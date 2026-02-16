@@ -39,7 +39,7 @@ func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 
 	email := strings.TrimSpace(strings.ToLower(req.Email))
 	password := strings.TrimSpace(req.Password)
-	username := strings.TrimSpace(req.Username)
+	username := normalizeUsername(req.Username)
 	log.Printf("[auth] signup requested email=%q username=%q", email, username)
 
 	if email == "" || password == "" || username == "" {
@@ -66,7 +66,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	email := strings.TrimSpace(strings.ToLower(req.Email))
 	password := strings.TrimSpace(req.Password)
-	username := strings.TrimSpace(req.Username)
+	username := normalizeUsername(req.Username)
 	log.Printf("[auth] login requested email=%q username=%q", email, username)
 
 	if email == "" || password == "" {
@@ -75,7 +75,10 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if username == "" {
-		username = usernameFromEmail(email)
+		username = normalizeUsername(usernameFromEmail(email))
+	}
+	if username == "" {
+		username = "Guest"
 	}
 
 	response, err := buildAuthResponse(email, username)

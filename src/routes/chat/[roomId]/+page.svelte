@@ -67,10 +67,12 @@
 	let messageViewport: HTMLDivElement | null = null;
 	let lastRenderedMessageCount = 0;
 
-	$: roomId = decodeURIComponent($page.params.roomId ?? '');
-	$: roomNameFromURL = decodeURIComponent($page.url.searchParams.get('name') ?? '').trim();
+	$: roomId = toRoomSlug(decodeURIComponent($page.params.roomId ?? ''));
+	$: roomNameFromURL = toRoomSlug(
+		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
+	);
 	$: currentUserId = $currentUser?.id ?? 'guest';
-	$: currentUsername = $currentUser?.username ?? 'Guest';
+	$: currentUsername = normalizeUsernameValue($currentUser?.username ?? 'Guest') || 'Guest';
 	$: activeThread =
 		roomThreads.find((thread) => thread.id === roomId) ?? createThread(roomId || 'default-room');
 	$: currentMessages = messagesByRoom[roomId] ?? [];
@@ -236,20 +238,21 @@
 	}
 
 	function connectToRoom(targetRoomId: string) {
-		if (!browser || !targetRoomId) {
+		const normalizedRoomId = toRoomSlug(targetRoomId);
+		if (!browser || !normalizedRoomId) {
 			return;
 		}
 
-		clientLog('ws-connect-start', { targetRoomId, wsBase: WS_BASE });
+		clientLog('ws-connect-start', { targetRoomId: normalizedRoomId, wsBase: WS_BASE });
 
 		clearReconnectTimer();
 		closeSocket();
 		wsState = 'connecting';
-		wsRoomId = targetRoomId;
+		wsRoomId = normalizedRoomId;
 
 		try {
-			const wsURL = new URL(`${WS_BASE}/ws/${encodeURIComponent(targetRoomId)}`);
-			wsURL.searchParams.set('userId', currentUserId);
+			const wsURL = new URL(`${WS_BASE}/ws/${encodeURIComponent(normalizedRoomId)}`);
+			wsURL.searchParams.set('userId', normalizeUsernameValue(currentUserId) || 'guest');
 			wsURL.searchParams.set('username', currentUsername);
 			const nextSocket = new WebSocket(wsURL.toString());
 			ws = nextSocket;
@@ -259,10 +262,10 @@
 					return;
 				}
 				wsState = 'open';
-				clientLog('ws-open', { targetRoomId });
+				clientLog('ws-open', { targetRoomId: normalizedRoomId });
 				reconnectAttempts = 0;
-				markRoomAsRead(targetRoomId);
-				flushPendingOutgoing(targetRoomId);
+				markRoomAsRead(normalizedRoomId);
+				flushPendingOutgoing(normalizedRoomId);
 			};
 
 			nextSocket.onmessage = (event: MessageEvent) => {
@@ -270,11 +273,14 @@
 					return;
 				}
 				if (typeof event.data !== 'string') {
-					clientLog('ws-message-non-string', { targetRoomId, dataType: typeof event.data });
+					clientLog('ws-message-non-string', {
+						targetRoomId: normalizedRoomId,
+						dataType: typeof event.data
+					});
 					return;
 				}
-				clientLog('ws-message-recv', { targetRoomId, bytes: event.data.length });
-				handleSocketPayload(event.data, targetRoomId);
+				clientLog('ws-message-recv', { targetRoomId: normalizedRoomId, bytes: event.data.length });
+				handleSocketPayload(event.data, normalizedRoomId);
 			};
 
 			nextSocket.onerror = () => {
@@ -282,7 +288,7 @@
 					return;
 				}
 				wsState = 'error';
-				clientLog('ws-error', { targetRoomId });
+				clientLog('ws-error', { targetRoomId: normalizedRoomId });
 			};
 
 			nextSocket.onclose = () => {
@@ -290,9 +296,9 @@
 					return;
 				}
 				wsState = 'closed';
-				clientLog('ws-close', { targetRoomId });
-				if (roomId === targetRoomId) {
-					scheduleReconnect(targetRoomId);
+				clientLog('ws-close', { targetRoomId: normalizedRoomId });
+				if (roomId === normalizedRoomId) {
+					scheduleReconnect(normalizedRoomId);
 				}
 			};
 		} catch (error) {
@@ -433,7 +439,7 @@
 		}
 
 		const source = value as Record<string, unknown>;
-		const nextRoomId = toStringValue(source.roomId ?? source.room_id ?? fallbackRoomId);
+		const nextRoomId = toRoomSlug(toStringValue(source.roomId ?? source.room_id ?? fallbackRoomId));
 		if (!nextRoomId) {
 			return null;
 		}
@@ -445,9 +451,10 @@
 			id: toStringValue(source.id) || createMessageId(nextRoomId),
 			roomId: nextRoomId,
 			senderId: toStringValue(source.userId ?? source.senderId ?? source.sender_id ?? 'unknown'),
-			senderName: toStringValue(
-				source.username ?? source.senderName ?? source.sender_name ?? 'Unknown'
-			),
+			senderName:
+				normalizeUsernameValue(
+					toStringValue(source.username ?? source.senderName ?? source.sender_name ?? 'Unknown')
+				) || 'Unknown',
 			content: messageContent,
 			type: messageType,
 			createdAt: toTimestamp(
@@ -729,12 +736,13 @@
 			return;
 		}
 
-		const requestedName = input.trim();
+		const requestedName = toRoomSlug(input);
 		if (!requestedName) {
 			return;
 		}
 
-		const joinUsername = currentUsername || `Guest_${Math.floor(Math.random() * 10000)}`;
+		const joinUsername =
+			normalizeUsernameValue(currentUsername) || `Guest_${Math.floor(Math.random() * 10000)}`;
 		if (!$currentUser) {
 			currentUser.set({ id: currentUserId, username: joinUsername });
 		}
@@ -744,7 +752,12 @@
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ roomName: requestedName, username: joinUsername, type: 'ephemeral' })
+				body: JSON.stringify({
+					roomName: requestedName,
+					username: joinUsername,
+					type: 'ephemeral',
+					mode: 'create'
+				})
 			});
 			const data = await res.json();
 			clientLog('api-rooms-join-response', { status: res.status, ok: res.ok, data });
@@ -950,9 +963,18 @@
 
 		return normalized
 			.replace(/[^a-z0-9\s_-]/g, '')
-			.replace(/[\s_]+/g, '-')
-			.replace(/-+/g, '-')
-			.replace(/^-|-$/g, '');
+			.replace(/[\s-]+/g, '_')
+			.replace(/_+/g, '_')
+			.replace(/^_+|_+$/g, '');
+	}
+
+	function normalizeUsernameValue(value: string) {
+		return value
+			.trim()
+			.replace(/[^a-zA-Z0-9\s_-]/g, '')
+			.replace(/[\s-]+/g, '_')
+			.replace(/_+/g, '_')
+			.replace(/^_+|_+$/g, '');
 	}
 
 	function scrollMessagesToBottom() {
@@ -982,12 +1004,12 @@
 		if (browser && typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
 			return crypto.randomUUID();
 		}
-		return `${targetRoomId}-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+		return `${targetRoomId}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
 	}
 
 	function formatRoomName(targetRoomId: string) {
 		return targetRoomId
-			.split('-')
+			.split(/[_-]/)
 			.filter(Boolean)
 			.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
 			.join(' ');

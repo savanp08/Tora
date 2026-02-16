@@ -2,8 +2,10 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -67,12 +69,18 @@ func (c *Client) LoadHistory(ctx context.Context, service *MessageService) {
 }
 
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	roomID := chi.URLParam(r, "roomId")
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	if roomID == "" {
+		http.Error(w, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
 	userID := r.URL.Query().Get("userId")
+	userID = normalizeUsername(userID)
 	if userID == "" {
 		userID = "guest_" + time.Now().UTC().Format("20060102150405.000000000")
 	}
-	username := r.URL.Query().Get("username")
+	username := normalizeUsername(r.URL.Query().Get("username"))
 	if username == "" {
 		username = "Guest"
 	}
@@ -125,12 +133,60 @@ func (c *Client) readPump() {
 		msg.SenderName = c.Username
 		msg.RoomID = c.RoomID
 		if msg.ID == "" {
-			msg.ID = c.RoomID + "-" + msg.CreatedAt.Format(time.RFC3339Nano)
+			msg.ID = fmt.Sprintf("%s_%d", c.RoomID, msg.CreatedAt.UnixNano())
 		}
 		log.Printf("[ws] recv room=%s msg_id=%s sender=%s type=%s chars=%d",
 			c.RoomID, msg.ID, msg.SenderID, msg.Type, len(msg.Content))
 		c.Hub.broadcast <- msg
 	}
+}
+
+func normalizeRoomID(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	prevSeparator := false
+	for _, ch := range normalized {
+		switch {
+		case (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'):
+			builder.WriteRune(ch)
+			prevSeparator = false
+		case ch == ' ' || ch == '-' || ch == '_':
+			if builder.Len() > 0 && !prevSeparator {
+				builder.WriteByte('_')
+				prevSeparator = true
+			}
+		}
+	}
+
+	return strings.Trim(builder.String(), "_")
+}
+
+func normalizeUsername(raw string) string {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	prevSeparator := false
+	for _, ch := range normalized {
+		switch {
+		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'):
+			builder.WriteRune(ch)
+			prevSeparator = false
+		case ch == ' ' || ch == '-' || ch == '_':
+			if builder.Len() > 0 && !prevSeparator {
+				builder.WriteByte('_')
+				prevSeparator = true
+			}
+		}
+	}
+
+	return strings.Trim(builder.String(), "_")
 }
 
 func (c *Client) writePump() {

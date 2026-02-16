@@ -2,11 +2,15 @@
 	import { goto } from '$app/navigation';
 	import AuthModal from '$lib/components/home/AuthModal.svelte';
 	import { currentUser, authToken } from '$lib/store';
+	import { generateRoomName } from '$lib/utils/nameGenerator';
+	import { onMount } from 'svelte';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[home-client]';
+	type JoinMode = 'create' | 'join';
 
 	let roomName = '';
 	let guestUsername = '';
+	let selectedMode: JoinMode = 'create';
 
 	let isModalOpen = false;
 	let isJoining = false;
@@ -21,19 +25,68 @@
 		console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
 	}
 
-	async function handleGuestJoin() {
-		if (!roomName) return;
+	onMount(() => {
+		roomName = generateRoomName();
+	});
+
+	function onRoomNameFocus(event: FocusEvent) {
+		const input = event.currentTarget as HTMLInputElement | null;
+		input?.select();
+	}
+
+	function normalizeRoomNameInput(value: string) {
+		return value
+			.trim()
+			.toLowerCase()
+			.replace(/[^a-z0-9\s_-]/g, '')
+			.replace(/[\s-]+/g, '_')
+			.replace(/_+/g, '_')
+			.replace(/^_+|_+$/g, '');
+	}
+
+	function normalizeUsernameInput(value: string) {
+		return value
+			.trim()
+			.replace(/[^a-zA-Z0-9\s_-]/g, '')
+			.replace(/[\s-]+/g, '_')
+			.replace(/_+/g, '_')
+			.replace(/^_+|_+$/g, '');
+	}
+
+	function setMode(mode: JoinMode) {
+		selectedMode = mode;
+	}
+
+	async function handleRoomAction() {
+		const normalizedRoomName = normalizeRoomNameInput(roomName);
+		if (!normalizedRoomName) {
+			joinError = 'Room name cannot be empty';
+			return;
+		}
+
 		isJoining = true;
 		joinError = '';
+		roomName = normalizedRoomName;
 
-		const userToJoin = guestUsername || `Guest_${Math.floor(Math.random() * 10000)}`;
+		const fallbackUsername = `Guest_${Math.floor(Math.random() * 10000)}`;
+		const userToJoin = normalizeUsernameInput(guestUsername) || fallbackUsername;
+		guestUsername = userToJoin;
 
 		try {
-			clientLog('api-rooms-join-request', { roomName, userToJoin });
+			clientLog('api-rooms-join-request', {
+				roomName: normalizedRoomName,
+				userToJoin,
+				mode: selectedMode
+			});
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ roomName, username: userToJoin, type: 'ephemeral' })
+				body: JSON.stringify({
+					roomName: normalizedRoomName,
+					username: userToJoin,
+					type: 'ephemeral',
+					mode: selectedMode
+				})
 			});
 
 			const data = await res.json();
@@ -44,7 +97,7 @@
 			currentUser.set({ id: data.userId, username: userToJoin });
 			authToken.set(data.token);
 
-			const resolvedRoomName = data.roomName || roomName;
+			const resolvedRoomName = data.roomName || normalizedRoomName;
 			clientLog('navigate-chat-room', { roomId: data.roomId, roomName: resolvedRoomName });
 			goto(`/chat/${data.roomId}?name=${encodeURIComponent(resolvedRoomName)}`);
 		} catch (e: any) {
@@ -82,12 +135,39 @@
 			{/if}
 
 			<div class="join-form">
-				<input type="text" placeholder="Enter Room Name (e.g. 'LunchPlan')" bind:value={roomName} />
+				<input
+					type="text"
+					placeholder="Enter Room Name (e.g. 'LunchPlan')"
+					bind:value={roomName}
+					on:focus={onRoomNameFocus}
+				/>
 
 				<input type="text" placeholder="Username (Optional)" bind:value={guestUsername} />
 
-				<button on:click={handleGuestJoin} disabled={isJoining || !roomName}>
-					{isJoining ? 'Connecting...' : 'Create / Join Room'}
+				<div class="action-row">
+					<button
+						class="btn-primary-action"
+						class:selected={selectedMode === 'create'}
+						on:click={() => setMode('create')}
+						disabled={isJoining}
+					>
+						New
+					</button>
+					<button
+						class="btn-secondary-action"
+						class:selected={selectedMode === 'join'}
+						on:click={() => setMode('join')}
+						disabled={isJoining}
+					>
+						Existing
+					</button>
+				</div>
+				<button
+					class="btn-submit-action"
+					on:click={handleRoomAction}
+					disabled={isJoining || !roomName}
+				>
+					{isJoining ? 'Working...' : 'Join'}
 				</button>
 			</div>
 
@@ -167,6 +247,11 @@
 		flex-direction: column;
 		gap: 10px;
 	}
+	.action-row {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
 	input {
 		padding: 12px;
 		border: 1px solid #ddd;
@@ -175,7 +260,6 @@
 	}
 	button {
 		padding: 12px;
-		background: #007bff;
 		color: white;
 		border: none;
 		border-radius: 6px;
@@ -190,6 +274,34 @@
 	}
 	button:hover:not(:disabled) {
 		background: #0056b3;
+	}
+	.btn-primary-action {
+		background: #ffffff;
+		border: 1px solid #cbd5e1;
+		color: #1f2937;
+	}
+	.btn-primary-action:hover:not(:disabled) {
+		background: #f1f5f9;
+	}
+	.btn-secondary-action {
+		background: #ffffff;
+		border: 1px solid #cbd5e1;
+		color: #1f2937;
+	}
+	.btn-secondary-action:hover:not(:disabled) {
+		background: #f1f5f9;
+	}
+	.btn-primary-action.selected,
+	.btn-secondary-action.selected {
+		border-color: #16a34a;
+		box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.18);
+		background: #ecfdf3;
+	}
+	.btn-submit-action {
+		background: #16a34a;
+	}
+	.btn-submit-action:hover:not(:disabled) {
+		background: #15803d;
 	}
 
 	.error-msg {

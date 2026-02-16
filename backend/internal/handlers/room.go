@@ -39,6 +39,7 @@ type JoinRoomRequest struct {
 	RoomName string `json:"roomName"`
 	Username string `json:"username"`
 	Type     string `json:"type"`
+	Mode     string `json:"mode"`
 }
 
 type JoinRoomResponse struct {
@@ -65,7 +66,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
 		return
 	}
-	log.Printf("[room] join requested raw_room=%q username=%q type=%q", req.RoomName, req.Username, req.Type)
+	log.Printf("[room] join requested raw_room=%q username=%q type=%q mode=%q", req.RoomName, req.Username, req.Type, req.Mode)
 
 	if strings.TrimSpace(req.RoomName) == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -84,70 +85,106 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	if roomType == "" {
 		roomType = "ephemeral"
 	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		mode = "create"
+	}
+	if mode != "create" && mode != "join" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "mode must be 'create' or 'join'"})
+		return
+	}
 
-	userID := fmt.Sprintf("user_%d", time.Now().UnixNano())
-	token := "temp_token_for_" + req.Username
 	ctx := context.Background()
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	createdAt := time.Now().Unix()
+	normalizedUsername := normalizeUsername(req.Username)
+	if normalizedUsername == "" {
+		normalizedUsername = fmt.Sprintf("Guest_%04d", rng.Intn(10000))
+	}
+	userID := fmt.Sprintf("user_%d", time.Now().UnixNano())
+	token := "temp_token_for_" + normalizedUsername
 
 	finalRoomID := baseSlug
 	finalRoomName := baseSlug
+	if mode == "join" {
+		exists, err := h.roomExists(ctx, baseSlug)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+			return
+		}
+		if !exists {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+			return
+		}
 
-	created, err := h.tryCreateRoom(ctx, baseSlug, baseSlug, roomType, createdAt)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
-		return
-	}
+		name, err := h.getRoomName(ctx, baseSlug)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read room data"})
+			return
+		}
+		if strings.TrimSpace(name) != "" {
+			finalRoomName = name
+		}
+	} else {
+		created, err := h.tryCreateRoom(ctx, baseSlug, baseSlug, roomType, createdAt)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+			return
+		}
 
-	if !created {
-		suffixOrder := rng.Perm(len(roomSuffixWords))
-		for i := 0; i < 3 && i < len(suffixOrder); i++ {
-			candidateID := fmt.Sprintf("%s-%s", baseSlug, roomSuffixWords[suffixOrder[i]])
-			candidateName := candidateID
+		if !created {
+			suffixOrder := rng.Perm(len(roomSuffixWords))
+			for i := 0; i < 3 && i < len(suffixOrder); i++ {
+				candidateID := fmt.Sprintf("%s_%s", baseSlug, roomSuffixWords[suffixOrder[i]])
+				candidateName := candidateID
 
-			created, err = h.tryCreateRoom(ctx, candidateID, candidateName, roomType, createdAt)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
-				return
-			}
+				created, err = h.tryCreateRoom(ctx, candidateID, candidateName, roomType, createdAt)
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+					return
+				}
 
-			if created {
-				finalRoomID = candidateID
-				finalRoomName = candidateName
-				break
+				if created {
+					finalRoomID = candidateID
+					finalRoomName = candidateName
+					break
+				}
 			}
 		}
-	}
 
-	if !created {
-		for attempts := 0; attempts < 10; attempts++ {
-			fallbackID := fmt.Sprintf("%s-%d", baseSlug, rng.Intn(9000)+1000)
-			fallbackName := fallbackID
+		if !created {
+			for attempts := 0; attempts < 10; attempts++ {
+				fallbackID := fmt.Sprintf("%s_%04d", baseSlug, rng.Intn(9000)+1000)
+				fallbackName := fallbackID
 
-			created, err = h.tryCreateRoom(ctx, fallbackID, fallbackName, roomType, createdAt)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
-				return
-			}
+				created, err = h.tryCreateRoom(ctx, fallbackID, fallbackName, roomType, createdAt)
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+					return
+				}
 
-			if created {
-				finalRoomID = fallbackID
-				finalRoomName = fallbackName
-				break
+				if created {
+					finalRoomID = fallbackID
+					finalRoomName = fallbackName
+					break
+				}
 			}
 		}
-	}
-	log.Printf("[room] join resolved room_id=%s room_name=%s user_id=%s", finalRoomID, finalRoomName, userID)
 
-	if !created {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to allocate unique room name"})
-		return
+		if !created {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to allocate unique room name"})
+			return
+		}
 	}
+	log.Printf("[room] join resolved room_id=%s room_name=%s user_id=%s mode=%s", finalRoomID, finalRoomName, userID, mode)
 
 	response := JoinRoomResponse{
 		RoomID:   finalRoomID,
@@ -244,22 +281,46 @@ func slugifyRoomName(raw string) string {
 	}
 
 	var builder strings.Builder
-	prevHyphen := false
+	prevSeparator := false
 
 	for _, ch := range normalized {
 		switch {
 		case (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'):
 			builder.WriteRune(ch)
-			prevHyphen = false
+			prevSeparator = false
 		case ch == ' ' || ch == '-' || ch == '_':
-			if builder.Len() > 0 && !prevHyphen {
-				builder.WriteByte('-')
-				prevHyphen = true
+			if builder.Len() > 0 && !prevSeparator {
+				builder.WriteByte('_')
+				prevSeparator = true
 			}
 		}
 	}
 
-	return strings.Trim(builder.String(), "-")
+	return strings.Trim(builder.String(), "_")
+}
+
+func normalizeUsername(raw string) string {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	prevSeparator := false
+	for _, ch := range normalized {
+		switch {
+		case (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'):
+			builder.WriteRune(ch)
+			prevSeparator = false
+		case ch == ' ' || ch == '-' || ch == '_':
+			if builder.Len() > 0 && !prevSeparator {
+				builder.WriteByte('_')
+				prevSeparator = true
+			}
+		}
+	}
+
+	return strings.Trim(builder.String(), "_")
 }
 
 func (h *RoomHandler) tryCreateRoom(ctx context.Context, roomID, roomName, roomType string, createdAt int64) (bool, error) {
@@ -284,6 +345,14 @@ func (h *RoomHandler) roomExists(ctx context.Context, roomID string) (bool, erro
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (h *RoomHandler) getRoomName(ctx context.Context, roomID string) (string, error) {
+	name, err := h.redis.Client.HGet(ctx, "room:"+roomID, "name").Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return name, err
 }
 
 func (h *RoomHandler) createRoom(ctx context.Context, roomID, roomName, roomType string, createdAt int64) error {
