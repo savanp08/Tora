@@ -3,7 +3,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { currentUser } from '$lib/store';
-	import { onDestroy, tick } from 'svelte';
+	import { getOrInitIdentity } from '$lib/utils/identity';
+	import { onDestroy, onMount, tick } from 'svelte';
 
 	type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 
@@ -30,6 +31,11 @@
 		id: string;
 		name: string;
 		isOnline: boolean;
+		joinedAt: number;
+	};
+
+	type RoomMeta = {
+		createdAt: number;
 	};
 
 	const CLIENT_LOG_PREFIX = '[chat-client]';
@@ -55,13 +61,19 @@
 	let showLeftMenu = false;
 	let showRoomMenu = false;
 	let showRoomSearch = false;
-	let showRoomInfo = false;
+	let showRoomDetails = false;
 
 	let roomThreads: ChatThread[] = [];
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
 	let onlineByRoom: Record<string, OnlineMember[]> = {};
+	let roomMetaById: Record<string, RoomMeta> = {};
 	let pendingOutgoingByRoom: Record<string, ChatMessage[]> = {};
 	let isExtendingRoom = false;
+	let expandedMessages: Record<string, boolean> = {};
+	let identityReady = !browser;
+
+	const ROOM_MAX_LIFESPAN_MS = 15 * 24 * 60 * 60 * 1000;
+	const COLLAPSED_MESSAGE_LENGTH = 500;
 
 	let fileInput: HTMLInputElement | null = null;
 	let messageViewport: HTMLDivElement | null = null;
@@ -71,6 +83,7 @@
 	$: roomNameFromURL = toRoomSlug(
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
 	);
+	$: roomCreatedAtFromURL = parseTimestampParam($page.url.searchParams.get('createdAt'));
 	$: currentUserId = $currentUser?.id ?? 'guest';
 	$: currentUsername = normalizeUsernameValue($currentUser?.username ?? 'Guest') || 'Guest';
 	$: activeThread =
@@ -90,8 +103,9 @@
 	$: if (roomId) {
 		ensureRoomThread(roomId, roomNameFromURL || undefined);
 		ensureOnlineSeed(roomId);
+		ensureRoomMeta(roomId, roomCreatedAtFromURL);
 	}
-	$: if (browser && roomId && roomId !== wsRoomId) {
+	$: if (browser && identityReady && roomId && roomId !== wsRoomId) {
 		connectToRoom(roomId);
 	}
 	$: if (browser && roomId && roomId !== lastToastRoom) {
@@ -107,6 +121,16 @@
 		closeSocket();
 		clearReconnectTimer();
 		clearToastTimer();
+	});
+
+	onMount(() => {
+		const identity = getOrInitIdentity();
+		currentUser.set({
+			id: normalizeUsernameValue(identity.id) || identity.id,
+			username: normalizeUsernameValue(identity.username) || identity.username
+		});
+		identityReady = true;
+		clientLog('identity-initialized', { id: identity.id, username: identity.username });
 	});
 
 	function clientLog(event: string, payload?: unknown) {
@@ -171,6 +195,22 @@
 		roomThreads = sortThreads([nextThread, ...roomThreads]);
 	}
 
+	function ensureRoomMeta(targetRoomId: string, createdAt: number) {
+		if (!targetRoomId || !Number.isFinite(createdAt) || createdAt <= 0) {
+			return;
+		}
+
+		const existing = roomMetaById[targetRoomId];
+		if (existing?.createdAt === createdAt) {
+			return;
+		}
+
+		roomMetaById = {
+			...roomMetaById,
+			[targetRoomId]: { createdAt }
+		};
+	}
+
 	function updateThreadPreview(targetRoomId: string) {
 		const roomMessages = messagesByRoom[targetRoomId] ?? [];
 		const lastMessage = roomMessages[roomMessages.length - 1];
@@ -215,7 +255,12 @@
 			return;
 		}
 
-		const me = { id: currentUserId, name: currentUsername, isOnline: true };
+		const me = {
+			id: currentUserId,
+			name: currentUsername,
+			isOnline: true,
+			joinedAt: Date.now()
+		};
 		onlineByRoom = {
 			...onlineByRoom,
 			[targetRoomId]: dedupeMembers([me])
@@ -231,7 +276,7 @@
 		showRoomMenu = false;
 		showRoomSearch = false;
 		roomMessageSearch = '';
-		showRoomInfo = false;
+		showRoomDetails = false;
 		const selected = roomThreads.find((thread) => thread.id === targetRoomId);
 		const roomNameQuery = selected?.name ? `?name=${encodeURIComponent(selected.name)}` : '';
 		void goto(`/chat/${encodeURIComponent(targetRoomId)}${roomNameQuery}`);
@@ -380,6 +425,7 @@
 			value &&
 			typeof value === 'object' &&
 			'type' in value &&
+			'payload' in value &&
 			typeof (value as { type?: unknown }).type === 'string'
 		);
 	}
@@ -477,10 +523,11 @@
 		const memberName =
 			toStringValue(source.name ?? source.username ?? source.userName ?? source.user_name) ||
 			memberId;
+		const joinedAt = toTimestamp(source.joinedAt ?? source.joined_at ?? Date.now());
 		if (!memberId) {
 			return null;
 		}
-		return { id: memberId, name: memberName, isOnline: true };
+		return { id: memberId, name: memberName, isOnline: true, joinedAt };
 	}
 
 	function addIncomingMessage(message: ChatMessage) {
@@ -741,11 +788,15 @@
 			return;
 		}
 
+		const identity = getOrInitIdentity();
 		const joinUsername =
-			normalizeUsernameValue(currentUsername) || `Guest_${Math.floor(Math.random() * 10000)}`;
-		if (!$currentUser) {
-			currentUser.set({ id: currentUserId, username: joinUsername });
-		}
+			normalizeUsernameValue(identity.username) ||
+			normalizeUsernameValue(currentUsername) ||
+			`Guest_${Math.floor(Math.random() * 10000)}`;
+		currentUser.set({
+			id: normalizeUsernameValue(identity.id) || identity.id,
+			username: joinUsername
+		});
 
 		try {
 			clientLog('api-rooms-join-request', { requestedName, joinUsername });
@@ -767,18 +818,18 @@
 
 			const nextRoomId = toStringValue(data.roomId) || toRoomSlug(requestedName);
 			const nextRoomName = toStringValue(data.roomName) || formatRoomName(nextRoomId);
-			const nextUserId = toStringValue(data.userId);
+			const nextCreatedAt = toTimestamp(data.createdAt);
 			if (!nextRoomId) {
 				throw new Error('Failed to resolve room id');
-			}
-			if (nextUserId) {
-				currentUser.set({ id: nextUserId, username: joinUsername });
 			}
 
 			ensureRoomThread(nextRoomId, nextRoomName);
 			ensureOnlineSeed(nextRoomId);
+			ensureRoomMeta(nextRoomId, nextCreatedAt);
+			const createdAtQuery =
+				Number.isFinite(nextCreatedAt) && nextCreatedAt > 0 ? `&createdAt=${nextCreatedAt}` : '';
 			await goto(
-				`/chat/${encodeURIComponent(nextRoomId)}?name=${encodeURIComponent(nextRoomName)}`
+				`/chat/${encodeURIComponent(nextRoomId)}?name=${encodeURIComponent(nextRoomName)}${createdAtQuery}`
 			);
 		} catch (error) {
 			clientLog('api-rooms-join-error', {
@@ -869,13 +920,13 @@
 		}
 	}
 
-	function handleHeaderRoomClick() {
-		showRoomInfo = true;
+	function openRoomDetails() {
+		showRoomDetails = true;
 		showRoomMenu = false;
 	}
 
-	function closeRoomInfo() {
-		showRoomInfo = false;
+	function closeRoomDetails() {
+		showRoomDetails = false;
 	}
 
 	function clearCurrentRoomMessages() {
@@ -953,6 +1004,76 @@
 				message.content.toLowerCase().includes(query) ||
 				message.senderName.toLowerCase().includes(query)
 		);
+	}
+
+	function isLongMessage(content: string) {
+		return content.length > COLLAPSED_MESSAGE_LENGTH;
+	}
+
+	function isMessageExpanded(messageId: string) {
+		return Boolean(expandedMessages[messageId]);
+	}
+
+	function toggleMessageExpanded(messageId: string) {
+		expandedMessages = {
+			...expandedMessages,
+			[messageId]: !expandedMessages[messageId]
+		};
+	}
+
+	function isCodeBlock(content: string) {
+		const trimmed = content.trim();
+		return trimmed.startsWith('```') && trimmed.endsWith('```') && trimmed.length >= 6;
+	}
+
+	function getCodeContent(content: string) {
+		const trimmed = content.trim();
+		const withoutOpening = trimmed.replace(/^```[^\n]*\n?/, '');
+		return withoutOpening.replace(/```$/, '');
+	}
+
+	function getRoomCreatedAt(targetRoomId: string) {
+		return roomMetaById[targetRoomId]?.createdAt ?? 0;
+	}
+
+	function getRoomExpiry(targetRoomId: string) {
+		const createdAt = getRoomCreatedAt(targetRoomId);
+		if (!createdAt) {
+			return 0;
+		}
+		return createdAt + ROOM_MAX_LIFESPAN_MS;
+	}
+
+	function formatDateTime(timestamp: number) {
+		if (!Number.isFinite(timestamp) || timestamp <= 0) {
+			return 'Unknown';
+		}
+		return new Date(timestamp).toLocaleString([], {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
+
+	function onChatHeaderKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			openRoomDetails();
+		}
+	}
+
+	function parseTimestampParam(value: string | null) {
+		if (!value) {
+			return 0;
+		}
+
+		const numeric = Number(value);
+		if (!Number.isFinite(numeric) || numeric <= 0) {
+			return 0;
+		}
+		return numeric;
 	}
 
 	function toRoomSlug(value: string) {
@@ -1033,11 +1154,15 @@
 			return value;
 		}
 		if (typeof value === 'string') {
-			const asNumber = Number(value);
+			const trimmed = value.trim();
+			if (!trimmed) {
+				return Date.now();
+			}
+			const asNumber = Number(trimmed);
 			if (Number.isFinite(asNumber)) {
 				return asNumber;
 			}
-			const parsed = Date.parse(value);
+			const parsed = Date.parse(trimmed);
 			if (Number.isFinite(parsed)) {
 				return parsed;
 			}
@@ -1116,8 +1241,14 @@
 	</aside>
 
 	<section class="chat-window">
-		<header class="chat-header">
-			<button type="button" class="room-title-button" on:click={handleHeaderRoomClick}>
+		<header
+			class="chat-header"
+			role="button"
+			tabindex="0"
+			on:click={openRoomDetails}
+			on:keydown={onChatHeaderKeyDown}
+		>
+			<div class="room-title-button">
 				<span class="presence-dot"></span>
 				<span class="title-text">
 					<span class="title-main">{activeThread.name}</span>
@@ -1128,20 +1259,29 @@
 						{/if}
 					</span>
 				</span>
-			</button>
+			</div>
 
 			<div class="header-actions">
 				<span class="connection {wsState}">{connectionLabel}</span>
-				<button type="button" class="icon-button" on:click={toggleRoomMenu} title="More options">
+				<button
+					type="button"
+					class="icon-button"
+					on:click|stopPropagation={toggleRoomMenu}
+					title="More options"
+				>
 					...
 				</button>
 				{#if showRoomMenu}
 					<div class="room-menu">
-						<button type="button" on:click={toggleRoomSearch}>
+						<button type="button" on:click|stopPropagation={toggleRoomSearch}>
 							{showRoomSearch ? 'Hide search' : 'Search messages'}
 						</button>
-						<button type="button" on:click={() => markRoomAsRead(roomId)}>Mark read</button>
-						<button type="button" on:click={clearCurrentRoomMessages}>Clear local</button>
+						<button type="button" on:click|stopPropagation={() => markRoomAsRead(roomId)}>
+							Mark read
+						</button>
+						<button type="button" on:click|stopPropagation={clearCurrentRoomMessages}>
+							Clear local
+						</button>
 					</div>
 				{/if}
 			</div>
@@ -1174,7 +1314,25 @@
 						<span>{message.senderName}</span>
 						<time>{formatClock(message.createdAt)}</time>
 					</div>
-					<div class="bubble-content">{message.content}</div>
+					<div
+						class="bubble-content"
+						class:collapsed={isLongMessage(message.content) && !isMessageExpanded(message.id)}
+					>
+						{#if isCodeBlock(message.content)}
+							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
+						{:else}
+							{message.content}
+						{/if}
+					</div>
+					{#if isLongMessage(message.content)}
+						<button
+							type="button"
+							class="read-more-btn"
+							on:click={() => toggleMessageExpanded(message.id)}
+						>
+							{isMessageExpanded(message.id) ? 'Read less' : 'Read more'}
+						</button>
+					{/if}
 				</article>
 			{/each}
 		</div>
@@ -1225,19 +1383,31 @@
 	</aside>
 </section>
 
-{#if showRoomInfo}
+{#if showRoomDetails}
 	<button
 		type="button"
 		class="mobile-info-backdrop"
-		aria-label="Close room info"
-		on:click={closeRoomInfo}
+		aria-label="Close room details"
+		on:click={closeRoomDetails}
 	></button>
-	<aside class="mobile-info-panel">
+	<section class="mobile-info-panel room-details-panel" role="dialog" aria-modal="true">
 		<header>
 			<h3>{activeThread.name}</h3>
-			<button type="button" on:click={closeRoomInfo}>Close</button>
+			<button type="button" on:click={closeRoomDetails}>Close</button>
 		</header>
 		<div class="mobile-info-content">
+			<div class="room-details-card">
+				<h4>Room Details</h4>
+				<div class="room-detail-row">
+					<span>Created</span>
+					<strong>{formatDateTime(getRoomCreatedAt(roomId))}</strong>
+				</div>
+				<div class="room-detail-row">
+					<span>Expires</span>
+					<strong>{formatDateTime(getRoomExpiry(roomId))}</strong>
+				</div>
+			</div>
+
 			<div class="room-actions">
 				<button
 					type="button"
@@ -1250,6 +1420,7 @@
 				<p>Manually extends this room for 24 hours (up to 15 days total).</p>
 			</div>
 
+			<h4 class="members-title">Members</h4>
 			{#if currentOnlineMembers.length === 0}
 				<div class="empty-label">No online members.</div>
 			{:else}
@@ -1258,13 +1429,13 @@
 						<span class="member-dot"></span>
 						<div>
 							<div class="member-name">{member.name}</div>
-							<div class="member-meta">Seen {formatLastSeen(Date.now())}</div>
+							<div class="member-meta">Joined {formatDateTime(member.joinedAt)}</div>
 						</div>
 					</div>
 				{/each}
 			{/if}
 		</div>
-	</aside>
+	</section>
 {/if}
 
 <style>
@@ -1430,16 +1601,18 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 1rem;
+		cursor: pointer;
+	}
+
+	.chat-header:focus-visible {
+		outline: 2px solid #22c55e;
+		outline-offset: -2px;
 	}
 
 	.room-title-button {
-		border: none;
-		background: transparent;
-		padding: 0;
 		display: flex;
 		align-items: center;
 		gap: 0.55rem;
-		cursor: pointer;
 		color: #0f172a;
 	}
 
@@ -1471,6 +1644,7 @@
 		align-items: center;
 		gap: 0.45rem;
 		position: relative;
+		cursor: default;
 	}
 
 	.connection {
@@ -1594,6 +1768,40 @@
 		color: #142032;
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+	.bubble-content.collapsed {
+		max-height: 300px;
+		overflow: hidden;
+		mask-image: linear-gradient(180deg, #000 70%, transparent);
+		-webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
+	}
+
+	.code-block {
+		margin: 0;
+		padding: 0.65rem 0.72rem;
+		border-radius: 8px;
+		background: #0f172a;
+		color: #e2e8f0;
+		font-family:
+			ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+			monospace;
+		font-size: 0.83rem;
+		line-height: 1.4;
+		overflow-x: auto;
+		white-space: pre;
+		word-break: normal;
+	}
+
+	.read-more-btn {
+		margin-top: 0.35rem;
+		border: none;
+		background: transparent;
+		color: #1d4ed8;
+		font-size: 0.78rem;
+		font-weight: 600;
+		padding: 0;
+		cursor: pointer;
 	}
 
 	.composer {
@@ -1780,6 +1988,44 @@
 		border: 1px solid #e2e8f0;
 		border-radius: 10px;
 		background: #f8fafc;
+	}
+
+	.room-details-card {
+		margin-bottom: 0.9rem;
+		padding: 0.75rem;
+		border: 1px solid #e2e8f0;
+		border-radius: 10px;
+		background: #f8fafc;
+	}
+
+	.room-details-card h4 {
+		margin: 0 0 0.5rem;
+		font-size: 0.88rem;
+		color: #0f172a;
+	}
+
+	.room-detail-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		gap: 0.65rem;
+		font-size: 0.8rem;
+		color: #475569;
+	}
+
+	.room-detail-row + .room-detail-row {
+		margin-top: 0.35rem;
+	}
+
+	.room-detail-row strong {
+		color: #0f172a;
+		font-weight: 600;
+	}
+
+	.members-title {
+		margin: 0 0 0.35rem;
+		font-size: 0.88rem;
+		color: #0f172a;
 	}
 
 	.room-actions p {

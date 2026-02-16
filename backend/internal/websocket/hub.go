@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/savanp08/converse/internal/models"
@@ -82,8 +83,65 @@ func (h *Hub) Run() {
 			if _, ok := h.rooms[client.RoomID]; !ok {
 				h.rooms[client.RoomID] = make(map[*Client]bool)
 			}
+			if client.JoinedAt.IsZero() {
+				client.JoinedAt = time.Now().UTC()
+			}
 			h.rooms[client.RoomID][client] = true
 			log.Printf("[hub] client joined room=%s active_clients=%d", client.RoomID, len(h.rooms[client.RoomID]))
+
+			onlineMembers := make([]map[string]interface{}, 0, len(h.rooms[client.RoomID]))
+			for roomClient := range h.rooms[client.RoomID] {
+				joinedAt := roomClient.JoinedAt
+				if joinedAt.IsZero() {
+					joinedAt = time.Now().UTC()
+				}
+
+				onlineMembers = append(onlineMembers, map[string]interface{}{
+					"id":       roomClient.UserID,
+					"name":     roomClient.Username,
+					"joinedAt": joinedAt.UnixMilli(),
+				})
+			}
+			sort.SliceStable(onlineMembers, func(i, j int) bool {
+				left := onlineMembers[i]["joinedAt"].(int64)
+				right := onlineMembers[j]["joinedAt"].(int64)
+				if left == right {
+					return onlineMembers[i]["id"].(string) < onlineMembers[j]["id"].(string)
+				}
+				return left < right
+			})
+
+			select {
+			case client.Send <- map[string]interface{}{
+				"type":    "online_list",
+				"payload": onlineMembers,
+			}:
+			default:
+				close(client.Send)
+				delete(h.rooms[client.RoomID], client)
+				log.Printf("[hub] online_list drop room=%s user=%s reason=send_buffer_full", client.RoomID, client.UserID)
+				continue
+			}
+
+			joinedPayload := map[string]interface{}{
+				"type": "user_joined",
+				"payload": map[string]interface{}{
+					"id":       client.UserID,
+					"name":     client.Username,
+					"joinedAt": client.JoinedAt.UnixMilli(),
+				},
+			}
+			for roomClient := range h.rooms[client.RoomID] {
+				if roomClient == client {
+					continue
+				}
+				select {
+				case roomClient.Send <- joinedPayload:
+				default:
+					close(roomClient.Send)
+					delete(h.rooms[client.RoomID], roomClient)
+				}
+			}
 
 			if h.msgService != nil {
 				go client.LoadHistory(context.Background(), h.msgService)
@@ -95,6 +153,25 @@ func (h *Hub) Run() {
 					delete(h.rooms[client.RoomID], client)
 					close(client.Send)
 					log.Printf("[hub] client left room=%s active_clients=%d", client.RoomID, len(h.rooms[client.RoomID]))
+
+					userLeftPayload := map[string]interface{}{
+						"type": "user_left",
+						"payload": map[string]interface{}{
+							"id": client.UserID,
+						},
+					}
+					for roomClient := range h.rooms[client.RoomID] {
+						select {
+						case roomClient.Send <- userLeftPayload:
+						default:
+							close(roomClient.Send)
+							delete(h.rooms[client.RoomID], roomClient)
+						}
+					}
+				}
+
+				if len(h.rooms[client.RoomID]) == 0 {
+					delete(h.rooms, client.RoomID)
 				}
 			}
 

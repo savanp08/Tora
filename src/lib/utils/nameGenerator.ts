@@ -483,8 +483,8 @@ function randomTwoDigit() {
 export function generateRoomName() {
 	let base = `${randomItem(adjectives)}_${randomItem(nouns)}`;
 	base = String(base).toLowerCase();
-	if (Math.random() < 0.4) {
-		return `${base}_${randomTwoDigit()}`;
+	if (Math.random() < 0.5) {
+		return `${base}${randomTwoDigit()}`;
 	}
 	return base;
 }

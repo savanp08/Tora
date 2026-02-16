@@ -34,6 +34,7 @@ type Client struct {
 	RoomID   string
 	UserID   string
 	Username string
+	JoinedAt time.Time
 }
 
 func (c *Client) LoadHistory(ctx context.Context, service *MessageService) {
@@ -100,6 +101,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		RoomID:   roomID,
 		UserID:   userID,
 		Username: username,
+		JoinedAt: time.Now().UTC(),
 	}
 	client.Hub.register <- client
 

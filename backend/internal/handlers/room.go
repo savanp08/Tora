@@ -43,10 +43,11 @@ type JoinRoomRequest struct {
 }
 
 type JoinRoomResponse struct {
-	RoomID   string `json:"roomId"`
-	RoomName string `json:"roomName"`
-	UserID   string `json:"userId"`
-	Token    string `json:"token"`
+	RoomID    string `json:"roomId"`
+	RoomName  string `json:"roomName"`
+	UserID    string `json:"userId"`
+	Token     string `json:"token"`
+	CreatedAt int64  `json:"createdAt"`
 }
 
 type ExtendRoomRequest struct {
@@ -186,11 +187,22 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[room] join resolved room_id=%s room_name=%s user_id=%s mode=%s", finalRoomID, finalRoomName, userID, mode)
 
+	finalCreatedAt, err := h.getRoomCreatedAt(ctx, finalRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room created time"})
+		return
+	}
+	if finalCreatedAt <= 0 {
+		finalCreatedAt = createdAt
+	}
+
 	response := JoinRoomResponse{
-		RoomID:   finalRoomID,
-		RoomName: finalRoomName,
-		UserID:   userID,
-		Token:    token,
+		RoomID:    finalRoomID,
+		RoomName:  finalRoomName,
+		UserID:    userID,
+		Token:     token,
+		CreatedAt: finalCreatedAt,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -353,6 +365,23 @@ func (h *RoomHandler) getRoomName(ctx context.Context, roomID string) (string, e
 		return "", nil
 	}
 	return name, err
+}
+
+func (h *RoomHandler) getRoomCreatedAt(ctx context.Context, roomID string) (int64, error) {
+	raw, err := h.redis.Client.HGet(ctx, "room:"+roomID, "created_at").Result()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return parsed, nil
 }
 
 func (h *RoomHandler) createRoom(ctx context.Context, roomID, roomName, roomType string, createdAt int64) error {

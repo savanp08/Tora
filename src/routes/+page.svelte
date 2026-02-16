@@ -2,6 +2,7 @@
 	import { goto } from '$app/navigation';
 	import AuthModal from '$lib/components/home/AuthModal.svelte';
 	import { currentUser, authToken } from '$lib/store';
+	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
 	import { generateRoomName } from '$lib/utils/nameGenerator';
 	import { onMount } from 'svelte';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
@@ -27,6 +28,8 @@
 
 	onMount(() => {
 		roomName = generateRoomName();
+		const identity = getOrInitIdentity();
+		currentUser.set({ id: identity.id, username: identity.username });
 	});
 
 	function onRoomNameFocus(event: FocusEvent) {
@@ -68,8 +71,10 @@
 		joinError = '';
 		roomName = normalizedRoomName;
 
-		const fallbackUsername = `Guest_${Math.floor(Math.random() * 10000)}`;
-		const userToJoin = normalizeUsernameInput(guestUsername) || fallbackUsername;
+		const identity = getOrInitIdentity();
+		const requestedUsername = normalizeUsernameInput(guestUsername);
+		const userIdentity = requestedUsername ? updateUsername(requestedUsername) : identity;
+		const userToJoin = userIdentity.username;
 		guestUsername = userToJoin;
 
 		try {
@@ -94,12 +99,15 @@
 
 			if (!res.ok) throw new Error(data.error || 'Failed to join room');
 
-			currentUser.set({ id: data.userId, username: userToJoin });
+			currentUser.set({ id: userIdentity.id, username: userToJoin });
 			authToken.set(data.token);
 
 			const resolvedRoomName = data.roomName || normalizedRoomName;
+			const createdAt = Number(data.createdAt);
+			const createdAtQuery =
+				Number.isFinite(createdAt) && createdAt > 0 ? `&createdAt=${createdAt}` : '';
 			clientLog('navigate-chat-room', { roomId: data.roomId, roomName: resolvedRoomName });
-			goto(`/chat/${data.roomId}?name=${encodeURIComponent(resolvedRoomName)}`);
+			goto(`/chat/${data.roomId}?name=${encodeURIComponent(resolvedRoomName)}${createdAtQuery}`);
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
 			joinError = e.message;
