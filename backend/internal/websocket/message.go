@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
 )
@@ -17,6 +20,7 @@ const (
 	roomHistoryTTL    = 1800
 	roomHistorySize   = 50
 	scyllaMessageTTL  = 1296000
+	messageBreakMeta  = "message:break:"
 )
 
 type MessageService struct {
@@ -116,11 +120,13 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 	}
 
 	if len(redisMessages) >= roomHistorySize {
+		s.enrichBreakMetadata(ctx, redisMessages)
 		return redisMessages, nil
 	}
 
 	needed := roomHistorySize - len(redisMessages)
 	if s.Scylla == nil || s.Scylla.Session == nil {
+		s.enrichBreakMetadata(ctx, redisMessages)
 		return redisMessages, nil
 	}
 
@@ -149,8 +155,47 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 	if len(combined) > roomHistorySize {
 		combined = combined[len(combined)-roomHistorySize:]
 	}
+	s.enrichBreakMetadata(ctx, combined)
 
 	return combined, nil
+}
+
+func (s *MessageService) enrichBreakMetadata(ctx context.Context, messages []models.Message) {
+	if len(messages) == 0 || s.Redis == nil || s.Redis.Client == nil {
+		return
+	}
+
+	pipe := s.Redis.Client.Pipeline()
+	cmds := make([]*redis.MapStringStringCmd, len(messages))
+	for index, msg := range messages {
+		if msg.ID == "" {
+			continue
+		}
+		cmds[index] = pipe.HGetAll(ctx, messageBreakMeta+msg.ID)
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return
+	}
+
+	for index, cmd := range cmds {
+		if cmd == nil {
+			continue
+		}
+		fields, err := cmd.Result()
+		if err != nil || len(fields) == 0 {
+			continue
+		}
+
+		hasBreak := fields["has_break_room"] == "1" || strings.EqualFold(fields["has_break_room"], "true")
+		breakRoomID := fields["break_room_id"]
+		joinCount, _ := strconv.Atoi(fields["break_join_count"])
+
+		if hasBreak || breakRoomID != "" {
+			messages[index].HasBreakRoom = true
+			messages[index].BreakRoomID = breakRoomID
+			messages[index].BreakJoinCount = joinCount
+		}
+	}
 }
 
 func decodeCachedMessages(rawMessages []string) []models.Message {
@@ -217,7 +262,7 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 		return []models.Message{}, nil
 	}
 
-	query := `SELECT room_id, message_id, sender_id, sender_name, content, type, created_at FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`
+	query := `SELECT room_id, message_id, sender_id, sender_name, content, type, created_at  messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`
 	args := []interface{}{roomID, limit}
 	if before != nil {
 		query = `SELECT room_id, message_id, sender_id, sender_name, content, type, created_at FROM messages WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`

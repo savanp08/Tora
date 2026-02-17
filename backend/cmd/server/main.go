@@ -6,7 +6,9 @@ import (
 
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
+	"github.com/savanp08/converse/internal/monitor"
 	"github.com/savanp08/converse/internal/router"
+	"github.com/savanp08/converse/internal/storage"
 	"github.com/savanp08/converse/internal/websocket"
 )
 
@@ -34,10 +36,29 @@ func main() {
 	}
 
 	msgService := websocket.NewMessageService(redisStore, scyllaStore)
-	hub := websocket.NewHub(msgService)
+	usageTracker := monitor.NewUsageTracker(scyllaStore, monitor.UsageLimits{
+		MaxDailyRequests:       cfg.MaxDailyRequests,
+		MaxDailyUploadBytes:    cfg.MaxDailyUploadBytes,
+		MaxDailyBandwidthBytes: cfg.MaxDailyBandwidthBytes,
+		MaxDailyMessages:       cfg.MaxDailyMessages,
+		MaxDailyWsConnections:  cfg.MaxDailyWsConnections,
+		MaxDailyFilesUploaded:  cfg.MaxDailyFilesUploaded,
+	})
+	defer usageTracker.Close()
+
+	hub := websocket.NewHub(msgService, usageTracker)
 	go hub.Run()
 
-	mainRouter := router.New(hub, redisStore)
+	var r2Client *storage.R2Client
+	r2Client, err = storage.NewR2Client(*cfg)
+	if err != nil {
+		log.Printf("⚠️  Warning: Could not initialize R2 client: %v", err)
+		log.Println("   (Uploads will be unavailable until R2 env vars are configured)")
+	} else {
+		log.Println("✅ Connected to Cloudflare R2")
+	}
+
+	mainRouter := router.New(hub, redisStore, scyllaStore, r2Client, usageTracker)
 
 	log.Printf("📡 Server listening on port %s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, mainRouter); err != nil {

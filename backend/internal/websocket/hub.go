@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/monitor"
 )
 
 type Hub struct {
@@ -17,15 +18,17 @@ type Hub struct {
 	unregister chan *Client
 
 	msgService *MessageService
+	tracker    *monitor.UsageTracker
 }
 
-func NewHub(service *MessageService) *Hub {
+func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	hub := &Hub{
 		broadcast:  make(chan models.Message),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		rooms:      make(map[string]map[*Client]bool),
 		msgService: service,
+		tracker:    tracker,
 	}
 
 	if service != nil && service.CanPersistToDisk() {

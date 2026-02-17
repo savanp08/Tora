@@ -2,11 +2,16 @@
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
+	import ChatSidebar from '$lib/components/chat/ChatSidebar.svelte';
+	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
+	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
 	import { currentUser } from '$lib/store';
 	import { getOrInitIdentity } from '$lib/utils/identity';
-	import { onDestroy, onMount, tick } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 
 	type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
+	type ThreadStatus = 'joined' | 'discoverable';
 
 	type ChatMessage = {
 		id: string;
@@ -15,8 +20,20 @@
 		senderName: string;
 		content: string;
 		type: string;
+		mediaUrl?: string;
+		mediaType?: string;
+		fileName?: string;
 		createdAt: number;
+		hasBreakRoom?: boolean;
+		breakRoomId?: string;
+		breakJoinCount?: number;
 		pending?: boolean;
+	};
+
+	type ComposerMediaPayload = {
+		type: 'image' | 'video' | 'file';
+		content: string;
+		fileName?: string;
 	};
 
 	type ChatThread = {
@@ -25,6 +42,9 @@
 		lastMessage: string;
 		lastActivity: number;
 		unread: number;
+		status: ThreadStatus;
+		memberCount?: number;
+		parentRoomId?: string;
 	};
 
 	type OnlineMember = {
@@ -38,15 +58,27 @@
 		createdAt: number;
 	};
 
-	const CLIENT_LOG_PREFIX = '[chat-client]';
+	type SidebarRoom = {
+		roomId: string;
+		roomName: string;
+		status: ThreadStatus;
+		parentRoomId?: string;
+		memberCount?: number;
+		createdAt?: number;
+	};
 
+	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const WS_BASE = (import.meta.env.VITE_WS_BASE as string | undefined) ?? 'ws://localhost:8080';
+	const ROOM_MAX_LIFESPAN_MS = 15 * 24 * 60 * 60 * 1000;
 
 	let ws: WebSocket | null = null;
 	let wsRoomId = '';
 	let wsState: ConnectionState = 'idle';
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
+	let roomMembershipSynced: Record<string, boolean> = {};
+	let roomMembershipSyncing: Record<string, boolean> = {};
 	let reconnectAttempts = 0;
 
 	let toastMessage = '';
@@ -62,6 +94,7 @@
 	let showRoomMenu = false;
 	let showRoomSearch = false;
 	let showRoomDetails = false;
+	let isSelectionMode = false;
 
 	let roomThreads: ChatThread[] = [];
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
@@ -72,38 +105,39 @@
 	let expandedMessages: Record<string, boolean> = {};
 	let identityReady = !browser;
 
-	const ROOM_MAX_LIFESPAN_MS = 15 * 24 * 60 * 60 * 1000;
-	const COLLAPSED_MESSAGE_LENGTH = 500;
-
-	let fileInput: HTMLInputElement | null = null;
-	let messageViewport: HTMLDivElement | null = null;
-	let lastRenderedMessageCount = 0;
-
 	$: roomId = toRoomSlug(decodeURIComponent($page.params.roomId ?? ''));
 	$: roomNameFromURL = toRoomSlug(
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
 	);
 	$: roomCreatedAtFromURL = parseTimestampParam($page.url.searchParams.get('createdAt'));
+	$: roomMemberHint = $page.url.searchParams.get('member');
 	$: currentUserId = $currentUser?.id ?? 'guest';
 	$: currentUsername = normalizeUsernameValue($currentUser?.username ?? 'Guest') || 'Guest';
 	$: activeThread =
-		roomThreads.find((thread) => thread.id === roomId) ?? createThread(roomId || 'default-room');
+		roomThreads.find((thread) => thread.id === roomId) ??
+		createThread(roomId || 'default_room', roomNameFromURL || undefined, 'joined');
 	$: currentMessages = messagesByRoom[roomId] ?? [];
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
 	$: activeUnreadCount = activeThread?.unread ?? 0;
 	$: connectionLabel = getConnectionLabel(wsState);
-	$: filteredThreads = getFilteredThreads(
-		roomThreads,
+	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
+	$: myRooms = filterThreadsByStatus(roomThreads, 'joined');
+	$: discoverableRooms = filterThreadsByStatus(roomThreads, 'discoverable');
+	$: filteredMyRooms = filterThreadList(myRooms, chatListSearch, messagesByRoom, roomId);
+	$: filteredDiscoverableRooms = filterThreadList(
+		discoverableRooms,
 		chatListSearch,
 		messagesByRoom,
-		roomId,
-		activeThread.name
+		roomId
 	);
-	$: visibleMessages = getVisibleMessages(currentMessages, roomMessageSearch);
+
 	$: if (roomId) {
-		ensureRoomThread(roomId, roomNameFromURL || undefined);
+		ensureRoomThread(roomId, roomNameFromURL || undefined, isMember ? 'joined' : 'discoverable');
 		ensureOnlineSeed(roomId);
 		ensureRoomMeta(roomId, roomCreatedAtFromURL);
+	}
+	$: if (browser && identityReady && roomId && isMember) {
+		void syncRoomMembership(roomId);
 	}
 	$: if (browser && identityReady && roomId && roomId !== wsRoomId) {
 		connectToRoom(roomId);
@@ -111,27 +145,33 @@
 	$: if (browser && roomId && roomId !== lastToastRoom) {
 		showJoinToast(roomId);
 	}
-	$: if (visibleMessages.length !== lastRenderedMessageCount) {
-		lastRenderedMessageCount = visibleMessages.length;
-		void tick().then(scrollMessagesToBottom);
-	}
 
 	onDestroy(() => {
 		clientLog('component-destroy', { roomId, wsRoomId, wsState });
 		closeSocket();
 		clearReconnectTimer();
+		clearSidebarRefreshTimer();
 		clearToastTimer();
 	});
 
 	onMount(() => {
+		void initializeIdentity();
+	});
+
+	async function initializeIdentity() {
 		const identity = getOrInitIdentity();
 		currentUser.set({
-			id: normalizeUsernameValue(identity.id) || identity.id,
+			id: normalizeIdentifier(identity.id) || identity.id,
 			username: normalizeUsernameValue(identity.username) || identity.username
 		});
 		identityReady = true;
 		clientLog('identity-initialized', { id: identity.id, username: identity.username });
-	});
+		await refreshSidebarRooms(normalizeIdentifier(identity.id) || identity.id);
+		clearSidebarRefreshTimer();
+		sidebarRefreshTimer = setInterval(() => {
+			void refreshSidebarRooms();
+		}, 2000);
+	}
 
 	function clientLog(event: string, payload?: unknown) {
 		const timestamp = new Date().toISOString();
@@ -149,6 +189,13 @@
 		}
 	}
 
+	function clearSidebarRefreshTimer() {
+		if (sidebarRefreshTimer) {
+			clearInterval(sidebarRefreshTimer);
+			sidebarRefreshTimer = null;
+		}
+	}
+
 	function clearToastTimer() {
 		if (toastTimer) {
 			clearTimeout(toastTimer);
@@ -157,7 +204,6 @@
 	}
 
 	function showJoinToast(activeRoomId: string) {
-		clientLog('toast-joined-room', { roomId: activeRoomId });
 		lastToastRoom = activeRoomId;
 		toastMessage = `Joined Room: ${activeRoomId}`;
 		showToast = true;
@@ -167,47 +213,83 @@
 		}, 3000);
 	}
 
-	function createThread(id: string, nameOverride?: string): ChatThread {
-		const defaultName = nameOverride ?? formatRoomName(id);
+	function showErrorToast(message: string) {
+		toastMessage = message;
+		showToast = true;
+		clearToastTimer();
+		toastTimer = setTimeout(() => {
+			showToast = false;
+		}, 3000);
+	}
+
+	function createThread(
+		id: string,
+		nameOverride?: string,
+		status: ThreadStatus = 'joined'
+	): ChatThread {
 		return {
 			id,
-			name: defaultName,
+			name: nameOverride ?? formatRoomName(id),
 			lastMessage: '',
 			lastActivity: Date.now(),
-			unread: 0
+			unread: 0,
+			status
 		};
 	}
 
-	function ensureRoomThread(targetRoomId: string, nameOverride?: string) {
+	function ensureRoomThread(
+		targetRoomId: string,
+		nameOverride?: string,
+		status: ThreadStatus = 'joined'
+	) {
 		const existing = roomThreads.find((thread) => thread.id === targetRoomId);
 		if (existing) {
-			if (nameOverride && existing.name !== nameOverride) {
-				roomThreads = sortThreads(
-					roomThreads.map((thread) =>
-						thread.id === targetRoomId ? { ...thread, name: nameOverride } : thread
-					)
-				);
+			const nextName = nameOverride || existing.name;
+			const nextStatus: ThreadStatus = existing.status === 'joined' ? 'joined' : status;
+			if (nextName === existing.name && nextStatus === existing.status) {
+				return;
 			}
+
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === targetRoomId
+						? {
+								...thread,
+								name: nextName,
+								status: nextStatus
+							}
+						: thread
+				)
+			);
 			return;
 		}
 
-		const nextThread = createThread(targetRoomId, nameOverride);
-		roomThreads = sortThreads([nextThread, ...roomThreads]);
+		roomThreads = sortThreads([createThread(targetRoomId, nameOverride, status), ...roomThreads]);
 	}
 
 	function ensureRoomMeta(targetRoomId: string, createdAt: number) {
 		if (!targetRoomId || !Number.isFinite(createdAt) || createdAt <= 0) {
 			return;
 		}
-
 		const existing = roomMetaById[targetRoomId];
 		if (existing?.createdAt === createdAt) {
 			return;
 		}
-
 		roomMetaById = {
 			...roomMetaById,
 			[targetRoomId]: { createdAt }
+		};
+	}
+
+	function ensureOnlineSeed(targetRoomId: string) {
+		if (onlineByRoom[targetRoomId]?.length) {
+			return;
+		}
+		onlineByRoom = {
+			...onlineByRoom,
+			[targetRoomId]: dedupeMembers([
+				{ id: currentUserId, name: currentUsername, isOnline: true, joinedAt: Date.now() }
+			])
 		};
 	}
 
@@ -215,9 +297,8 @@
 		const roomMessages = messagesByRoom[targetRoomId] ?? [];
 		const lastMessage = roomMessages[roomMessages.length - 1];
 		const fallbackName = formatRoomName(targetRoomId);
-
 		if (!lastMessage) {
-			ensureRoomThread(targetRoomId, fallbackName);
+			ensureRoomThread(targetRoomId, fallbackName, 'joined');
 			return;
 		}
 
@@ -234,15 +315,12 @@
 				)
 			: [
 					{
-						id: targetRoomId,
-						name: fallbackName,
+						...createThread(targetRoomId, fallbackName, 'joined'),
 						lastMessage: lastMessage.content,
-						lastActivity: lastMessage.createdAt,
-						unread: 0
+						lastActivity: lastMessage.createdAt
 					},
 					...roomThreads
 				];
-
 		roomThreads = sortThreads(merged);
 	}
 
@@ -250,36 +328,175 @@
 		return [...threads].sort((a, b) => b.lastActivity - a.lastActivity);
 	}
 
-	function ensureOnlineSeed(targetRoomId: string) {
-		if (onlineByRoom[targetRoomId]?.length) {
+	function markRoomMembershipSynced(targetRoomId: string) {
+		const normalizedRoomId = toRoomSlug(targetRoomId);
+		if (!normalizedRoomId) {
 			return;
 		}
-
-		const me = {
-			id: currentUserId,
-			name: currentUsername,
-			isOnline: true,
-			joinedAt: Date.now()
-		};
-		onlineByRoom = {
-			...onlineByRoom,
-			[targetRoomId]: dedupeMembers([me])
+		roomMembershipSynced = {
+			...roomMembershipSynced,
+			[normalizedRoomId]: true
 		};
 	}
 
-	function selectRoom(targetRoomId: string) {
+	async function syncRoomMembership(targetRoomId: string) {
+		const normalizedRoomId = toRoomSlug(targetRoomId);
+		if (!browser || !normalizedRoomId || !isMember) {
+			return;
+		}
+		if (roomMembershipSynced[normalizedRoomId] || roomMembershipSyncing[normalizedRoomId]) {
+			return;
+		}
+
+		roomMembershipSyncing = {
+			...roomMembershipSyncing,
+			[normalizedRoomId]: true
+		};
+
+		try {
+			const payload = {
+				roomName: normalizedRoomId,
+				username: currentUsername,
+				userId: normalizeIdentifier(currentUserId),
+				mode: 'join'
+			};
+			clientLog('api-room-sync-request', payload);
+			const res = await fetch(`${API_BASE}/api/rooms/join`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				clientLog('api-room-sync-failed', { roomId: normalizedRoomId, status: res.status, data });
+				return;
+			}
+
+			markRoomMembershipSynced(normalizedRoomId);
+			const joinedName = toStringValue(data.roomName) || formatRoomName(normalizedRoomId);
+			const joinedCreatedAt = toTimestamp(data.createdAt);
+			ensureRoomThread(normalizedRoomId, joinedName, 'joined');
+			ensureRoomMeta(normalizedRoomId, joinedCreatedAt);
+			await refreshSidebarRooms();
+		} catch (error) {
+			clientLog('api-room-sync-error', {
+				roomId: normalizedRoomId,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		} finally {
+			const nextSyncing = { ...roomMembershipSyncing };
+			delete nextSyncing[normalizedRoomId];
+			roomMembershipSyncing = nextSyncing;
+		}
+	}
+
+	async function refreshSidebarRooms(userIdOverride?: string) {
+		const userID = normalizeIdentifier(userIdOverride || currentUserId);
+		if (!browser || !userID) {
+			return;
+		}
+
+		try {
+			clientLog('api-sidebar-request', { userID });
+			const res = await fetch(`${API_BASE}/api/rooms/sidebar?userId=${encodeURIComponent(userID)}`);
+			const data = await res.json().catch(() => ({ rooms: [] }));
+			if (!res.ok) {
+				clientLog('api-sidebar-failed', { status: res.status, data });
+				return;
+			}
+			const incoming = Array.isArray(data.rooms) ? (data.rooms as SidebarRoom[]) : [];
+			const existing = new Map(roomThreads.map((thread) => [thread.id, thread]));
+			const nextThreads = incoming.reduce<ChatThread[]>((acc, room) => {
+				const roomID = toRoomSlug(room.roomId);
+				if (!roomID) {
+					return acc;
+				}
+
+				const prev = existing.get(roomID);
+				const createdAt = normalizeEpoch(Number(room.createdAt ?? 0));
+				if (createdAt > 0) {
+					ensureRoomMeta(roomID, createdAt);
+				}
+
+				const next: ChatThread = {
+					id: roomID,
+					name: toStringValue(room.roomName) || prev?.name || formatRoomName(roomID),
+					lastMessage: prev?.lastMessage || '',
+					lastActivity: prev?.lastActivity || createdAt || Date.now(),
+					unread: prev?.unread || 0,
+					status: room.status === 'discoverable' ? 'discoverable' : 'joined',
+					memberCount: typeof room.memberCount === 'number' ? room.memberCount : prev?.memberCount,
+					parentRoomId: toStringValue(room.parentRoomId) || prev?.parentRoomId || undefined
+				};
+
+				acc.push(next);
+				return acc;
+			}, []);
+
+			if (roomId && !nextThreads.some((thread) => thread.id === roomId)) {
+				nextThreads.push(
+					createThread(
+						roomId,
+						roomNameFromURL || formatRoomName(roomId),
+						roomMemberHint === '0' ? 'discoverable' : 'joined'
+					)
+				);
+			}
+
+			const merged = new Map<string, ChatThread>();
+			for (const existingThread of roomThreads) {
+				merged.set(existingThread.id, existingThread);
+			}
+			for (const nextThread of nextThreads) {
+				const prev = merged.get(nextThread.id);
+				merged.set(nextThread.id, {
+					...prev,
+					...nextThread,
+					unread: prev?.unread ?? nextThread.unread,
+					lastMessage: nextThread.lastMessage || prev?.lastMessage || '',
+					lastActivity: Math.max(nextThread.lastActivity, prev?.lastActivity ?? 0),
+					status:
+						prev?.status === 'joined' || nextThread.status === 'joined' ? 'joined' : 'discoverable'
+				});
+			}
+
+			roomThreads = sortThreads([...merged.values()]);
+		} catch (error) {
+			clientLog('api-sidebar-error', {
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
+
+	function selectRoom(targetRoomId: string, memberState: boolean) {
 		if (!targetRoomId || targetRoomId === roomId) {
 			return;
 		}
-		clientLog('select-room', { fromRoom: roomId, toRoom: targetRoomId });
+		clientLog('select-room', { fromRoom: roomId, toRoom: targetRoomId, memberState });
 		showLeftMenu = false;
 		showRoomMenu = false;
 		showRoomSearch = false;
-		roomMessageSearch = '';
 		showRoomDetails = false;
+		isSelectionMode = false;
+		roomMessageSearch = '';
+
 		const selected = roomThreads.find((thread) => thread.id === targetRoomId);
-		const roomNameQuery = selected?.name ? `?name=${encodeURIComponent(selected.name)}` : '';
-		void goto(`/chat/${encodeURIComponent(targetRoomId)}${roomNameQuery}`);
+		const params = new URLSearchParams();
+		if (selected?.name) {
+			params.set('name', selected.name);
+		}
+		if (memberState) {
+			params.set('member', '1');
+		} else {
+			params.set('member', '0');
+		}
+		const createdAt = getRoomCreatedAt(targetRoomId);
+		if (createdAt > 0) {
+			params.set('createdAt', String(createdAt));
+		}
+
+		const query = params.toString();
+		void goto(`/chat/${encodeURIComponent(targetRoomId)}${query ? `?${query}` : ''}`);
 	}
 
 	function connectToRoom(targetRoomId: string) {
@@ -288,8 +505,6 @@
 			return;
 		}
 
-		clientLog('ws-connect-start', { targetRoomId: normalizedRoomId, wsBase: WS_BASE });
-
 		clearReconnectTimer();
 		closeSocket();
 		wsState = 'connecting';
@@ -297,7 +512,7 @@
 
 		try {
 			const wsURL = new URL(`${WS_BASE}/ws/${encodeURIComponent(normalizedRoomId)}`);
-			wsURL.searchParams.set('userId', normalizeUsernameValue(currentUserId) || 'guest');
+			wsURL.searchParams.set('userId', normalizeIdentifier(currentUserId) || 'guest');
 			wsURL.searchParams.set('username', currentUsername);
 			const nextSocket = new WebSocket(wsURL.toString());
 			ws = nextSocket;
@@ -307,24 +522,15 @@
 					return;
 				}
 				wsState = 'open';
-				clientLog('ws-open', { targetRoomId: normalizedRoomId });
 				reconnectAttempts = 0;
 				markRoomAsRead(normalizedRoomId);
 				flushPendingOutgoing(normalizedRoomId);
 			};
 
 			nextSocket.onmessage = (event: MessageEvent) => {
-				if (ws !== nextSocket) {
+				if (ws !== nextSocket || typeof event.data !== 'string') {
 					return;
 				}
-				if (typeof event.data !== 'string') {
-					clientLog('ws-message-non-string', {
-						targetRoomId: normalizedRoomId,
-						dataType: typeof event.data
-					});
-					return;
-				}
-				clientLog('ws-message-recv', { targetRoomId: normalizedRoomId, bytes: event.data.length });
 				handleSocketPayload(event.data, normalizedRoomId);
 			};
 
@@ -333,7 +539,6 @@
 					return;
 				}
 				wsState = 'error';
-				clientLog('ws-error', { targetRoomId: normalizedRoomId });
 			};
 
 			nextSocket.onclose = () => {
@@ -341,7 +546,6 @@
 					return;
 				}
 				wsState = 'closed';
-				clientLog('ws-close', { targetRoomId: normalizedRoomId });
 				if (roomId === normalizedRoomId) {
 					scheduleReconnect(normalizedRoomId);
 				}
@@ -357,7 +561,6 @@
 		clearReconnectTimer();
 		reconnectAttempts = Math.min(reconnectAttempts + 1, 5);
 		const delay = Math.min(1000 * 2 ** (reconnectAttempts - 1), 9000);
-		clientLog('ws-reconnect-scheduled', { targetRoomId, reconnectAttempts, delayMs: delay });
 		reconnectTimer = setTimeout(() => {
 			if (roomId === targetRoomId) {
 				connectToRoom(targetRoomId);
@@ -373,7 +576,6 @@
 		}
 
 		const activeSocket = ws;
-		clientLog('ws-close-requested', { wsRoomId, readyState: activeSocket.readyState });
 		ws = null;
 		activeSocket.onopen = null;
 		activeSocket.onmessage = null;
@@ -393,8 +595,7 @@
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(raw);
-		} catch (error) {
-			console.error(`${CLIENT_LOG_PREFIX} failed to parse socket payload`, error, raw);
+		} catch {
 			return;
 		}
 
@@ -402,7 +603,6 @@
 			const history = parsed
 				.map((entry) => parseIncomingMessage(entry, targetRoomId))
 				.filter((entry): entry is ChatMessage => Boolean(entry));
-			clientLog('ws-history-array', { targetRoomId, count: history.length });
 			mergeMessages(targetRoomId, history);
 			markRoomAsRead(targetRoomId);
 			return;
@@ -413,10 +613,9 @@
 			return;
 		}
 
-		const singleMessage = parseIncomingMessage(parsed, targetRoomId);
-		if (singleMessage) {
-			clientLog('ws-single-message', { targetRoomId, messageId: singleMessage.id });
-			addIncomingMessage(singleMessage);
+		const single = parseIncomingMessage(parsed, targetRoomId);
+		if (single) {
+			addIncomingMessage(single);
 		}
 	}
 
@@ -432,7 +631,6 @@
 
 	function handleEnvelope(envelope: { type: string; payload: unknown }, targetRoomId: string) {
 		const kind = envelope.type;
-		clientLog('ws-envelope', { targetRoomId, kind });
 		if (kind === 'history' || kind === 'recent_messages' || kind === 'initial_messages') {
 			if (Array.isArray(envelope.payload)) {
 				const history = envelope.payload
@@ -490,10 +688,15 @@
 			return null;
 		}
 
-		const messageType = toStringValue(source.type ?? 'text') || 'text';
-		const messageContent = toStringValue(source.text ?? source.content ?? '');
+		const nextType = toStringValue(source.type ?? 'text') || 'text';
+		const rawMediaURL = toStringValue(source.mediaUrl ?? source.media_url ?? '');
+		const normalizedMediaURL = toAbsoluteMediaURL(rawMediaURL);
+		let nextContent = toStringValue(source.text ?? source.content ?? '') || normalizedMediaURL;
+		if (isMediaMessageType(nextType)) {
+			nextContent = toAbsoluteMediaURL(nextContent);
+		}
 
-		const normalized: ChatMessage = {
+		return {
 			id: toStringValue(source.id) || createMessageId(nextRoomId),
 			roomId: nextRoomId,
 			senderId: toStringValue(source.userId ?? source.senderId ?? source.sender_id ?? 'unknown'),
@@ -501,15 +704,21 @@
 				normalizeUsernameValue(
 					toStringValue(source.username ?? source.senderName ?? source.sender_name ?? 'Unknown')
 				) || 'Unknown',
-			content: messageContent,
-			type: messageType,
+			content: nextContent,
+			type: nextType,
+			mediaUrl: normalizedMediaURL || (isMediaMessageType(nextType) ? nextContent : ''),
+			mediaType: toStringValue(source.mediaType ?? source.media_type ?? source.type ?? nextType),
+			fileName: toStringValue(source.fileName ?? source.file_name),
 			createdAt: toTimestamp(
 				source.time ?? source.createdAt ?? source.created_at ?? source.timestamp
 			),
+			hasBreakRoom:
+				toBool(source.hasBreakRoom ?? source.has_break_room) ||
+				toStringValue(source.breakRoomId ?? source.break_room_id) !== '',
+			breakRoomId: toStringValue(source.breakRoomId ?? source.break_room_id),
+			breakJoinCount: toInt(source.breakJoinCount ?? source.break_join_count),
 			pending: false
 		};
-
-		return normalized;
 	}
 
 	function parseMember(value: unknown, fallbackIndex: number): OnlineMember | null {
@@ -555,19 +764,12 @@
 		}
 
 		nextMessages.sort((a, b) => a.createdAt - b.createdAt);
-		clientLog('message-upsert', {
-			targetRoomId,
-			messageId: message.id,
-			pending: Boolean(message.pending),
-			total: nextMessages.length
-		});
 		messagesByRoom = {
 			...messagesByRoom,
 			[targetRoomId]: nextMessages
 		};
 
 		updateThreadPreview(targetRoomId);
-
 		if (shouldCountUnread) {
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
@@ -581,7 +783,6 @@
 		if (incoming.length === 0) {
 			return;
 		}
-
 		const existing = messagesByRoom[targetRoomId] ?? [];
 		const merged = new Map<string, ChatMessage>();
 		for (const message of existing) {
@@ -591,7 +792,6 @@
 			const current = merged.get(message.id);
 			merged.set(message.id, { ...current, ...message, pending: false });
 		}
-
 		const nextMessages = [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
 		messagesByRoom = {
 			...messagesByRoom,
@@ -643,7 +843,6 @@
 
 	function queueOutgoing(message: ChatMessage) {
 		const currentQueue = pendingOutgoingByRoom[message.roomId] ?? [];
-		clientLog('queue-outgoing', { roomId: message.roomId, messageId: message.id });
 		pendingOutgoingByRoom = {
 			...pendingOutgoingByRoom,
 			[message.roomId]: [...currentQueue, message]
@@ -653,17 +852,9 @@
 	function flushPendingOutgoing(targetRoomId: string) {
 		const roomQueue = pendingOutgoingByRoom[targetRoomId] ?? [];
 		if (roomQueue.length === 0 || !ws || ws.readyState !== WebSocket.OPEN) {
-			clientLog('flush-outgoing-skip', {
-				targetRoomId,
-				queueSize: roomQueue.length,
-				wsReadyState: ws?.readyState
-			});
 			return;
 		}
-
-		clientLog('flush-outgoing-start', { targetRoomId, queueSize: roomQueue.length });
 		for (const queued of roomQueue) {
-			clientLog('ws-send-queued', { targetRoomId, messageId: queued.id });
 			ws.send(JSON.stringify(toWireMessage(queued)));
 		}
 		pendingOutgoingByRoom = {
@@ -672,56 +863,56 @@
 		};
 	}
 
-	async function sendMessage() {
-		if (!roomId) {
-			clientLog('send-message-skip-no-room');
+	async function sendMessage(payload?: ComposerMediaPayload) {
+		if (!roomId || !isMember) {
+			showErrorToast('Join room before sending messages');
 			return;
 		}
 
 		const text = draftMessage.trim();
-		if (!text && !attachedFile) {
-			clientLog('send-message-skip-empty');
+		const mediaType = payload?.type;
+		const mediaContent = payload?.content?.trim() ?? '';
+		const isMediaMessage = Boolean(mediaType && mediaContent);
+		if (!text && !isMediaMessage) {
 			return;
 		}
+
+		const nextType = isMediaMessage ? mediaType : 'text';
+		const nextContent = isMediaMessage ? mediaContent : text;
 
 		const nextMessage: ChatMessage = {
 			id: createMessageId(roomId),
 			roomId,
 			senderId: currentUserId,
 			senderName: currentUsername,
-			content: buildOutgoingContent(text, attachedFile),
-			type: attachedFile ? 'file' : 'text',
+			content: nextContent,
+			type: nextType || 'text',
+			mediaUrl: isMediaMessage ? mediaContent : '',
+			mediaType: isMediaMessage ? mediaType : '',
+			fileName: payload?.fileName?.trim() ?? '',
 			createdAt: Date.now(),
 			pending: true
 		};
 
 		upsertMessage(roomId, nextMessage, false);
 		markRoomAsRead(roomId);
-		clientLog('send-message-local', {
-			roomId,
-			messageId: nextMessage.id,
-			type: nextMessage.type,
-			wsReadyState: ws?.readyState
-		});
-
 		draftMessage = '';
 		attachedFile = null;
-		if (fileInput) {
-			fileInput.value = '';
-		}
 
 		if (ws && ws.readyState === WebSocket.OPEN) {
-			clientLog('ws-send-live', { roomId, messageId: nextMessage.id });
 			ws.send(JSON.stringify(toWireMessage(nextMessage)));
 		} else {
 			queueOutgoing(nextMessage);
 		}
-
-		await tick();
-		scrollMessagesToBottom();
 	}
 
 	function toWireMessage(message: ChatMessage) {
+		const mediaType =
+			message.type === 'image' || message.type === 'video' || message.type === 'file'
+				? message.type
+				: '';
+		const mediaURL = mediaType ? message.content : '';
+
 		return {
 			id: message.id,
 			roomId: message.roomId,
@@ -733,42 +924,21 @@
 			senderName: message.senderName,
 			content: message.content,
 			type: message.type,
+			mediaUrl: mediaURL,
+			mediaType,
+			fileName: message.fileName ?? '',
 			createdAt: new Date(message.createdAt).toISOString()
 		};
 	}
 
-	function buildOutgoingContent(text: string, file: File | null) {
-		if (!file) {
-			return text;
-		}
-		if (!text) {
-			return `[File] ${file.name}`;
-		}
-		return `[File] ${file.name} - ${text}`;
-	}
-
-	function onComposerKeyDown(event: KeyboardEvent) {
-		if (event.key === 'Enter' && !event.shiftKey) {
-			event.preventDefault();
-			void sendMessage();
+	function handleComposerAttach(event: CustomEvent<{ file: File | null; error?: string }>) {
+		if (event.detail?.error) {
+			showErrorToast(event.detail.error);
 		}
 	}
 
-	function openFilePicker() {
-		fileInput?.click();
-	}
-
-	function onFilePicked(event: Event) {
-		const target = event.currentTarget as HTMLInputElement;
-		const picked = target.files?.[0] ?? null;
-		attachedFile = picked;
-	}
-
-	function removeAttachedFile() {
+	function handleComposerRemoveAttachment() {
 		attachedFile = null;
-		if (fileInput) {
-			fileInput.value = '';
-		}
 	}
 
 	function toggleLeftMenu() {
@@ -788,113 +958,107 @@
 			return;
 		}
 
-		const identity = getOrInitIdentity();
-		const joinUsername =
-			normalizeUsernameValue(identity.username) ||
-			normalizeUsernameValue(currentUsername) ||
-			`Guest_${Math.floor(Math.random() * 10000)}`;
-		currentUser.set({
-			id: normalizeUsernameValue(identity.id) || identity.id,
-			username: joinUsername
-		});
-
 		try {
-			clientLog('api-rooms-join-request', { requestedName, joinUsername });
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					roomName: requestedName,
-					username: joinUsername,
+					username: currentUsername,
+					userId: normalizeIdentifier(currentUserId),
 					type: 'ephemeral',
 					mode: 'create'
 				})
 			});
 			const data = await res.json();
-			clientLog('api-rooms-join-response', { status: res.status, ok: res.ok, data });
 			if (!res.ok) {
 				throw new Error(data.error || 'Failed to create room');
 			}
 
-			const nextRoomId = toStringValue(data.roomId) || toRoomSlug(requestedName);
+			const nextRoomId = toStringValue(data.roomId) || requestedName;
 			const nextRoomName = toStringValue(data.roomName) || formatRoomName(nextRoomId);
 			const nextCreatedAt = toTimestamp(data.createdAt);
-			if (!nextRoomId) {
-				throw new Error('Failed to resolve room id');
+
+			ensureRoomThread(nextRoomId, nextRoomName, 'joined');
+			markRoomMembershipSynced(nextRoomId);
+			ensureRoomMeta(nextRoomId, nextCreatedAt);
+			await refreshSidebarRooms();
+
+			const params = new URLSearchParams({
+				name: nextRoomName,
+				member: '1'
+			});
+			if (nextCreatedAt > 0) {
+				params.set('createdAt', String(nextCreatedAt));
+			}
+			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}`);
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to create room');
+		}
+	}
+
+	async function joinCurrentRoom() {
+		if (!roomId) {
+			return;
+		}
+		try {
+			const res = await fetch(`${API_BASE}/api/rooms/join`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					roomName: roomId,
+					username: currentUsername,
+					userId: normalizeIdentifier(currentUserId),
+					mode: 'join'
+				})
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				throw new Error(data.error || 'Unable to join room');
 			}
 
-			ensureRoomThread(nextRoomId, nextRoomName);
-			ensureOnlineSeed(nextRoomId);
-			ensureRoomMeta(nextRoomId, nextCreatedAt);
-			const createdAtQuery =
-				Number.isFinite(nextCreatedAt) && nextCreatedAt > 0 ? `&createdAt=${nextCreatedAt}` : '';
-			await goto(
-				`/chat/${encodeURIComponent(nextRoomId)}?name=${encodeURIComponent(nextRoomName)}${createdAtQuery}`
+			const joinedName =
+				toStringValue(data.roomName) || activeThread.name || formatRoomName(roomId);
+			const joinedCreatedAt = toTimestamp(data.createdAt);
+			ensureRoomThread(roomId, joinedName, 'joined');
+			markRoomMembershipSynced(roomId);
+			ensureRoomMeta(roomId, joinedCreatedAt);
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === roomId ? { ...thread, status: 'joined', name: joinedName } : thread
+				)
 			);
+			await refreshSidebarRooms();
+
+			const params = new URLSearchParams({ name: joinedName, member: '1' });
+			if (joinedCreatedAt > 0) {
+				params.set('createdAt', String(joinedCreatedAt));
+			}
+			await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}`);
 		} catch (error) {
-			clientLog('api-rooms-join-error', {
-				error: error instanceof Error ? error.message : String(error)
-			});
-			const message = error instanceof Error ? error.message : 'Failed to create room';
-			toastMessage = message;
-			showToast = true;
-			clearToastTimer();
-			toastTimer = setTimeout(() => {
-				showToast = false;
-			}, 3000);
+			showErrorToast(error instanceof Error ? error.message : 'Unable to join room');
 		}
 	}
 
 	async function extendRoomTTL(targetRoomId: string) {
-		if (!browser || !targetRoomId) {
+		if (!browser || !targetRoomId || isExtendingRoom) {
 			return;
 		}
-
-		if (isExtendingRoom) {
-			clientLog('api-rooms-extend-skipped', { roomId: targetRoomId, reason: 'in-flight' });
-			return;
-		}
-
 		isExtendingRoom = true;
 		try {
-			clientLog('api-rooms-extend-request', { roomId: targetRoomId });
 			const res = await fetch(`${API_BASE}/api/rooms/extend`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ roomId: targetRoomId })
 			});
 			const data = await res.json().catch(() => ({}));
-			clientLog('api-rooms-extend-response', {
-				roomId: targetRoomId,
-				status: res.status,
-				ok: res.ok,
-				data
-			});
-
 			if (!res.ok) {
-				toastMessage = data.error || 'Room has reached its 15-day limit';
-				showToast = true;
-				clearToastTimer();
-				toastTimer = setTimeout(() => {
-					showToast = false;
-				}, 3000);
+				showErrorToast(data.error || 'Room has reached its 15-day limit');
 				return;
 			}
-
-			toastMessage = data.message || 'Room extended for 24 hours';
-			showToast = true;
-			clearToastTimer();
-			toastTimer = setTimeout(() => {
-				showToast = false;
-			}, 3000);
-		} catch (error) {
-			console.error(`${CLIENT_LOG_PREFIX} failed to extend room TTL`, error);
-			toastMessage = 'Failed to extend room';
-			showToast = true;
-			clearToastTimer();
-			toastTimer = setTimeout(() => {
-				showToast = false;
-			}, 3000);
+			showErrorToast(data.message || 'Room extended for 24 hours');
+		} catch {
+			showErrorToast('Failed to extend room');
 		} finally {
 			isExtendingRoom = false;
 		}
@@ -920,6 +1084,11 @@
 		}
 	}
 
+	function toggleSelectionMode() {
+		isSelectionMode = !isSelectionMode;
+		showRoomMenu = false;
+	}
+
 	function openRoomDetails() {
 		showRoomDetails = true;
 		showRoomMenu = false;
@@ -933,28 +1102,111 @@
 		if (!roomId) {
 			return;
 		}
-		messagesByRoom = {
-			...messagesByRoom,
-			[roomId]: []
-		};
+		messagesByRoom = { ...messagesByRoom, [roomId]: [] };
 		updateThreadPreview(roomId);
 		showRoomMenu = false;
 	}
 
-	function getFilteredThreads(
+	function toggleMessageExpanded(messageId: string) {
+		expandedMessages = {
+			...expandedMessages,
+			[messageId]: !expandedMessages[messageId]
+		};
+	}
+
+	async function onMessageSelected(event: CustomEvent<{ messageId: string }>) {
+		if (!isSelectionMode || !roomId) {
+			return;
+		}
+		const message = (messagesByRoom[roomId] ?? []).find(
+			(entry) => entry.id === event.detail.messageId
+		);
+		if (!message) {
+			return;
+		}
+		await createBreakRoom(message);
+		isSelectionMode = false;
+	}
+
+	async function createBreakRoom(message: ChatMessage) {
+		try {
+			const res = await fetch(`${API_BASE}/api/rooms/break`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					parentRoomId: roomId,
+					originMessageId: message.id,
+					roomName: message.content,
+					userId: normalizeIdentifier(currentUserId),
+					username: currentUsername
+				})
+			});
+			const data = await res.json();
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to create break room');
+			}
+
+			const breakRoomId = toRoomSlug(toStringValue(data.roomId));
+			if (!breakRoomId) {
+				throw new Error('Invalid break room id');
+			}
+			const breakRoomName = toStringValue(data.roomName) || formatRoomName(breakRoomId);
+			const breakCreatedAt = toTimestamp(data.createdAt);
+
+			messagesByRoom = {
+				...messagesByRoom,
+				[roomId]: (messagesByRoom[roomId] ?? []).map((entry) =>
+					entry.id === message.id
+						? {
+								...entry,
+								hasBreakRoom: true,
+								breakRoomId,
+								breakJoinCount: Math.max(1, entry.breakJoinCount ?? 0)
+							}
+						: entry
+				)
+			};
+			ensureRoomThread(breakRoomId, breakRoomName, 'joined');
+			markRoomMembershipSynced(breakRoomId);
+			ensureRoomMeta(breakRoomId, breakCreatedAt);
+			await refreshSidebarRooms();
+			await goto(
+				`/chat/${encodeURIComponent(breakRoomId)}?name=${encodeURIComponent(breakRoomName)}&member=1`
+			);
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to create break room');
+		}
+	}
+
+	function onJoinBreakRoom(event: CustomEvent<{ roomId: string }>) {
+		const target = toRoomSlug(event.detail.roomId);
+		if (!target) {
+			return;
+		}
+		const match = roomThreads.find((thread) => thread.id === target);
+		if (!match) {
+			ensureRoomThread(target, formatRoomName(target), 'discoverable');
+			selectRoom(target, false);
+			return;
+		}
+		selectRoom(target, match.status === 'joined');
+	}
+
+	function filterThreadsByStatus(threads: ChatThread[], status: ThreadStatus) {
+		return threads.filter((thread) => thread.status === status);
+	}
+
+	function filterThreadList(
 		threads: ChatThread[],
 		searchQuery: string,
 		messageMap: Record<string, ChatMessage[]>,
-		activeRoomId: string,
-		activeRoomName: string
+		activeRoomId: string
 	) {
-		const threadsWithActive = getThreadsWithActive(threads, activeRoomId, activeRoomName);
 		const query = searchQuery.trim().toLowerCase();
 		if (!query) {
-			return threadsWithActive;
+			return threads;
 		}
-
-		const filtered = threadsWithActive.filter((thread) => {
+		const filtered = threads.filter((thread) => {
 			if (thread.name.toLowerCase().includes(query)) {
 				return true;
 			}
@@ -970,66 +1222,12 @@
 		});
 
 		if (activeRoomId && !filtered.some((thread) => thread.id === activeRoomId)) {
-			const activeFallback = threadsWithActive.find((thread) => thread.id === activeRoomId);
-			if (activeFallback) {
-				return [activeFallback, ...filtered];
+			const active = threads.find((thread) => thread.id === activeRoomId);
+			if (active) {
+				return [active, ...filtered];
 			}
 		}
-
 		return filtered;
-	}
-
-	function getThreadsWithActive(
-		threads: ChatThread[],
-		activeRoomId: string,
-		activeRoomName: string
-	) {
-		if (!activeRoomId) {
-			return threads;
-		}
-		if (threads.some((thread) => thread.id === activeRoomId)) {
-			return threads;
-		}
-		return sortThreads([createThread(activeRoomId, activeRoomName), ...threads]);
-	}
-
-	function getVisibleMessages(messages: ChatMessage[], searchQuery: string) {
-		const query = searchQuery.trim().toLowerCase();
-		if (!query) {
-			return messages;
-		}
-
-		return messages.filter(
-			(message) =>
-				message.content.toLowerCase().includes(query) ||
-				message.senderName.toLowerCase().includes(query)
-		);
-	}
-
-	function isLongMessage(content: string) {
-		return content.length > COLLAPSED_MESSAGE_LENGTH;
-	}
-
-	function isMessageExpanded(messageId: string) {
-		return Boolean(expandedMessages[messageId]);
-	}
-
-	function toggleMessageExpanded(messageId: string) {
-		expandedMessages = {
-			...expandedMessages,
-			[messageId]: !expandedMessages[messageId]
-		};
-	}
-
-	function isCodeBlock(content: string) {
-		const trimmed = content.trim();
-		return trimmed.startsWith('```') && trimmed.endsWith('```') && trimmed.length >= 6;
-	}
-
-	function getCodeContent(content: string) {
-		const trimmed = content.trim();
-		const withoutOpening = trimmed.replace(/^```[^\n]*\n?/, '');
-		return withoutOpening.replace(/```$/, '');
 	}
 
 	function getRoomCreatedAt(targetRoomId: string) {
@@ -1068,12 +1266,11 @@
 		if (!value) {
 			return 0;
 		}
-
 		const numeric = Number(value);
 		if (!Number.isFinite(numeric) || numeric <= 0) {
 			return 0;
 		}
-		return numeric;
+		return normalizeEpoch(numeric);
 	}
 
 	function toRoomSlug(value: string) {
@@ -1081,7 +1278,6 @@
 		if (!normalized) {
 			return '';
 		}
-
 		return normalized
 			.replace(/[^a-z0-9\s_-]/g, '')
 			.replace(/[\s-]+/g, '_')
@@ -1098,11 +1294,13 @@
 			.replace(/^_+|_+$/g, '');
 	}
 
-	function scrollMessagesToBottom() {
-		if (!messageViewport) {
-			return;
-		}
-		messageViewport.scrollTop = messageViewport.scrollHeight;
+	function normalizeIdentifier(value: string) {
+		return value
+			.trim()
+			.replace(/[^a-zA-Z0-9\s_-]/g, '')
+			.replace(/[\s-]+/g, '_')
+			.replace(/_+/g, '_')
+			.replace(/^_+|_+$/g, '');
 	}
 
 	function getConnectionLabel(state: ConnectionState) {
@@ -1136,22 +1334,9 @@
 			.join(' ');
 	}
 
-	function formatClock(timestamp: number) {
-		const safe = toTimestamp(timestamp);
-		return new Date(safe).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-	}
-
-	function formatLastSeen(timestamp: number) {
-		const safe = toTimestamp(timestamp);
-		return new Date(safe).toLocaleDateString([], {
-			month: 'short',
-			day: 'numeric'
-		});
-	}
-
 	function toTimestamp(value: unknown) {
 		if (typeof value === 'number' && Number.isFinite(value)) {
-			return value;
+			return normalizeEpoch(value);
 		}
 		if (typeof value === 'string') {
 			const trimmed = value.trim();
@@ -1160,7 +1345,7 @@
 			}
 			const asNumber = Number(trimmed);
 			if (Number.isFinite(asNumber)) {
-				return asNumber;
+				return normalizeEpoch(asNumber);
 			}
 			const parsed = Date.parse(trimmed);
 			if (Number.isFinite(parsed)) {
@@ -1173,6 +1358,40 @@
 		return Date.now();
 	}
 
+	function normalizeEpoch(value: number) {
+		if (value > 0 && value < 1_000_000_000_000) {
+			return value * 1000;
+		}
+		return value;
+	}
+
+	function toBool(value: unknown) {
+		if (typeof value === 'boolean') {
+			return value;
+		}
+		if (typeof value === 'string') {
+			const lower = value.toLowerCase();
+			return lower === '1' || lower === 'true';
+		}
+		if (typeof value === 'number') {
+			return value === 1;
+		}
+		return false;
+	}
+
+	function toInt(value: unknown) {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return Math.trunc(value);
+		}
+		if (typeof value === 'string') {
+			const parsed = Number(value);
+			if (Number.isFinite(parsed)) {
+				return Math.trunc(parsed);
+			}
+		}
+		return 0;
+	}
+
 	function toStringValue(value: unknown) {
 		if (typeof value === 'string') {
 			return value;
@@ -1182,63 +1401,82 @@
 		}
 		return '';
 	}
+
+	function isMediaMessageType(value: string) {
+		const normalized = value.trim().toLowerCase();
+		return normalized === 'image' || normalized === 'video' || normalized === 'file';
+	}
+
+	function toAbsoluteMediaURL(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return '';
+		}
+		if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+			return trimmed;
+		}
+		if (/^https?:\/\//i.test(trimmed)) {
+			try {
+				const parsed = new URL(trimmed);
+				if (parsed.hostname.endsWith('.r2.cloudflarestorage.com')) {
+					const pathParts = parsed.pathname.split('/').filter(Boolean);
+					if (pathParts.length >= 2) {
+						const objectKey = decodeIfNeeded(pathParts.slice(1).join('/'));
+						return `${API_BASE}/api/upload/object/${encodeURIComponent(objectKey)}`;
+					}
+				}
+			} catch {
+				return trimmed;
+			}
+			return trimmed;
+		}
+		if (trimmed.startsWith('/')) {
+			return `${API_BASE}${trimmed}`;
+		}
+		return `${API_BASE}/${trimmed}`;
+	}
+
+	function decodeIfNeeded(value: string) {
+		try {
+			return decodeURIComponent(value);
+		} catch {
+			return value;
+		}
+	}
+
+	function resolveRoomMembership(roomID: string, threads: ChatThread[], memberHint: string | null) {
+		if (!roomID) {
+			return true;
+		}
+		if (memberHint === '0') {
+			return false;
+		}
+		if (memberHint === '1') {
+			return true;
+		}
+		const thread = threads.find((entry) => entry.id === roomID);
+		if (!thread) {
+			return true;
+		}
+		return thread.status === 'joined';
+	}
 </script>
 
 {#if showToast}
-	<div class="toast" role="status" aria-live="polite">
-		{toastMessage}
-	</div>
+	<div class="toast" role="status" aria-live="polite">{toastMessage}</div>
 {/if}
 
 <section class="chat-shell">
-	<aside class="room-list">
-		<div class="room-list-header">
-			<div class="list-title">
-				<h2>Chats</h2>
-				<span class="thread-count">{roomThreads.length}</span>
-			</div>
-			<div class="list-actions">
-				<button type="button" class="icon-button" on:click={toggleLeftMenu} title="Room options">
-					...
-				</button>
-				{#if showLeftMenu}
-					<div class="room-menu left-menu">
-						<button type="button" on:click={createRoomFromMenu}>New room</button>
-					</div>
-				{/if}
-			</div>
-		</div>
-		<div class="room-list-search">
-			<input type="text" bind:value={chatListSearch} placeholder="Search names or messages" />
-		</div>
-		<div class="room-items">
-			{#if filteredThreads.length === 0 && !roomId}
-				<div class="empty-label">No chats matched your search.</div>
-			{:else}
-				{#each filteredThreads as thread (thread.id)}
-					<button
-						type="button"
-						class="room-item {thread.id === roomId ? 'selected' : ''}"
-						on:click={() => selectRoom(thread.id)}
-					>
-						<span class="avatar">{thread.name.charAt(0).toUpperCase()}</span>
-						<span class="item-main">
-							<span class="item-top">
-								<span class="room-name">{thread.name}</span>
-								<span class="room-time">{formatClock(thread.lastActivity)}</span>
-							</span>
-							<span class="item-bottom">
-								<span class="room-preview">{thread.lastMessage || 'No messages yet'}</span>
-								{#if thread.unread > 0}
-									<span class="unread">{thread.unread}</span>
-								{/if}
-							</span>
-						</span>
-					</button>
-				{/each}
-			{/if}
-		</div>
-	</aside>
+	<ChatSidebar
+		myRooms={filteredMyRooms}
+		discoverableRooms={filteredDiscoverableRooms}
+		activeRoomId={roomId}
+		{showLeftMenu}
+		bind:chatListSearch
+		on:select={(event) => selectRoom(event.detail.id, event.detail.isMember)}
+		on:toggleMenu={toggleLeftMenu}
+		on:createRoom={createRoomFromMenu}
+	/>
 
 	<section class="chat-window">
 		<header
@@ -1256,6 +1494,9 @@
 						{currentOnlineMembers.length} online
 						{#if activeUnreadCount > 0}
 							- {activeUnreadCount} unread
+						{/if}
+						{#if !isMember}
+							- discoverable
 						{/if}
 					</span>
 				</span>
@@ -1276,6 +1517,9 @@
 						<button type="button" on:click|stopPropagation={toggleRoomSearch}>
 							{showRoomSearch ? 'Hide search' : 'Search messages'}
 						</button>
+						<button type="button" on:click|stopPropagation={toggleSelectionMode}>
+							{isSelectionMode ? 'Cancel Break Mode' : 'Start Break / New Topic'}
+						</button>
 						<button type="button" on:click|stopPropagation={() => markRoomAsRead(roomId)}>
 							Mark read
 						</button>
@@ -1287,100 +1531,43 @@
 			</div>
 		</header>
 
+		{#if isSelectionMode}
+			<div class="selection-banner">
+				Break mode active: click a message to start a new topic room.
+			</div>
+		{/if}
+
 		{#if showRoomSearch}
 			<div class="chat-search-row">
 				<input type="text" bind:value={roomMessageSearch} placeholder="Search in this room" />
 			</div>
 		{/if}
 
-		<div class="messages" bind:this={messageViewport}>
-			{#if visibleMessages.length === 0}
-				<div class="empty-thread">
-					{#if roomMessageSearch.trim()}
-						No messages matched your room search.
-					{:else}
-						No messages yet. Send the first one.
-					{/if}
-				</div>
-			{/if}
+		<ChatWindow
+			messages={currentMessages}
+			{currentUserId}
+			{roomMessageSearch}
+			{expandedMessages}
+			{isMember}
+			{isSelectionMode}
+			on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+			on:joinBreakRoom={onJoinBreakRoom}
+			on:joinRoom={() => void joinCurrentRoom()}
+			on:messageSelect={onMessageSelected}
+		/>
 
-			{#each visibleMessages as message (message.id)}
-				<article
-					class="bubble {message.senderId === currentUserId ? 'mine' : 'theirs'} {message.pending
-						? 'pending'
-						: ''}"
-				>
-					<div class="bubble-meta">
-						<span>{message.senderName}</span>
-						<time>{formatClock(message.createdAt)}</time>
-					</div>
-					<div
-						class="bubble-content"
-						class:collapsed={isLongMessage(message.content) && !isMessageExpanded(message.id)}
-					>
-						{#if isCodeBlock(message.content)}
-							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
-						{:else}
-							{message.content}
-						{/if}
-					</div>
-					{#if isLongMessage(message.content)}
-						<button
-							type="button"
-							class="read-more-btn"
-							on:click={() => toggleMessageExpanded(message.id)}
-						>
-							{isMessageExpanded(message.id) ? 'Read less' : 'Read more'}
-						</button>
-					{/if}
-				</article>
-			{/each}
-		</div>
-
-		<footer class="composer">
-			{#if attachedFile}
-				<div class="attachment-pill">
-					<span>{attachedFile.name}</span>
-					<button type="button" on:click={removeAttachedFile}>x</button>
-				</div>
-			{/if}
-			<div class="composer-row">
-				<input
-					bind:this={fileInput}
-					type="file"
-					class="hidden-file-input"
-					on:change={onFilePicked}
-				/>
-				<button type="button" class="attach-button" on:click={openFilePicker}>Attach</button>
-				<textarea
-					bind:value={draftMessage}
-					rows="1"
-					placeholder="Type a message"
-					on:keydown={onComposerKeyDown}
-				></textarea>
-				<button type="button" class="send-button" on:click={sendMessage}>Send</button>
-			</div>
-		</footer>
+		{#if isMember}
+			<ChatComposer
+				bind:draftMessage
+				bind:attachedFile
+				on:send={(event) => void sendMessage(event.detail)}
+				on:attach={handleComposerAttach}
+				on:removeAttachment={handleComposerRemoveAttachment}
+			/>
+		{/if}
 	</section>
 
-	<aside class="online-panel">
-		<div class="online-header">
-			<h3>Online</h3>
-			<span>{currentOnlineMembers.length}</span>
-		</div>
-		<div class="online-list">
-			{#if currentOnlineMembers.length === 0}
-				<div class="empty-label">No online members.</div>
-			{:else}
-				{#each currentOnlineMembers as member (member.id)}
-					<div class="online-member">
-						<span class="member-dot"></span>
-						<span class="member-name">{member.name}</span>
-					</div>
-				{/each}
-			{/if}
-		</div>
-	</aside>
+	<OnlinePanel members={currentOnlineMembers} />
 </section>
 
 {#if showRoomDetails}
@@ -1446,143 +1633,6 @@
 		grid-template-columns: 320px minmax(0, 1fr) 270px;
 		border-top: 1px solid #d9dee4;
 		background: #f3f5f7;
-	}
-
-	.room-list {
-		display: flex;
-		flex-direction: column;
-		border-right: 1px solid #d9dee4;
-		background: #ffffff;
-	}
-
-	.room-list-header {
-		padding: 1rem 1rem 0.75rem;
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		position: relative;
-	}
-
-	.list-title {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-
-	.list-actions {
-		position: relative;
-	}
-
-	.room-list-header h2 {
-		margin: 0;
-		font-size: 1.05rem;
-	}
-
-	.thread-count {
-		font-size: 0.85rem;
-		font-weight: 700;
-		color: #166534;
-		background: #dcfce7;
-		padding: 0.2rem 0.5rem;
-		border-radius: 999px;
-	}
-
-	.room-list-search {
-		padding: 0 1rem 0.75rem;
-	}
-
-	.room-list-search input {
-		width: 100%;
-		border: 1px solid #cfd8e3;
-		border-radius: 8px;
-		padding: 0.55rem 0.7rem;
-		font-size: 0.92rem;
-	}
-
-	.room-items {
-		flex: 1;
-		overflow: auto;
-	}
-
-	.room-item {
-		width: 100%;
-		display: flex;
-		gap: 0.75rem;
-		padding: 0.78rem 0.9rem;
-		border: none;
-		border-top: 1px solid #f1f3f6;
-		text-align: left;
-		background: transparent;
-		cursor: pointer;
-	}
-
-	.room-item:hover {
-		background: #f8fafc;
-	}
-
-	.room-item.selected {
-		background: #e8f5ec;
-	}
-
-	.avatar {
-		width: 38px;
-		height: 38px;
-		border-radius: 50%;
-		background: #dde7f4;
-		color: #1e293b;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		font-weight: 700;
-	}
-
-	.item-main {
-		min-width: 0;
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
-	}
-
-	.item-top,
-	.item-bottom {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: 0.6rem;
-	}
-
-	.room-name {
-		font-size: 0.92rem;
-		font-weight: 600;
-		color: #162136;
-	}
-
-	.room-time {
-		font-size: 0.78rem;
-		color: #607188;
-		white-space: nowrap;
-	}
-
-	.room-preview {
-		font-size: 0.82rem;
-		color: #546479;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.unread {
-		min-width: 20px;
-		height: 20px;
-		border-radius: 999px;
-		background: #16a34a;
-		color: #ffffff;
-		font-size: 0.75rem;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		font-weight: 700;
 	}
 
 	.chat-window {
@@ -1690,13 +1740,8 @@
 		border-radius: 8px;
 		box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
 		overflow: hidden;
-		min-width: 138px;
+		min-width: 170px;
 		z-index: 100;
-	}
-
-	.left-menu {
-		left: 0;
-		right: auto;
 	}
 
 	.room-menu button {
@@ -1713,6 +1758,14 @@
 		background: #f3f6fa;
 	}
 
+	.selection-banner {
+		padding: 0.45rem 0.9rem;
+		background: #fff8e1;
+		border-bottom: 1px solid #f8ddb2;
+		font-size: 0.8rem;
+		color: #7c4a03;
+	}
+
 	.chat-search-row {
 		padding: 0.65rem 0.9rem;
 		background: #f6f8fa;
@@ -1725,183 +1778,6 @@
 		border-radius: 8px;
 		padding: 0.55rem 0.7rem;
 		font-size: 0.9rem;
-	}
-
-	.messages {
-		flex: 1;
-		overflow: auto;
-		padding: 1rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.72rem;
-	}
-
-	.bubble {
-		max-width: min(75%, 540px);
-		border-radius: 12px;
-		padding: 0.58rem 0.7rem;
-		background: #ffffff;
-		box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
-	}
-
-	.bubble.mine {
-		align-self: flex-end;
-		background: #dcf8c6;
-	}
-
-	.bubble.pending {
-		opacity: 0.65;
-	}
-
-	.bubble-meta {
-		display: flex;
-		justify-content: space-between;
-		gap: 0.75rem;
-		font-size: 0.72rem;
-		color: #5b6472;
-		margin-bottom: 0.28rem;
-	}
-
-	.bubble-content {
-		font-size: 0.89rem;
-		line-height: 1.35;
-		color: #142032;
-		white-space: pre-wrap;
-		word-break: break-word;
-	}
-
-	.bubble-content.collapsed {
-		max-height: 300px;
-		overflow: hidden;
-		mask-image: linear-gradient(180deg, #000 70%, transparent);
-		-webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
-	}
-
-	.code-block {
-		margin: 0;
-		padding: 0.65rem 0.72rem;
-		border-radius: 8px;
-		background: #0f172a;
-		color: #e2e8f0;
-		font-family:
-			ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-			monospace;
-		font-size: 0.83rem;
-		line-height: 1.4;
-		overflow-x: auto;
-		white-space: pre;
-		word-break: normal;
-	}
-
-	.read-more-btn {
-		margin-top: 0.35rem;
-		border: none;
-		background: transparent;
-		color: #1d4ed8;
-		font-size: 0.78rem;
-		font-weight: 600;
-		padding: 0;
-		cursor: pointer;
-	}
-
-	.composer {
-		border-top: 1px solid #d9dee4;
-		background: #f6f8fa;
-		padding: 0.75rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-
-	.attachment-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.5rem;
-		padding: 0.35rem 0.6rem;
-		background: #dbeafe;
-		color: #1e3a8a;
-		border-radius: 999px;
-		width: fit-content;
-		font-size: 0.82rem;
-	}
-
-	.attachment-pill button {
-		border: none;
-		background: transparent;
-		color: inherit;
-		cursor: pointer;
-		font-weight: 700;
-	}
-
-	.composer-row {
-		display: grid;
-		grid-template-columns: auto 1fr auto;
-		gap: 0.55rem;
-		align-items: end;
-	}
-
-	.hidden-file-input {
-		display: none;
-	}
-
-	.attach-button,
-	.send-button {
-		border: 1px solid #cfd8e3;
-		background: #ffffff;
-		border-radius: 8px;
-		padding: 0.52rem 0.72rem;
-		font-size: 0.85rem;
-		cursor: pointer;
-	}
-
-	.send-button {
-		background: #1f9d4c;
-		border-color: #1f9d4c;
-		color: #ffffff;
-	}
-
-	textarea {
-		width: 100%;
-		resize: none;
-		min-height: 40px;
-		max-height: 110px;
-		border: 1px solid #cfd8e3;
-		border-radius: 9px;
-		padding: 0.55rem 0.66rem;
-		font-size: 0.91rem;
-		font-family: inherit;
-	}
-
-	.online-panel {
-		border-left: 1px solid #d9dee4;
-		background: #ffffff;
-		display: flex;
-		flex-direction: column;
-	}
-
-	.online-header {
-		padding: 1rem;
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		border-bottom: 1px solid #edf1f5;
-	}
-
-	.online-header h3 {
-		margin: 0;
-		font-size: 0.95rem;
-	}
-
-	.online-header span {
-		font-size: 0.82rem;
-		color: #334155;
-		font-weight: 700;
-	}
-
-	.online-list {
-		flex: 1;
-		overflow: auto;
-		padding: 0.75rem;
 	}
 
 	.online-member {
@@ -1928,8 +1804,7 @@
 		color: #64748b;
 	}
 
-	.empty-label,
-	.empty-thread {
+	.empty-label {
 		color: #64748b;
 		font-size: 0.84rem;
 		padding: 1rem;
@@ -2071,10 +1946,6 @@
 		.chat-shell {
 			grid-template-columns: 290px minmax(0, 1fr);
 		}
-
-		.online-panel {
-			display: none;
-		}
 	}
 
 	@media (max-width: 900px) {
@@ -2082,12 +1953,6 @@
 			grid-template-columns: 1fr;
 			grid-template-rows: minmax(220px, 36%) minmax(0, 64%);
 			height: calc(100vh - 72px);
-		}
-
-		.room-list {
-			display: flex;
-			border-right: none;
-			border-bottom: 1px solid #d9dee4;
 		}
 
 		.chat-window {

@@ -6,6 +6,8 @@ import (
 
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/handlers"
+	"github.com/savanp08/converse/internal/monitor"
+	"github.com/savanp08/converse/internal/storage"
 	"github.com/savanp08/converse/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -13,7 +15,13 @@ import (
 	"github.com/go-chi/cors"
 )
 
-func New(hub *websocket.Hub, redisStore *database.RedisStore) *chi.Mux {
+func New(
+	hub *websocket.Hub,
+	redisStore *database.RedisStore,
+	scyllaStore *database.ScyllaStore,
+	r2Client *storage.R2Client,
+	usageTracker *monitor.UsageTracker,
+) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -30,14 +38,21 @@ func New(hub *websocket.Hub, redisStore *database.RedisStore) *chi.Mux {
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
+	if usageTracker != nil {
+		r.Use(usageTracker.Middleware)
+	}
 
 	authHandler := handlers.NewAuthHandler()
-	roomHandler := handlers.NewRoomHandler(redisStore)
+	roomHandler := handlers.NewRoomHandler(redisStore, scyllaStore)
+	uploadHandler := handlers.NewUploadHandler(r2Client, usageTracker)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	if usageTracker != nil {
+		r.Get("/api/usage", usageTracker.HandleUsage)
+	}
 
 	r.Get("/ws/{roomId}", func(w http.ResponseWriter, r *http.Request) {
 		websocket.ServeWs(hub, w, r)
@@ -50,6 +65,11 @@ func New(hub *websocket.Hub, redisStore *database.RedisStore) *chi.Mux {
 		r.Post("/rooms", roomHandler.CreateRoom)
 		r.Post("/rooms/join", roomHandler.JoinRoom)
 		r.Post("/rooms/extend", roomHandler.ExtendRoom)
+		r.Post("/rooms/break", roomHandler.CreateBreakRoom)
+		r.Get("/rooms/sidebar", roomHandler.GetSidebarRooms)
+		r.Post("/upload/presigned", uploadHandler.GenerateUploadURL)
+		r.Post("/upload", uploadHandler.UploadProxy)
+		r.Get("/upload/object/*", uploadHandler.ServeObject)
 	})
 
 	return r

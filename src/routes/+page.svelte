@@ -89,6 +89,7 @@
 				body: JSON.stringify({
 					roomName: normalizedRoomName,
 					username: userToJoin,
+					userId: userIdentity.id,
 					type: 'ephemeral',
 					mode: selectedMode
 				})
@@ -99,7 +100,7 @@
 
 			if (!res.ok) throw new Error(data.error || 'Failed to join room');
 
-			currentUser.set({ id: userIdentity.id, username: userToJoin });
+			currentUser.set({ id: data.userId || userIdentity.id, username: userToJoin });
 			authToken.set(data.token);
 
 			const resolvedRoomName = data.roomName || normalizedRoomName;
@@ -107,7 +108,9 @@
 			const createdAtQuery =
 				Number.isFinite(createdAt) && createdAt > 0 ? `&createdAt=${createdAt}` : '';
 			clientLog('navigate-chat-room', { roomId: data.roomId, roomName: resolvedRoomName });
-			goto(`/chat/${data.roomId}?name=${encodeURIComponent(resolvedRoomName)}${createdAtQuery}`);
+			goto(
+				`/chat/${data.roomId}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}`
+			);
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
 			joinError = e.message;
