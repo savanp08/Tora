@@ -908,8 +908,9 @@ func (h *RoomHandler) tryUpdateBreakMetadataInScylla(parentRoomID, originMessage
 		return
 	}
 
+	messagesTable := h.scylla.Table("messages")
 	err := h.scylla.Session.Query(
-		`UPDATE messages SET has_break_room = ?, break_room_id = ?, break_join_count = ? WHERE room_id = ? AND message_id = ?`,
+		fmt.Sprintf(`UPDATE %s SET has_break_room = ?, break_room_id = ?, break_join_count = ? WHERE room_id = ? AND message_id = ?`, messagesTable),
 		true,
 		breakRoomID,
 		joinCount,

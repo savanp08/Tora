@@ -70,6 +70,7 @@
 	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const WS_BASE = (import.meta.env.VITE_WS_BASE as string | undefined) ?? 'ws://localhost:8080';
+	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
 	const ROOM_MAX_LIFESPAN_MS = 15 * 24 * 60 * 60 * 1000;
 
 	let ws: WebSocket | null = null;
@@ -170,10 +171,13 @@
 		clearSidebarRefreshTimer();
 		sidebarRefreshTimer = setInterval(() => {
 			void refreshSidebarRooms();
-		}, 2000);
+		}, 15000);
 	}
 
 	function clientLog(event: string, payload?: unknown) {
+		if (!CLIENT_DEBUG) {
+			return;
+		}
 		const timestamp = new Date().toISOString();
 		if (payload === undefined) {
 			console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
@@ -551,7 +555,9 @@
 				}
 			};
 		} catch (error) {
-			console.error(`${CLIENT_LOG_PREFIX} socket connection failed`, error);
+			clientLog('socket-connection-failed', {
+				error: error instanceof Error ? error.message : String(error)
+			});
 			wsState = 'error';
 			scheduleReconnect(targetRoomId);
 		}

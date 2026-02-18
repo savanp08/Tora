@@ -17,10 +17,9 @@ type Config struct {
 	ScyllaHosts            []string
 	ScyllaKeyspace         string
 	AstraBundlePath        string
-	AstraClientID          string
-	AstraClientSecret      string
 	AstraAPIURL            string
 	AstraDatabaseID        string
+	AstraRegion            string
 	AstraToken             string
 	R2AccountId            string
 	R2AccessKey            string
@@ -36,7 +35,7 @@ type Config struct {
 }
 
 func LoadConfig() *Config {
-	if err := godotenv.Load(".env", "../.env"); err != nil {
+	if err := godotenv.Load("../.env", ".env"); err != nil {
 		log.Println("No .env file found, using system env variables")
 	}
 
@@ -46,10 +45,18 @@ func LoadConfig() *Config {
 		r2AccountID = accountIDFromEndpoint(r2EndpointURL)
 	}
 
-	astraAPIURL := getAnyEnv("", "ASTRA_API_URL", "ASTRA_DB_ENDPOINT", "astra_db_endpoint")
-	astraDatabaseID := getAnyEnv("", "ASTRA_DB_ID", "ASTRA_DATABASE_ID", "astra_db_id")
+	rawAstraEndpoint := getAnyEnv("", "ASTRA_API_URL", "ASTRA_DB_ENDPOINT", "astra_db_endpoint")
+	astraAPIURL := normalizeAstraAPIURL(rawAstraEndpoint)
+	if astraAPIURL == "" {
+		astraAPIURL = "https://api.astra.datastax.com"
+	}
+	astraDatabaseID := getAnyEnv("", "ASTRA_DB_ID")
 	if astraDatabaseID == "" {
-		astraDatabaseID = databaseIDFromAstraEndpoint(astraAPIURL)
+		astraDatabaseID = databaseIDFromAstraEndpoint(rawAstraEndpoint)
+	}
+	astraRegion := getAnyEnv("", "ASTRA_DB_REGION", "astra_db_region")
+	if astraRegion == "" {
+		astraRegion = regionFromAstraEndpoint(rawAstraEndpoint)
 	}
 
 	return &Config{
@@ -57,13 +64,12 @@ func LoadConfig() *Config {
 		RedisAddr:              getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPass:              getEnv("REDIS_PASS", ""),
 		ScyllaHosts:            parseCSVEnv("SCYLLA_HOSTS", "127.0.0.1"),
-		ScyllaKeyspace:         getEnv("SCYLLA_KEYSPACE", "converse"),
+		ScyllaKeyspace:         getAnyEnv("converse", "SCYLLA_KEYSPACE", "KEYSPACE_NAME"),
 		AstraBundlePath:        getAnyEnv("", "ASTRA_BUNDLE_PATH"),
-		AstraClientID:          getAnyEnv("", "ASTRA_CLIENT_ID"),
-		AstraClientSecret:      getAnyEnv("", "ASTRA_CLIENT_SECRET"),
 		AstraAPIURL:            astraAPIURL,
 		AstraDatabaseID:        astraDatabaseID,
-		AstraToken:             getAnyEnv("", "ASTRA_TOKEN", "ASTRA_DB_TOKEN", "astra_db_token", "ASTRA_DB_APP_TOKEN", "astra_db_app_token"),
+		AstraRegion:            astraRegion,
+		AstraToken:             getAnyEnv("", "ASTRA_TOKEN", "APPLICATION_TOKEN"),
 		R2AccountId:            r2AccountID,
 		R2AccessKey:            getAnyEnv("", "R2_ACCESS_KEY", "R2_S3_access_key_id", "R2_S3_ACCESS_KEY_ID"),
 		R2SecretKey:            getAnyEnv("", "R2_SECRET_KEY", "R2_S3_secret_access_key", "R2_S3_SECRET_ACCESS_KEY"),
@@ -80,7 +86,10 @@ func LoadConfig() *Config {
 
 func getEnv(key, fallback string) string {
 	if value, exists := os.LookupEnv(key); exists {
-		return value
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
 	}
 	return fallback
 }
@@ -148,6 +157,40 @@ func accountIDFromEndpoint(endpoint string) string {
 	return strings.TrimSpace(prefix)
 }
 
+func normalizeAstraAPIURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Hostname() == "" {
+		return trimmed
+	}
+
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return trimmed
+	}
+
+	// `*.apps.astra.datastax.com` is a DB endpoint, not the DevOps API base.
+	if strings.HasSuffix(host, ".apps.astra.datastax.com") || host == "apps.astra.datastax.com" {
+		return "https://api.astra.datastax.com"
+	}
+	if host == "api.astra.datastax.com" {
+		return "https://api.astra.datastax.com"
+	}
+
+	scheme := parsed.Scheme
+	if strings.TrimSpace(scheme) == "" {
+		scheme = "https"
+	}
+	return scheme + "://" + parsed.Host
+}
+
 func databaseIDFromAstraEndpoint(endpoint string) string {
 	trimmed := strings.TrimSpace(endpoint)
 	if trimmed == "" {
@@ -172,6 +215,45 @@ func databaseIDFromAstraEndpoint(endpoint string) string {
 		return ""
 	}
 	return candidate
+}
+
+func regionFromAstraEndpoint(endpoint string) string {
+	trimmed := strings.TrimSpace(endpoint)
+	if trimmed == "" {
+		return ""
+	}
+
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return ""
+	}
+
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return ""
+	}
+
+	parts := strings.Split(host, ".")
+	if len(parts) < 4 {
+		return ""
+	}
+	if parts[len(parts)-4] != "apps" || parts[len(parts)-3] != "astra" || parts[len(parts)-2] != "datastax" || parts[len(parts)-1] != "com" {
+		return ""
+	}
+
+	prefix := parts[0]
+	if len(prefix) <= 37 {
+		return ""
+	}
+	region := strings.TrimSpace(prefix[37:])
+	if region == "" {
+		return ""
+	}
+	return region
 }
 
 func isUUIDLike(input string) bool {

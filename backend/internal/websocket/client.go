@@ -24,7 +24,7 @@ const (
 	maxMessageSize = 65536
 	maxTextChars   = 4000
 	maxMediaURLLen = 4096
-	maxFileNameLen = 180 
+	maxFileNameLen = 180
 )
 
 var wsConnectLimiter = security.NewLimiter(40, time.Minute, 15, 15*time.Minute)
@@ -50,7 +50,6 @@ type Client struct {
 
 func (c *Client) LoadHistory(ctx context.Context, service *MessageService) {
 	if service == nil {
-		log.Printf("[ws] history skipped room=%s reason=no_message_service", c.RoomID)
 		return
 	}
 
@@ -59,7 +58,6 @@ func (c *Client) LoadHistory(ctx context.Context, service *MessageService) {
 		log.Printf("[ws] history load error room=%s err=%v", c.RoomID, err)
 		return
 	}
-	log.Printf("[ws] history loaded room=%s count=%d", c.RoomID, len(history))
 
 	if len(history) == 0 {
 		return
@@ -72,11 +70,8 @@ func (c *Client) LoadHistory(ctx context.Context, service *MessageService) {
 
 	select {
 	case c.Send <- packet:
-		log.Printf("[ws] history sent room=%s count=%d", c.RoomID, len(history))
 	case <-ctx.Done():
-		log.Printf("[ws] history send canceled room=%s err=%v", c.RoomID, ctx.Err())
 	default:
-		log.Printf("[ws] history drop room=%s reason=send_buffer_full", c.RoomID)
 	}
 }
 
@@ -108,14 +103,11 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	if username == "" {
 		username = "Guest"
 	}
-	log.Printf("[ws] upgrade requested room=%s remote=%s", roomID, r.RemoteAddr)
-
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[ws] upgrade failed room=%s remote=%s err=%v", roomID, r.RemoteAddr, err)
 		return
 	}
-	log.Printf("[ws] upgrade success room=%s remote=%s", roomID, r.RemoteAddr)
 	if hub != nil && hub.tracker != nil {
 		hub.tracker.RecordWSConnection()
 	}
@@ -152,8 +144,6 @@ func (c *Client) readPump() {
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("[ws] read unexpected close room=%s err=%v", c.RoomID, err)
-			} else {
-				log.Printf("[ws] read closed room=%s err=%v", c.RoomID, err)
 			}
 			break
 		}
@@ -175,8 +165,6 @@ func (c *Client) readPump() {
 		if c.Hub != nil && c.Hub.tracker != nil {
 			c.Hub.tracker.RecordWSMessage(int64(estimateMessageBytes(msg)))
 		}
-		log.Printf("[ws] recv room=%s msg_id=%s sender=%s type=%s chars=%d",
-			c.RoomID, msg.ID, msg.SenderID, msg.Type, len(msg.Content))
 		c.Hub.broadcast <- msg
 	}
 }
@@ -242,7 +230,6 @@ func (c *Client) writePump() {
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
-				log.Printf("[ws] send channel closed room=%s", c.RoomID)
 				return
 			}
 
@@ -252,17 +239,6 @@ func (c *Client) writePump() {
 			}
 			if c.Hub != nil && c.Hub.tracker != nil {
 				c.Hub.tracker.RecordDownload(int64(estimatePayloadBytes(payload)))
-			}
-
-			switch message := payload.(type) {
-			case models.Message:
-				log.Printf("[ws] sent room=%s msg_id=%s sender=%s type=%s", c.RoomID, message.ID, message.SenderID, message.Type)
-			case map[string]interface{}:
-				if packetType, ok := message["type"].(string); ok && packetType == "history" {
-					log.Printf("[ws] sent history envelope room=%s", c.RoomID)
-				}
-			default:
-				log.Printf("[ws] sent payload room=%s", c.RoomID)
 			}
 
 		case <-ticker.C:

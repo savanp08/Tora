@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gocql/gocql"
 	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
@@ -29,7 +30,9 @@ type MessageService struct {
 }
 
 func NewMessageService(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *MessageService {
-	return &MessageService{Redis: redisStore, Scylla: scyllaStore}
+	service := &MessageService{Redis: redisStore, Scylla: scyllaStore}
+	service.ensureSchema()
+	return service
 }
 
 func (s *MessageService) CanPersistToDisk() bool {
@@ -49,7 +52,6 @@ func (s *MessageService) EnqueueMessage(ctx context.Context, msg models.Message)
 	if err := s.Redis.Client.RPush(ctx, messageQueueKey, payload).Err(); err != nil {
 		return fmt.Errorf("enqueue message: %w", err)
 	}
-	log.Printf("[message-service] enqueue room=%s msg_id=%s", msg.RoomID, msg.ID)
 
 	return nil
 }
@@ -59,8 +61,14 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 		return fmt.Errorf("scylla session is not configured")
 	}
 
-	if err := s.Scylla.Session.Query(
-		`INSERT INTO messages (room_id, message_id, sender_id, sender_name, content, type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL 1296000`,
+	messagesTable := s.Scylla.Table("messages")
+	query := fmt.Sprintf(
+		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL 1296000`,
+		messagesTable,
+	)
+	if err := safeExecScyllaQuery(
+		s.Scylla.Session,
+		query,
 		msg.RoomID,
 		msg.ID,
 		msg.SenderID,
@@ -68,10 +76,9 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 		msg.Content,
 		msg.Type,
 		msg.CreatedAt,
-	).Exec(); err != nil {
+	); err != nil {
 		return fmt.Errorf("save to scylla: %w", err)
 	}
-	log.Printf("[message-service] scylla saved room=%s msg_id=%s ttl_seconds=%d", msg.RoomID, msg.ID, scyllaMessageTTL)
 
 	return nil
 }
@@ -94,7 +101,6 @@ func (s *MessageService) CacheRecentMessage(ctx context.Context, msg models.Mess
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("cache recent message: %w", err)
 	}
-	log.Printf("[message-service] cache recent room=%s msg_id=%s", msg.RoomID, msg.ID)
 
 	return nil
 }
@@ -116,7 +122,6 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 		if len(redisMessages) > roomHistorySize {
 			redisMessages = redisMessages[len(redisMessages)-roomHistorySize:]
 		}
-		log.Printf("[message-service] redis history room=%s count=%d", roomID, len(redisMessages))
 	}
 
 	if len(redisMessages) >= roomHistorySize {
@@ -144,7 +149,6 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("[message-service] scylla supplement room=%s needed=%d count=%d", roomID, needed, len(scyllaMessagesDesc))
 
 	for left, right := 0, len(scyllaMessagesDesc)-1; left < right; left, right = left+1, right-1 {
 		scyllaMessagesDesc[left], scyllaMessagesDesc[right] = scyllaMessagesDesc[right], scyllaMessagesDesc[left]
@@ -158,6 +162,40 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 	s.enrichBreakMetadata(ctx, combined)
 
 	return combined, nil
+}
+
+func (s *MessageService) ensureSchema() {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return
+	}
+
+	messagesTable := s.Scylla.Table("messages")
+	query := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text,
+			created_at timestamp,
+			message_id text,
+			sender_id text,
+			sender_name text,
+			content text,
+			type text,
+			PRIMARY KEY ((room_id), created_at, message_id)
+		) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`,
+		messagesTable,
+	)
+
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := safeExecScyllaQuery(s.Scylla.Session, query); err == nil {
+			return
+		} else {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		}
+	}
+	if lastErr != nil {
+		log.Printf("[message-service] ensure messages schema failed: %v", lastErr)
+	}
 }
 
 func (s *MessageService) enrichBreakMetadata(ctx context.Context, messages []models.Message) {
@@ -257,21 +295,34 @@ func dedupeChronological(messages []models.Message) []models.Message {
 	return result
 }
 
-func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *time.Time) ([]models.Message, error) {
+func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *time.Time) (messages []models.Message, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("load scylla history panic: %v", recovered)
+		}
+	}()
+
 	if limit <= 0 {
 		return []models.Message{}, nil
 	}
 
-	query := `SELECT room_id, message_id, sender_id, sender_name, content, type, created_at  messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`
+	messagesTable := s.Scylla.Table("messages")
+	query := fmt.Sprintf(
+		`SELECT room_id, message_id, sender_id, sender_name, content, type, created_at FROM %s WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`,
+		messagesTable,
+	)
 	args := []interface{}{roomID, limit}
 	if before != nil {
-		query = `SELECT room_id, message_id, sender_id, sender_name, content, type, created_at FROM messages WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`
+		query = fmt.Sprintf(
+			`SELECT room_id, message_id, sender_id, sender_name, content, type, created_at FROM %s WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`,
+			messagesTable,
+		)
 		args = []interface{}{roomID, *before, limit}
 	}
 
 	iter := s.Scylla.Session.Query(query, args...).Iter()
 
-	messages := make([]models.Message, 0, limit)
+	messages = make([]models.Message, 0, limit)
 	var dbRoomID string
 	var messageID string
 	var senderID string
@@ -296,6 +347,16 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 	}
 
 	return messages, nil
+}
+
+func safeExecScyllaQuery(session *gocql.Session, query string, args ...interface{}) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("scylla query panic: %v", recovered)
+		}
+	}()
+
+	return session.Query(query, args...).Exec()
 }
 
 func toString(value interface{}) string {

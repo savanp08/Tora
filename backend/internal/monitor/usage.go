@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -332,8 +333,12 @@ func (t *UsageTracker) ensureSchema() {
 		return
 	}
 
-	err := t.scylla.Session.Query(
-		`CREATE TABLE IF NOT EXISTS usage_daily (
+	usageDailyTable := t.scylla.Table("usage_daily")
+	usageTotalsTable := t.scylla.Table("usage_totals")
+
+	err := safeExecScyllaUsageQuery(
+		t.scylla.Session,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			day text PRIMARY KEY,
 			request_count bigint,
 			request_bytes bigint,
@@ -345,14 +350,15 @@ func (t *UsageTracker) ensureSchema() {
 			sleep_activated boolean,
 			sleep_reason text,
 			updated_at timestamp
-		)`,
-	).Exec()
+		)`, usageDailyTable),
+	)
 	if err != nil {
 		log.Printf("[usage] failed to ensure usage_daily schema: %v", err)
 	}
 
-	err = t.scylla.Session.Query(
-		`CREATE TABLE IF NOT EXISTS usage_totals (
+	err = safeExecScyllaUsageQuery(
+		t.scylla.Session,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			id text PRIMARY KEY,
 			request_count bigint,
 			request_bytes bigint,
@@ -362,8 +368,8 @@ func (t *UsageTracker) ensureSchema() {
 			ws_connections bigint,
 			ws_messages bigint,
 			updated_at timestamp
-		)`,
-	).Exec()
+		)`, usageTotalsTable),
+	)
 	if err != nil {
 		log.Printf("[usage] failed to ensure usage_totals schema: %v", err)
 	}
@@ -374,16 +380,19 @@ func (t *UsageTracker) bootstrapFromStorage(now time.Time) {
 		return
 	}
 
+	usageDailyTable := t.scylla.Table("usage_daily")
+	usageTotalsTable := t.scylla.Table("usage_totals")
+
 	day := now.Format("2006-01-02")
 	var current UsageSnapshot
 	current.Day = day
 
-	err := t.scylla.Session.Query(
-		`SELECT request_count, request_bytes, bandwidth_bytes, files_uploaded, upload_bytes,
+	err := safeScanScyllaUsageQuery(
+		t.scylla.Session,
+		fmt.Sprintf(`SELECT request_count, request_bytes, bandwidth_bytes, files_uploaded, upload_bytes,
 			ws_connections, ws_messages, sleep_activated, sleep_reason, updated_at
-		FROM usage_daily WHERE day = ? LIMIT 1`,
-		day,
-	).Scan(
+		FROM %s WHERE day = ? LIMIT 1`, usageDailyTable),
+		[]interface{}{day},
 		&current.RequestCount,
 		&current.RequestBytes,
 		&current.BandwidthBytes,
@@ -409,12 +418,12 @@ func (t *UsageTracker) bootstrapFromStorage(now time.Time) {
 	}
 
 	var totals UsageTotals
-	err = t.scylla.Session.Query(
-		`SELECT request_count, request_bytes, bandwidth_bytes, files_uploaded, upload_bytes,
+	err = safeScanScyllaUsageQuery(
+		t.scylla.Session,
+		fmt.Sprintf(`SELECT request_count, request_bytes, bandwidth_bytes, files_uploaded, upload_bytes,
 			ws_connections, ws_messages, updated_at
-		FROM usage_totals WHERE id = ? LIMIT 1`,
-		usageTotalsID,
-	).Scan(
+		FROM %s WHERE id = ? LIMIT 1`, usageTotalsTable),
+		[]interface{}{usageTotalsID},
 		&totals.RequestCount,
 		&totals.RequestBytes,
 		&totals.BandwidthBytes,
@@ -445,11 +454,14 @@ func (t *UsageTracker) persistSnapshot(snapshot UsageSnapshot) {
 		return
 	}
 
-	err := t.scylla.Session.Query(
-		`INSERT INTO usage_daily (
+	usageDailyTable := t.scylla.Table("usage_daily")
+
+	err := safeExecScyllaUsageQuery(
+		t.scylla.Session,
+		fmt.Sprintf(`INSERT INTO %s (
 			day, request_count, request_bytes, bandwidth_bytes, files_uploaded, upload_bytes,
 			ws_connections, ws_messages, sleep_activated, sleep_reason, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, usageDailyTable),
 		snapshot.Day,
 		snapshot.RequestCount,
 		snapshot.RequestBytes,
@@ -461,7 +473,7 @@ func (t *UsageTracker) persistSnapshot(snapshot UsageSnapshot) {
 		snapshot.Sleeping,
 		snapshot.SleepReason,
 		snapshot.UpdatedAt.UTC(),
-	).Exec()
+	)
 	if err != nil {
 		log.Printf("[usage] failed to persist daily snapshot day=%s err=%v", snapshot.Day, err)
 		t.rollbackPersist(snapshot.Day)
@@ -474,11 +486,14 @@ func (t *UsageTracker) persistTotals(totals UsageTotals) {
 		return
 	}
 
-	err := t.scylla.Session.Query(
-		`INSERT INTO usage_totals (
+	usageTotalsTable := t.scylla.Table("usage_totals")
+
+	err := safeExecScyllaUsageQuery(
+		t.scylla.Session,
+		fmt.Sprintf(`INSERT INTO %s (
 			id, request_count, request_bytes, bandwidth_bytes, files_uploaded,
 			upload_bytes, ws_connections, ws_messages, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, usageTotalsTable),
 		usageTotalsID,
 		totals.RequestCount,
 		totals.RequestBytes,
@@ -488,10 +503,28 @@ func (t *UsageTracker) persistTotals(totals UsageTotals) {
 		totals.WsConnections,
 		totals.WsMessages,
 		totals.UpdatedAt.UTC(),
-	).Exec()
+	)
 	if err != nil {
 		log.Printf("[usage] failed to persist totals err=%v", err)
 	}
+}
+
+func safeExecScyllaUsageQuery(session *gocql.Session, query string, args ...interface{}) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("scylla query panic: %v", recovered)
+		}
+	}()
+	return session.Query(query, args...).Exec()
+}
+
+func safeScanScyllaUsageQuery(session *gocql.Session, query string, args []interface{}, dest ...interface{}) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("scylla query panic: %v", recovered)
+		}
+	}()
+	return session.Query(query, args...).Scan(dest...)
 }
 
 func (t *UsageTracker) beginPersist(day string) bool {

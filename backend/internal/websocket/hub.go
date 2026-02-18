@@ -32,10 +32,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	}
 
 	if service != nil && service.CanPersistToDisk() {
-		log.Printf("[hub] starting persistence worker")
 		go hub.persistenceWorker()
-	} else {
-		log.Printf("[hub] persistence worker disabled (missing redis or scylla)")
 	}
 
 	return hub
@@ -74,7 +71,6 @@ func (h *Hub) persistenceWorker() {
 			time.Sleep(time.Second)
 			continue
 		}
-		log.Printf("[hub] persisted msg room=%s msg_id=%s", msg.RoomID, msg.ID)
 	}
 }
 
@@ -82,7 +78,6 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
-			log.Printf("[hub] register room=%s", client.RoomID)
 			if _, ok := h.rooms[client.RoomID]; !ok {
 				h.rooms[client.RoomID] = make(map[*Client]bool)
 			}
@@ -90,7 +85,6 @@ func (h *Hub) Run() {
 				client.JoinedAt = time.Now().UTC()
 			}
 			h.rooms[client.RoomID][client] = true
-			log.Printf("[hub] client joined room=%s active_clients=%d", client.RoomID, len(h.rooms[client.RoomID]))
 
 			onlineMembers := make([]map[string]interface{}, 0, len(h.rooms[client.RoomID]))
 			for roomClient := range h.rooms[client.RoomID] {
@@ -122,7 +116,6 @@ func (h *Hub) Run() {
 			default:
 				close(client.Send)
 				delete(h.rooms[client.RoomID], client)
-				log.Printf("[hub] online_list drop room=%s user=%s reason=send_buffer_full", client.RoomID, client.UserID)
 				continue
 			}
 
@@ -155,7 +148,6 @@ func (h *Hub) Run() {
 				if _, ok := h.rooms[client.RoomID][client]; ok {
 					delete(h.rooms[client.RoomID], client)
 					close(client.Send)
-					log.Printf("[hub] client left room=%s active_clients=%d", client.RoomID, len(h.rooms[client.RoomID]))
 
 					userLeftPayload := map[string]interface{}{
 						"type": "user_left",
@@ -179,7 +171,6 @@ func (h *Hub) Run() {
 			}
 
 		case msg := <-h.broadcast:
-			log.Printf("[hub] broadcast recv room=%s msg_id=%s sender=%s type=%s", msg.RoomID, msg.ID, msg.SenderID, msg.Type)
 			if msg.CreatedAt.IsZero() {
 				msg.CreatedAt = time.Now().UTC()
 			}
@@ -199,7 +190,6 @@ func (h *Hub) Run() {
 			}
 
 			if clients, ok := h.rooms[msg.RoomID]; ok {
-				log.Printf("[hub] fanout room=%s recipients=%d msg_id=%s", msg.RoomID, len(clients), msg.ID)
 				for client := range clients {
 					select {
 					case client.Send <- msg:
