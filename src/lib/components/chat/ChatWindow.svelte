@@ -25,12 +25,14 @@
 	export let expandedMessages: Record<string, boolean> = {};
 	export let isMember = true;
 	export let isSelectionMode = false;
+	export let focusMessageId = '';
 
 	const dispatch = createEventDispatcher<{
 		toggleExpand: { messageId: string };
 		joinBreakRoom: { roomId: string };
 		joinRoom: void;
 		messageSelect: { messageId: string };
+		focusHandled: { messageId: string };
 	}>();
 
 	const COLLAPSED_MESSAGE_LENGTH = 500;
@@ -40,6 +42,12 @@
 	let copiedMessageId = '';
 	let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
 	let mediaLoadFailedById: Record<string, boolean> = {};
+	let focusedMessageId = '';
+	let clearFocusOnPointerDown: ((event: PointerEvent) => void) | null = null;
+
+	$: if (!focusMessageId && focusedMessageId) {
+		focusedMessageId = '';
+	}
 
 	$: visibleMessages = getVisibleMessages(messages, roomMessageSearch);
 
@@ -51,13 +59,58 @@
 			previousVisibleCount = visibleMessages.length;
 			viewport.scrollTop = viewport.scrollHeight;
 		}
+		tryFocusMessage();
 	});
 
 	onDestroy(() => {
 		if (copyResetTimer) {
 			clearTimeout(copyResetTimer);
 		}
+		if (typeof window !== 'undefined' && clearFocusOnPointerDown) {
+			window.removeEventListener('pointerdown', clearFocusOnPointerDown, true);
+			clearFocusOnPointerDown = null;
+		}
 	});
+
+	function tryFocusMessage() {
+		if (!viewport || !focusMessageId) {
+			return;
+		}
+		const nodes = viewport.querySelectorAll<HTMLElement>('[data-message-id]');
+		let target: HTMLElement | null = null;
+		for (const node of nodes) {
+			if (node.dataset.messageId === focusMessageId) {
+				target = node;
+				break;
+			}
+		}
+		if (!target) {
+			return;
+		}
+		target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		focusedMessageId = focusMessageId;
+		dispatch('focusHandled', { messageId: focusMessageId });
+		if (typeof window !== 'undefined') {
+			if (clearFocusOnPointerDown) {
+				window.removeEventListener('pointerdown', clearFocusOnPointerDown, true);
+				clearFocusOnPointerDown = null;
+			}
+			clearFocusOnPointerDown = () => {
+				clearFocusedMessage();
+			};
+			window.addEventListener('pointerdown', clearFocusOnPointerDown, true);
+		}
+	}
+
+	function clearFocusedMessage() {
+		if (focusedMessageId) {
+			focusedMessageId = '';
+		}
+		if (typeof window !== 'undefined' && clearFocusOnPointerDown) {
+			window.removeEventListener('pointerdown', clearFocusOnPointerDown, true);
+			clearFocusOnPointerDown = null;
+		}
+	}
 
 	function getVisibleMessages(input: ChatMessage[], query: string) {
 		const normalized = query.trim().toLowerCase();
@@ -113,6 +166,36 @@
 		return (message.mediaUrl || message.content || '').trim();
 	}
 
+	function isMediaBubble(message: ChatMessage) {
+		return message.type === 'image' || message.type === 'video' || message.type === 'file';
+	}
+
+	function isLikelyURL(value: string) {
+		const trimmed = value.trim();
+		return (
+			trimmed.startsWith('http://') ||
+			trimmed.startsWith('https://') ||
+			trimmed.startsWith('blob:') ||
+			trimmed.startsWith('data:') ||
+			trimmed.startsWith('/')
+		);
+	}
+
+	function getMediaCaption(message: ChatMessage) {
+		const content = (message.content || '').trim();
+		if (!content) {
+			return '';
+		}
+		const mediaURL = getMediaURL(message);
+		if (mediaURL && content === mediaURL) {
+			return '';
+		}
+		if (!mediaURL && isLikelyURL(content)) {
+			return '';
+		}
+		return content;
+	}
+
 	function getFileName(message: ChatMessage) {
 		const provided = (message.fileName || '').trim();
 		if (provided) {
@@ -153,6 +236,18 @@
 		const ext = getFileExtension(message);
 		const mediaType = (message.mediaType || '').toLowerCase();
 		return ext === 'pdf' || mediaType.includes('pdf');
+	}
+
+	function isImageFileMessage(message: ChatMessage) {
+		const ext = getFileExtension(message);
+		const mediaType = (message.mediaType || '').toLowerCase();
+		return ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext) || mediaType.startsWith('image/');
+	}
+
+	function isVideoFileMessage(message: ChatMessage) {
+		const ext = getFileExtension(message);
+		const mediaType = (message.mediaType || '').toLowerCase();
+		return ['mp4', 'webm', 'mov', 'm4v', 'ogg'].includes(ext) || mediaType.startsWith('video/');
 	}
 
 	function onMediaError(messageID: string) {
@@ -220,8 +315,11 @@
 				class="bubble {message.senderId === currentUserId ? 'mine' : 'theirs'} {message.pending
 					? 'pending'
 					: ''} {isSelectionMode ? 'selectable' : ''}"
+				class:media-bubble={isMediaBubble(message)}
+				class:focused={focusedMessageId === message.id}
 				role={isSelectionMode ? 'button' : undefined}
 				tabindex={isSelectionMode ? 0 : undefined}
+				data-message-id={message.id}
 				on:click={() => onMessageClick(message)}
 				on:keydown={(event) => onMessageKeyDown(event, message)}
 			>
@@ -269,6 +367,9 @@
 							loading="lazy"
 							on:error={() => onMediaError(message.id)}
 						/>
+						{#if getMediaCaption(message)}
+							<div class="media-caption">{getMediaCaption(message)}</div>
+						{/if}
 					{:else if message.type === 'video' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
 						<!-- svelte-ignore a11y_media_has_caption -->
 						<video
@@ -278,6 +379,9 @@
 							preload="metadata"
 							on:error={() => onMediaError(message.id)}
 						></video>
+						{#if getMediaCaption(message)}
+							<div class="media-caption">{getMediaCaption(message)}</div>
+						{/if}
 					{:else if (message.type === 'file' || mediaLoadFailedById[message.id]) && getMediaURL(message)}
 						{#if isPDFMessage(message)}
 							<iframe
@@ -286,6 +390,24 @@
 								title={getFileName(message)}
 								loading="lazy"
 							></iframe>
+						{/if}
+						{#if isImageFileMessage(message) && !mediaLoadFailedById[message.id]}
+							<img
+								src={getMediaURL(message)}
+								alt={getFileName(message)}
+								class="media-preview image-preview file-inline-preview"
+								loading="lazy"
+								on:error={() => onMediaError(message.id)}
+							/>
+						{:else if isVideoFileMessage(message) && !mediaLoadFailedById[message.id]}
+							<!-- svelte-ignore a11y_media_has_caption -->
+							<video
+								src={getMediaURL(message)}
+								class="media-preview video-preview file-inline-preview"
+								controls
+								preload="metadata"
+								on:error={() => onMediaError(message.id)}
+							></video>
 						{/if}
 						<div class="file-card">
 							<div class="file-meta">
@@ -310,6 +432,9 @@
 								</a>
 							</div>
 						</div>
+						{#if getMediaCaption(message)}
+							<div class="media-caption">{getMediaCaption(message)}</div>
+						{/if}
 					{:else if isCodeBlock(message.content)}
 						<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
 					{:else}
@@ -344,38 +469,44 @@
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
+		overflow: hidden;
 	}
 
 	.messages {
-		height: 100%;
-		overflow: auto;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
 		padding: 1rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.72rem;
+		gap: 0.9rem;
+		overflow-x: hidden;
+		width: 100%;
+		box-sizing: border-box;
+		background: linear-gradient(180deg, #f7f8fa 0%, #f1f4f8 100%);
 	}
 
 	.readonly-banner {
 		margin: 0 0 0.4rem;
 		padding: 0.45rem 0.65rem;
 		border-radius: 8px;
-		border: 1px solid #f8ddb2;
-		background: #fff8e1;
-		color: #7c4a03;
+		border: 1px solid #dadada;
+		background: #f3f3f3;
+		color: #202020;
 		font-size: 0.78rem;
 	}
 
 	.join-footer {
-		border-top: 1px solid #d9dee4;
-		background: #f6f8fa;
+		border-top: 1px solid #dadada;
+		background: #ffffff;
 		padding: 0.7rem;
 		display: flex;
 		justify-content: center;
 	}
 
 	.join-room-btn {
-		border: 1px solid #15803d;
-		background: #16a34a;
+		border: 1px solid #111111;
+		background: #111111;
 		color: #ffffff;
 		border-radius: 8px;
 		padding: 0.55rem 0.9rem;
@@ -384,18 +515,21 @@
 	}
 
 	.empty-thread {
-		color: #64748b;
+		color: #666666;
 		font-size: 0.84rem;
 		padding: 1rem;
 	}
 
 	.bubble {
 		position: relative;
-		max-width: min(75%, 540px);
+		max-width: min(76%, 40rem);
 		border-radius: 12px;
-		padding: 0.58rem 0.7rem;
+		padding: 0.76rem 0.86rem;
 		background: #ffffff;
-		box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+		border: 1px solid #d7dce4;
+		box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+		box-sizing: border-box;
+		overflow: visible;
 	}
 
 	.selection-mode .bubble.selectable {
@@ -404,28 +538,42 @@
 	}
 
 	.selection-mode .bubble.selectable:hover {
-		outline-color: #16a34a;
+		outline-color: #334155;
 	}
 
 	.bubble.mine {
 		align-self: flex-end;
-		background: #dcf8c6;
+		background: #273341;
+		border-color: #273341;
+		color: #f3f5f8;
+	}
+
+	.bubble.media-bubble {
+		width: min(100%, 42rem);
+		max-width: min(100%, 42rem);
+		min-width: 0;
 	}
 
 	.bubble.pending {
 		opacity: 0.65;
 	}
 
+	.bubble.focused {
+		box-shadow:
+			0 0 0 2px rgba(245, 158, 11, 0.95),
+			0 8px 18px rgba(15, 23, 42, 0.14);
+	}
+
 	.copy-btn {
 		position: absolute;
 		top: 0.35rem;
 		right: 0.35rem;
-		border: none;
-		background: rgba(255, 255, 255, 0.85);
-		color: #1e293b;
+		border: 1px solid #cfcfcf;
+		background: rgba(255, 255, 255, 0.92);
+		color: #1e1e1e;
 		border-radius: 6px;
 		padding: 0.2rem;
-		opacity: 0.55;
+		opacity: 0.82;
 		transform: scale(1);
 		transition:
 			opacity 120ms ease,
@@ -435,7 +583,13 @@
 
 	.bubble:hover .copy-btn {
 		opacity: 1;
-		transform: scale(1.2);
+		transform: scale(1.14);
+	}
+
+	.bubble.mine .copy-btn {
+		border-color: #454545;
+		background: rgba(17, 17, 17, 0.85);
+		color: #f7f7f7;
 	}
 
 	.copied-tip {
@@ -443,7 +597,7 @@
 		top: -0.7rem;
 		right: 1.8rem;
 		font-size: 0.68rem;
-		background: #0f172a;
+		background: #111111;
 		color: #ffffff;
 		padding: 0.15rem 0.36rem;
 		border-radius: 999px;
@@ -453,9 +607,13 @@
 		display: flex;
 		justify-content: space-between;
 		gap: 0.75rem;
-		font-size: 0.72rem;
-		color: #5b6472;
-		margin-bottom: 0.28rem;
+		font-size: 0.74rem;
+		color: #5e5e5e;
+		margin-bottom: 0.44rem;
+	}
+
+	.bubble.mine .bubble-meta {
+		color: #d8d8d8;
 	}
 
 	.meta-right {
@@ -468,10 +626,10 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.2rem;
-		border: 1px solid #d8e0e9;
+		border: 1px solid #cfcfcf;
 		border-radius: 999px;
 		background: #ffffff;
-		color: #0f172a;
+		color: #111111;
 		padding: 0.08rem 0.33rem;
 		font-size: 0.68rem;
 		cursor: pointer;
@@ -479,22 +637,27 @@
 
 	.media-preview {
 		display: block;
-		max-width: min(100%, 360px);
+		width: 100%;
+		max-width: none;
 		border-radius: 8px;
-		border: 1px solid #d8e0e9;
+		border: 1px solid #d1d1d1;
+		box-sizing: border-box;
 	}
 
 	.image-preview {
 		height: auto;
+		max-height: 460px;
+		object-fit: contain;
+		background: #f0f0f0;
 	}
 
 	.video-preview {
-		max-height: 320px;
-		background: #020617;
+		max-height: 360px;
+		background: #111111;
 	}
 
 	.file-link {
-		color: #1d4ed8;
+		color: #111111;
 		font-weight: 600;
 		text-decoration: none;
 		font-size: 0.8rem;
@@ -508,18 +671,20 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.45rem;
-		border: 1px solid #d8e0e9;
+		border: 1px solid #d1d1d1;
 		border-radius: 10px;
-		background: #f8fafc;
+		background: #f4f4f4;
 		padding: 0.5rem 0.62rem;
-		max-width: 360px;
+		width: 100%;
+		max-width: none;
+		box-sizing: border-box;
 	}
 
 	.file-meta {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		color: #0f172a;
+		color: #141414;
 	}
 
 	.file-name {
@@ -531,7 +696,7 @@
 
 	.file-ext {
 		font-size: 0.68rem;
-		color: #64748b;
+		color: #666666;
 		margin-top: 0.1rem;
 	}
 
@@ -542,19 +707,41 @@
 	}
 
 	.pdf-preview {
-		width: min(100%, 360px);
+		width: 100%;
 		height: 260px;
-		border: 1px solid #d8e0e9;
+		border: 1px solid #d0d0d0;
 		border-radius: 8px;
 		background: #ffffff;
+		box-sizing: border-box;
+	}
+
+	.file-inline-preview {
+		margin-bottom: 0.45rem;
 	}
 
 	.bubble-content {
-		font-size: 0.89rem;
-		line-height: 1.35;
-		color: #142032;
+		font-size: 0.93rem;
+		line-height: 1.52;
+		color: #161616;
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+	.bubble.mine .bubble-content {
+		color: #f2f2f2;
+	}
+
+	.media-caption {
+		margin-top: 0.48rem;
+		font-size: 0.9rem;
+		line-height: 1.45;
+		color: #181818;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.bubble.mine .media-caption {
+		color: #e6e6e6;
 	}
 
 	.bubble-content.collapsed {
@@ -568,8 +755,8 @@
 		margin: 0;
 		padding: 0.65rem 0.72rem;
 		border-radius: 8px;
-		background: #0f172a;
-		color: #e2e8f0;
+		background: #0f0f0f;
+		color: #e9e9e9;
 		font-family:
 			ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
 			monospace;
@@ -581,13 +768,41 @@
 	}
 
 	.read-more-btn {
-		margin-top: 0.35rem;
+		margin-top: 0.5rem;
 		border: none;
 		background: transparent;
-		color: #1d4ed8;
+		color: #161616;
 		font-size: 0.78rem;
 		font-weight: 600;
 		padding: 0;
 		cursor: pointer;
+	}
+
+	.bubble.mine .read-more-btn {
+		color: #f2f2f2;
+	}
+
+	@media (max-width: 900px) {
+		.messages {
+			padding: 0.82rem 0.68rem;
+		}
+
+		.bubble {
+			max-width: min(96%, 36rem);
+			padding: 0.68rem 0.72rem;
+		}
+
+		.bubble.media-bubble {
+			width: min(100%, 36rem);
+			max-width: min(100%, 36rem);
+		}
+
+		.video-preview {
+			max-height: 300px;
+		}
+
+		.pdf-preview {
+			height: 220px;
+		}
 	}
 </style>

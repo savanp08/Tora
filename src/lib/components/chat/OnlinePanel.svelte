@@ -30,7 +30,7 @@
 
 <style>
 	.online-panel {
-		border-left: 1px solid #d9dee4;
+		border-left: 1px solid #dddddd;
 		background: #ffffff;
 		display: flex;
 		flex-direction: column;
@@ -41,7 +41,7 @@
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		border-bottom: 1px solid #edf1f5;
+		border-bottom: 1px solid #eeeeee;
 	}
 
 	.online-header h3 {
@@ -51,7 +51,7 @@
 
 	.online-header span {
 		font-size: 0.82rem;
-		color: #334155;
+		color: #2a2a2a;
 		font-weight: 700;
 	}
 
@@ -77,11 +77,11 @@
 
 	.member-name {
 		font-size: 0.88rem;
-		color: #172132;
+		color: #141414;
 	}
 
 	.empty-label {
-		color: #64748b;
+		color: #666666;
 		font-size: 0.84rem;
 		padding: 1rem;
 	}

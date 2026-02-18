@@ -45,6 +45,7 @@
 		status: ThreadStatus;
 		memberCount?: number;
 		parentRoomId?: string;
+		originMessageId?: string;
 	};
 
 	type OnlineMember = {
@@ -63,6 +64,7 @@
 		roomName: string;
 		status: ThreadStatus;
 		parentRoomId?: string;
+		originMessageId?: string;
 		memberCount?: number;
 		createdAt?: number;
 	};
@@ -96,6 +98,9 @@
 	let showRoomSearch = false;
 	let showRoomDetails = false;
 	let isSelectionMode = false;
+	let isMobileView = false;
+	let mobilePane: 'list' | 'chat' = 'chat';
+	let focusMessageId = '';
 
 	let roomThreads: ChatThread[] = [];
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
@@ -111,6 +116,7 @@
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
 	);
 	$: roomCreatedAtFromURL = parseTimestampParam($page.url.searchParams.get('createdAt'));
+	$: focusMessageIdFromURL = normalizeMessageID($page.url.searchParams.get('focusMsg') ?? '');
 	$: roomMemberHint = $page.url.searchParams.get('member');
 	$: currentUserId = $currentUser?.id ?? 'guest';
 	$: currentUsername = normalizeUsernameValue($currentUser?.username ?? 'Guest') || 'Guest';
@@ -120,7 +126,6 @@
 	$: currentMessages = messagesByRoom[roomId] ?? [];
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
 	$: activeUnreadCount = activeThread?.unread ?? 0;
-	$: connectionLabel = getConnectionLabel(wsState);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: myRooms = filterThreadsByStatus(roomThreads, 'joined');
 	$: discoverableRooms = filterThreadsByStatus(roomThreads, 'discoverable');
@@ -146,6 +151,9 @@
 	$: if (browser && roomId && roomId !== lastToastRoom) {
 		showJoinToast(roomId);
 	}
+	$: if (focusMessageIdFromURL && focusMessageIdFromURL !== focusMessageId) {
+		focusMessageId = focusMessageIdFromURL;
+	}
 
 	onDestroy(() => {
 		clientLog('component-destroy', { roomId, wsRoomId, wsState });
@@ -157,7 +165,25 @@
 
 	onMount(() => {
 		void initializeIdentity();
+		if (!browser) {
+			return;
+		}
+		updateViewportMode();
+		window.addEventListener('resize', updateViewportMode);
+		return () => {
+			window.removeEventListener('resize', updateViewportMode);
+		};
 	});
+
+	function updateViewportMode() {
+		if (!browser) {
+			return;
+		}
+		isMobileView = window.innerWidth <= 900;
+		if (!isMobileView) {
+			mobilePane = 'chat';
+		}
+	}
 
 	async function initializeIdentity() {
 		const identity = getOrInitIdentity();
@@ -312,7 +338,7 @@
 						? {
 								...thread,
 								name: thread.name || fallbackName,
-								lastMessage: lastMessage.content,
+								lastMessage: getMessagePreviewText(lastMessage),
 								lastActivity: lastMessage.createdAt
 							}
 						: thread
@@ -320,12 +346,36 @@
 			: [
 					{
 						...createThread(targetRoomId, fallbackName, 'joined'),
-						lastMessage: lastMessage.content,
+						lastMessage: getMessagePreviewText(lastMessage),
 						lastActivity: lastMessage.createdAt
 					},
 					...roomThreads
 				];
 		roomThreads = sortThreads(merged);
+	}
+
+	function getMessagePreviewText(message: ChatMessage) {
+		const content = (message.content || '').trim();
+		if (message.type === 'image') {
+			if (content && !isLikelyMediaURL(content)) {
+				return content;
+			}
+			return 'Photo';
+		}
+		if (message.type === 'video') {
+			if (content && !isLikelyMediaURL(content)) {
+				return content;
+			}
+			return 'Video';
+		}
+		if (message.type === 'file') {
+			if (content && !isLikelyMediaURL(content)) {
+				return content;
+			}
+			const fileName = (message.fileName || '').trim();
+			return fileName ? `File: ${fileName}` : 'Attachment';
+		}
+		return content;
 	}
 
 	function sortThreads(threads: ChatThread[]) {
@@ -430,7 +480,8 @@
 					unread: prev?.unread || 0,
 					status: room.status === 'discoverable' ? 'discoverable' : 'joined',
 					memberCount: typeof room.memberCount === 'number' ? room.memberCount : prev?.memberCount,
-					parentRoomId: toStringValue(room.parentRoomId) || prev?.parentRoomId || undefined
+					parentRoomId: toStringValue(room.parentRoomId) || prev?.parentRoomId || undefined,
+					originMessageId: toStringValue(room.originMessageId) || prev?.originMessageId || undefined
 				};
 
 				acc.push(next);
@@ -472,19 +523,35 @@
 		}
 	}
 
-	function selectRoom(targetRoomId: string, memberState: boolean) {
-		if (!targetRoomId || targetRoomId === roomId) {
+	function selectRoom(targetRoomId: string, memberState: boolean, focusMsgID = '') {
+		const normalizedTargetRoomId = toRoomSlug(targetRoomId);
+		if (!normalizedTargetRoomId) {
 			return;
 		}
-		clientLog('select-room', { fromRoom: roomId, toRoom: targetRoomId, memberState });
+		if (normalizedTargetRoomId === roomId) {
+			if (isMobileView) {
+				mobilePane = 'chat';
+			}
+			const normalizedFocus = normalizeMessageID(focusMsgID);
+			if (normalizedFocus) {
+				focusMessageId = normalizedFocus;
+			} else {
+				focusMessageId = '';
+			}
+			return;
+		}
+		clientLog('select-room', { fromRoom: roomId, toRoom: normalizedTargetRoomId, memberState });
 		showLeftMenu = false;
 		showRoomMenu = false;
 		showRoomSearch = false;
 		showRoomDetails = false;
 		isSelectionMode = false;
 		roomMessageSearch = '';
+		if (isMobileView) {
+			mobilePane = 'chat';
+		}
 
-		const selected = roomThreads.find((thread) => thread.id === targetRoomId);
+		const selected = roomThreads.find((thread) => thread.id === normalizedTargetRoomId);
 		const params = new URLSearchParams();
 		if (selected?.name) {
 			params.set('name', selected.name);
@@ -494,13 +561,80 @@
 		} else {
 			params.set('member', '0');
 		}
-		const createdAt = getRoomCreatedAt(targetRoomId);
+		const createdAt = getRoomCreatedAt(normalizedTargetRoomId);
 		if (createdAt > 0) {
 			params.set('createdAt', String(createdAt));
 		}
+		const normalizedFocus = normalizeMessageID(focusMsgID);
+		if (normalizedFocus) {
+			params.set('focusMsg', normalizedFocus);
+			focusMessageId = normalizedFocus;
+		} else {
+			focusMessageId = '';
+		}
 
 		const query = params.toString();
-		void goto(`/chat/${encodeURIComponent(targetRoomId)}${query ? `?${query}` : ''}`);
+		void goto(`/chat/${encodeURIComponent(normalizedTargetRoomId)}${query ? `?${query}` : ''}`);
+	}
+
+	function showMobileRoomList() {
+		if (!isMobileView) {
+			return;
+		}
+		showRoomMenu = false;
+		showRoomSearch = false;
+		showRoomDetails = false;
+		isSelectionMode = false;
+		mobilePane = 'list';
+	}
+
+	function onJumpToBreakOrigin(
+		event: CustomEvent<{
+			parentRoomId: string;
+			originMessageId: string;
+			fallbackRoomId: string;
+			fallbackIsMember: boolean;
+		}>
+	) {
+		const parentRoomID = toRoomSlug(event.detail.parentRoomId);
+		const originMessageID = normalizeMessageID(event.detail.originMessageId);
+		if (!parentRoomID || !originMessageID) {
+			selectRoom(event.detail.fallbackRoomId, event.detail.fallbackIsMember);
+			return;
+		}
+
+		const parentThread = roomThreads.find((thread) => thread.id === parentRoomID);
+		const parentMemberState = parentThread ? parentThread.status === 'joined' : true;
+		ensureRoomThread(
+			parentRoomID,
+			parentThread?.name || formatRoomName(parentRoomID),
+			parentMemberState ? 'joined' : 'discoverable'
+		);
+		selectRoom(parentRoomID, parentMemberState, originMessageID);
+	}
+
+	function onFocusHandled(event: CustomEvent<{ messageId: string }>) {
+		if (normalizeMessageID(event.detail.messageId) === focusMessageId) {
+			focusMessageId = '';
+			void clearFocusMessageQuery();
+		}
+	}
+
+	async function clearFocusMessageQuery() {
+		if (!browser || !roomId) {
+			return;
+		}
+		const params = new URLSearchParams($page.url.searchParams);
+		if (!params.has('focusMsg')) {
+			return;
+		}
+		params.delete('focusMsg');
+		const query = params.toString();
+		await goto(`/chat/${encodeURIComponent(roomId)}${query ? `?${query}` : ''}`, {
+			replaceState: true,
+			noScroll: true,
+			keepFocus: true
+		});
 	}
 
 	function connectToRoom(targetRoomId: string) {
@@ -695,11 +829,13 @@
 		}
 
 		const nextType = toStringValue(source.type ?? 'text') || 'text';
+		const rawText = toStringValue(source.text ?? source.content ?? source.caption ?? '');
 		const rawMediaURL = toStringValue(source.mediaUrl ?? source.media_url ?? '');
-		const normalizedMediaURL = toAbsoluteMediaURL(rawMediaURL);
-		let nextContent = toStringValue(source.text ?? source.content ?? '') || normalizedMediaURL;
-		if (isMediaMessageType(nextType)) {
-			nextContent = toAbsoluteMediaURL(nextContent);
+		let normalizedMediaURL = toAbsoluteMediaURL(rawMediaURL);
+		let nextContent = rawText;
+		if (isMediaMessageType(nextType) && !normalizedMediaURL && isLikelyMediaURL(rawText)) {
+			normalizedMediaURL = toAbsoluteMediaURL(rawText);
+			nextContent = '';
 		}
 
 		return {
@@ -712,7 +848,11 @@
 				) || 'Unknown',
 			content: nextContent,
 			type: nextType,
-			mediaUrl: normalizedMediaURL || (isMediaMessageType(nextType) ? nextContent : ''),
+			mediaUrl:
+				normalizedMediaURL ||
+				(isMediaMessageType(nextType) && isLikelyMediaURL(rawText)
+					? toAbsoluteMediaURL(rawText)
+					: ''),
 			mediaType: toStringValue(source.mediaType ?? source.media_type ?? source.type ?? nextType),
 			fileName: toStringValue(source.fileName ?? source.file_name),
 			createdAt: toTimestamp(
@@ -883,52 +1023,83 @@
 			return;
 		}
 
-		const nextType = isMediaMessage ? mediaType : 'text';
-		const nextContent = isMediaMessage ? mediaContent : text;
+		const outgoing: ChatMessage[] = [];
+		if (isMediaMessage) {
+			outgoing.push({
+				id: createMessageId(roomId),
+				roomId,
+				senderId: currentUserId,
+				senderName: currentUsername,
+				content: mediaContent,
+				type: mediaType || 'file',
+				mediaUrl: mediaContent,
+				mediaType: mediaType,
+				fileName: payload?.fileName?.trim() ?? '',
+				createdAt: Date.now(),
+				pending: true
+			});
+			if (text) {
+				outgoing.push({
+					id: createMessageId(roomId),
+					roomId,
+					senderId: currentUserId,
+					senderName: currentUsername,
+					content: text,
+					type: 'text',
+					mediaUrl: '',
+					mediaType: '',
+					fileName: '',
+					createdAt: Date.now() + 1,
+					pending: true
+				});
+			}
+		} else {
+			outgoing.push({
+				id: createMessageId(roomId),
+				roomId,
+				senderId: currentUserId,
+				senderName: currentUsername,
+				content: text,
+				type: 'text',
+				mediaUrl: '',
+				mediaType: '',
+				fileName: '',
+				createdAt: Date.now(),
+				pending: true
+			});
+		}
 
-		const nextMessage: ChatMessage = {
-			id: createMessageId(roomId),
-			roomId,
-			senderId: currentUserId,
-			senderName: currentUsername,
-			content: nextContent,
-			type: nextType || 'text',
-			mediaUrl: isMediaMessage ? mediaContent : '',
-			mediaType: isMediaMessage ? mediaType : '',
-			fileName: payload?.fileName?.trim() ?? '',
-			createdAt: Date.now(),
-			pending: true
-		};
-
-		upsertMessage(roomId, nextMessage, false);
+		for (const message of outgoing) {
+			upsertMessage(roomId, message, false);
+			if (ws && ws.readyState === WebSocket.OPEN) {
+				ws.send(JSON.stringify(toWireMessage(message)));
+			} else {
+				queueOutgoing(message);
+			}
+		}
 		markRoomAsRead(roomId);
 		draftMessage = '';
 		attachedFile = null;
-
-		if (ws && ws.readyState === WebSocket.OPEN) {
-			ws.send(JSON.stringify(toWireMessage(nextMessage)));
-		} else {
-			queueOutgoing(nextMessage);
-		}
 	}
 
 	function toWireMessage(message: ChatMessage) {
-		const mediaType =
-			message.type === 'image' || message.type === 'video' || message.type === 'file'
-				? message.type
-				: '';
-		const mediaURL = mediaType ? message.content : '';
+		const mediaType = isMediaMessageType(message.type) ? message.type : '';
+		const mediaURL = mediaType
+			? (message.mediaUrl || '').trim() || (isLikelyMediaURL(message.content) ? message.content : '')
+			: '';
+		const contentText =
+			mediaType && mediaURL && message.content.trim() === mediaURL ? '' : message.content;
 
 		return {
 			id: message.id,
 			roomId: message.roomId,
 			userId: message.senderId,
 			username: message.senderName,
-			text: message.content,
+			text: contentText,
 			time: new Date(message.createdAt).toISOString(),
 			senderId: message.senderId,
 			senderName: message.senderName,
-			content: message.content,
+			content: contentText,
 			type: message.type,
 			mediaUrl: mediaURL,
 			mediaType,
@@ -1062,7 +1233,7 @@
 				showErrorToast(data.error || 'Room has reached its 15-day limit');
 				return;
 			}
-			showErrorToast(data.message || 'Room extended for 24 hours');
+			showErrorToast(data.message || 'Room extended for 6 hours');
 		} catch {
 			showErrorToast('Failed to extend room');
 		} finally {
@@ -1095,7 +1266,17 @@
 		showRoomMenu = false;
 	}
 
-	function openRoomDetails() {
+	function isInteractiveTarget(target: EventTarget | null) {
+		if (!(target instanceof HTMLElement)) {
+			return false;
+		}
+		return Boolean(target.closest('button, a, input, textarea, select, [role="button"]'));
+	}
+
+	function openRoomDetails(event?: MouseEvent | KeyboardEvent) {
+		if (event && isInteractiveTarget(event.target)) {
+			return;
+		}
 		showRoomDetails = true;
 		showRoomMenu = false;
 	}
@@ -1309,20 +1490,8 @@
 			.replace(/^_+|_+$/g, '');
 	}
 
-	function getConnectionLabel(state: ConnectionState) {
-		if (state === 'open') {
-			return 'Live';
-		}
-		if (state === 'connecting') {
-			return 'Connecting';
-		}
-		if (state === 'error') {
-			return 'Error';
-		}
-		if (state === 'closed') {
-			return 'Offline';
-		}
-		return 'Idle';
+	function normalizeMessageID(value: string) {
+		return value.trim().replace(/[^a-zA-Z0-9_-]/g, '');
 	}
 
 	function createMessageId(targetRoomId: string) {
@@ -1413,6 +1582,17 @@
 		return normalized === 'image' || normalized === 'video' || normalized === 'file';
 	}
 
+	function isLikelyMediaURL(value: string) {
+		const trimmed = value.trim();
+		return (
+			trimmed.startsWith('http://') ||
+			trimmed.startsWith('https://') ||
+			trimmed.startsWith('blob:') ||
+			trimmed.startsWith('data:') ||
+			trimmed.startsWith('/')
+		);
+	}
+
 	function toAbsoluteMediaURL(value: string) {
 		const trimmed = value.trim();
 		if (!trimmed) {
@@ -1472,17 +1652,24 @@
 	<div class="toast" role="status" aria-live="polite">{toastMessage}</div>
 {/if}
 
-<section class="chat-shell">
-	<ChatSidebar
-		myRooms={filteredMyRooms}
-		discoverableRooms={filteredDiscoverableRooms}
-		activeRoomId={roomId}
-		{showLeftMenu}
-		bind:chatListSearch
-		on:select={(event) => selectRoom(event.detail.id, event.detail.isMember)}
-		on:toggleMenu={toggleLeftMenu}
-		on:createRoom={createRoomFromMenu}
-	/>
+<section
+	class="chat-shell"
+	class:mobile-list-only={isMobileView && mobilePane === 'list'}
+	class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
+>
+	<div class="sidebar-pane">
+		<ChatSidebar
+			myRooms={filteredMyRooms}
+			discoverableRooms={filteredDiscoverableRooms}
+			activeRoomId={roomId}
+			{showLeftMenu}
+			bind:chatListSearch
+			on:select={(event) => selectRoom(event.detail.id, event.detail.isMember)}
+			on:jumpOrigin={onJumpToBreakOrigin}
+			on:toggleMenu={toggleLeftMenu}
+			on:createRoom={createRoomFromMenu}
+		/>
+	</div>
 
 	<section class="chat-window">
 		<header
@@ -1492,6 +1679,17 @@
 			on:click={openRoomDetails}
 			on:keydown={onChatHeaderKeyDown}
 		>
+			{#if isMobileView}
+				<button
+					type="button"
+					class="mobile-back-button"
+					on:pointerdown|stopPropagation
+					on:click|stopPropagation={showMobileRoomList}
+					aria-label="Back to room list"
+				>
+					Rooms
+				</button>
+			{/if}
 			<div class="room-title-button">
 				<span class="presence-dot"></span>
 				<span class="title-text">
@@ -1509,7 +1707,6 @@
 			</div>
 
 			<div class="header-actions">
-				<span class="connection {wsState}">{connectionLabel}</span>
 				<button
 					type="button"
 					class="icon-button"
@@ -1556,10 +1753,12 @@
 			{expandedMessages}
 			{isMember}
 			{isSelectionMode}
+			{focusMessageId}
 			on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
 			on:joinBreakRoom={onJoinBreakRoom}
 			on:joinRoom={() => void joinCurrentRoom()}
 			on:messageSelect={onMessageSelected}
+			on:focusHandled={onFocusHandled}
 		/>
 
 		{#if isMember}
@@ -1573,7 +1772,9 @@
 		{/if}
 	</section>
 
-	<OnlinePanel members={currentOnlineMembers} />
+	<div class="online-pane">
+		<OnlinePanel members={currentOnlineMembers} />
+	</div>
 </section>
 
 {#if showRoomDetails}
@@ -1608,9 +1809,9 @@
 					on:click={requestRoomExtension}
 					disabled={isExtendingRoom}
 				>
-					{isExtendingRoom ? 'Extending...' : 'Extend Room (24h)'}
+					{isExtendingRoom ? 'Extending...' : 'Extend Room (6h)'}
 				</button>
-				<p>Manually extends this room for 24 hours (up to 15 days total).</p>
+				<p>Manually extends this room and its messages for 6 hours.</p>
 			</div>
 
 			<h4 class="members-title">Members</h4>
@@ -1636,40 +1837,62 @@
 		height: calc(100vh - 72px);
 		min-height: 620px;
 		display: grid;
-		grid-template-columns: 320px minmax(0, 1fr) 270px;
-		border-top: 1px solid #d9dee4;
-		background: #f3f5f7;
+		grid-template-columns: 330px minmax(0, 1fr) 280px;
+		border-top: 1px solid #d7dde6;
+		background: #e9edf3;
+		overflow: hidden;
+	}
+
+	.sidebar-pane,
+	.chat-window,
+	.online-pane {
+		min-height: 0;
 	}
 
 	.chat-window {
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
-		background: #efeae2;
+		overflow: hidden;
+		background: #f4f6f9;
 	}
 
 	.chat-header {
 		position: relative;
-		background: #f6f8fa;
-		border-bottom: 1px solid #d9dee4;
+		background: #fbfcfe;
+		border-bottom: 1px solid #d8dfe8;
 		padding: 0.8rem 1rem;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 1rem;
+		gap: 0.85rem;
 		cursor: pointer;
 	}
 
 	.chat-header:focus-visible {
-		outline: 2px solid #22c55e;
+		outline: 2px solid #111111;
 		outline-offset: -2px;
+	}
+
+	.mobile-back-button {
+		display: none;
+		border: 1px solid #c0cad7;
+		background: #f7f9fc;
+		color: #2f3a4a;
+		border-radius: 999px;
+		padding: 0.35rem 0.65rem;
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+		flex-shrink: 0;
 	}
 
 	.room-title-button {
 		display: flex;
 		align-items: center;
 		gap: 0.55rem;
-		color: #0f172a;
+		color: #253041;
+		min-width: 0;
 	}
 
 	.presence-dot {
@@ -1683,16 +1906,23 @@
 		display: inline-flex;
 		flex-direction: column;
 		align-items: flex-start;
+		min-width: 0;
 	}
 
 	.title-main {
 		font-size: 0.98rem;
 		font-weight: 700;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.title-sub {
 		font-size: 0.76rem;
-		color: #64748b;
+		color: #5d687a;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.header-actions {
@@ -1701,50 +1931,27 @@
 		gap: 0.45rem;
 		position: relative;
 		cursor: default;
-	}
-
-	.connection {
-		font-size: 0.74rem;
-		font-weight: 700;
-		padding: 0.2rem 0.5rem;
-		border-radius: 999px;
-		background: #dbe5f1;
-		color: #1e293b;
-	}
-
-	.connection.open {
-		background: #dcfce7;
-		color: #166534;
-	}
-
-	.connection.connecting {
-		background: #fef9c3;
-		color: #854d0e;
-	}
-
-	.connection.error,
-	.connection.closed {
-		background: #fee2e2;
-		color: #b91c1c;
+		flex-shrink: 0;
 	}
 
 	.icon-button {
-		border: 1px solid #cdd7e1;
-		background: #ffffff;
+		border: 1px solid #ccd5e2;
+		background: #f6f8fb;
 		border-radius: 6px;
 		padding: 0.35rem 0.55rem;
 		font-size: 0.78rem;
 		cursor: pointer;
+		color: #2d3748;
 	}
 
 	.room-menu {
 		position: absolute;
 		top: calc(100% + 6px);
 		right: 0;
-		background: #ffffff;
-		border: 1px solid #d8e0e9;
+		background: #fbfcfe;
+		border: 1px solid #d2dae6;
 		border-radius: 8px;
-		box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+		box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
 		overflow: hidden;
 		min-width: 170px;
 		z-index: 100;
@@ -1753,7 +1960,7 @@
 	.room-menu button {
 		width: 100%;
 		border: none;
-		background: #ffffff;
+		background: #fbfcfe;
 		padding: 0.55rem 0.75rem;
 		text-align: left;
 		font-size: 0.84rem;
@@ -1761,29 +1968,31 @@
 	}
 
 	.room-menu button:hover {
-		background: #f3f6fa;
+		background: #eef2f7;
 	}
 
 	.selection-banner {
 		padding: 0.45rem 0.9rem;
-		background: #fff8e1;
-		border-bottom: 1px solid #f8ddb2;
+		background: #eef2f7;
+		border-bottom: 1px solid #d6deea;
 		font-size: 0.8rem;
-		color: #7c4a03;
+		color: #2e3847;
 	}
 
 	.chat-search-row {
 		padding: 0.65rem 0.9rem;
-		background: #f6f8fa;
-		border-bottom: 1px solid #d9dee4;
+		background: #fbfcfe;
+		border-bottom: 1px solid #dbe2ec;
 	}
 
 	.chat-search-row input {
 		width: 100%;
-		border: 1px solid #cfd8e3;
+		border: 1px solid #cdd6e3;
 		border-radius: 8px;
 		padding: 0.55rem 0.7rem;
 		font-size: 0.9rem;
+		background: #f9fbfd;
+		color: #1f2937;
 	}
 
 	.online-member {
@@ -1802,16 +2011,16 @@
 
 	.member-name {
 		font-size: 0.88rem;
-		color: #172132;
+		color: #141414;
 	}
 
 	.member-meta {
 		font-size: 0.75rem;
-		color: #64748b;
+		color: #676767;
 	}
 
 	.empty-label {
-		color: #64748b;
+		color: #666666;
 		font-size: 0.84rem;
 		padding: 1rem;
 	}
@@ -1819,7 +2028,7 @@
 	.mobile-info-backdrop {
 		position: fixed;
 		inset: 0;
-		background: rgba(15, 23, 42, 0.35);
+		background: rgba(0, 0, 0, 0.45);
 		border: none;
 		z-index: 150;
 	}
@@ -1830,16 +2039,16 @@
 		top: 0;
 		height: 100vh;
 		width: min(92vw, 320px);
-		background: #ffffff;
+		background: #fbfcfe;
 		z-index: 160;
-		box-shadow: -14px 0 30px rgba(15, 23, 42, 0.2);
+		box-shadow: -14px 0 30px rgba(0, 0, 0, 0.24);
 		display: flex;
 		flex-direction: column;
 	}
 
 	.mobile-info-panel header {
 		padding: 0.9rem 1rem;
-		border-bottom: 1px solid #e8edf3;
+		border-bottom: 1px solid #dddddd;
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
@@ -1851,11 +2060,12 @@
 	}
 
 	.mobile-info-panel header button {
-		border: 1px solid #d4dce6;
+		border: 1px solid #c9c9c9;
 		background: #ffffff;
 		border-radius: 7px;
 		padding: 0.32rem 0.5rem;
 		cursor: pointer;
+		color: #111111;
 	}
 
 	.mobile-info-content {
@@ -1866,23 +2076,23 @@
 	.room-actions {
 		margin-bottom: 0.9rem;
 		padding: 0.75rem;
-		border: 1px solid #e2e8f0;
+		border: 1px solid #d7dfe9;
 		border-radius: 10px;
-		background: #f8fafc;
+		background: #f2f5fa;
 	}
 
 	.room-details-card {
 		margin-bottom: 0.9rem;
 		padding: 0.75rem;
-		border: 1px solid #e2e8f0;
+		border: 1px solid #d7dfe9;
 		border-radius: 10px;
-		background: #f8fafc;
+		background: #f2f5fa;
 	}
 
 	.room-details-card h4 {
 		margin: 0 0 0.5rem;
 		font-size: 0.88rem;
-		color: #0f172a;
+		color: #111111;
 	}
 
 	.room-detail-row {
@@ -1891,7 +2101,7 @@
 		align-items: baseline;
 		gap: 0.65rem;
 		font-size: 0.8rem;
-		color: #475569;
+		color: #5c5c5c;
 	}
 
 	.room-detail-row + .room-detail-row {
@@ -1899,26 +2109,26 @@
 	}
 
 	.room-detail-row strong {
-		color: #0f172a;
+		color: #111111;
 		font-weight: 600;
 	}
 
 	.members-title {
 		margin: 0 0 0.35rem;
 		font-size: 0.88rem;
-		color: #0f172a;
+		color: #111111;
 	}
 
 	.room-actions p {
 		margin: 0.45rem 0 0;
 		font-size: 0.78rem;
-		color: #475569;
+		color: #5c5c5c;
 	}
 
 	.extend-room-button {
 		width: 100%;
-		border: 1px solid #15803d;
-		background: #16a34a;
+		border: 1px solid #111111;
+		background: #111111;
 		color: #ffffff;
 		border-radius: 8px;
 		padding: 0.48rem 0.65rem;
@@ -1937,13 +2147,13 @@
 		top: 0.8rem;
 		left: 50%;
 		transform: translateX(-50%);
-		background: #1f2937;
+		background: #111111;
 		color: #ffffff;
 		padding: 0.65rem 1rem;
 		border-radius: 999px;
 		font-size: 0.87rem;
 		font-weight: 600;
-		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.22);
+		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
 		z-index: 500;
 		pointer-events: none;
 	}
@@ -1952,17 +2162,39 @@
 		.chat-shell {
 			grid-template-columns: 290px minmax(0, 1fr);
 		}
+
+		.online-pane {
+			display: none;
+		}
 	}
 
 	@media (max-width: 900px) {
 		.chat-shell {
 			grid-template-columns: 1fr;
-			grid-template-rows: minmax(220px, 36%) minmax(0, 64%);
-			height: calc(100vh - 72px);
-		}
-
-		.chat-window {
+			height: calc(100dvh - 72px);
 			min-height: 0;
 		}
+
+		.chat-header {
+			padding: 0.68rem 0.75rem;
+		}
+
+		.mobile-back-button {
+			display: inline-flex;
+		}
+
+		.chat-shell.mobile-chat-only .sidebar-pane {
+			display: none;
+		}
+
+		.chat-shell.mobile-list-only .chat-window {
+			display: none;
+		}
+
+		.sidebar-pane,
+		.chat-window {
+			height: 100%;
+		}
+
 	}
 </style>

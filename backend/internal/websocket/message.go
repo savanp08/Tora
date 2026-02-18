@@ -19,9 +19,9 @@ import (
 const (
 	messageQueueKey   = "msg_queue"
 	roomHistoryPrefix = "room:history:"
-	roomHistoryTTL    = 1800
+	roomHistoryTTL    = 21600
 	roomHistorySize   = 50
-	scyllaMessageTTL  = 1296000
+	scyllaMessageTTL  = 21600
 	messageBreakMeta  = "message:break:"
 )
 
@@ -74,8 +74,9 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 
 	messagesTable := s.Scylla.Table("messages")
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL 1296000`,
+		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		messagesTable,
+		scyllaMessageTTL,
 	)
 	if err := safeExecScyllaQuery(
 		s.Scylla.Session,

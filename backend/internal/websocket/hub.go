@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/monitor"
 )
 
+const chatBroadcastChannel = "chat:broadcast"
+
 type Hub struct {
 	rooms      map[string]map[*Client]bool
 	broadcast  chan models.Message
+	redisInbox chan models.Message
 	register   chan *Client
 	unregister chan *Client
 
@@ -24,6 +28,7 @@ type Hub struct {
 func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	hub := &Hub{
 		broadcast:  make(chan models.Message),
+		redisInbox: make(chan models.Message, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		rooms:      make(map[string]map[*Client]bool),
@@ -34,8 +39,50 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	if service != nil && service.CanPersistToDisk() {
 		go hub.persistenceWorker()
 	}
+	if service != nil && service.Redis != nil && service.Redis.Client != nil {
+		go hub.Subscribe()
+	}
 
 	return hub
+}
+
+func (h *Hub) Subscribe() {
+	if h == nil || h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return
+	}
+
+	ctx := context.Background()
+	for {
+		pubsub := h.msgService.Redis.Client.Subscribe(ctx, chatBroadcastChannel)
+		if _, err := pubsub.Receive(ctx); err != nil {
+			log.Printf("redis subscribe receive error: %v", err)
+			_ = pubsub.Close()
+			time.Sleep(time.Second)
+			continue
+		}
+
+		channel := pubsub.Channel()
+		for incoming := range channel {
+			if incoming == nil || strings.TrimSpace(incoming.Payload) == "" {
+				continue
+			}
+
+			var msg models.Message
+			if err := json.Unmarshal([]byte(incoming.Payload), &msg); err != nil {
+				log.Printf("redis subscribe unmarshal error: %v", err)
+				continue
+			}
+
+			select {
+			case h.redisInbox <- msg:
+			default:
+				log.Printf("redis subscribe drop room=%s reason=inbox_full", msg.RoomID)
+			}
+		}
+
+		_ = pubsub.Close()
+		time.Sleep(time.Second)
+	}
 }
 
 func (h *Hub) persistenceWorker() {
@@ -189,16 +236,42 @@ func (h *Hub) Run() {
 				}(msg)
 			}
 
-			if clients, ok := h.rooms[msg.RoomID]; ok {
-				for client := range clients {
-					select {
-					case client.Send <- msg:
-					default:
-						close(client.Send)
-						delete(clients, client)
-					}
+			if h.msgService != nil && h.msgService.Redis != nil && h.msgService.Redis.Client != nil {
+				payload, err := json.Marshal(msg)
+				if err != nil {
+					log.Printf("redis publish marshal error: %v", err)
+					h.broadcastToLocal(msg)
+					continue
 				}
+				if err := h.msgService.Redis.Client.Publish(context.Background(), chatBroadcastChannel, payload).Err(); err != nil {
+					log.Printf("redis publish error: %v", err)
+					h.broadcastToLocal(msg)
+				}
+			} else {
+				h.broadcastToLocal(msg)
 			}
+
+		case msg := <-h.redisInbox:
+			if msg.CreatedAt.IsZero() {
+				msg.CreatedAt = time.Now().UTC()
+			}
+			h.broadcastToLocal(msg)
+		}
+	}
+}
+
+func (h *Hub) broadcastToLocal(msg models.Message) {
+	clients, ok := h.rooms[msg.RoomID]
+	if !ok {
+		return
+	}
+
+	for client := range clients {
+		select {
+		case client.Send <- msg:
+		default:
+			close(client.Send)
+			delete(clients, client)
 		}
 	}
 }

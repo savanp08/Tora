@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	roomKeyTTL         = 24 * time.Hour
+	roomKeyTTL         = 6 * time.Hour
 	roomMaxExtendAge   = 14 * 24 * time.Hour
-	roomHistoryTTL     = 30 * time.Minute
+	roomHistoryTTL     = roomKeyTTL
 	roomHistorySize    = 50
 	messageBreakPrefix = "message:break:"
 )
@@ -89,12 +89,13 @@ type CreateBreakRoomResponse struct {
 }
 
 type SidebarRoom struct {
-	RoomID       string `json:"roomId"`
-	RoomName     string `json:"roomName"`
-	Status       string `json:"status"`
-	ParentRoomID string `json:"parentRoomId,omitempty"`
-	MemberCount  int    `json:"memberCount"`
-	CreatedAt    int64  `json:"createdAt"`
+	RoomID          string `json:"roomId"`
+	RoomName        string `json:"roomName"`
+	Status          string `json:"status"`
+	ParentRoomID    string `json:"parentRoomId,omitempty"`
+	OriginMessageID string `json:"originMessageId,omitempty"`
+	MemberCount     int    `json:"memberCount"`
+	CreatedAt       int64  `json:"createdAt"`
 }
 
 type SidebarRoomsResponse struct {
@@ -564,6 +565,16 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to extend room"})
 		return
 	}
+	_ = h.redis.Client.Expire(ctx, roomMembersKey(roomID), roomKeyTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomChildrenKey(roomID), roomKeyTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomHistoryKey(roomID), roomKeyTTL).Err()
+
+	if err := h.refreshRoomMessageTTL(ctx, roomID); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to extend room messages"})
+		return
+	}
+
 	log.Printf("[room] extend success room_id=%s ttl_seconds=%d", roomID, int64(roomKeyTTL.Seconds()))
 
 	response := ExtendRoomResponse{
@@ -829,13 +840,67 @@ func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string
 	memberCount64, _ := strconv.ParseInt(meta["member_count"], 10, 64)
 
 	return SidebarRoom{
-		RoomID:       roomID,
-		RoomName:     name,
-		Status:       status,
-		ParentRoomID: strings.TrimSpace(meta["parent_room_id"]),
-		MemberCount:  int(memberCount64),
-		CreatedAt:    createdAt,
+		RoomID:          roomID,
+		RoomName:        name,
+		Status:          status,
+		ParentRoomID:    strings.TrimSpace(meta["parent_room_id"]),
+		OriginMessageID: strings.TrimSpace(meta["origin_message_id"]),
+		MemberCount:     int(memberCount64),
+		CreatedAt:       createdAt,
 	}, true, nil
+}
+
+func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return nil
+	}
+
+	messagesTable := h.scylla.Table("messages")
+	selectQuery := fmt.Sprintf(
+		`SELECT created_at, message_id, sender_id, sender_name, content, type FROM %s WHERE room_id = ?`,
+		messagesTable,
+	)
+	upsertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, created_at, message_id, sender_id, sender_name, content, type) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?`,
+		messagesTable,
+	)
+	ttlSeconds := int(roomKeyTTL / time.Second)
+
+	iter := h.scylla.Session.Query(selectQuery, roomID).WithContext(ctx).Iter()
+	var (
+		createdAt  time.Time
+		messageID  string
+		senderID   string
+		senderName string
+		content    string
+		msgType    string
+	)
+
+	refreshedCount := 0
+	for iter.Scan(&createdAt, &messageID, &senderID, &senderName, &content, &msgType) {
+		if err := h.scylla.Session.Query(
+			upsertQuery,
+			roomID,
+			createdAt,
+			messageID,
+			senderID,
+			senderName,
+			content,
+			msgType,
+			ttlSeconds,
+		).WithContext(ctx).Exec(); err != nil {
+			_ = iter.Close()
+			return err
+		}
+		refreshedCount++
+	}
+	if err := iter.Close(); err != nil {
+		return err
+	}
+	if refreshedCount > 0 {
+		log.Printf("[room] message ttl refreshed room_id=%s count=%d ttl_seconds=%d", roomID, refreshedCount, ttlSeconds)
+	}
+	return nil
 }
 
 func (h *RoomHandler) updateBreakMetadataInCachedHistory(
