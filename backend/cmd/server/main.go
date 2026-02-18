@@ -24,7 +24,7 @@ func main() {
 	log.Println("✅ Connected to Redis")
 
 	var scyllaStore *database.ScyllaStore
-	if len(cfg.ScyllaHosts) > 0 {
+	if (cfg.AstraToken != "" && cfg.AstraDatabaseID != "") || len(cfg.ScyllaHosts) > 0 {
 		scyllaStore, err = database.NewScyllaStore(*cfg)
 		if err != nil {
 			log.Printf("⚠️  Warning: Could not connect to ScyllaDB: %v", err)

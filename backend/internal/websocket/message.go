@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gocql/gocql"
@@ -25,8 +26,10 @@ const (
 )
 
 type MessageService struct {
-	Redis  *database.RedisStore
-	Scylla *database.ScyllaStore
+	Redis          *database.RedisStore
+	Scylla         *database.ScyllaStore
+	scyllaDisabled atomic.Bool
+	panicFailures  atomic.Int32
 }
 
 func NewMessageService(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *MessageService {
@@ -36,7 +39,12 @@ func NewMessageService(redisStore *database.RedisStore, scyllaStore *database.Sc
 }
 
 func (s *MessageService) CanPersistToDisk() bool {
-	return s != nil && s.Redis != nil && s.Redis.Client != nil && s.Scylla != nil && s.Scylla.Session != nil
+	return s != nil &&
+		s.Redis != nil &&
+		s.Redis.Client != nil &&
+		s.Scylla != nil &&
+		s.Scylla.Session != nil &&
+		!s.scyllaDisabled.Load()
 }
 
 func (s *MessageService) EnqueueMessage(ctx context.Context, msg models.Message) error {
@@ -60,6 +68,9 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 	if s.Scylla == nil || s.Scylla.Session == nil {
 		return fmt.Errorf("scylla session is not configured")
 	}
+	if s.scyllaDisabled.Load() {
+		return fmt.Errorf("scylla persistence disabled after repeated panics")
+	}
 
 	messagesTable := s.Scylla.Table("messages")
 	query := fmt.Sprintf(
@@ -77,8 +88,15 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 		msg.Type,
 		msg.CreatedAt,
 	); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "panic") {
+			failures := s.panicFailures.Add(1)
+			if failures >= 3 && s.scyllaDisabled.CompareAndSwap(false, true) {
+				log.Printf("[message-service] disabling scylla persistence after repeated panics")
+			}
+		}
 		return fmt.Errorf("save to scylla: %w", err)
 	}
+	s.panicFailures.Store(0)
 
 	return nil
 }
