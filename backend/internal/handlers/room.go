@@ -16,19 +16,24 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/security"
 )
 
 const (
-	roomKeyTTL         = 6 * time.Hour
+	roomDefaultTTL     = 6 * time.Hour
+	roomExtendedTTL    = 24 * time.Hour
 	roomMaxExtendAge   = 14 * 24 * time.Hour
-	roomHistoryTTL     = roomKeyTTL
+	roomHistoryTTL     = roomDefaultTTL
 	roomHistorySize    = 50
 	roomCodeDigits     = 6
 	messageBreakPrefix = "message:break:"
 )
 
 var (
-	errRoomFull = errors.New("room full")
+	errRoomFull       = errors.New("room full")
+	CreateRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
+	JoinRoomLimiter   = security.NewLimiter(20, time.Minute, 20, 15*time.Minute)
+	ExtendRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
 
 	roomSuffixWords = []string{
 		"hub", "zone", "chat", "base", "net",
@@ -75,6 +80,16 @@ type ExtendRoomResponse struct {
 	Message          string `json:"message"`
 }
 
+type RenameRoomRequest struct {
+	RoomID   string `json:"roomId"`
+	RoomName string `json:"roomName"`
+}
+
+type RenameRoomResponse struct {
+	RoomID   string `json:"roomId"`
+	RoomName string `json:"roomName"`
+}
+
 type CreateBreakRoomRequest struct {
 	ParentRoomID    string `json:"parentRoomId"`
 	OriginMessageID string `json:"originMessageId"`
@@ -106,6 +121,13 @@ type SidebarRoomsResponse struct {
 }
 
 func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !JoinRoomLimiter.Allow(clientIP) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Join room rate limit exceeded"})
+		return
+	}
+
 	var req JoinRoomRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -304,6 +326,13 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !CreateRoomLimiter.Allow(clientIP) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Create room rate limit exceeded"})
+		return
+	}
+
 	var req CreateBreakRoomRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -342,21 +371,19 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		parentRoomName = parentRoomID
 	}
 
-	messageSlug := slugifyRoomName(truncate(req.RoomName, 20))
-	if messageSlug == "" {
-		messageSlug = "break"
+	prefixSlug := slugifyRoomName(truncate(req.RoomName, 24))
+	if prefixSlug == "" {
+		prefixSlug = "topic"
 	}
-	parentSlug := slugifyRoomName(parentRoomName)
-	if parentSlug == "" {
-		parentSlug = parentRoomID
+	parentSuffix := slugifyRoomName(parentRoomName)
+	if parentSuffix == "" {
+		parentSuffix = parentRoomID
+	}
+	parentSuffix = truncate(parentSuffix, 5)
+	if parentSuffix == "" {
+		parentSuffix = "root"
 	}
 
-	baseSlug := slugifyRoomName(fmt.Sprintf("%s_%s", messageSlug, parentSlug))
-	if baseSlug == "" {
-		baseSlug = fmt.Sprintf("break_%s", parentRoomID)
-	}
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	createdAt := time.Now().Unix()
 	roomType, err := h.getRoomType(ctx, parentRoomID)
 	if err != nil {
@@ -368,47 +395,44 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		roomType = "ephemeral"
 	}
 
-	finalRoomID := baseSlug
-	finalRoomName := baseSlug
-	created, err := h.tryCreateRoom(ctx, baseSlug, baseSlug, roomType, createdAt, parentRoomID, originMessageID)
+	existingChildren, err := h.redis.Client.SCard(ctx, roomChildrenKey(parentRoomID)).Result()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room"})
 		return
 	}
-	if !created {
-		suffixOrder := rng.Perm(len(roomSuffixWords))
-		for i := 0; i < 3 && i < len(suffixOrder); i++ {
-			candidateID := fmt.Sprintf("%s_%s", baseSlug, roomSuffixWords[suffixOrder[i]])
-			created, err = h.tryCreateRoom(ctx, candidateID, candidateID, roomType, createdAt, parentRoomID, originMessageID)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room"})
-				return
-			}
-			if created {
-				finalRoomID = candidateID
-				finalRoomName = candidateID
-				break
-			}
+
+	finalRoomID := ""
+	finalRoomName := ""
+	created := false
+	nextIndex := int(existingChildren) + 1
+	if nextIndex < 1 {
+		nextIndex = 1
+	}
+	for offset := 0; offset < 5000; offset++ {
+		sequence := nextIndex + offset
+		candidateID := fmt.Sprintf("%s_%s_%d", prefixSlug, parentSuffix, sequence)
+		created, err = h.tryCreateRoom(
+			ctx,
+			candidateID,
+			candidateID,
+			roomType,
+			createdAt,
+			parentRoomID,
+			originMessageID,
+		)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room"})
+			return
+		}
+		if created {
+			finalRoomID = candidateID
+			finalRoomName = candidateID
+			break
 		}
 	}
-	if !created {
-		for attempts := 0; attempts < 10; attempts++ {
-			candidateID := fmt.Sprintf("%s_%04d", baseSlug, rng.Intn(9000)+1000)
-			created, err = h.tryCreateRoom(ctx, candidateID, candidateID, roomType, createdAt, parentRoomID, originMessageID)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room"})
-				return
-			}
-			if created {
-				finalRoomID = candidateID
-				finalRoomName = candidateID
-				break
-			}
-		}
-	}
+
 	if !created {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to allocate unique break room"})
@@ -420,7 +444,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to link break room"})
 		return
 	}
-	_ = h.redis.Client.Expire(ctx, roomChildrenKey(parentRoomID), roomKeyTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomChildrenKey(parentRoomID), h.effectiveRoomTTL(ctx, parentRoomID)).Err()
 
 	creatorID := normalizeIdentifier(req.UserID)
 	if creatorID == "" {
@@ -533,6 +557,13 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !ExtendRoomLimiter.Allow(clientIP) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Extend room rate limit exceeded"})
+		return
+	}
+
 	var req ExtendRoomRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -590,35 +621,86 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.redis.Client.Expire(ctx, roomKey, roomKeyTTL).Err(); err != nil {
+	if err := h.redis.Client.Expire(ctx, roomKey, roomExtendedTTL).Err(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to extend room"})
 		return
 	}
 	if roomCode, codeErr := h.ensureRoomCode(ctx, roomID); codeErr == nil && roomCode != "" {
-		_ = h.redis.Client.Set(ctx, roomCodeKey(roomCode), roomID, roomKeyTTL).Err()
+		_ = h.redis.Client.Set(ctx, roomCodeKey(roomCode), roomID, roomExtendedTTL).Err()
 	}
-	_ = h.redis.Client.Expire(ctx, roomMembersKey(roomID), roomKeyTTL).Err()
-	_ = h.redis.Client.Expire(ctx, roomChildrenKey(roomID), roomKeyTTL).Err()
-	_ = h.redis.Client.Expire(ctx, roomHistoryKey(roomID), roomKeyTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomMembersKey(roomID), roomExtendedTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomChildrenKey(roomID), roomExtendedTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomHistoryKey(roomID), roomExtendedTTL).Err()
 
-	if err := h.refreshRoomMessageTTL(ctx, roomID); err != nil {
+	if err := h.refreshRoomMessageTTL(ctx, roomID, roomExtendedTTL); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to extend room messages"})
 		return
 	}
 
-	log.Printf("[room] extend success room_id=%s ttl_seconds=%d", roomID, int64(roomKeyTTL.Seconds()))
+	log.Printf("[room] extend success room_id=%s ttl_seconds=%d", roomID, int64(roomExtendedTTL.Seconds()))
 
 	response := ExtendRoomResponse{
 		RoomID:           roomID,
-		ExpiresInSeconds: int64(roomKeyTTL.Seconds()),
-		Message:          "Room extended",
+		ExpiresInSeconds: int64(roomExtendedTTL.Seconds()),
+		Message:          "Room extended for 24 hours",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+}
+
+func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
+	var req RenameRoomRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	roomID := slugifyRoomName(req.RoomID)
+	nextName := slugifyRoomName(req.RoomName)
+	if roomID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "roomId is required"})
+		return
+	}
+	if nextName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "roomName is required"})
+		return
+	}
+
+	ctx := context.Background()
+	exists, err := h.roomExists(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+		return
+	}
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+		return
+	}
+
+	if err := h.redis.Client.HSet(ctx, roomKey(roomID), map[string]interface{}{
+		"name":       nextName,
+		"updated_at": time.Now().Unix(),
+	}).Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to rename room"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(RenameRoomResponse{
+		RoomID:   roomID,
+		RoomName: nextName,
+	})
 }
 
 func slugifyRoomName(raw string) string {
@@ -746,6 +828,18 @@ func (h *RoomHandler) roomExists(ctx context.Context, roomID string) (bool, erro
 	return count > 0, nil
 }
 
+func (h *RoomHandler) effectiveRoomTTL(ctx context.Context, roomID string) time.Duration {
+	if h == nil || h.redis == nil || h.redis.Client == nil || roomID == "" {
+		return roomDefaultTTL
+	}
+
+	ttl, err := h.redis.Client.TTL(ctx, roomKey(roomID)).Result()
+	if err != nil || ttl <= 0 {
+		return roomDefaultTTL
+	}
+	return ttl
+}
+
 func (h *RoomHandler) getRoomName(ctx context.Context, roomID string) (string, error) {
 	name, err := h.redis.Client.HGet(ctx, roomKey(roomID), "name").Result()
 	if err == redis.Nil {
@@ -813,12 +907,13 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 	if roomID == "" {
 		return "", fmt.Errorf("room id is required")
 	}
+	codeTTL := h.effectiveRoomTTL(ctx, roomID)
 
 	existing, err := h.redis.Client.HGet(ctx, roomKey(roomID), "room_code").Result()
 	if err == nil {
 		normalized := normalizeRoomCode(existing)
 		if normalized != "" {
-			_ = h.redis.Client.Set(ctx, roomCodeKey(normalized), roomID, roomKeyTTL).Err()
+			_ = h.redis.Client.Set(ctx, roomCodeKey(normalized), roomID, codeTTL).Err()
 			return normalized, nil
 		}
 	} else if err != redis.Nil {
@@ -828,7 +923,7 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for attempts := 0; attempts < 40; attempts++ {
 		code := fmt.Sprintf("%0*d", roomCodeDigits, rng.Intn(1000000))
-		created, err := h.redis.Client.SetNX(ctx, roomCodeKey(code), roomID, roomKeyTTL).Result()
+		created, err := h.redis.Client.SetNX(ctx, roomCodeKey(code), roomID, codeTTL).Result()
 		if err != nil {
 			return "", err
 		}
@@ -867,7 +962,7 @@ func (h *RoomHandler) createRoom(
 		return err
 	}
 
-	if err := h.redis.Client.Expire(ctx, roomKey(roomID), roomKeyTTL).Err(); err != nil {
+	if err := h.redis.Client.Expire(ctx, roomKey(roomID), roomDefaultTTL).Err(); err != nil {
 		return err
 	}
 
@@ -914,7 +1009,7 @@ func (h *RoomHandler) registerRoomMembership(ctx context.Context, roomID, userID
 	if err := h.redis.Client.SAdd(ctx, userRoomsKey(userID), roomID).Err(); err != nil {
 		return int(count), err
 	}
-	_ = h.redis.Client.Expire(ctx, membersKey, roomKeyTTL).Err()
+	_ = h.redis.Client.Expire(ctx, membersKey, h.effectiveRoomTTL(ctx, roomID)).Err()
 
 	return int(count), nil
 }
@@ -974,7 +1069,7 @@ func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string
 	}, true, nil
 }
 
-func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string) error {
+func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string, ttl time.Duration) error {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return nil
 	}
@@ -988,7 +1083,7 @@ func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string) 
 		`INSERT INTO %s (room_id, created_at, message_id, sender_id, sender_name, content, type) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?`,
 		messagesTable,
 	)
-	ttlSeconds := int(roomKeyTTL / time.Second)
+	ttlSeconds := int(ttl / time.Second)
 
 	iter := h.scylla.Session.Query(selectQuery, roomID).WithContext(ctx).Iter()
 	var (
@@ -1086,7 +1181,7 @@ func (h *RoomHandler) updateBreakMetadataInCachedHistory(
 	if len(items) > 0 {
 		pipe.RPush(ctx, historyKey, items...)
 		pipe.LTrim(ctx, historyKey, -roomHistorySize, -1)
-		pipe.Expire(ctx, historyKey, roomHistoryTTL)
+		pipe.Expire(ctx, historyKey, h.effectiveRoomTTL(ctx, roomID))
 	}
 	_, err = pipe.Exec(ctx)
 	return err
@@ -1163,5 +1258,12 @@ func toString(value interface{}) string {
 }
 
 func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !CreateRoomLimiter.Allow(clientIP) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Create room rate limit exceeded"})
+		return
+	}
+
 	w.WriteHeader(http.StatusNotImplemented)
 }

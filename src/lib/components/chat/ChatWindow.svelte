@@ -524,7 +524,7 @@
 		overflow-x: hidden;
 		width: 100%;
 		box-sizing: border-box;
-		background: linear-gradient(180deg, #f7f8fa 0%, #f1f4f8 100%);
+		background: linear-gradient(180deg, #f7f7f8 0%, #f1f1f3 100%);
 	}
 
 	.readonly-banner {
@@ -561,20 +561,20 @@
 		bottom: 1rem;
 		width: 2.4rem;
 		height: 2.4rem;
-		border: 1px solid #ced6e3;
+		border: 1px solid #d0d0d7;
 		border-radius: 999px;
-		background: rgba(248, 250, 253, 0.95);
-		color: #1f2937;
+		background: rgba(250, 250, 251, 0.95);
+		color: #2f2f37;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		cursor: pointer;
-		box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16);
+		box-shadow: 0 8px 18px rgba(0, 0, 0, 0.16);
 		z-index: 3;
 	}
 
 	.scroll-bottom-button:hover {
-		background: #f1f5f9;
+		background: #efeff2;
 	}
 
 	.empty-thread {
@@ -589,8 +589,8 @@
 		border-radius: 12px;
 		padding: 0.76rem 0.86rem;
 		background: #ffffff;
-		border: 1px solid #d7dce4;
-		box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+		border: 1px solid #d9d9de;
+		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
 		box-sizing: border-box;
 		overflow: visible;
 	}
@@ -601,13 +601,13 @@
 	}
 
 	.selection-mode .bubble.selectable:hover {
-		outline-color: #334155;
+		outline-color: #4a4a54;
 	}
 
 	.bubble.mine {
 		align-self: flex-end;
-		background: #273341;
-		border-color: #273341;
+		background: #2f3138;
+		border-color: #2f3138;
 		color: #f3f5f8;
 	}
 
@@ -624,7 +624,7 @@
 	.bubble.focused {
 		box-shadow:
 			0 0 0 2px rgba(245, 158, 11, 0.95),
-			0 8px 18px rgba(15, 23, 42, 0.14);
+			0 8px 18px rgba(0, 0, 0, 0.14);
 	}
 
 	.copy-btn {

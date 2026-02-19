@@ -20,9 +20,15 @@ type Hub struct {
 	redisInbox chan models.Message
 	register   chan *Client
 	unregister chan *Client
+	subscribe  chan *ClientSubscription
 
 	msgService *MessageService
 	tracker    *monitor.UsageTracker
+}
+
+type ClientSubscription struct {
+	Client  *Client
+	RoomIDs []string
 }
 
 func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
@@ -31,6 +37,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		redisInbox: make(chan models.Message, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		subscribe:  make(chan *ClientSubscription, 256),
 		rooms:      make(map[string]map[*Client]bool),
 		msgService: service,
 		tracker:    tracker,
@@ -125,96 +132,20 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
-			if _, ok := h.rooms[client.RoomID]; !ok {
-				h.rooms[client.RoomID] = make(map[*Client]bool)
+			if client == nil {
+				continue
 			}
 			if client.JoinedAt.IsZero() {
 				client.JoinedAt = time.Now().UTC()
 			}
-			h.rooms[client.RoomID][client] = true
 
-			onlineMembers := make([]map[string]interface{}, 0, len(h.rooms[client.RoomID]))
-			for roomClient := range h.rooms[client.RoomID] {
-				joinedAt := roomClient.JoinedAt
-				if joinedAt.IsZero() {
-					joinedAt = time.Now().UTC()
-				}
-
-				onlineMembers = append(onlineMembers, map[string]interface{}{
-					"id":       roomClient.UserID,
-					"name":     roomClient.Username,
-					"joinedAt": joinedAt.UnixMilli(),
-				})
-			}
-			sort.SliceStable(onlineMembers, func(i, j int) bool {
-				left := onlineMembers[i]["joinedAt"].(int64)
-				right := onlineMembers[j]["joinedAt"].(int64)
-				if left == right {
-					return onlineMembers[i]["id"].(string) < onlineMembers[j]["id"].(string)
-				}
-				return left < right
-			})
-
-			select {
-			case client.Send <- map[string]interface{}{
-				"type":    "online_list",
-				"payload": onlineMembers,
-			}:
-			default:
-				close(client.Send)
-				delete(h.rooms[client.RoomID], client)
-				continue
-			}
-
-			joinedPayload := map[string]interface{}{
-				"type": "user_joined",
-				"payload": map[string]interface{}{
-					"id":       client.UserID,
-					"name":     client.Username,
-					"joinedAt": client.JoinedAt.UnixMilli(),
-				},
-			}
-			for roomClient := range h.rooms[client.RoomID] {
-				if roomClient == client {
-					continue
-				}
-				select {
-				case roomClient.Send <- joinedPayload:
-				default:
-					close(roomClient.Send)
-					delete(h.rooms[client.RoomID], roomClient)
-				}
-			}
-
-			if h.msgService != nil {
-				go client.LoadHistory(context.Background(), h.msgService)
-			}
+		case subscription := <-h.subscribe:
+			h.handleSubscription(subscription)
 
 		case client := <-h.unregister:
-			if _, ok := h.rooms[client.RoomID]; ok {
-				if _, ok := h.rooms[client.RoomID][client]; ok {
-					delete(h.rooms[client.RoomID], client)
-					close(client.Send)
-
-					userLeftPayload := map[string]interface{}{
-						"type": "user_left",
-						"payload": map[string]interface{}{
-							"id": client.UserID,
-						},
-					}
-					for roomClient := range h.rooms[client.RoomID] {
-						select {
-						case roomClient.Send <- userLeftPayload:
-						default:
-							close(roomClient.Send)
-							delete(h.rooms[client.RoomID], roomClient)
-						}
-					}
-				}
-
-				if len(h.rooms[client.RoomID]) == 0 {
-					delete(h.rooms, client.RoomID)
-				}
+			h.removeClientFromAllRooms(client, true)
+			if client != nil {
+				client.closeSendChannel()
 			}
 
 		case msg := <-h.broadcast:
@@ -270,8 +201,137 @@ func (h *Hub) broadcastToLocal(msg models.Message) {
 		select {
 		case client.Send <- msg:
 		default:
-			close(client.Send)
-			delete(clients, client)
+			h.removeClientFromAllRooms(client, true)
+			client.closeSendChannel()
+		}
+	}
+}
+
+func (h *Hub) handleSubscription(subscription *ClientSubscription) {
+	if subscription == nil || subscription.Client == nil {
+		return
+	}
+
+	client := subscription.Client
+	if client.JoinedAt.IsZero() {
+		client.JoinedAt = time.Now().UTC()
+	}
+
+	seen := make(map[string]struct{})
+	for _, rawRoomID := range subscription.RoomIDs {
+		roomID := normalizeRoomID(rawRoomID)
+		if roomID == "" {
+			continue
+		}
+		if _, exists := seen[roomID]; exists {
+			continue
+		}
+		seen[roomID] = struct{}{}
+
+		if _, ok := h.rooms[roomID]; !ok {
+			h.rooms[roomID] = make(map[*Client]bool)
+		}
+		if h.rooms[roomID][client] {
+			continue
+		}
+
+		h.rooms[roomID][client] = true
+		client.subscribeToRoom(roomID)
+
+		onlineMembers := make([]map[string]interface{}, 0, len(h.rooms[roomID]))
+		for roomClient := range h.rooms[roomID] {
+			joinedAt := roomClient.JoinedAt
+			if joinedAt.IsZero() {
+				joinedAt = time.Now().UTC()
+			}
+
+			onlineMembers = append(onlineMembers, map[string]interface{}{
+				"id":       roomClient.UserID,
+				"name":     roomClient.Username,
+				"joinedAt": joinedAt.UnixMilli(),
+			})
+		}
+		sort.SliceStable(onlineMembers, func(i, j int) bool {
+			left := onlineMembers[i]["joinedAt"].(int64)
+			right := onlineMembers[j]["joinedAt"].(int64)
+			if left == right {
+				return onlineMembers[i]["id"].(string) < onlineMembers[j]["id"].(string)
+			}
+			return left < right
+		})
+
+		select {
+		case client.Send <- map[string]interface{}{
+			"type":    "online_list",
+			"roomId":  roomID,
+			"payload": onlineMembers,
+		}:
+		default:
+			h.removeClientFromAllRooms(client, true)
+			client.closeSendChannel()
+			return
+		}
+
+		joinedPayload := map[string]interface{}{
+			"type":   "user_joined",
+			"roomId": roomID,
+			"payload": map[string]interface{}{
+				"id":       client.UserID,
+				"name":     client.Username,
+				"joinedAt": client.JoinedAt.UnixMilli(),
+			},
+		}
+		for roomClient := range h.rooms[roomID] {
+			if roomClient == client {
+				continue
+			}
+			select {
+			case roomClient.Send <- joinedPayload:
+			default:
+				h.removeClientFromAllRooms(roomClient, true)
+				roomClient.closeSendChannel()
+			}
+		}
+
+		if h.msgService != nil {
+			go client.LoadHistory(context.Background(), h.msgService, roomID)
+		}
+	}
+}
+
+func (h *Hub) removeClientFromAllRooms(client *Client, broadcastUserLeft bool) {
+	if client == nil {
+		return
+	}
+
+	for roomID, clients := range h.rooms {
+		if _, ok := clients[client]; !ok {
+			continue
+		}
+		delete(clients, client)
+		client.unsubscribeFromRoom(roomID)
+
+		if broadcastUserLeft {
+			userLeftPayload := map[string]interface{}{
+				"type":   "user_left",
+				"roomId": roomID,
+				"payload": map[string]interface{}{
+					"id": client.UserID,
+				},
+			}
+			for roomClient := range clients {
+				select {
+				case roomClient.Send <- userLeftPayload:
+				default:
+					delete(clients, roomClient)
+					roomClient.unsubscribeFromRoom(roomID)
+					roomClient.closeSendChannel()
+				}
+			}
+		}
+
+		if len(clients) == 0 {
+			delete(h.rooms, roomID)
 		}
 	}
 }

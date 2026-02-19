@@ -8,9 +8,10 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/security"
@@ -25,9 +26,17 @@ const (
 	maxTextChars   = 4000
 	maxMediaURLLen = 4096
 	maxFileNameLen = 180
+
+	maxGlobalWSConnections = int32(15000)
+	maxWSConnectionsPerIP  = int32(5)
 )
 
-var wsConnectLimiter = security.NewLimiter(40, time.Minute, 15, 15*time.Minute)
+var (
+	wsConnectLimiter = security.NewLimiter(40, time.Minute, 15, 15*time.Minute)
+
+	globalWSConnections    atomic.Int32
+	activeConnectionsPerIP sync.Map
+)
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:    1024,
@@ -41,21 +50,31 @@ type Client struct {
 	Hub        *Hub
 	Conn       *websocket.Conn
 	Send       chan interface{}
-	RoomID     string
 	UserID     string
 	Username   string
 	JoinedAt   time.Time
 	msgLimiter *rate.Limiter
+	clientIP   string
+
+	disconnectOnce  sync.Once
+	sendCloseOnce   sync.Once
+	subscriptionsMu sync.RWMutex
+	subscribedRooms map[string]struct{}
+	onDisconnect    func()
 }
 
-func (c *Client) LoadHistory(ctx context.Context, service *MessageService) {
+func (c *Client) LoadHistory(ctx context.Context, service *MessageService, roomID string) {
 	if service == nil {
 		return
 	}
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return
+	}
 
-	history, err := service.GetRecentMessages(ctx, c.RoomID)
+	history, err := service.GetRecentMessages(ctx, roomID)
 	if err != nil {
-		log.Printf("[ws] history load error room=%s err=%v", c.RoomID, err)
+		log.Printf("[ws] history load error room=%s user=%s err=%v", roomID, c.UserID, err)
 		return
 	}
 
@@ -65,6 +84,7 @@ func (c *Client) LoadHistory(ctx context.Context, service *MessageService) {
 
 	packet := map[string]interface{}{
 		"type":    "history",
+		"roomId":  roomID,
 		"payload": history,
 	}
 
@@ -87,10 +107,10 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		log.Printf("[ws] connect rate limited ip=%s", clientIP)
 		return
 	}
-
-	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
-	if roomID == "" {
-		http.Error(w, "invalid room id", http.StatusBadRequest)
+	releaseReservation, status, rejectReason := reserveWSConnection(clientIP)
+	if releaseReservation == nil {
+		http.Error(w, rejectReason, status)
+		log.Printf("[ws] connection rejected ip=%s status=%d reason=%s", clientIP, status, rejectReason)
 		return
 	}
 
@@ -105,7 +125,8 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[ws] upgrade failed room=%s remote=%s err=%v", roomID, r.RemoteAddr, err)
+		releaseReservation()
+		log.Printf("[ws] upgrade failed remote=%s err=%v", r.RemoteAddr, err)
 		return
 	}
 	if hub != nil && hub.tracker != nil {
@@ -113,14 +134,18 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		Hub:        hub,
-		Conn:       conn,
-		Send:       make(chan interface{}, 256),
-		RoomID:     roomID,
-		UserID:     userID,
-		Username:   username,
-		JoinedAt:   time.Now().UTC(),
-		msgLimiter: rate.NewLimiter(rate.Every(250*time.Millisecond), 8),
+		Hub:             hub,
+		Conn:            conn,
+		Send:            make(chan interface{}, 256),
+		UserID:          userID,
+		Username:        username,
+		JoinedAt:        time.Now().UTC(),
+		msgLimiter:      rate.NewLimiter(rate.Every(250*time.Millisecond), 8),
+		clientIP:        clientIP,
+		subscribedRooms: make(map[string]struct{}),
+		onDisconnect: func() {
+			releaseReservation()
+		},
 	}
 	client.Hub.register <- client
 
@@ -130,6 +155,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 func (c *Client) readPump() {
 	defer func() {
+		c.cleanupConnectionTracking()
 		c.Hub.unregister <- c
 		c.Conn.Close()
 	}()
@@ -139,28 +165,53 @@ func (c *Client) readPump() {
 	c.Conn.SetPongHandler(func(string) error { c.Conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 
 	for {
-		var msg models.Message
-		err := c.Conn.ReadJSON(&msg)
+		_, raw, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[ws] read unexpected close room=%s err=%v", c.RoomID, err)
+				log.Printf("[ws] read unexpected close user=%s err=%v", c.UserID, err)
 			}
 			break
+		}
+
+		if roomIDs, isSubscribe := parseSubscribeRoomIDs(raw); isSubscribe {
+			if len(roomIDs) == 0 {
+				continue
+			}
+			if c.Hub != nil {
+				c.Hub.subscribe <- &ClientSubscription{
+					Client:  c,
+					RoomIDs: roomIDs,
+				}
+			}
+			continue
+		}
+
+		var msg models.Message
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
 		}
 		msg.CreatedAt = time.Now().UTC()
 		msg.SenderID = c.UserID
 		msg.SenderName = c.Username
-		msg.RoomID = c.RoomID
+		msg.RoomID = normalizeRoomID(msg.RoomID)
+		if msg.RoomID == "" {
+			log.Printf("[ws] message rejected user=%s reason=missing_room_id", c.UserID)
+			continue
+		}
+		if !c.isSubscribedToRoom(msg.RoomID) {
+			log.Printf("[ws] message rejected user=%s room=%s reason=not_subscribed", c.UserID, msg.RoomID)
+			continue
+		}
 		if c.msgLimiter != nil && !c.msgLimiter.Allow() {
-			log.Printf("[ws] message rate limited room=%s user=%s", c.RoomID, c.UserID)
+			log.Printf("[ws] message rate limited room=%s user=%s", msg.RoomID, c.UserID)
 			continue
 		}
 		if !normalizeInboundMessage(&msg) {
-			log.Printf("[ws] message rejected room=%s user=%s type=%s", c.RoomID, c.UserID, msg.Type)
+			log.Printf("[ws] message rejected room=%s user=%s type=%s", msg.RoomID, c.UserID, msg.Type)
 			continue
 		}
 		if msg.ID == "" {
-			msg.ID = fmt.Sprintf("%s_%d", c.RoomID, msg.CreatedAt.UnixNano())
+			msg.ID = fmt.Sprintf("%s_%d", msg.RoomID, msg.CreatedAt.UnixNano())
 		}
 		if c.Hub != nil && c.Hub.tracker != nil {
 			c.Hub.tracker.RecordWSMessage(int64(estimateMessageBytes(msg)))
@@ -220,6 +271,7 @@ func normalizeUsername(raw string) string {
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
+		c.cleanupConnectionTracking()
 		ticker.Stop()
 		c.Conn.Close()
 	}()
@@ -234,7 +286,7 @@ func (c *Client) writePump() {
 			}
 
 			if err := c.Conn.WriteJSON(payload); err != nil {
-				log.Printf("[ws] write json failed room=%s err=%v", c.RoomID, err)
+				log.Printf("[ws] write json failed user=%s err=%v", c.UserID, err)
 				return
 			}
 			if c.Hub != nil && c.Hub.tracker != nil {
@@ -244,11 +296,70 @@ func (c *Client) writePump() {
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("[ws] ping failed room=%s err=%v", c.RoomID, err)
+				log.Printf("[ws] ping failed user=%s err=%v", c.UserID, err)
 				return
 			}
 		}
 	}
+}
+
+type subscribeEnvelope struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+	RoomIDs []string        `json:"roomIds"`
+	Rooms   []string        `json:"rooms"`
+}
+
+type subscribePayload struct {
+	RoomIDs []string `json:"roomIds"`
+	Rooms   []string `json:"rooms"`
+}
+
+func parseSubscribeRoomIDs(raw []byte) ([]string, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+
+	var envelope subscribeEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, false
+	}
+	if strings.ToLower(strings.TrimSpace(envelope.Type)) != "subscribe" {
+		return nil, false
+	}
+
+	candidates := make([]string, 0, len(envelope.RoomIDs)+len(envelope.Rooms))
+	candidates = append(candidates, envelope.RoomIDs...)
+	candidates = append(candidates, envelope.Rooms...)
+
+	if len(envelope.Payload) > 0 {
+		var asList []string
+		if err := json.Unmarshal(envelope.Payload, &asList); err == nil {
+			candidates = append(candidates, asList...)
+		} else {
+			var payload subscribePayload
+			if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+				candidates = append(candidates, payload.RoomIDs...)
+				candidates = append(candidates, payload.Rooms...)
+			}
+		}
+	}
+
+	unique := make(map[string]struct{})
+	roomIDs := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		normalized := normalizeRoomID(candidate)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := unique[normalized]; exists {
+			continue
+		}
+		unique[normalized] = struct{}{}
+		roomIDs = append(roomIDs, normalized)
+	}
+
+	return roomIDs, true
 }
 
 func normalizeInboundMessage(msg *models.Message) bool {
@@ -328,4 +439,128 @@ func estimatePayloadBytes(payload interface{}) int {
 		return 0
 	}
 	return len(raw)
+}
+
+func (c *Client) cleanupConnectionTracking() {
+	if c == nil {
+		return
+	}
+	c.disconnectOnce.Do(func() {
+		if c.onDisconnect != nil {
+			c.onDisconnect()
+		}
+	})
+}
+
+func (c *Client) closeSendChannel() {
+	if c == nil {
+		return
+	}
+	c.sendCloseOnce.Do(func() {
+		close(c.Send)
+	})
+}
+
+func (c *Client) subscribeToRoom(roomID string) {
+	if c == nil || roomID == "" {
+		return
+	}
+	c.subscriptionsMu.Lock()
+	c.subscribedRooms[roomID] = struct{}{}
+	c.subscriptionsMu.Unlock()
+}
+
+func (c *Client) unsubscribeFromRoom(roomID string) {
+	if c == nil || roomID == "" {
+		return
+	}
+	c.subscriptionsMu.Lock()
+	delete(c.subscribedRooms, roomID)
+	c.subscriptionsMu.Unlock()
+}
+
+func (c *Client) isSubscribedToRoom(roomID string) bool {
+	if c == nil || roomID == "" {
+		return false
+	}
+	c.subscriptionsMu.RLock()
+	_, exists := c.subscribedRooms[roomID]
+	c.subscriptionsMu.RUnlock()
+	return exists
+}
+
+func reserveWSConnection(clientIP string) (func(), int, string) {
+	for {
+		currentGlobal := globalWSConnections.Load()
+		if currentGlobal >= maxGlobalWSConnections {
+			return nil, http.StatusServiceUnavailable, "WebSocket capacity reached"
+		}
+		if globalWSConnections.CompareAndSwap(currentGlobal, currentGlobal+1) {
+			break
+		}
+	}
+
+	ipCounter := getOrCreateIPConnectionCounter(clientIP)
+	for {
+		currentIP := ipCounter.Load()
+		if currentIP >= maxWSConnectionsPerIP {
+			decrementGlobalWSConnections()
+			return nil, http.StatusTooManyRequests, "Too many active WebSocket connections for this IP"
+		}
+		if ipCounter.CompareAndSwap(currentIP, currentIP+1) {
+			return func() {
+				releaseWSConnection(clientIP)
+			}, 0, ""
+		}
+	}
+}
+
+func getOrCreateIPConnectionCounter(clientIP string) *atomic.Int32 {
+	normalizedIP := strings.TrimSpace(clientIP)
+	if normalizedIP == "" {
+		normalizedIP = "unknown"
+	}
+	counter, _ := activeConnectionsPerIP.LoadOrStore(normalizedIP, &atomic.Int32{})
+	return counter.(*atomic.Int32)
+}
+
+func releaseWSConnection(clientIP string) {
+	decrementGlobalWSConnections()
+
+	normalizedIP := strings.TrimSpace(clientIP)
+	if normalizedIP == "" {
+		normalizedIP = "unknown"
+	}
+
+	entry, ok := activeConnectionsPerIP.Load(normalizedIP)
+	if !ok {
+		return
+	}
+
+	counter := entry.(*atomic.Int32)
+	for {
+		current := counter.Load()
+		if current <= 0 {
+			activeConnectionsPerIP.Delete(normalizedIP)
+			return
+		}
+		if counter.CompareAndSwap(current, current-1) {
+			if current-1 <= 0 {
+				activeConnectionsPerIP.Delete(normalizedIP)
+			}
+			return
+		}
+	}
+}
+
+func decrementGlobalWSConnections() {
+	for {
+		current := globalWSConnections.Load()
+		if current <= 0 {
+			return
+		}
+		if globalWSConnections.CompareAndSwap(current, current-1) {
+			return
+		}
+	}
 }

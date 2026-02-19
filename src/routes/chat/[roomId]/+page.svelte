@@ -8,9 +8,9 @@
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
 	import { currentUser } from '$lib/store';
 	import { getOrInitIdentity } from '$lib/utils/identity';
+	import { globalMessages, initGlobalSocket, sendSocketPayload, subscribeToRooms } from '$lib/ws';
 	import { onDestroy, onMount } from 'svelte';
 
-	type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
 	type ThreadStatus = 'joined' | 'discoverable';
 
 	type ChatMessage = {
@@ -71,18 +71,13 @@
 
 	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
-	const WS_BASE = (import.meta.env.VITE_WS_BASE as string | undefined) ?? 'ws://localhost:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
 	const ROOM_MAX_LIFESPAN_MS = 15 * 24 * 60 * 60 * 1000;
 
-	let ws: WebSocket | null = null;
-	let wsRoomId = '';
-	let wsState: ConnectionState = 'idle';
-	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomMembershipSynced: Record<string, boolean> = {};
 	let roomMembershipSyncing: Record<string, boolean> = {};
-	let reconnectAttempts = 0;
+	let unsubscribeGlobalMessages: (() => void) | null = null;
 
 	let toastMessage = '';
 	let showToast = false;
@@ -108,7 +103,6 @@
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
 	let onlineByRoom: Record<string, OnlineMember[]> = {};
 	let roomMetaById: Record<string, RoomMeta> = {};
-	let pendingOutgoingByRoom: Record<string, ChatMessage[]> = {};
 	let isExtendingRoom = false;
 	let expandedMessages: Record<string, boolean> = {};
 	let identityReady = !browser;
@@ -148,8 +142,15 @@
 	$: if (browser && identityReady && roomId && isMember) {
 		void syncRoomMembership(roomId);
 	}
-	$: if (browser && identityReady && roomId && roomId !== wsRoomId) {
-		connectToRoom(roomId);
+	$: if (browser && identityReady) {
+		initGlobalSocket(currentUserId, currentUsername);
+	}
+	$: if (browser && identityReady) {
+		const joinedRoomIDs = myRooms.map((thread) => thread.id);
+		if (roomId && isMember && !joinedRoomIDs.includes(roomId)) {
+			joinedRoomIDs.push(roomId);
+		}
+		subscribeToRooms(joinedRoomIDs);
 	}
 	$: if (browser && roomId && roomId !== lastToastRoom) {
 		showJoinToast(roomId);
@@ -165,9 +166,11 @@
 	}
 
 	onDestroy(() => {
-		clientLog('component-destroy', { roomId, wsRoomId, wsState });
-		closeSocket();
-		clearReconnectTimer();
+		clientLog('component-destroy', { roomId });
+		if (unsubscribeGlobalMessages) {
+			unsubscribeGlobalMessages();
+			unsubscribeGlobalMessages = null;
+		}
 		clearSidebarRefreshTimer();
 		clearToastTimer();
 	});
@@ -177,6 +180,12 @@
 		if (!browser) {
 			return;
 		}
+		unsubscribeGlobalMessages = globalMessages.subscribe((event) => {
+			if (!event) {
+				return;
+			}
+			handleGlobalPayload(event.payload);
+		});
 		const onDocumentPointerDown = (event: PointerEvent) => {
 			const target = event.target;
 			if (!(target instanceof Node)) {
@@ -190,6 +199,10 @@
 		window.addEventListener('pointerdown', onDocumentPointerDown);
 		window.addEventListener('resize', updateViewportMode);
 		return () => {
+			if (unsubscribeGlobalMessages) {
+				unsubscribeGlobalMessages();
+				unsubscribeGlobalMessages = null;
+			}
 			window.removeEventListener('pointerdown', onDocumentPointerDown);
 			window.removeEventListener('resize', updateViewportMode);
 		};
@@ -230,13 +243,6 @@
 			return;
 		}
 		console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
-	}
-
-	function clearReconnectTimer() {
-		if (reconnectTimer) {
-			clearTimeout(reconnectTimer);
-			reconnectTimer = null;
-		}
 	}
 
 	function clearSidebarRefreshTimer() {
@@ -644,129 +650,49 @@
 		}
 	}
 
-	function connectToRoom(targetRoomId: string) {
-		const normalizedRoomId = toRoomSlug(targetRoomId);
-		if (!browser || !normalizedRoomId) {
-			return;
-		}
+	type SocketEnvelope = {
+		type: string;
+		payload: unknown;
+		roomId?: unknown;
+		room_id?: unknown;
+	};
 
-		clearReconnectTimer();
-		closeSocket();
-		wsState = 'connecting';
-		wsRoomId = normalizedRoomId;
-
-		try {
-			const wsURL = new URL(`${WS_BASE}/ws/${encodeURIComponent(normalizedRoomId)}`);
-			wsURL.searchParams.set('userId', normalizeIdentifier(currentUserId) || 'guest');
-			wsURL.searchParams.set('username', currentUsername);
-			const nextSocket = new WebSocket(wsURL.toString());
-			ws = nextSocket;
-
-			nextSocket.onopen = () => {
-				if (ws !== nextSocket) {
-					return;
-				}
-				wsState = 'open';
-				reconnectAttempts = 0;
-				markRoomAsRead(normalizedRoomId);
-				flushPendingOutgoing(normalizedRoomId);
-			};
-
-			nextSocket.onmessage = (event: MessageEvent) => {
-				if (ws !== nextSocket || typeof event.data !== 'string') {
-					return;
-				}
-				handleSocketPayload(event.data, normalizedRoomId);
-			};
-
-			nextSocket.onerror = () => {
-				if (ws !== nextSocket) {
-					return;
-				}
-				wsState = 'error';
-			};
-
-			nextSocket.onclose = () => {
-				if (ws !== nextSocket) {
-					return;
-				}
-				wsState = 'closed';
-				if (roomId === normalizedRoomId) {
-					scheduleReconnect(normalizedRoomId);
-				}
-			};
-		} catch (error) {
-			clientLog('socket-connection-failed', {
-				error: error instanceof Error ? error.message : String(error)
-			});
-			wsState = 'error';
-			scheduleReconnect(targetRoomId);
-		}
-	}
-
-	function scheduleReconnect(targetRoomId: string) {
-		clearReconnectTimer();
-		reconnectAttempts = Math.min(reconnectAttempts + 1, 5);
-		const delay = Math.min(1000 * 2 ** (reconnectAttempts - 1), 9000);
-		reconnectTimer = setTimeout(() => {
-			if (roomId === targetRoomId) {
-				connectToRoom(targetRoomId);
-			}
-		}, delay);
-	}
-
-	function closeSocket() {
-		if (!ws) {
-			wsRoomId = '';
-			wsState = 'idle';
-			return;
-		}
-
-		const activeSocket = ws;
-		ws = null;
-		activeSocket.onopen = null;
-		activeSocket.onmessage = null;
-		activeSocket.onclose = null;
-		activeSocket.onerror = null;
-		if (
-			activeSocket.readyState === WebSocket.OPEN ||
-			activeSocket.readyState === WebSocket.CONNECTING
-		) {
-			activeSocket.close();
-		}
-		wsRoomId = '';
-		wsState = 'idle';
-	}
-
-	function handleSocketPayload(raw: string, targetRoomId: string) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(raw);
-		} catch {
-			return;
-		}
-
-		if (Array.isArray(parsed)) {
-			const history = parsed
-				.map((entry) => parseIncomingMessage(entry, targetRoomId))
+	function handleGlobalPayload(payload: unknown) {
+		if (Array.isArray(payload)) {
+			const parsedMessages = payload
+				.map((entry) => parseIncomingMessage(entry, ''))
 				.filter((entry): entry is ChatMessage => Boolean(entry));
-			mergeMessages(targetRoomId, history);
-			markRoomAsRead(targetRoomId);
+			if (parsedMessages.length === 0) {
+				return;
+			}
+
+			const byRoom = new Map<string, ChatMessage[]>();
+			for (const message of parsedMessages) {
+				const roomBucket = byRoom.get(message.roomId) ?? [];
+				roomBucket.push(message);
+				byRoom.set(message.roomId, roomBucket);
+			}
+			for (const [targetRoomId, history] of byRoom.entries()) {
+				mergeMessages(targetRoomId, history);
+				if (targetRoomId === roomId) {
+					markRoomAsRead(targetRoomId);
+				}
+			}
 			return;
 		}
 
-		if (isEnvelope(parsed)) {
-			handleEnvelope(parsed, targetRoomId);
+		if (isEnvelope(payload)) {
+			handleEnvelope(payload);
 			return;
 		}
 
-		const single = parseIncomingMessage(parsed, targetRoomId);
+		const single = parseIncomingMessage(payload, '');
 		if (single) {
 			addIncomingMessage(single);
 		}
 	}
 
-	function isEnvelope(value: unknown): value is { type: string; payload: unknown } {
+	function isEnvelope(value: unknown): value is SocketEnvelope {
 		return Boolean(
 			value &&
 			typeof value === 'object' &&
@@ -776,15 +702,40 @@
 		);
 	}
 
-	function handleEnvelope(envelope: { type: string; payload: unknown }, targetRoomId: string) {
+	function resolveEnvelopeRoomID(envelope: SocketEnvelope) {
+		const directRoomID = toRoomSlug(toStringValue(envelope.roomId ?? envelope.room_id));
+		if (directRoomID) {
+			return directRoomID;
+		}
+		if (envelope.payload && typeof envelope.payload === 'object') {
+			const payload = envelope.payload as Record<string, unknown>;
+			return toRoomSlug(toStringValue(payload.roomId ?? payload.room_id));
+		}
+		return '';
+	}
+
+	function handleEnvelope(envelope: SocketEnvelope) {
+		const targetRoomId = resolveEnvelopeRoomID(envelope);
 		const kind = envelope.type;
 		if (kind === 'history' || kind === 'recent_messages' || kind === 'initial_messages') {
 			if (Array.isArray(envelope.payload)) {
 				const history = envelope.payload
 					.map((entry) => parseIncomingMessage(entry, targetRoomId))
 					.filter((entry): entry is ChatMessage => Boolean(entry));
-				mergeMessages(targetRoomId, history);
-				markRoomAsRead(targetRoomId);
+				if (history.length > 0) {
+					const grouped = new Map<string, ChatMessage[]>();
+					for (const message of history) {
+						const roomBucket = grouped.get(message.roomId) ?? [];
+						roomBucket.push(message);
+						grouped.set(message.roomId, roomBucket);
+					}
+					for (const [roomID, messages] of grouped.entries()) {
+						mergeMessages(roomID, messages);
+						if (roomID === roomId) {
+							markRoomAsRead(roomID);
+						}
+					}
+				}
 			}
 			return;
 		}
@@ -797,7 +748,7 @@
 			return;
 		}
 
-		if (kind === 'online_list' && Array.isArray(envelope.payload)) {
+		if (kind === 'online_list' && targetRoomId && Array.isArray(envelope.payload)) {
 			const members = envelope.payload
 				.map((entry, index) => parseMember(entry, index))
 				.filter((entry): entry is OnlineMember => Boolean(entry));
@@ -808,7 +759,7 @@
 			return;
 		}
 
-		if (kind === 'user_joined') {
+		if (kind === 'user_joined' && targetRoomId) {
 			const joined = parseMember(envelope.payload, Date.now());
 			if (joined) {
 				upsertOnlineMember(targetRoomId, joined);
@@ -816,7 +767,7 @@
 			return;
 		}
 
-		if (kind === 'user_left') {
+		if (kind === 'user_left' && targetRoomId) {
 			const leaving = parseMember(envelope.payload, Date.now());
 			if (leaving) {
 				removeOnlineMember(targetRoomId, leaving.id);
@@ -994,28 +945,6 @@
 		return [...byId.values()];
 	}
 
-	function queueOutgoing(message: ChatMessage) {
-		const currentQueue = pendingOutgoingByRoom[message.roomId] ?? [];
-		pendingOutgoingByRoom = {
-			...pendingOutgoingByRoom,
-			[message.roomId]: [...currentQueue, message]
-		};
-	}
-
-	function flushPendingOutgoing(targetRoomId: string) {
-		const roomQueue = pendingOutgoingByRoom[targetRoomId] ?? [];
-		if (roomQueue.length === 0 || !ws || ws.readyState !== WebSocket.OPEN) {
-			return;
-		}
-		for (const queued of roomQueue) {
-			ws.send(JSON.stringify(toWireMessage(queued)));
-		}
-		pendingOutgoingByRoom = {
-			...pendingOutgoingByRoom,
-			[targetRoomId]: []
-		};
-	}
-
 	async function sendMessage(payload?: ComposerMediaPayload) {
 		if (!roomId || !isMember) {
 			showErrorToast('Join room before sending messages');
@@ -1062,11 +991,7 @@
 		}
 
 		upsertMessage(roomId, outgoing, false);
-		if (ws && ws.readyState === WebSocket.OPEN) {
-			ws.send(JSON.stringify(toWireMessage(outgoing)));
-		} else {
-			queueOutgoing(outgoing);
-		}
+		sendSocketPayload(toWireMessage(outgoing));
 		markRoomAsRead(roomId);
 		draftMessage = '';
 		attachedFile = null;
@@ -1111,6 +1036,69 @@
 	function toggleLeftMenu() {
 		showLeftMenu = !showLeftMenu;
 		showRoomMenu = false;
+	}
+
+	async function renameRoom(targetRoomId: string = roomId) {
+		const normalizedRoomID = toRoomSlug(targetRoomId);
+		if (!normalizedRoomID) {
+			return;
+		}
+		showLeftMenu = false;
+		showRoomMenu = false;
+
+		const existing = roomThreads.find((thread) => thread.id === normalizedRoomID);
+		const currentName = existing?.name || formatRoomName(normalizedRoomID);
+		const requested = window.prompt('Rename room', currentName);
+		if (requested === null) {
+			return;
+		}
+
+		const normalizedName = toRoomSlug(requested);
+		if (!normalizedName) {
+			showErrorToast('Room name cannot be empty');
+			return;
+		}
+		if (normalizedName === currentName) {
+			return;
+		}
+
+		try {
+			const res = await fetch(`${API_BASE}/api/rooms/rename`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					roomId: normalizedRoomID,
+					roomName: normalizedName
+				})
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to rename room');
+			}
+
+			const savedName = toStringValue(data.roomName) || normalizedName;
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === normalizedRoomID ? { ...thread, name: savedName } : thread
+				)
+			);
+
+			if (normalizedRoomID === roomId) {
+				const params = new URLSearchParams($page.url.searchParams.toString());
+				params.set('name', savedName);
+				await goto(`/chat/${encodeURIComponent(normalizedRoomID)}?${params.toString()}`, {
+					replaceState: true,
+					noScroll: true,
+					keepFocus: true
+				});
+			}
+
+			showLeftMenu = false;
+			showRoomMenu = false;
+			showErrorToast('Room renamed');
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to rename room');
+		}
 	}
 
 	async function createRoomFromMenu() {
@@ -1223,7 +1211,7 @@
 				showErrorToast(data.error || 'Room has reached its 15-day limit');
 				return;
 			}
-			showErrorToast(data.message || 'Room extended for 6 hours');
+			showErrorToast(data.message || 'Room extended for 24 hours');
 		} catch {
 			showErrorToast('Failed to extend room');
 		} finally {
@@ -1291,11 +1279,39 @@
 		if (!message) {
 			return;
 		}
-		await createBreakRoom(message);
-		isSelectionMode = false;
+		const created = await createBreakRoom(message);
+		if (created) {
+			isSelectionMode = false;
+		}
+	}
+
+	function buildBreakPrefixSuggestion(message: ChatMessage) {
+		const textBased = toRoomSlug(message.content);
+		if (textBased) {
+			return textBased.slice(0, 24);
+		}
+		const fileBased = toRoomSlug(message.fileName || '');
+		if (fileBased) {
+			return fileBased.slice(0, 24);
+		}
+		const senderBased = toRoomSlug(message.senderName);
+		if (senderBased) {
+			return `${senderBased}_topic`.slice(0, 24);
+		}
+		return 'topic';
 	}
 
 	async function createBreakRoom(message: ChatMessage) {
+		const suggestedPrefix = buildBreakPrefixSuggestion(message);
+		const requested = window.prompt(
+			'Child room prefix (final format: prefix_parent5_n)',
+			suggestedPrefix
+		);
+		if (requested === null) {
+			return false;
+		}
+		const normalizedPrefix = toRoomSlug(requested) || suggestedPrefix;
+
 		try {
 			const res = await fetch(`${API_BASE}/api/rooms/break`, {
 				method: 'POST',
@@ -1303,7 +1319,7 @@
 				body: JSON.stringify({
 					parentRoomId: roomId,
 					originMessageId: message.id,
-					roomName: message.content,
+					roomName: normalizedPrefix,
 					userId: normalizeIdentifier(currentUserId),
 					username: currentUsername
 				})
@@ -1340,8 +1356,10 @@
 			await goto(
 				`/chat/${encodeURIComponent(breakRoomId)}?name=${encodeURIComponent(breakRoomName)}&member=1`
 			);
+			return true;
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to create break room');
+			return false;
 		}
 	}
 
@@ -1634,6 +1652,7 @@
 		<ChatSidebar
 			myRooms={filteredMyRooms}
 			discoverableRooms={filteredDiscoverableRooms}
+			accessibleParentRoomIds={roomThreads.map((thread) => thread.id)}
 			activeRoomId={roomId}
 			{showLeftMenu}
 			bind:chatListSearch
@@ -1641,6 +1660,7 @@
 			on:jumpOrigin={onJumpToBreakOrigin}
 			on:toggleMenu={toggleLeftMenu}
 			on:createRoom={createRoomFromMenu}
+			on:renameRoom={(event) => void renameRoom(event.detail.roomId)}
 		/>
 	</div>
 
@@ -1686,6 +1706,9 @@
 					<div class="room-menu">
 						<button type="button" on:click|stopPropagation={toggleRoomSearch}>
 							{showRoomSearch ? 'Hide search' : 'Search messages'}
+						</button>
+						<button type="button" on:click|stopPropagation={() => void renameRoom(roomId)}>
+							Rename room
 						</button>
 						<button type="button" on:click|stopPropagation={toggleSelectionMode}>
 							{isSelectionMode ? 'Cancel Break Mode' : 'Start Break / New Topic'}
@@ -1783,9 +1806,9 @@
 					on:click={requestRoomExtension}
 					disabled={isExtendingRoom}
 				>
-					{isExtendingRoom ? 'Extending...' : 'Extend Room (6h)'}
+					{isExtendingRoom ? 'Extending...' : 'Extend Room (24h)'}
 				</button>
-				<p>Manually extends this room and its messages for 6 hours.</p>
+				<p>Manually extends this room and its messages for 24 hours.</p>
 			</div>
 
 			<h4 class="members-title">Members</h4>
@@ -1812,8 +1835,8 @@
 		min-height: 620px;
 		display: grid;
 		grid-template-columns: 330px minmax(0, 1fr) 280px;
-		border-top: 1px solid #d7dde6;
-		background: #e9edf3;
+		border-top: 1px solid #dcdce1;
+		background: #ececef;
 		overflow: hidden;
 	}
 
@@ -1828,13 +1851,13 @@
 		flex-direction: column;
 		min-width: 0;
 		overflow: hidden;
-		background: #f4f6f9;
+		background: #f5f5f6;
 	}
 
 	.chat-header {
 		position: relative;
-		background: #fbfcfe;
-		border-bottom: 1px solid #d8dfe8;
+		background: #fcfcfd;
+		border-bottom: 1px solid #e2e2e7;
 		padding: 0.8rem 1rem;
 		display: flex;
 		align-items: center;
@@ -1844,9 +1867,9 @@
 
 	.mobile-back-button {
 		display: none;
-		border: 1px solid #c0cad7;
-		background: #f7f9fc;
-		color: #2f3a4a;
+		border: 1px solid #cdced4;
+		background: #f8f8f9;
+		color: #35353d;
 		border-radius: 999px;
 		padding: 0.35rem 0.65rem;
 		font-size: 0.78rem;
@@ -1859,7 +1882,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.55rem;
-		color: #253041;
+		color: #2e2e36;
 		min-width: 0;
 		flex: 1;
 		border: none;
@@ -1871,7 +1894,7 @@
 	}
 
 	.room-title-button:focus-visible {
-		outline: 2px solid #94a3b8;
+		outline: 2px solid #8f8f98;
 		outline-offset: 4px;
 		border-radius: 8px;
 	}
@@ -1900,7 +1923,7 @@
 
 	.title-sub {
 		font-size: 0.76rem;
-		color: #5d687a;
+		color: #6d6d76;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1916,23 +1939,23 @@
 	}
 
 	.icon-button {
-		border: 1px solid #ccd5e2;
-		background: #f6f8fb;
+		border: 1px solid #d2d2d8;
+		background: #f7f7f8;
 		border-radius: 6px;
 		padding: 0.35rem 0.55rem;
 		font-size: 0.78rem;
 		cursor: pointer;
-		color: #2d3748;
+		color: #33333b;
 	}
 
 	.room-menu {
 		position: absolute;
 		top: calc(100% + 6px);
 		right: 0;
-		background: #fbfcfe;
-		border: 1px solid #d2dae6;
+		background: #fcfcfd;
+		border: 1px solid #dedee4;
 		border-radius: 8px;
-		box-shadow: 0 12px 24px rgba(15, 23, 42, 0.12);
+		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
 		overflow: hidden;
 		min-width: 170px;
 		z-index: 100;
@@ -1941,7 +1964,7 @@
 	.room-menu button {
 		width: 100%;
 		border: none;
-		background: #fbfcfe;
+		background: #fcfcfd;
 		padding: 0.55rem 0.75rem;
 		text-align: left;
 		font-size: 0.84rem;
@@ -1949,31 +1972,31 @@
 	}
 
 	.room-menu button:hover {
-		background: #eef2f7;
+		background: #f1f1f3;
 	}
 
 	.selection-banner {
 		padding: 0.45rem 0.9rem;
-		background: #eef2f7;
-		border-bottom: 1px solid #d6deea;
+		background: #f1f1f3;
+		border-bottom: 1px solid #dfdfe4;
 		font-size: 0.8rem;
-		color: #2e3847;
+		color: #3a3a42;
 	}
 
 	.chat-search-row {
 		padding: 0.65rem 0.9rem;
-		background: #fbfcfe;
-		border-bottom: 1px solid #dbe2ec;
+		background: #fcfcfd;
+		border-bottom: 1px solid #e3e3e8;
 	}
 
 	.chat-search-row input {
 		width: 100%;
-		border: 1px solid #cdd6e3;
+		border: 1px solid #d6d6dc;
 		border-radius: 8px;
 		padding: 0.55rem 0.7rem;
 		font-size: 0.9rem;
-		background: #f9fbfd;
-		color: #1f2937;
+		background: #fafafb;
+		color: #2a2a31;
 	}
 
 	.online-member {
@@ -2068,17 +2091,17 @@
 	.room-actions {
 		margin-bottom: 0.9rem;
 		padding: 0.75rem;
-		border: 1px solid #d7dfe9;
+		border: 1px solid #dddddf;
 		border-radius: 10px;
-		background: #f2f5fa;
+		background: #f4f4f5;
 	}
 
 	.room-details-card {
 		margin-bottom: 0.9rem;
 		padding: 0.75rem;
-		border: 1px solid #d7dfe9;
+		border: 1px solid #dddddf;
 		border-radius: 10px;
-		background: #f2f5fa;
+		background: #f4f4f5;
 	}
 
 	.room-details-card h4 {

@@ -23,6 +23,7 @@ const (
 	roomHistorySize   = 50
 	scyllaMessageTTL  = 21600
 	messageBreakMeta  = "message:break:"
+	roomKeyPrefix     = "room:"
 )
 
 type MessageService struct {
@@ -72,11 +73,12 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 		return fmt.Errorf("scylla persistence disabled after repeated panics")
 	}
 
+	ttlSeconds := s.resolveRoomTTLSeconds(context.Background(), msg.RoomID)
 	messagesTable := s.Scylla.Table("messages")
 	query := fmt.Sprintf(
 		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		messagesTable,
-		scyllaMessageTTL,
+		ttlSeconds,
 	)
 	if err := safeExecScyllaQuery(
 		s.Scylla.Session,
@@ -112,16 +114,35 @@ func (s *MessageService) CacheRecentMessage(ctx context.Context, msg models.Mess
 		return fmt.Errorf("marshal message: %w", err)
 	}
 
+	historyTTLSeconds := s.resolveRoomTTLSeconds(ctx, msg.RoomID)
+	historyTTL := time.Duration(historyTTLSeconds) * time.Second
 	historyKey := roomHistoryPrefix + msg.RoomID
 	pipe := s.Redis.Client.TxPipeline()
 	pipe.RPush(ctx, historyKey, payload)
 	pipe.LTrim(ctx, historyKey, -roomHistorySize, -1)
-	pipe.Expire(ctx, historyKey, roomHistoryTTL*time.Second)
+	pipe.Expire(ctx, historyKey, historyTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("cache recent message: %w", err)
 	}
 
 	return nil
+}
+
+func (s *MessageService) resolveRoomTTLSeconds(ctx context.Context, roomID string) int {
+	if s == nil || s.Redis == nil || s.Redis.Client == nil || roomID == "" {
+		return scyllaMessageTTL
+	}
+
+	ttl, err := s.Redis.Client.TTL(ctx, roomKeyPrefix+roomID).Result()
+	if err != nil || ttl <= 0 {
+		return scyllaMessageTTL
+	}
+
+	seconds := int(ttl / time.Second)
+	if seconds <= 0 {
+		return 1
+	}
+	return seconds
 }
 
 func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) ([]models.Message, error) {

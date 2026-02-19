@@ -268,8 +268,8 @@
 <style>
 	.composer {
 		position: relative;
-		border-top: 1px solid #d6deea;
-		background: linear-gradient(180deg, #f7f9fc 0%, #f1f4f9 100%);
+		border-top: 1px solid #dbdbe0;
+		background: linear-gradient(180deg, #f6f6f7 0%, #f1f1f2 100%);
 		padding: 0.54rem 0.6rem;
 		display: flex;
 		flex-direction: column;
@@ -278,8 +278,8 @@
 	}
 
 	.attachment-preview-panel {
-		border: 1px solid #d2dbe8;
-		background: #f8fafd;
+		border: 1px solid #dddddf;
+		background: #f8f8f9;
 		border-radius: 12px;
 		padding: 0.55rem;
 		display: flex;
@@ -301,7 +301,7 @@
 	}
 
 	.preview-remove {
-		border: 1px solid #c8d2df;
+		border: 1px solid #d2d2d6;
 		background: #ffffff;
 		border-radius: 6px;
 		width: 24px;
@@ -345,7 +345,7 @@
 		grid-template-columns: 2.2rem minmax(0, 1fr) 2.2rem;
 		gap: 0.42rem;
 		align-items: center;
-		border: 1px solid #cfd8e6;
+		border: 1px solid #d8d8dd;
 		background: #ffffff;
 		border-radius: 14px;
 		padding: 0.28rem 0.3rem;
@@ -365,13 +365,13 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		border: 1px solid #c7d2e1;
-		background: #f8fafd;
+		border: 1px solid #d2d2d8;
+		background: #f7f7f8;
 		border-radius: 10px;
 		width: 2.1rem;
 		height: 2.1rem;
 		cursor: pointer;
-		color: #243244;
+		color: #2f2f37;
 		padding: 0;
 	}
 
@@ -383,25 +383,25 @@
 
 	.attach-button:hover:not(:disabled),
 	.send-button:hover:not(:disabled) {
-		background: #eef3f9;
+		background: #ececef;
 	}
 
 	.send-button {
-		background: #263445;
-		border-color: #263445;
+		background: #2f3138;
+		border-color: #2f3138;
 		color: #ffffff;
 	}
 
 	.send-button:hover:not(:disabled) {
-		background: #1e2a38;
+		background: #25272d;
 	}
 
 	.attach-menu {
 		position: absolute;
 		left: 0;
 		bottom: calc(100% + 8px);
-		background: #fbfcfe;
-		border: 1px solid #d4dcea;
+		background: #fcfcfd;
+		border: 1px solid #dddde2;
 		border-radius: 10px;
 		box-shadow: 0 12px 24px rgba(15, 23, 42, 0.14);
 		padding: 0.3rem;
@@ -424,7 +424,7 @@
 	}
 
 	.attach-menu button:hover {
-		background: #eef2f7;
+		background: #f1f1f3;
 	}
 
 	textarea {
@@ -433,20 +433,20 @@
 		resize: none;
 		min-height: 2.1rem;
 		max-height: 110px;
-		border: 1px solid #d3dbe8;
+		border: 1px solid #d7d7dc;
 		border-radius: 10px;
 		padding: 0.4rem 0.56rem;
 		font-size: 0.9rem;
 		line-height: 1.32;
 		font-family: inherit;
-		background: #fbfcfe;
+		background: #fcfcfd;
 		color: #111111;
 		box-sizing: border-box;
 	}
 
 	textarea:focus {
 		outline: none;
-		border-color: #6b7c93;
+		border-color: #8a8a93;
 	}
 
 	@media (max-width: 700px) {

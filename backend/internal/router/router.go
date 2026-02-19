@@ -53,7 +53,7 @@ func New(
 		r.Get("/api/usage", usageTracker.HandleUsage)
 	}
 
-	r.Get("/ws/{roomId}", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
 		websocket.ServeWs(hub, w, r)
 	})
 
@@ -64,6 +64,7 @@ func New(
 		r.Post("/rooms", roomHandler.CreateRoom)
 		r.Post("/rooms/join", roomHandler.JoinRoom)
 		r.Post("/rooms/extend", roomHandler.ExtendRoom)
+		r.Post("/rooms/rename", roomHandler.RenameRoom)
 		r.Post("/rooms/break", roomHandler.CreateBreakRoom)
 		r.Get("/rooms/sidebar", roomHandler.GetSidebarRooms)
 		r.Post("/upload/presigned", uploadHandler.GenerateUploadURL)
