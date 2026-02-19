@@ -23,6 +23,7 @@ const (
 	roomMaxExtendAge   = 14 * 24 * time.Hour
 	roomHistoryTTL     = roomKeyTTL
 	roomHistorySize    = 50
+	roomCodeDigits     = 6
 	messageBreakPrefix = "message:break:"
 )
 
@@ -48,6 +49,7 @@ func NewRoomHandler(redisStore *database.RedisStore, scyllaStore *database.Scyll
 
 type JoinRoomRequest struct {
 	RoomName string `json:"roomName"`
+	RoomCode string `json:"roomCode"`
 	Username string `json:"username"`
 	UserID   string `json:"userId"`
 	Type     string `json:"type"`
@@ -57,6 +59,7 @@ type JoinRoomRequest struct {
 type JoinRoomResponse struct {
 	RoomID    string `json:"roomId"`
 	RoomName  string `json:"roomName"`
+	RoomCode  string `json:"roomCode,omitempty"`
 	UserID    string `json:"userId"`
 	Token     string `json:"token"`
 	CreatedAt int64  `json:"createdAt"`
@@ -109,20 +112,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
 		return
 	}
-	log.Printf("[room] join requested raw_room=%q username=%q type=%q mode=%q", req.RoomName, req.Username, req.Type, req.Mode)
-
-	if strings.TrimSpace(req.RoomName) == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Room name cannot be empty"})
-		return
-	}
-
-	baseSlug := slugifyRoomName(req.RoomName)
-	if baseSlug == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Room name must contain letters or numbers"})
-		return
-	}
+	log.Printf("[room] join requested raw_room=%q room_code=%q username=%q type=%q mode=%q", req.RoomName, req.RoomCode, req.Username, req.Type, req.Mode)
 
 	roomType := strings.TrimSpace(req.Type)
 	if roomType == "" {
@@ -139,6 +129,36 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
+	normalizedRoomCode := normalizeRoomCode(req.RoomCode)
+	baseSlug := slugifyRoomName(req.RoomName)
+	if mode == "create" {
+		if baseSlug == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Room name must contain letters or numbers"})
+			return
+		}
+	} else {
+		if baseSlug == "" && normalizedRoomCode == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Provide a room name or 6-digit room code"})
+			return
+		}
+		if normalizedRoomCode != "" {
+			resolvedRoomID, err := h.resolveRoomIDByCode(ctx, normalizedRoomCode)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
+				return
+			}
+			if resolvedRoomID == "" {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Room code not found"})
+				return
+			}
+			baseSlug = resolvedRoomID
+		}
+	}
+
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	createdAt := time.Now().Unix()
 
@@ -155,6 +175,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 
 	finalRoomID := baseSlug
 	finalRoomName := baseSlug
+	finalRoomCode := normalizedRoomCode
 	if mode == "join" {
 		exists, err := h.roomExists(ctx, baseSlug)
 		if err != nil {
@@ -233,6 +254,14 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	roomCode, err := h.ensureRoomCode(ctx, finalRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
+		return
+	}
+	finalRoomCode = roomCode
+
 	memberCount, err := h.registerRoomMembership(ctx, finalRoomID, userID)
 	if err != nil {
 		if errors.Is(err, errRoomFull) {
@@ -263,6 +292,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	response := JoinRoomResponse{
 		RoomID:    finalRoomID,
 		RoomName:  finalRoomName,
+		RoomCode:  finalRoomCode,
 		UserID:    userID,
 		Token:     token,
 		CreatedAt: finalCreatedAt,
@@ -565,6 +595,9 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to extend room"})
 		return
 	}
+	if roomCode, codeErr := h.ensureRoomCode(ctx, roomID); codeErr == nil && roomCode != "" {
+		_ = h.redis.Client.Set(ctx, roomCodeKey(roomCode), roomID, roomKeyTTL).Err()
+	}
 	_ = h.redis.Client.Expire(ctx, roomMembersKey(roomID), roomKeyTTL).Err()
 	_ = h.redis.Client.Expire(ctx, roomChildrenKey(roomID), roomKeyTTL).Err()
 	_ = h.redis.Client.Expire(ctx, roomHistoryKey(roomID), roomKeyTTL).Err()
@@ -661,6 +694,26 @@ func normalizeIdentifier(raw string) string {
 	return strings.Trim(builder.String(), "_")
 }
 
+func normalizeRoomCode(raw string) string {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	for _, ch := range normalized {
+		if ch >= '0' && ch <= '9' {
+			builder.WriteRune(ch)
+		}
+	}
+
+	code := builder.String()
+	if len(code) != roomCodeDigits {
+		return ""
+	}
+	return code
+}
+
 func (h *RoomHandler) tryCreateRoom(
 	ctx context.Context,
 	roomID,
@@ -726,6 +779,73 @@ func (h *RoomHandler) getRoomCreatedAt(ctx context.Context, roomID string) (int6
 	return parsed, nil
 }
 
+func (h *RoomHandler) resolveRoomIDByCode(ctx context.Context, roomCode string) (string, error) {
+	if roomCode == "" {
+		return "", nil
+	}
+
+	roomID, err := h.redis.Client.Get(ctx, roomCodeKey(roomCode)).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	normalizedRoomID := slugifyRoomName(roomID)
+	if normalizedRoomID == "" {
+		return "", nil
+	}
+
+	exists, err := h.roomExists(ctx, normalizedRoomID)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		_ = h.redis.Client.Del(ctx, roomCodeKey(roomCode)).Err()
+		return "", nil
+	}
+
+	return normalizedRoomID, nil
+}
+
+func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string, error) {
+	if roomID == "" {
+		return "", fmt.Errorf("room id is required")
+	}
+
+	existing, err := h.redis.Client.HGet(ctx, roomKey(roomID), "room_code").Result()
+	if err == nil {
+		normalized := normalizeRoomCode(existing)
+		if normalized != "" {
+			_ = h.redis.Client.Set(ctx, roomCodeKey(normalized), roomID, roomKeyTTL).Err()
+			return normalized, nil
+		}
+	} else if err != redis.Nil {
+		return "", err
+	}
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for attempts := 0; attempts < 40; attempts++ {
+		code := fmt.Sprintf("%0*d", roomCodeDigits, rng.Intn(1000000))
+		created, err := h.redis.Client.SetNX(ctx, roomCodeKey(code), roomID, roomKeyTTL).Result()
+		if err != nil {
+			return "", err
+		}
+		if !created {
+			continue
+		}
+
+		if err := h.redis.Client.HSet(ctx, roomKey(roomID), "room_code", code).Err(); err != nil {
+			_ = h.redis.Client.Del(ctx, roomCodeKey(code)).Err()
+			return "", err
+		}
+		return code, nil
+	}
+
+	return "", fmt.Errorf("failed to allocate room code")
+}
+
 func (h *RoomHandler) createRoom(
 	ctx context.Context,
 	roomID,
@@ -748,6 +868,10 @@ func (h *RoomHandler) createRoom(
 	}
 
 	if err := h.redis.Client.Expire(ctx, roomKey(roomID), roomKeyTTL).Err(); err != nil {
+		return err
+	}
+
+	if _, err := h.ensureRoomCode(ctx, roomID); err != nil {
 		return err
 	}
 
@@ -1017,6 +1141,10 @@ func messageBreakKey(messageID string) string {
 
 func roomHistoryKey(roomID string) string {
 	return "room:history:" + roomID
+}
+
+func roomCodeKey(roomCode string) string {
+	return "room:code:" + roomCode
 }
 
 func toString(value interface{}) string {

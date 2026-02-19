@@ -44,6 +44,8 @@
 	let mediaLoadFailedById: Record<string, boolean> = {};
 	let focusedMessageId = '';
 	let clearFocusOnPointerDown: ((event: PointerEvent) => void) | null = null;
+	let isNearBottom = true;
+	let showScrollToBottom = false;
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -56,8 +58,13 @@
 			return;
 		}
 		if (visibleMessages.length !== previousVisibleCount) {
+			const shouldStickToBottom = previousVisibleCount === 0 || isNearBottom;
 			previousVisibleCount = visibleMessages.length;
-			viewport.scrollTop = viewport.scrollHeight;
+			if (shouldStickToBottom) {
+				scrollToBottom('instant');
+			} else {
+				updateScrollState();
+			}
 		}
 		tryFocusMessage();
 	});
@@ -88,6 +95,7 @@
 			return;
 		}
 		target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		updateScrollState();
 		focusedMessageId = focusMessageId;
 		dispatch('focusHandled', { messageId: focusMessageId });
 		if (typeof window !== 'undefined') {
@@ -110,6 +118,27 @@
 			window.removeEventListener('pointerdown', clearFocusOnPointerDown, true);
 			clearFocusOnPointerDown = null;
 		}
+	}
+
+	function updateScrollState() {
+		if (!viewport) {
+			return;
+		}
+		const distanceFromBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
+		isNearBottom = distanceFromBottom < 96;
+		showScrollToBottom = distanceFromBottom > Math.max(viewport.clientHeight, 300);
+	}
+
+	function onMessagesScroll() {
+		updateScrollState();
+	}
+
+	function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+		if (!viewport) {
+			return;
+		}
+		viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+		updateScrollState();
 	}
 
 	function getVisibleMessages(input: ChatMessage[], query: string) {
@@ -294,7 +323,7 @@
 </script>
 
 <div class="messages-shell {isSelectionMode ? 'selection-mode' : ''}">
-	<div class="messages" bind:this={viewport}>
+	<div class="messages" bind:this={viewport} on:scroll={onMessagesScroll}>
 		{#if !isMember}
 			<div class="readonly-banner">Read-only preview. Join this room to post messages.</div>
 		{/if}
@@ -453,6 +482,17 @@
 			</article>
 		{/each}
 	</div>
+	{#if showScrollToBottom}
+		<button
+			type="button"
+			class="scroll-bottom-button"
+			on:click={() => scrollToBottom('smooth')}
+			aria-label="Scroll to latest message"
+			title="Scroll to latest"
+		>
+			<IconSet name="chevron-down" size={20} />
+		</button>
+	{/if}
 
 	{#if !isMember}
 		<div class="join-footer">
@@ -470,6 +510,7 @@
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
+		position: relative;
 	}
 
 	.messages {
@@ -512,6 +553,28 @@
 		padding: 0.55rem 0.9rem;
 		font-weight: 600;
 		cursor: pointer;
+	}
+
+	.scroll-bottom-button {
+		position: absolute;
+		right: 1rem;
+		bottom: 1rem;
+		width: 2.4rem;
+		height: 2.4rem;
+		border: 1px solid #ced6e3;
+		border-radius: 999px;
+		background: rgba(248, 250, 253, 0.95);
+		color: #1f2937;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		box-shadow: 0 8px 18px rgba(15, 23, 42, 0.16);
+		z-index: 3;
+	}
+
+	.scroll-bottom-button:hover {
+		background: #f1f5f9;
 	}
 
 	.empty-thread {
@@ -803,6 +866,11 @@
 
 		.pdf-preview {
 			height: 220px;
+		}
+
+		.scroll-bottom-button {
+			right: 0.8rem;
+			bottom: 0.8rem;
 		}
 	}
 </style>

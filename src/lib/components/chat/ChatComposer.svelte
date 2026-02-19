@@ -6,7 +6,7 @@
 		uploadToR2,
 		type MediaMessageType
 	} from '$lib/utils/media';
-	import { createEventDispatcher, onDestroy } from 'svelte';
+	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;
@@ -19,6 +19,7 @@
 	let attachedMessageType: MediaMessageType | null = null;
 	let attachedPickerType: 'media' | 'file' = 'file';
 	let attachmentPreviewURL = '';
+	let attachWrapEl: HTMLDivElement | null = null;
 
 	const dispatch = createEventDispatcher<{
 		send: { type: MediaMessageType; content: string; fileName?: string } | undefined;
@@ -28,6 +29,26 @@
 
 	onDestroy(() => {
 		clearAttachmentPreview();
+	});
+
+	onMount(() => {
+		const onDocumentPointerDown = (event: PointerEvent) => {
+			if (!showAttachMenu) {
+				return;
+			}
+			const target = event.target;
+			if (!(target instanceof Node)) {
+				return;
+			}
+			if (attachWrapEl && !attachWrapEl.contains(target)) {
+				showAttachMenu = false;
+			}
+		};
+
+		window.addEventListener('pointerdown', onDocumentPointerDown);
+		return () => {
+			window.removeEventListener('pointerdown', onDocumentPointerDown);
+		};
 	});
 
 	function toggleAttachMenu() {
@@ -199,20 +220,26 @@
 			on:change={(event) => void onFilePicked(event, 'file')}
 		/>
 
-		<div class="attach-wrap">
-			<button type="button" class="attach-button" on:click={toggleAttachMenu} disabled={isProcessingAttachment}>
+		<div class="attach-wrap" bind:this={attachWrapEl}>
+			<button
+				type="button"
+				class="attach-button"
+				on:click={toggleAttachMenu}
+				disabled={isProcessingAttachment}
+				aria-label="Attach"
+				title="Attach"
+			>
 				<IconSet name="paperclip" size={14} />
-				<span>Attach</span>
 			</button>
 			{#if showAttachMenu}
 				<div class="attach-menu">
 					<button type="button" on:click={() => chooseAttachmentType('media')}>
 						<IconSet name="image" size={14} />
-						<span>📷 Media</span>
+						<span>Media</span>
 					</button>
 					<button type="button" on:click={() => chooseAttachmentType('file')}>
 						<IconSet name="file" size={14} />
-						<span>📎 File</span>
+						<span>File</span>
 					</button>
 				</div>
 			{/if}
@@ -225,28 +252,35 @@
 			on:keydown={onComposerKeyDown}
 			disabled={isProcessingAttachment}
 		></textarea>
-		<button type="button" class="send-button" on:click={onSend} disabled={isProcessingAttachment}>
-			{attachedFile ? 'Send Attachment' : 'Send'}
-		</button>
-	</div>
-</footer>
+			<button
+				type="button"
+				class="send-button"
+				on:click={onSend}
+				disabled={isProcessingAttachment}
+				aria-label={attachedFile ? 'Send attachment' : 'Send message'}
+				title={attachedFile ? 'Send attachment' : 'Send message'}
+			>
+				<IconSet name="send" size={15} />
+			</button>
+		</div>
+	</footer>
 
 <style>
 	.composer {
 		position: relative;
-		border-top: 1px solid #dcdcdc;
-		background: #ffffff;
-		padding: 0.75rem;
+		border-top: 1px solid #d6deea;
+		background: linear-gradient(180deg, #f7f9fc 0%, #f1f4f9 100%);
+		padding: 0.54rem 0.6rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 0.4rem;
 		flex-shrink: 0;
 	}
 
 	.attachment-preview-panel {
-		border: 1px solid #d8d8d8;
-		background: #f7f7f7;
-		border-radius: 10px;
+		border: 1px solid #d2dbe8;
+		background: #f8fafd;
+		border-radius: 12px;
 		padding: 0.55rem;
 		display: flex;
 		flex-direction: column;
@@ -267,7 +301,7 @@
 	}
 
 	.preview-remove {
-		border: 1px solid #c9c9c9;
+		border: 1px solid #c8d2df;
 		background: #ffffff;
 		border-radius: 6px;
 		width: 24px;
@@ -308,9 +342,14 @@
 
 	.composer-row {
 		display: grid;
-		grid-template-columns: auto 1fr auto;
-		gap: 0.55rem;
-		align-items: end;
+		grid-template-columns: 2.2rem minmax(0, 1fr) 2.2rem;
+		gap: 0.42rem;
+		align-items: center;
+		border: 1px solid #cfd8e6;
+		background: #ffffff;
+		border-radius: 14px;
+		padding: 0.28rem 0.3rem;
+		box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
 	}
 
 	.hidden-file-input {
@@ -325,15 +364,15 @@
 	.send-button {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.35rem;
-		border: 1px solid #c9c9c9;
-		background: #ffffff;
-		border-radius: 8px;
-		padding: 0.52rem 0.72rem;
-		font-size: 0.85rem;
+		justify-content: center;
+		border: 1px solid #c7d2e1;
+		background: #f8fafd;
+		border-radius: 10px;
+		width: 2.1rem;
+		height: 2.1rem;
 		cursor: pointer;
-		white-space: nowrap;
-		color: #111111;
+		color: #243244;
+		padding: 0;
 	}
 
 	.attach-button:disabled,
@@ -342,20 +381,29 @@
 		cursor: not-allowed;
 	}
 
+	.attach-button:hover:not(:disabled),
+	.send-button:hover:not(:disabled) {
+		background: #eef3f9;
+	}
+
 	.send-button {
-		background: #111111;
-		border-color: #111111;
+		background: #263445;
+		border-color: #263445;
 		color: #ffffff;
+	}
+
+	.send-button:hover:not(:disabled) {
+		background: #1e2a38;
 	}
 
 	.attach-menu {
 		position: absolute;
 		left: 0;
 		bottom: calc(100% + 8px);
-		background: #ffffff;
-		border: 1px solid #d0d0d0;
+		background: #fbfcfe;
+		border: 1px solid #d4dcea;
 		border-radius: 10px;
-		box-shadow: 0 10px 22px rgba(0, 0, 0, 0.12);
+		box-shadow: 0 12px 24px rgba(15, 23, 42, 0.14);
 		padding: 0.3rem;
 		z-index: 120;
 		min-width: 132px;
@@ -376,36 +424,44 @@
 	}
 
 	.attach-menu button:hover {
-		background: #f0f0f0;
+		background: #eef2f7;
 	}
 
 	textarea {
 		width: 100%;
+		min-width: 0;
 		resize: none;
-		min-height: 40px;
+		min-height: 2.1rem;
 		max-height: 110px;
-		border: 1px solid #cfcfcf;
-		border-radius: 9px;
-		padding: 0.55rem 0.66rem;
-		font-size: 0.91rem;
+		border: 1px solid #d3dbe8;
+		border-radius: 10px;
+		padding: 0.4rem 0.56rem;
+		font-size: 0.9rem;
+		line-height: 1.32;
 		font-family: inherit;
-		background: #fbfbfb;
+		background: #fbfcfe;
 		color: #111111;
+		box-sizing: border-box;
+	}
+
+	textarea:focus {
+		outline: none;
+		border-color: #6b7c93;
 	}
 
 	@media (max-width: 700px) {
 		.composer {
-			padding: 0.62rem;
+			padding: 0.48rem;
 		}
 
 		.composer-row {
-			gap: 0.4rem;
+			gap: 0.34rem;
 		}
 
 		.attach-button,
 		.send-button {
-			padding: 0.48rem 0.58rem;
-			font-size: 0.78rem;
+			width: 2rem;
+			height: 2rem;
 		}
 
 		textarea {

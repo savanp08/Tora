@@ -101,6 +101,8 @@
 	let isMobileView = false;
 	let mobilePane: 'list' | 'chat' = 'chat';
 	let focusMessageId = '';
+	let focusConsumedForRoom = false;
+	let focusRoomTracker = '';
 
 	let roomThreads: ChatThread[] = [];
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
@@ -110,6 +112,7 @@
 	let isExtendingRoom = false;
 	let expandedMessages: Record<string, boolean> = {};
 	let identityReady = !browser;
+	let headerActionsEl: HTMLDivElement | null = null;
 
 	$: roomId = toRoomSlug(decodeURIComponent($page.params.roomId ?? ''));
 	$: roomNameFromURL = toRoomSlug(
@@ -151,8 +154,14 @@
 	$: if (browser && roomId && roomId !== lastToastRoom) {
 		showJoinToast(roomId);
 	}
-	$: if (focusMessageIdFromURL && focusMessageIdFromURL !== focusMessageId) {
+	$: if (roomId && focusRoomTracker !== roomId) {
+		focusRoomTracker = roomId;
+		focusConsumedForRoom = false;
+		focusMessageId = '';
+	}
+	$: if (!focusConsumedForRoom && focusMessageIdFromURL) {
 		focusMessageId = focusMessageIdFromURL;
+		focusConsumedForRoom = true;
 	}
 
 	onDestroy(() => {
@@ -168,9 +177,20 @@
 		if (!browser) {
 			return;
 		}
+		const onDocumentPointerDown = (event: PointerEvent) => {
+			const target = event.target;
+			if (!(target instanceof Node)) {
+				return;
+			}
+			if (showRoomMenu && headerActionsEl && !headerActionsEl.contains(target)) {
+				showRoomMenu = false;
+			}
+		};
 		updateViewportMode();
+		window.addEventListener('pointerdown', onDocumentPointerDown);
 		window.addEventListener('resize', updateViewportMode);
 		return () => {
+			window.removeEventListener('pointerdown', onDocumentPointerDown);
 			window.removeEventListener('resize', updateViewportMode);
 		};
 	});
@@ -535,8 +555,10 @@
 			const normalizedFocus = normalizeMessageID(focusMsgID);
 			if (normalizedFocus) {
 				focusMessageId = normalizedFocus;
+				focusConsumedForRoom = true;
 			} else {
 				focusMessageId = '';
+				focusConsumedForRoom = true;
 			}
 			return;
 		}
@@ -569,8 +591,10 @@
 		if (normalizedFocus) {
 			params.set('focusMsg', normalizedFocus);
 			focusMessageId = normalizedFocus;
+			focusConsumedForRoom = false;
 		} else {
 			focusMessageId = '';
+			focusConsumedForRoom = true;
 		}
 
 		const query = params.toString();
@@ -616,25 +640,8 @@
 	function onFocusHandled(event: CustomEvent<{ messageId: string }>) {
 		if (normalizeMessageID(event.detail.messageId) === focusMessageId) {
 			focusMessageId = '';
-			void clearFocusMessageQuery();
+			focusConsumedForRoom = true;
 		}
-	}
-
-	async function clearFocusMessageQuery() {
-		if (!browser || !roomId) {
-			return;
-		}
-		const params = new URLSearchParams($page.url.searchParams);
-		if (!params.has('focusMsg')) {
-			return;
-		}
-		params.delete('focusMsg');
-		const query = params.toString();
-		await goto(`/chat/${encodeURIComponent(roomId)}${query ? `?${query}` : ''}`, {
-			replaceState: true,
-			noScroll: true,
-			keepFocus: true
-		});
 	}
 
 	function connectToRoom(targetRoomId: string) {
@@ -1023,38 +1030,23 @@
 			return;
 		}
 
-		const outgoing: ChatMessage[] = [];
+		let outgoing: ChatMessage;
 		if (isMediaMessage) {
-			outgoing.push({
+			outgoing = {
 				id: createMessageId(roomId),
 				roomId,
 				senderId: currentUserId,
 				senderName: currentUsername,
-				content: mediaContent,
+				content: text,
 				type: mediaType || 'file',
 				mediaUrl: mediaContent,
 				mediaType: mediaType,
 				fileName: payload?.fileName?.trim() ?? '',
 				createdAt: Date.now(),
 				pending: true
-			});
-			if (text) {
-				outgoing.push({
-					id: createMessageId(roomId),
-					roomId,
-					senderId: currentUserId,
-					senderName: currentUsername,
-					content: text,
-					type: 'text',
-					mediaUrl: '',
-					mediaType: '',
-					fileName: '',
-					createdAt: Date.now() + 1,
-					pending: true
-				});
-			}
+			};
 		} else {
-			outgoing.push({
+			outgoing = {
 				id: createMessageId(roomId),
 				roomId,
 				senderId: currentUserId,
@@ -1066,16 +1058,14 @@
 				fileName: '',
 				createdAt: Date.now(),
 				pending: true
-			});
+			};
 		}
 
-		for (const message of outgoing) {
-			upsertMessage(roomId, message, false);
-			if (ws && ws.readyState === WebSocket.OPEN) {
-				ws.send(JSON.stringify(toWireMessage(message)));
-			} else {
-				queueOutgoing(message);
-			}
+		upsertMessage(roomId, outgoing, false);
+		if (ws && ws.readyState === WebSocket.OPEN) {
+			ws.send(JSON.stringify(toWireMessage(outgoing)));
+		} else {
+			queueOutgoing(outgoing);
 		}
 		markRoomAsRead(roomId);
 		draftMessage = '';
@@ -1266,17 +1256,7 @@
 		showRoomMenu = false;
 	}
 
-	function isInteractiveTarget(target: EventTarget | null) {
-		if (!(target instanceof HTMLElement)) {
-			return false;
-		}
-		return Boolean(target.closest('button, a, input, textarea, select, [role="button"]'));
-	}
-
-	function openRoomDetails(event?: MouseEvent | KeyboardEvent) {
-		if (event && isInteractiveTarget(event.target)) {
-			return;
-		}
+	function openRoomDetails() {
 		showRoomDetails = true;
 		showRoomMenu = false;
 	}
@@ -1440,13 +1420,6 @@
 			hour: '2-digit',
 			minute: '2-digit'
 		});
-	}
-
-	function onChatHeaderKeyDown(event: KeyboardEvent) {
-		if (event.key === 'Enter' || event.key === ' ') {
-			event.preventDefault();
-			openRoomDetails();
-		}
 	}
 
 	function parseTimestampParam(value: string | null) {
@@ -1672,13 +1645,7 @@
 	</div>
 
 	<section class="chat-window">
-		<header
-			class="chat-header"
-			role="button"
-			tabindex="0"
-			on:click={openRoomDetails}
-			on:keydown={onChatHeaderKeyDown}
-		>
+		<header class="chat-header">
 			{#if isMobileView}
 				<button
 					type="button"
@@ -1690,7 +1657,7 @@
 					Rooms
 				</button>
 			{/if}
-			<div class="room-title-button">
+			<button type="button" class="room-title-button" on:click={openRoomDetails}>
 				<span class="presence-dot"></span>
 				<span class="title-text">
 					<span class="title-main">{activeThread.name}</span>
@@ -1704,9 +1671,9 @@
 						{/if}
 					</span>
 				</span>
-			</div>
+			</button>
 
-			<div class="header-actions">
+			<div class="header-actions" bind:this={headerActionsEl}>
 				<button
 					type="button"
 					class="icon-button"
@@ -1778,13 +1745,20 @@
 </section>
 
 {#if showRoomDetails}
-	<button
-		type="button"
-		class="mobile-info-backdrop"
-		aria-label="Close room details"
-		on:click={closeRoomDetails}
-	></button>
-	<section class="mobile-info-panel room-details-panel" role="dialog" aria-modal="true">
+	{#if isMobileView}
+		<button
+			type="button"
+			class="mobile-info-backdrop"
+			aria-label="Close room details"
+			on:click={closeRoomDetails}
+		></button>
+	{/if}
+	<section
+		class="mobile-info-panel room-details-panel"
+		class:desktop-room-panel={!isMobileView}
+		role="dialog"
+		aria-modal="true"
+	>
 		<header>
 			<h3>{activeThread.name}</h3>
 			<button type="button" on:click={closeRoomDetails}>Close</button>
@@ -1866,12 +1840,6 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.85rem;
-		cursor: pointer;
-	}
-
-	.chat-header:focus-visible {
-		outline: 2px solid #111111;
-		outline-offset: -2px;
 	}
 
 	.mobile-back-button {
@@ -1893,6 +1861,19 @@
 		gap: 0.55rem;
 		color: #253041;
 		min-width: 0;
+		flex: 1;
+		border: none;
+		background: transparent;
+		padding: 0;
+		margin: 0;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.room-title-button:focus-visible {
+		outline: 2px solid #94a3b8;
+		outline-offset: 4px;
+		border-radius: 8px;
 	}
 
 	.presence-dot {
@@ -2044,6 +2025,17 @@
 		box-shadow: -14px 0 30px rgba(0, 0, 0, 0.24);
 		display: flex;
 		flex-direction: column;
+	}
+
+	.desktop-room-panel {
+		top: 84px;
+		right: 18px;
+		height: auto;
+		width: min(34vw, 360px);
+		max-height: calc(100vh - 104px);
+		border-radius: 14px;
+		border: 1px solid #d7dfeb;
+		box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
 	}
 
 	.mobile-info-panel header {

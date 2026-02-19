@@ -10,6 +10,7 @@
 	type JoinMode = 'create' | 'join';
 
 	let roomName = '';
+	let roomCode = '';
 	let guestUsername = '';
 	let selectedMode: JoinMode = 'create';
 
@@ -37,6 +38,15 @@
 		input?.select();
 	}
 
+	function onRoomCodeInput(event: Event) {
+		const input = event.currentTarget as HTMLInputElement | null;
+		if (!input) {
+			return;
+		}
+		const digitsOnly = input.value.replace(/\D+/g, '').slice(0, 6);
+		roomCode = digitsOnly;
+	}
+
 	function normalizeRoomNameInput(value: string) {
 		return value
 			.trim()
@@ -56,20 +66,34 @@
 			.replace(/^_+|_+$/g, '');
 	}
 
+	function normalizeRoomCodeInput(value: string) {
+		const digitsOnly = value.replace(/\D+/g, '');
+		if (digitsOnly.length !== 6) {
+			return '';
+		}
+		return digitsOnly;
+	}
+
 	function setMode(mode: JoinMode) {
 		selectedMode = mode;
 	}
 
 	async function handleRoomAction() {
 		const normalizedRoomName = normalizeRoomNameInput(roomName);
-		if (!normalizedRoomName) {
-			joinError = 'Room name cannot be empty';
+		const normalizedRoomCode = normalizeRoomCodeInput(roomCode);
+		if (selectedMode === 'create' && !normalizedRoomName) {
+			joinError = 'New rooms require a room name';
+			return;
+		}
+		if (selectedMode === 'join' && !normalizedRoomName && !normalizedRoomCode) {
+			joinError = 'Enter a room name or a 6-digit room code';
 			return;
 		}
 
 		isJoining = true;
 		joinError = '';
 		roomName = normalizedRoomName;
+		roomCode = normalizedRoomCode;
 
 		const identity = getOrInitIdentity();
 		const requestedUsername = normalizeUsernameInput(guestUsername);
@@ -80,6 +104,7 @@
 		try {
 			clientLog('api-rooms-join-request', {
 				roomName: normalizedRoomName,
+				roomCode: normalizedRoomCode,
 				userToJoin,
 				mode: selectedMode
 			});
@@ -88,6 +113,7 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					roomName: normalizedRoomName,
+					roomCode: normalizedRoomCode,
 					username: userToJoin,
 					userId: userIdentity.id,
 					type: 'ephemeral',
@@ -128,6 +154,8 @@
 
 		alert(`Welcome back, ${user.username}!`);
 	}
+
+	$: canSubmit = selectedMode === 'create' ? normalizeRoomNameInput(roomName) !== '' : normalizeRoomNameInput(roomName) !== '' || normalizeRoomCodeInput(roomCode) !== '';
 </script>
 
 <div class="container">
@@ -146,14 +174,38 @@
 			{/if}
 
 			<div class="join-form">
-				<input
-					type="text"
-					placeholder="Enter Room Name (e.g. 'LunchPlan')"
-					bind:value={roomName}
-					on:focus={onRoomNameFocus}
-				/>
+				<div class="room-inputs-row">
+					<div class="field-group room-name-group">
+						<label for="room-name-input">Room name</label>
+						<input
+							id="room-name-input"
+							type="text"
+							placeholder="e.g. lunch_plan"
+							bind:value={roomName}
+							on:focus={onRoomNameFocus}
+						/>
+						<small>Use words to create or join by name.</small>
+					</div>
+					<div class="or-divider" aria-hidden="true">or</div>
+					<div class="field-group room-code-group">
+						<label for="room-code-input">6-digit code</label>
+						<input
+							id="room-code-input"
+							type="text"
+							inputmode="numeric"
+							pattern="[0-9]{6}"
+							placeholder="e.g. 409215"
+							bind:value={roomCode}
+							on:input={onRoomCodeInput}
+						/>
+						<small>For quick join when someone shares a code.</small>
+					</div>
+				</div>
 
-				<input type="text" placeholder="Username (Optional)" bind:value={guestUsername} />
+				<div class="field-group">
+					<label for="username-input">Username (optional)</label>
+					<input id="username-input" type="text" placeholder="e.g. dizzy_panda" bind:value={guestUsername} />
+				</div>
 
 				<div class="action-row">
 					<button
@@ -176,7 +228,7 @@
 				<button
 					class="btn-submit-action"
 					on:click={handleRoomAction}
-					disabled={isJoining || !roomName}
+					disabled={isJoining || !canSubmit}
 				>
 					{isJoining ? 'Working...' : 'Join'}
 				</button>
@@ -256,7 +308,41 @@
 	.join-form {
 		display: flex;
 		flex-direction: column;
+		gap: 12px;
+	}
+
+	.room-inputs-row {
+		display: flex;
+		align-items: stretch;
 		gap: 10px;
+		flex-wrap: nowrap;
+	}
+
+	.field-group {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		flex: 1;
+		text-align: left;
+	}
+
+	.field-group label {
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: #475569;
+	}
+
+	.field-group small {
+		font-size: 0.75rem;
+		color: #64748b;
+	}
+
+	.or-divider {
+		align-self: center;
+		font-size: 0.85rem;
+		font-weight: 700;
+		color: #64748b;
+		padding: 0 2px;
 	}
 	.action-row {
 		display: grid;
@@ -268,6 +354,11 @@
 		border: 1px solid #ddd;
 		border-radius: 6px;
 		font-size: 1rem;
+	}
+
+	.room-code-group input {
+		letter-spacing: 0.14em;
+		font-variant-numeric: tabular-nums;
 	}
 	button {
 		padding: 12px;
@@ -326,5 +417,21 @@
 		font-size: 0.8rem;
 		color: #999;
 		margin-top: 20px;
+	}
+
+	@media (max-width: 760px) {
+		.room-inputs-row {
+			flex-wrap: wrap;
+		}
+
+		.room-name-group,
+		.room-code-group {
+			flex-basis: 100%;
+		}
+
+		.or-divider {
+			width: 100%;
+			text-align: center;
+		}
 	}
 </style>
