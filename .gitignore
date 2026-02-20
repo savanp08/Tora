@@ -18,6 +18,7 @@ tmp
 tmp/
 /.gocache
 .gocache
+.gocache/
 
 # Env
 .env
