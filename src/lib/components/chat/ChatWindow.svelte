@@ -882,6 +882,8 @@
 		--meta-gutter-size: clamp(2.6rem, 7vw, 3.1rem);
 		--action-icon-size: clamp(1.2rem, 2.8vw, 1.5rem);
 		--action-hit-size: clamp(1.76rem, 3.7vw, 2.2rem);
+		--copy-icon-size: calc(var(--action-icon-size) * 0.84);
+		--copy-hit-size: calc(var(--action-hit-size) * 0.84);
 		--counter-icon-size: clamp(1rem, 2.4vw, 1.25rem);
 		flex: 1;
 		min-height: 0;
@@ -1123,8 +1125,8 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		width: var(--action-hit-size);
-		height: var(--action-hit-size);
+		width: var(--copy-hit-size);
+		height: var(--copy-hit-size);
 		border: none;
 		border-radius: 999px;
 		background: rgba(19, 19, 24, 0.85);
@@ -1354,7 +1356,11 @@
 		text-align: center;
 	}
 
-	:global(.copy-icon),
+	:global(.copy-icon) {
+		width: var(--copy-icon-size);
+		height: var(--copy-icon-size);
+	}
+
 	:global(.reply-edge-icon) {
 		width: var(--action-icon-size);
 		height: var(--action-icon-size);
@@ -1544,28 +1550,6 @@
 
 		.gutter-stat {
 			padding: 0.1rem 0.14rem;
-		}
-
-		.reply-edge-btn {
-			position: static;
-			opacity: 0.72;
-			pointer-events: auto;
-		}
-
-		.message-action-btn {
-			opacity: 0.74;
-			pointer-events: auto;
-		}
-
-		.reply-edge-btn.mine,
-		.reply-edge-btn.theirs {
-			left: auto;
-			right: auto;
-		}
-
-		.time-meta .copy-btn,
-		.time-meta .copied-tip {
-			display: none;
 		}
 
 		.video-preview {

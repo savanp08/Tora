@@ -99,12 +99,24 @@ type ExtendRoomRequest struct {
 	RoomID string `json:"roomId"`
 }
 
+type LeaveRoomRequest struct {
+	RoomID string `json:"roomId"`
+	UserID string `json:"userId"`
+}
+
 type ExtendRoomResponse struct {
 	RoomID           string `json:"roomId"`
 	ExpiresInSeconds int64  `json:"expiresInSeconds"`
 	ExpiresAt        int64  `json:"expiresAt,omitempty"`
 	Message          string `json:"message"`
 	ServerNow        int64  `json:"serverNow,omitempty"`
+}
+
+type LeaveRoomResponse struct {
+	RoomID    string `json:"roomId"`
+	UserID    string `json:"userId"`
+	Message   string `json:"message"`
+	ServerNow int64  `json:"serverNow,omitempty"`
 }
 
 type RenameRoomRequest struct {
@@ -585,6 +597,20 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load user rooms"})
 		return
 	}
+	hiddenRoomIDsRaw, hiddenErr := h.redis.Client.SMembers(ctx, userHiddenRoomsKey(userID)).Result()
+	if hiddenErr != nil && hiddenErr != redis.Nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load hidden rooms"})
+		return
+	}
+	hiddenRoomSet := make(map[string]struct{}, len(hiddenRoomIDsRaw))
+	for _, hiddenRawID := range hiddenRoomIDsRaw {
+		hiddenRoomID := normalizeRoomID(hiddenRawID)
+		if hiddenRoomID == "" {
+			continue
+		}
+		hiddenRoomSet[hiddenRoomID] = struct{}{}
+	}
 
 	membershipCache := make(map[string]bool, len(joinedRoomIDsRaw))
 	joinedRoomIDs := make([]string, 0, len(joinedRoomIDsRaw))
@@ -592,6 +618,10 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 	for _, rawRoomID := range joinedRoomIDsRaw {
 		roomID := normalizeRoomID(rawRoomID)
 		if roomID == "" {
+			continue
+		}
+		if _, hidden := hiddenRoomSet[roomID]; hidden {
+			_ = h.redis.Client.SRem(ctx, userRoomsKey(userID), roomID).Err()
 			continue
 		}
 		if _, exists := joinedSet[roomID]; exists {
@@ -647,6 +677,9 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 			if childRoomID == "" {
 				continue
 			}
+			if _, hidden := hiddenRoomSet[childRoomID]; hidden {
+				continue
+			}
 
 			exists, existsErr := h.roomExists(ctx, childRoomID)
 			if existsErr != nil {
@@ -680,6 +713,74 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 				queue = append(queue, childRoomID)
 			}
 		}
+	}
+
+	// If the user left a parent room but still has visible descendants, include the hidden parent as
+	// a "left" node so tree/list navigation remains contextual without restoring room membership.
+	parentByRoomID := make(map[string]string, len(roomsMap))
+	for mappedRoomID, room := range roomsMap {
+		parentByRoomID[mappedRoomID] = normalizeRoomID(room.ParentRoomID)
+	}
+	parentLookupCache := make(map[string]string)
+	resolveParentRoomID := func(targetRoomID string) string {
+		targetRoomID = normalizeRoomID(targetRoomID)
+		if targetRoomID == "" {
+			return ""
+		}
+		if cachedParent, ok := parentByRoomID[targetRoomID]; ok {
+			return cachedParent
+		}
+		if cachedParent, ok := parentLookupCache[targetRoomID]; ok {
+			return cachedParent
+		}
+		rawParentID, parentErr := h.redis.Client.HGet(ctx, roomKey(targetRoomID), "parent_room_id").Result()
+		if parentErr != nil {
+			if parentErr != redis.Nil {
+				log.Printf("[room] sidebar parent lookup failed room=%s err=%v", targetRoomID, parentErr)
+			}
+			parentLookupCache[targetRoomID] = ""
+			return ""
+		}
+		parentRoomID := normalizeRoomID(rawParentID)
+		parentLookupCache[targetRoomID] = parentRoomID
+		return parentRoomID
+	}
+
+	hiddenAncestorRoomIDs := make(map[string]struct{})
+	for _, room := range roomsMap {
+		ancestorRoomID := normalizeRoomID(room.ParentRoomID)
+		seenAncestors := make(map[string]struct{})
+		for ancestorRoomID != "" {
+			if _, seen := seenAncestors[ancestorRoomID]; seen {
+				break
+			}
+			seenAncestors[ancestorRoomID] = struct{}{}
+
+			if _, hidden := hiddenRoomSet[ancestorRoomID]; hidden {
+				hiddenAncestorRoomIDs[ancestorRoomID] = struct{}{}
+			}
+
+			nextAncestorRoomID := resolveParentRoomID(ancestorRoomID)
+			if nextAncestorRoomID == ancestorRoomID {
+				break
+			}
+			ancestorRoomID = nextAncestorRoomID
+		}
+	}
+
+	for hiddenRoomID := range hiddenAncestorRoomIDs {
+		if _, alreadyAdded := roomsMap[hiddenRoomID]; alreadyAdded {
+			continue
+		}
+		room, ok, loadErr := h.loadSidebarRoom(ctx, hiddenRoomID, "left")
+		if loadErr != nil {
+			continue
+		}
+		if !ok {
+			continue
+		}
+		roomsMap[hiddenRoomID] = room
+		parentByRoomID[hiddenRoomID] = normalizeRoomID(room.ParentRoomID)
 	}
 
 	h.assignTreeNumbers(ctx, userID, roomsMap)
@@ -840,6 +941,79 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func (h *RoomHandler) LeaveRoom(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !JoinRoomLimiter.Allow(clientIP) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Leave room rate limit exceeded"})
+		return
+	}
+
+	var req LeaveRoomRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	roomID := normalizeRoomID(req.RoomID)
+	userID := normalizeIdentifier(req.UserID)
+	if roomID == "" || userID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "roomId and userId are required"})
+		return
+	}
+
+	ctx := context.Background()
+	exists, err := h.roomExists(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+		return
+	}
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+		return
+	}
+
+	membersKey := roomMembersKey(roomID)
+	removedCount, err := h.redis.Client.SRem(ctx, membersKey, userID).Result()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update room membership"})
+		return
+	}
+	_ = h.redis.Client.SRem(ctx, userRoomsKey(userID), roomID).Err()
+	_ = h.redis.Client.HDel(ctx, roomMemberJoinedAtKey(roomID), userID).Err()
+	if err := h.redis.Client.SAdd(ctx, userHiddenRoomsKey(userID), roomID).Err(); err != nil {
+		log.Printf("[room] leave hidden-room set failed user=%s room=%s err=%v", userID, roomID, err)
+	}
+	_ = h.redis.Client.Expire(ctx, userHiddenRoomsKey(userID), roomMaxExtendAge).Err()
+
+	memberCount, err := h.redis.Client.SCard(ctx, membersKey).Result()
+	if err == nil {
+		_ = h.redis.Client.HSet(ctx, roomKey(roomID), "member_count", memberCount).Err()
+		if syncErr := h.syncBreakJoinCount(ctx, roomID, int(memberCount)); syncErr != nil {
+			log.Printf("[room] leave break-join sync failed room=%s err=%v", roomID, syncErr)
+		}
+	}
+
+	responseMessage := "Room left"
+	if removedCount == 0 {
+		responseMessage = "Not a room member"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(LeaveRoomResponse{
+		RoomID:    roomID,
+		UserID:    userID,
+		Message:   responseMessage,
+		ServerNow: time.Now().Unix(),
+	})
+}
+
 func (h *RoomHandler) RemoveRoomMember(w http.ResponseWriter, r *http.Request) {
 	var req RemoveRoomMemberRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -895,10 +1069,15 @@ func (h *RoomHandler) RemoveRoomMember(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.redis.Client.SRem(ctx, userRoomsKey(targetUserID), roomID).Err()
 	_ = h.redis.Client.HDel(ctx, roomMemberJoinedAtKey(roomID), targetUserID).Err()
+	_ = h.redis.Client.SAdd(ctx, userHiddenRoomsKey(targetUserID), roomID).Err()
+	_ = h.redis.Client.Expire(ctx, userHiddenRoomsKey(targetUserID), roomMaxExtendAge).Err()
 
 	memberCount, err := h.redis.Client.SCard(ctx, roomMembersKey(roomID)).Result()
 	if err == nil {
 		_ = h.redis.Client.HSet(ctx, roomKey(roomID), "member_count", memberCount).Err()
+		if syncErr := h.syncBreakJoinCount(ctx, roomID, int(memberCount)); syncErr != nil {
+			log.Printf("[room] remove-member break-join sync failed room=%s err=%v", roomID, syncErr)
+		}
 	}
 
 	if removedCount == 0 {
@@ -2117,6 +2296,7 @@ func (h *RoomHandler) registerRoomMembership(ctx context.Context, roomID, userID
 	if err := h.redis.Client.SAdd(ctx, userRoomsKey(userID), roomID).Err(); err != nil {
 		return int(count), err
 	}
+	_ = h.redis.Client.SRem(ctx, userHiddenRoomsKey(userID), roomID).Err()
 	roomTTL := h.effectiveRoomTTL(ctx, roomID)
 	_ = h.redis.Client.Expire(ctx, membersKey, roomTTL).Err()
 	if err := h.redis.Client.HSetNX(ctx, roomMemberJoinedAtKey(roomID), userID, time.Now().Unix()).Err(); err != nil {
@@ -2587,6 +2767,10 @@ func roomChildrenKey(roomID string) string {
 
 func userRoomsKey(userID string) string {
 	return "user:" + userID + ":rooms"
+}
+
+func userHiddenRoomsKey(userID string) string {
+	return "user:" + userID + ":hidden_rooms"
 }
 
 func messageBreakKey(messageID string) string {

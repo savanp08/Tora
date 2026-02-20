@@ -2,7 +2,7 @@
 	import { createEventDispatcher, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
 
-	type ThreadStatus = 'joined' | 'discoverable';
+	type ThreadStatus = 'joined' | 'discoverable' | 'left';
 
 	type ChatThread = {
 		id: string;
@@ -46,10 +46,12 @@
 
 	export let myRooms: ChatThread[] = [];
 	export let discoverableRooms: ChatThread[] = [];
+	export let leftRooms: ChatThread[] = [];
 	export let accessibleParentRoomIds: string[] = [];
 	export let activeRoomId = '';
 	export let showLeftMenu = false;
 	export let chatListSearch = '';
+	export let isMobileView = false;
 
 	const dispatch = createEventDispatcher<{
 		select: { id: string; isMember: boolean; status: ThreadStatus };
@@ -78,8 +80,8 @@
 	const treePadX = 24;
 	const treePadY = 24;
 
-	$: totalRooms = myRooms.length + discoverableRooms.length;
-	$: allThreads = dedupeThreads([...myRooms, ...discoverableRooms]);
+	$: totalRooms = myRooms.length + discoverableRooms.length + leftRooms.length;
+	$: allThreads = dedupeThreads([...myRooms, ...discoverableRooms, ...leftRooms]);
 	$: threadByID = new Map(allThreads.map((thread) => [thread.id, thread]));
 	$: childrenByParent = buildChildrenByParent(allThreads);
 	$: rootThreads = sortSidebarThreads(
@@ -108,11 +110,24 @@
 	$: descendantThreads = streamlinedParentRoomId
 		? sortSidebarThreads(flattenTree(streamlinedParentRoomId).slice(1).map((row) => row.thread))
 		: [];
-	$: streamlinedThreads = streamlinedParentRoomId ? descendantThreads : rootThreads;
+	$: streamlinedThreads = (() => {
+		if (!streamlinedParentRoomId) {
+			return rootThreads;
+		}
+		const parentThread = threadByID.get(streamlinedParentRoomId);
+		if (!parentThread) {
+			return descendantThreads;
+		}
+		return [parentThread, ...descendantThreads];
+	})();
 	$: accessibleParents = new Set(
 		accessibleParentRoomIds.length > 0
 			? accessibleParentRoomIds
-			: [...myRooms.map((room) => room.id), ...discoverableRooms.map((room) => room.id)]
+			: [
+					...myRooms.map((room) => room.id),
+					...discoverableRooms.map((room) => room.id),
+					...leftRooms.map((room) => room.id)
+				]
 	);
 	$: relationRootIds = allThreads
 		.filter((thread) => !thread.parentRoomId || !threadByID.has(thread.parentRoomId))
@@ -173,7 +188,9 @@
 				status:
 					existing.status === 'joined' || thread.status === 'joined'
 						? 'joined'
-						: 'discoverable'
+						: existing.status === 'discoverable' || thread.status === 'discoverable'
+							? 'discoverable'
+							: 'left'
 			});
 		}
 		return [...byID.values()];
@@ -199,9 +216,19 @@
 	}
 
 	function sortSidebarThreads(threads: ChatThread[]) {
+		const statusRank = (status: ThreadStatus) => {
+			if (status === 'joined') {
+				return 0;
+			}
+			if (status === 'left') {
+				return 1;
+			}
+			return 2;
+		};
 		return [...threads].sort((a, b) => {
-			if (a.status !== b.status) {
-				return a.status === 'joined' ? -1 : 1;
+			const rankDelta = statusRank(a.status) - statusRank(b.status);
+			if (rankDelta !== 0) {
+				return rankDelta;
 			}
 			if (a.lastActivity !== b.lastActivity) {
 				return b.lastActivity - a.lastActivity;
@@ -384,6 +411,21 @@
 	}
 
 	function onThreadSelect(thread: ChatThread) {
+		if (thread.status === 'left') {
+			if (hasChildren(thread.id)) {
+				streamlinedManualRootList = false;
+				streamlinedParentRoomId = thread.id;
+			}
+			return;
+		}
+		if (!isFullView && isMobileView && hasChildren(thread.id)) {
+			const isAlreadyBrowsingThisParent = streamlinedParentRoomId === thread.id;
+			if (!isAlreadyBrowsingThisParent) {
+				streamlinedManualRootList = false;
+				streamlinedParentRoomId = thread.id;
+				return;
+			}
+		}
 		streamlinedManualRootList = false;
 		selectRoom(thread);
 		if (!isFullView && hasChildren(thread.id)) {
@@ -415,10 +457,12 @@
 	}
 
 	function canJumpToOrigin(thread: ChatThread) {
+		const parentRoom = thread.parentRoomId ? threadByID.get(thread.parentRoomId) : null;
 		return Boolean(
 			hasBreakOrigin(thread) &&
 				thread.parentRoomId &&
-				accessibleParents.has(thread.parentRoomId)
+				accessibleParents.has(thread.parentRoomId) &&
+				parentRoom?.status !== 'left'
 		);
 	}
 
@@ -449,6 +493,9 @@
 		if (thread.status === 'discoverable') {
 			classes.push('discoverable');
 		}
+		if (thread.status === 'left') {
+			classes.push('left');
+		}
 		if (thread.id === activeRoomId) {
 			classes.push('selected');
 		}
@@ -478,6 +525,9 @@
 		const preview = (thread.lastMessage || '').trim();
 		if (preview) {
 			return preview;
+		}
+		if (thread.status === 'left') {
+			return hasChildren(thread.id) ? 'Left room - browse child rooms' : 'You left this room';
 		}
 		return thread.status === 'joined' ? 'No messages yet' : 'Preview and join';
 	}
@@ -534,7 +584,7 @@
 	</div>
 	<div class="room-items">
 		{#if isFullView}
-			{#if myRooms.length === 0 && discoverableRooms.length === 0}
+			{#if myRooms.length === 0 && discoverableRooms.length === 0 && leftRooms.length === 0}
 				<div class="empty-label">No chats matched your search.</div>
 			{:else}
 				{#if myRooms.length > 0}
@@ -609,6 +659,41 @@
 						</button>
 					{/each}
 				{/if}
+
+				{#if leftRooms.length > 0}
+					<div class="section-label">Left (Child Nav)</div>
+					{#each leftRooms as thread (thread.id)}
+						<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+							<span
+								class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
+									? 'jumpable'
+									: ''}"
+								role={canJumpToOrigin(thread) ? 'button' : undefined}
+								tabindex={canJumpToOrigin(thread) ? 0 : undefined}
+								title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
+								on:click|stopPropagation={() => jumpToOrigin(thread)}
+								on:keydown={(event) => onAvatarKeyDown(event, thread)}
+							>
+								{getTreeAvatarLabel(thread)}
+							</span>
+							<span class="item-main">
+								<span class="item-top">
+									<span class="room-name-wrap">
+										<span class="status-dot gray"></span>
+										<span class="room-name">{thread.name}</span>
+									</span>
+									<span class="room-time">{formatClock(thread.lastActivity)}</span>
+								</span>
+								<span class="item-bottom">
+									<span class="room-preview">{getThreadPreview(thread)}</span>
+								</span>
+							</span>
+						</button>
+					{/each}
+				{/if}
 			{/if}
 		{:else}
 			{#if streamlinedParentRoomId}
@@ -647,7 +732,13 @@
 						<span class="item-main">
 							<span class="item-top">
 								<span class="room-name-wrap">
-									<span class="status-dot {thread.status === 'joined' ? 'green' : 'orange'}"></span>
+									<span
+										class="status-dot {thread.status === 'joined'
+											? 'green'
+											: thread.status === 'left'
+												? 'gray'
+												: 'orange'}"
+									></span>
 									<span class="room-name">{thread.name}</span>
 								</span>
 								<span class="room-time">{formatClock(thread.lastActivity)}</span>
@@ -859,6 +950,15 @@
 		border-color: #3a3d45;
 	}
 
+	.room-item.left {
+		border-style: dashed;
+	}
+
+	.room-item.left.selected {
+		background: #3b3b40;
+		border-color: #3b3b40;
+	}
+
 	.avatar {
 		width: 38px;
 		height: 38px;
@@ -938,6 +1038,10 @@
 
 	.status-dot.orange {
 		background: #f59e0b;
+	}
+
+	.status-dot.gray {
+		background: #9ca3af;
 	}
 
 	.room-name {
@@ -1275,6 +1379,10 @@
 
 	.tree-state.discoverable {
 		background: #f59e0b;
+	}
+
+	.tree-state.left {
+		background: #9ca3af;
 	}
 
 	@media (max-width: 900px) {

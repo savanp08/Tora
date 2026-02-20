@@ -63,6 +63,7 @@ func New(
 
 		r.Post("/rooms", roomHandler.CreateRoom)
 		r.Post("/rooms/join", roomHandler.JoinRoom)
+		r.Post("/rooms/leave", roomHandler.LeaveRoom)
 		r.Post("/rooms/extend", roomHandler.ExtendRoom)
 		r.Post("/rooms/rename", roomHandler.RenameRoom)
 		r.Post("/rooms/break", roomHandler.CreateBreakRoom)

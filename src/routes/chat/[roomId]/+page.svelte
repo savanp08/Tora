@@ -21,7 +21,7 @@
 	import { closeGlobalSocket, globalMessages, initGlobalSocket, sendSocketPayload, subscribeToRooms } from '$lib/ws';
 	import { onDestroy, onMount, tick } from 'svelte';
 
-	type ThreadStatus = 'joined' | 'discoverable';
+	type ThreadStatus = 'joined' | 'discoverable' | 'left';
 	type MessageActionMode = 'none' | 'break' | 'edit' | 'delete';
 
 	type ChatMessage = {
@@ -176,8 +176,12 @@
 	$: currentUsername = normalizeUsernameValue($currentUser?.username ?? 'Guest') || 'Guest';
 	$: activeThread =
 		roomThreads.find((thread) => thread.id === roomId) ??
-		createThread(roomId || 'default_room', roomNameFromURL || undefined, 'joined');
-	$: currentMessages = messagesByRoom[roomId] ?? [];
+		createThread(
+			roomId || 'default_room',
+			roomNameFromURL || undefined,
+			roomMemberHint === '1' ? 'joined' : 'discoverable'
+		);
+	$: currentMessages = activeThread?.status === 'left' ? [] : (messagesByRoom[roomId] ?? []);
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
@@ -188,6 +192,7 @@
 	$: hasMoreOlderHistory = historyHasMoreByRoom[roomId] ?? true;
 	$: myRooms = filterThreadsByStatus(roomThreads, 'joined');
 	$: discoverableRooms = filterThreadsByStatus(roomThreads, 'discoverable');
+	$: leftRooms = filterThreadsByStatus(roomThreads, 'left');
 	$: filteredMyRooms = filterThreadList(myRooms, chatListSearch, messagesByRoom, roomId);
 	$: filteredDiscoverableRooms = filterThreadList(
 		discoverableRooms,
@@ -195,10 +200,14 @@
 		messagesByRoom,
 		roomId
 	);
+	$: filteredLeftRooms = filterThreadList(leftRooms, chatListSearch, messagesByRoom, roomId);
 
 	$: if (roomId) {
-		ensureRoomThread(roomId, roomNameFromURL || undefined, isMember ? 'joined' : 'discoverable');
-		ensureOnlineSeed(roomId);
+		const existingRoom = roomThreads.find((thread) => thread.id === roomId);
+		if (existingRoom) {
+			ensureRoomThread(roomId, roomNameFromURL || undefined, existingRoom.status);
+			ensureOnlineSeed(roomId);
+		}
 		ensureRoomMeta(roomId, roomCreatedAtFromURL, roomExpiresAtFromURL);
 	}
 	$: if (serverNowFromURL > 0) {
@@ -212,8 +221,10 @@
 	}
 	$: if (browser && identityReady) {
 		// Subscribe to all rooms visible in sidebar so discoverable rooms get read-only previews.
-		const readableRoomIDs = roomThreads.map((thread) => thread.id);
-		if (roomId && !readableRoomIDs.includes(roomId)) {
+		const readableRoomIDs = roomThreads
+			.filter((thread) => thread.status !== 'left')
+			.map((thread) => thread.id);
+		if (roomId && isMember && !readableRoomIDs.includes(roomId)) {
 			readableRoomIDs.push(roomId);
 		}
 		subscribeToRooms(readableRoomIDs);
@@ -646,7 +657,12 @@
 		const existing = roomThreads.find((thread) => thread.id === targetRoomId);
 		if (existing) {
 			const nextName = nameOverride || existing.name;
-			const nextStatus: ThreadStatus = existing.status === 'joined' ? 'joined' : status;
+			let nextStatus: ThreadStatus = existing.status;
+			if (status === 'joined') {
+				nextStatus = 'joined';
+			} else if (existing.status !== 'joined' && existing.status !== 'left') {
+				nextStatus = status;
+			}
 			if (nextName === existing.name && nextStatus === existing.status) {
 				return;
 			}
@@ -874,6 +890,13 @@
 					ensureRoomMeta(roomID, createdAt, expiresAt);
 				}
 
+				const roomStatus: ThreadStatus =
+					room.status === 'joined'
+						? 'joined'
+						: room.status === 'left'
+							? 'left'
+							: 'discoverable';
+
 				const next: ChatThread = {
 					id: roomID,
 					name:
@@ -883,7 +906,7 @@
 					lastMessage: prev?.lastMessage || '',
 					lastActivity: prev?.lastActivity || createdAt || Date.now(),
 					unread: prev?.unread || 0,
-					status: room.status === 'discoverable' ? 'discoverable' : 'joined',
+					status: roomStatus,
 					memberCount: typeof room.memberCount === 'number' ? room.memberCount : prev?.memberCount,
 					parentRoomId: toStringValue(room.parentRoomId) || prev?.parentRoomId || undefined,
 					originMessageId: toStringValue(room.originMessageId) || prev?.originMessageId || undefined,
@@ -895,30 +918,17 @@
 				return acc;
 			}, []);
 
-			if (roomId && !nextThreads.some((thread) => thread.id === roomId)) {
-				nextThreads.push(
-					createThread(
-						roomId,
-						roomNameFromURL || formatRoomName(roomId),
-						roomMemberHint === '0' ? 'discoverable' : 'joined'
-					)
-				);
-			}
-
+			const previousById = new Map(roomThreads.map((thread) => [thread.id, thread]));
 			const merged = new Map<string, ChatThread>();
-			for (const existingThread of roomThreads) {
-				merged.set(existingThread.id, existingThread);
-			}
 			for (const nextThread of nextThreads) {
-				const prev = merged.get(nextThread.id);
+				const prev = previousById.get(nextThread.id);
 				merged.set(nextThread.id, {
 					...prev,
 					...nextThread,
 					unread: prev?.unread ?? nextThread.unread,
 					lastMessage: nextThread.lastMessage || prev?.lastMessage || '',
 					lastActivity: Math.max(nextThread.lastActivity, prev?.lastActivity ?? 0),
-					status:
-						prev?.status === 'joined' || nextThread.status === 'joined' ? 'joined' : 'discoverable'
+					status: nextThread.status
 				});
 			}
 
@@ -928,6 +938,18 @@
 				error: error instanceof Error ? error.message : String(error)
 			});
 		}
+	}
+
+	function onSidebarSelect(event: CustomEvent<{ id: string; isMember: boolean; status: ThreadStatus }>) {
+		const targetRoomId = normalizeRoomIDValue(event.detail.id);
+		if (!targetRoomId) {
+			return;
+		}
+		if (event.detail.status === 'left') {
+			showErrorToast('You left this room. Open one of its child rooms.');
+			return;
+		}
+		selectRoom(targetRoomId, event.detail.isMember);
 	}
 
 	function selectRoom(targetRoomId: string, memberState: boolean, focusMsgID = '') {
@@ -2098,13 +2120,78 @@
 
 			await refreshSidebarRooms();
 			const fallbackJoined = roomThreads.find((thread) => thread.status === 'joined');
+			const fallbackThread =
+				fallbackJoined ?? roomThreads.find((thread) => thread.status !== 'left');
+			if (fallbackThread) {
+				selectRoom(fallbackThread.id, fallbackThread.status === 'joined');
+			} else {
+				await goto('/');
+			}
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to delete room');
+		}
+	}
+
+	async function leaveCurrentRoom() {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const confirmed = window.confirm('Leave this room?');
+		if (!confirmed) {
+			return;
+		}
+
+		try {
+			const leftRoomId = roomId;
+			const res = await fetch(`${API_BASE}/api/rooms/leave`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					roomId: leftRoomId,
+					userId: normalizeIdentifier(currentUserId)
+				})
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to leave room');
+			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			setMessageActionMode('none');
+			showRoomMenu = false;
+			showRoomDetails = false;
+			showRoomSearch = false;
+
+			roomThreads = roomThreads.filter((thread) => thread.id !== leftRoomId);
+			const nextMessages = { ...messagesByRoom };
+			delete nextMessages[leftRoomId];
+			messagesByRoom = nextMessages;
+			const nextOnline = { ...onlineByRoom };
+			delete nextOnline[leftRoomId];
+			onlineByRoom = nextOnline;
+			const nextMeta = { ...roomMetaById };
+			delete nextMeta[leftRoomId];
+			roomMetaById = nextMeta;
+			const nextTyping = { ...typingUsersByRoom };
+			delete nextTyping[leftRoomId];
+			typingUsersByRoom = nextTyping;
+			const nextHistoryLoading = { ...historyLoadingByRoom };
+			delete nextHistoryLoading[leftRoomId];
+			historyLoadingByRoom = nextHistoryLoading;
+			const nextHistoryHasMore = { ...historyHasMoreByRoom };
+			delete nextHistoryHasMore[leftRoomId];
+			historyHasMoreByRoom = nextHistoryHasMore;
+
+			await refreshSidebarRooms();
+			showErrorToast((data as { message?: string }).message || 'Room left');
+
+			const fallbackJoined = roomThreads.find((thread) => thread.status === 'joined');
 			if (fallbackJoined) {
 				selectRoom(fallbackJoined.id, true);
 			} else {
 				await goto('/');
 			}
 		} catch (error) {
-			showErrorToast(error instanceof Error ? error.message : 'Failed to delete room');
+			showErrorToast(error instanceof Error ? error.message : 'Failed to leave room');
 		}
 	}
 
@@ -2595,7 +2682,7 @@
 		}
 		const thread = threads.find((entry) => entry.id === roomID);
 		if (!thread) {
-			return true;
+			return false;
 		}
 		return thread.status === 'joined';
 	}
@@ -2614,11 +2701,13 @@
 		<ChatSidebar
 			myRooms={filteredMyRooms}
 			discoverableRooms={filteredDiscoverableRooms}
+			leftRooms={filteredLeftRooms}
 			accessibleParentRoomIds={roomThreads.map((thread) => thread.id)}
 			activeRoomId={roomId}
+			{isMobileView}
 			{showLeftMenu}
 			bind:chatListSearch
-			on:select={(event) => selectRoom(event.detail.id, event.detail.isMember)}
+			on:select={onSidebarSelect}
 			on:jumpOrigin={onJumpToBreakOrigin}
 			on:toggleMenu={toggleLeftMenu}
 			on:createRoom={createRoomFromMenu}
@@ -2696,6 +2785,11 @@
 							<button type="button" on:click|stopPropagation={clearCurrentRoomMessages}>
 								Clear local
 							</button>
+							{#if isMember}
+								<button type="button" on:click|stopPropagation={() => void leaveCurrentRoom()}>
+									Leave Room
+								</button>
+							{/if}
 							{#if isActiveRoomAdmin}
 								<button type="button" on:click|stopPropagation={() => void deleteCurrentRoomAsAdmin()}>
 									Delete Room
