@@ -643,7 +643,7 @@ func (s *MessageService) IsMessageOwnedBy(ctx context.Context, roomID, messageID
 
 	messagesTable := s.Scylla.Table("messages")
 	lookupQuery := fmt.Sprintf(
-		`SELECT sender_id FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`,
+		`SELECT sender_id FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`,
 		messagesTable,
 	)
 	var senderID string
@@ -660,7 +660,7 @@ func (s *MessageService) getMessageCreatedAt(ctx context.Context, roomID, messag
 	}
 	messagesTable := s.Scylla.Table("messages")
 	lookupQuery := fmt.Sprintf(
-		`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`,
+		`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`,
 		messagesTable,
 	)
 	var createdAt time.Time

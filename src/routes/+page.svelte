@@ -140,14 +140,20 @@
 			if (!resolvedRoomID) {
 				throw new Error('Server returned an invalid room id');
 			}
-			const resolvedRoomName = data.roomName || normalizedRoomName;
-			const createdAt = Number(data.createdAt);
-			const createdAtQuery =
-				Number.isFinite(createdAt) && createdAt > 0 ? `&createdAt=${createdAt}` : '';
-			clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
-			goto(
-				`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}`
-			);
+				const resolvedRoomName = data.roomName || normalizedRoomName;
+				const createdAt = Number(data.createdAt);
+				const createdAtQuery =
+					Number.isFinite(createdAt) && createdAt > 0 ? `&createdAt=${createdAt}` : '';
+				const expiresAt = Number(data.expiresAt ?? data.expires_at);
+				const expiresAtQuery =
+					Number.isFinite(expiresAt) && expiresAt > 0 ? `&expiresAt=${expiresAt}` : '';
+				const serverNow = Number(data.serverNow ?? data.server_now);
+				const serverNowQuery =
+					Number.isFinite(serverNow) && serverNow > 0 ? `&serverNow=${serverNow}` : '';
+				clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
+				goto(
+					`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}${expiresAtQuery}${serverNowQuery}`
+				);
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
 			joinError = e.message;

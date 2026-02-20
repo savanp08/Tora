@@ -197,7 +197,7 @@ func (h *RoomHandler) lookupMessageCreatedAt(
 ) (time.Time, error) {
 	messagesTable := h.scylla.Table("messages")
 	query := fmt.Sprintf(
-		`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`,
+		`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`,
 		messagesTable,
 	)
 	var createdAt time.Time

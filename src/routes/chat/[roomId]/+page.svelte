@@ -102,7 +102,6 @@
 	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
-	const ROOM_DEFAULT_LIFESPAN_MS = 6 * 60 * 60 * 1000;
 	const TYPING_PING_INTERVAL_MS = 5000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
@@ -169,6 +168,8 @@
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
 	);
 	$: roomCreatedAtFromURL = parseTimestampParam($page.url.searchParams.get('createdAt'));
+	$: roomExpiresAtFromURL = parseTimestampParam($page.url.searchParams.get('expiresAt'));
+	$: serverNowFromURL = parseTimestampParam($page.url.searchParams.get('serverNow'));
 	$: focusMessageIdFromURL = normalizeMessageID($page.url.searchParams.get('focusMsg') ?? '');
 	$: roomMemberHint = $page.url.searchParams.get('member');
 	$: currentUserId = $currentUser?.id ?? 'guest';
@@ -198,7 +199,10 @@
 	$: if (roomId) {
 		ensureRoomThread(roomId, roomNameFromURL || undefined, isMember ? 'joined' : 'discoverable');
 		ensureOnlineSeed(roomId);
-		ensureRoomMeta(roomId, roomCreatedAtFromURL);
+		ensureRoomMeta(roomId, roomCreatedAtFromURL, roomExpiresAtFromURL);
+	}
+	$: if (serverNowFromURL > 0) {
+		syncServerClock(serverNowFromURL);
 	}
 	$: if (browser && identityReady && roomId && isMember) {
 		void syncRoomMembership(roomId);
@@ -781,7 +785,11 @@
 		if (!browser || !normalizedRoomId || !isMember) {
 			return;
 		}
-		if (roomMembershipSynced[normalizedRoomId] || roomMembershipSyncing[normalizedRoomId]) {
+		const knownExpiry = roomMetaById[normalizedRoomId]?.expiresAt ?? 0;
+		if (
+			(roomMembershipSynced[normalizedRoomId] && knownExpiry > 0) ||
+			roomMembershipSyncing[normalizedRoomId]
+		) {
 			return;
 		}
 
@@ -967,6 +975,10 @@
 		if (createdAt > 0) {
 			params.set('createdAt', String(createdAt));
 		}
+		const expiresAt = roomMetaById[normalizedTargetRoomId]?.expiresAt ?? 0;
+		if (expiresAt > 0) {
+			params.set('expiresAt', String(expiresAt));
+		}
 		const normalizedFocus = normalizeMessageID(focusMsgID);
 		if (normalizedFocus) {
 			params.set('focusMsg', normalizedFocus);
@@ -976,6 +988,7 @@
 			focusMessageId = '';
 			focusConsumedForRoom = true;
 		}
+		params.set('serverNow', String(Date.now() + serverClockOffsetMs));
 
 		const query = params.toString();
 		void goto(`/chat/${encodeURIComponent(normalizedTargetRoomId)}${query ? `?${query}` : ''}`);
@@ -1689,6 +1702,10 @@
 			if (nextCreatedAt > 0) {
 				params.set('createdAt', String(nextCreatedAt));
 			}
+			if (nextExpiresAt > 0) {
+				params.set('expiresAt', String(nextExpiresAt));
+			}
+			params.set('serverNow', String(Date.now() + serverClockOffsetMs));
 			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}`);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to create room');
@@ -1739,6 +1756,10 @@
 			if (joinedCreatedAt > 0) {
 				params.set('createdAt', String(joinedCreatedAt));
 			}
+			if (joinedExpiresAt > 0) {
+				params.set('expiresAt', String(joinedExpiresAt));
+			}
+			params.set('serverNow', String(Date.now() + serverClockOffsetMs));
 			await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}`);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Unable to join room');
@@ -2191,9 +2212,18 @@
 			markRoomMembershipSynced(breakRoomId);
 			ensureRoomMeta(breakRoomId, breakCreatedAt, breakExpiresAt);
 			await refreshSidebarRooms();
-			await goto(
-				`/chat/${encodeURIComponent(breakRoomId)}?name=${encodeURIComponent(breakRoomName)}&member=1`
-			);
+			const params = new URLSearchParams({
+				name: breakRoomName,
+				member: '1',
+				serverNow: String(Date.now() + serverClockOffsetMs)
+			});
+			if (breakCreatedAt > 0) {
+				params.set('createdAt', String(breakCreatedAt));
+			}
+			if (breakExpiresAt > 0) {
+				params.set('expiresAt', String(breakExpiresAt));
+			}
+			await goto(`/chat/${encodeURIComponent(breakRoomId)}?${params.toString()}`);
 			return true;
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to create break room');
@@ -2292,9 +2322,6 @@
 		if (meta.expiresAt > 0) {
 			return meta.expiresAt;
 		}
-		if (meta.createdAt > 0) {
-			return meta.createdAt + ROOM_DEFAULT_LIFESPAN_MS;
-		}
 		return 0;
 	}
 
@@ -2315,25 +2342,18 @@
 			return `${minutes}m`;
 		}
 
-		const totalHours = remainingMs / (60 * 60 * 1000);
-		if (totalHours < 24) {
-			const roundedHours = Math.round(totalHours * 10) / 10;
-			const value = roundedHours.toFixed(1);
-			return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
-		}
+			const totalHours = remainingMs / (60 * 60 * 1000);
+			if (totalHours < 24) {
+				const roundedHours = Math.round(totalHours * 10) / 10;
+				const value = roundedHours.toFixed(1);
+				return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
+			}
 
-		let wholeDays = Math.floor(totalHours / 24);
-		let remainingHours = totalHours - wholeDays * 24;
-		remainingHours = Math.round(remainingHours * 10) / 10;
-		if (remainingHours >= 24) {
-			wholeDays += 1;
-			remainingHours = 0;
+			const totalDays = totalHours / 24;
+			const roundedDays = Math.round(totalDays * 10) / 10;
+			const value = roundedDays.toFixed(1);
+			return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
 		}
-		if (remainingHours <= 0) {
-			return `${wholeDays}${wholeDays === 1 ? 'day' : 'days'}`;
-		}
-		return `${wholeDays}${wholeDays === 1 ? 'day' : 'days'} ${remainingHours.toFixed(1)}hrs`;
-	}
 
 	function formatDateTime(timestamp: number) {
 		if (!Number.isFinite(timestamp) || timestamp <= 0) {

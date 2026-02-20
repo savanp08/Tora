@@ -1358,7 +1358,7 @@ func (h *RoomHandler) resolveSourceMessageText(ctx context.Context, roomID strin
 
 	if h.scylla != nil && h.scylla.Session != nil {
 		messagesTable := h.scylla.Table("messages")
-		query := fmt.Sprintf(`SELECT content FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`, messagesTable)
+		query := fmt.Sprintf(`SELECT content FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`, messagesTable)
 		iter := h.scylla.Session.Query(query, roomID, messageID).WithContext(ctx).Iter()
 		var content string
 		if iter.Scan(&content) {
@@ -2534,7 +2534,7 @@ func (h *RoomHandler) tryUpdateBreakMetadataInScylla(parentRoomID, originMessage
 	messagesTable := h.scylla.Table("messages")
 	var createdAt time.Time
 	iter := h.scylla.Session.Query(
-		fmt.Sprintf(`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`, messagesTable),
+		fmt.Sprintf(`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`, messagesTable),
 		parentRoomID,
 		originMessageID,
 	).Iter()
