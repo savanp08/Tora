@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createEventDispatcher, onMount } from 'svelte';
+	import IconSet from '$lib/components/icons/IconSet.svelte';
 
 	type ThreadStatus = 'joined' | 'discoverable';
 
@@ -13,6 +14,7 @@
 		memberCount?: number;
 		parentRoomId?: string;
 		originMessageId?: string;
+		treeNumber?: number;
 	};
 
 	type TreeRow = {
@@ -64,6 +66,9 @@
 
 	let showRelationsMap = false;
 	let activeTreeIndex = 0;
+	let isFullView = false;
+	let streamlinedParentRoomId = '';
+	let streamlinedManualRootList = false;
 	let relationsPanelEl: HTMLElement | null = null;
 	let relationsTriggerEl: HTMLButtonElement | null = null;
 	const treeNodeWidth = 170;
@@ -77,6 +82,33 @@
 	$: allThreads = dedupeThreads([...myRooms, ...discoverableRooms]);
 	$: threadByID = new Map(allThreads.map((thread) => [thread.id, thread]));
 	$: childrenByParent = buildChildrenByParent(allThreads);
+	$: rootThreads = sortSidebarThreads(
+		allThreads.filter((thread) => !thread.parentRoomId || !threadByID.has(thread.parentRoomId))
+	);
+	$: if (streamlinedParentRoomId && !threadByID.has(streamlinedParentRoomId)) {
+		streamlinedParentRoomId = '';
+	}
+	$: if (isFullView) {
+		streamlinedManualRootList = false;
+	}
+	$: if (!isFullView) {
+		const active = threadByID.get(activeRoomId);
+		// Keep sidebar and chat route in sync: child room routes always open the child tree view.
+		if (active?.parentRoomId) {
+			streamlinedManualRootList = false;
+		}
+	}
+	$: if (!isFullView && !streamlinedManualRootList) {
+		const contextRoomID = getStreamlinedContextRoomID();
+		if (contextRoomID !== streamlinedParentRoomId) {
+			streamlinedParentRoomId = contextRoomID;
+		}
+	}
+	$: activeStreamlinedParent = threadByID.get(streamlinedParentRoomId);
+	$: descendantThreads = streamlinedParentRoomId
+		? sortSidebarThreads(flattenTree(streamlinedParentRoomId).slice(1).map((row) => row.thread))
+		: [];
+	$: streamlinedThreads = streamlinedParentRoomId ? descendantThreads : rootThreads;
 	$: accessibleParents = new Set(
 		accessibleParentRoomIds.length > 0
 			? accessibleParentRoomIds
@@ -164,6 +196,18 @@
 			);
 		}
 		return index;
+	}
+
+	function sortSidebarThreads(threads: ChatThread[]) {
+		return [...threads].sort((a, b) => {
+			if (a.status !== b.status) {
+				return a.status === 'joined' ? -1 : 1;
+			}
+			if (a.lastActivity !== b.lastActivity) {
+				return b.lastActivity - a.lastActivity;
+			}
+			return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+		});
 	}
 
 	function flattenTree(rootID: string) {
@@ -284,6 +328,14 @@
 		showRelationsMap = false;
 	}
 
+	function toggleFullView() {
+		isFullView = !isFullView;
+		if (isFullView) {
+			streamlinedParentRoomId = '';
+			streamlinedManualRootList = false;
+		}
+	}
+
 	function requestRenameRoom() {
 		if (!activeRoomId) {
 			return;
@@ -320,6 +372,38 @@
 			isMember: thread.status === 'joined',
 			status: thread.status
 		});
+	}
+
+	function hasChildren(threadID: string) {
+		return (childrenByParent.get(threadID) ?? []).length > 0;
+	}
+
+	function openRootRoomList() {
+		streamlinedManualRootList = true;
+		streamlinedParentRoomId = '';
+	}
+
+	function onThreadSelect(thread: ChatThread) {
+		streamlinedManualRootList = false;
+		selectRoom(thread);
+		if (!isFullView && hasChildren(thread.id)) {
+			streamlinedParentRoomId = thread.id;
+		}
+	}
+
+	function getStreamlinedContextRoomID() {
+		const active = threadByID.get(activeRoomId);
+		if (!active) {
+			return '';
+		}
+		const rootID = getTreeRootID(active.id);
+		if (rootID && hasChildren(rootID)) {
+			return rootID;
+		}
+		if (hasChildren(active.id)) {
+			return active.id;
+		}
+		return '';
 	}
 
 	function hasBreakOrigin(thread: ChatThread) {
@@ -381,6 +465,22 @@
 		selectRoom(thread);
 		closeRelationsMap();
 	}
+
+	function getTreeAvatarLabel(thread: ChatThread) {
+		const number = Number.isFinite(thread.treeNumber) ? Number(thread.treeNumber) : 0;
+		if (number > 0) {
+			return String(number);
+		}
+		return '#';
+	}
+
+	function getThreadPreview(thread: ChatThread) {
+		const preview = (thread.lastMessage || '').trim();
+		if (preview) {
+			return preview;
+		}
+		return thread.status === 'joined' ? 'No messages yet' : 'Preview and join';
+	}
 </script>
 
 <aside class="room-list">
@@ -395,22 +495,23 @@
 				class="icon-button map-icon-button"
 				on:click={openRelationsMap}
 				title="View room relations map"
+				aria-label="View room relations map"
 				bind:this={relationsTriggerEl}
 			>
-				map
+				<IconSet name="tree-map" size={14} />
 			</button>
 			<button
 				type="button"
-				class="icon-button edit-icon-button"
-				on:click={requestRenameRoom}
-				title="Edit room"
-				disabled={!activeRoomId}
+				class="icon-button view-icon-button {isFullView ? 'active' : ''}"
+				on:click={toggleFullView}
+				title={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
+				aria-label={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
 			>
-				edit room
+				<IconSet name="list-vertical" size={14} />
 			</button>
 			<button
 				type="button"
-				class="icon-button"
+				class="icon-button menu-icon-button"
 				on:click={() => dispatch('toggleMenu')}
 				title="Room options"
 			>
@@ -421,6 +522,9 @@
 					<button type="button" on:click={() => dispatch('createRoom')}>New room</button>
 					<button type="button" on:click={requestRenameRoom} disabled={!activeRoomId}>Rename room</button>
 					<button type="button" on:click={openRelationsMap}>Relations map</button>
+					<button type="button" on:click={toggleFullView}>
+						{isFullView ? 'Streamlined view' : 'Full view'}
+					</button>
 				</div>
 			{/if}
 		</div>
@@ -429,13 +533,102 @@
 		<input type="text" bind:value={chatListSearch} placeholder="Search names or messages" />
 	</div>
 	<div class="room-items">
-		{#if myRooms.length === 0 && discoverableRooms.length === 0}
-			<div class="empty-label">No chats matched your search.</div>
+		{#if isFullView}
+			{#if myRooms.length === 0 && discoverableRooms.length === 0}
+				<div class="empty-label">No chats matched your search.</div>
+			{:else}
+				{#if myRooms.length > 0}
+					<div class="section-label">Joined</div>
+					{#each myRooms as thread (thread.id)}
+						<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+							<span
+								class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
+									? 'jumpable'
+									: ''}"
+								role={canJumpToOrigin(thread) ? 'button' : undefined}
+								tabindex={canJumpToOrigin(thread) ? 0 : undefined}
+								title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
+								on:click|stopPropagation={() => jumpToOrigin(thread)}
+								on:keydown={(event) => onAvatarKeyDown(event, thread)}
+							>
+								{getTreeAvatarLabel(thread)}
+							</span>
+							<span class="item-main">
+								<span class="item-top">
+									<span class="room-name-wrap">
+										<span class="status-dot green"></span>
+										<span class="room-name">{thread.name}</span>
+									</span>
+									<span class="room-time">{formatClock(thread.lastActivity)}</span>
+								</span>
+								<span class="item-bottom">
+									<span class="room-preview">{getThreadPreview(thread)}</span>
+									{#if thread.unread > 0}
+										<span class="unread">{thread.unread}</span>
+									{/if}
+								</span>
+							</span>
+						</button>
+					{/each}
+				{/if}
+
+				{#if discoverableRooms.length > 0}
+					<div class="section-label">Discover</div>
+					{#each discoverableRooms as thread (thread.id)}
+						<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+							<span
+								class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
+									? 'jumpable'
+									: ''}"
+								role={canJumpToOrigin(thread) ? 'button' : undefined}
+								tabindex={canJumpToOrigin(thread) ? 0 : undefined}
+								title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
+								on:click|stopPropagation={() => jumpToOrigin(thread)}
+								on:keydown={(event) => onAvatarKeyDown(event, thread)}
+							>
+								{getTreeAvatarLabel(thread)}
+							</span>
+							<span class="item-main">
+								<span class="item-top">
+									<span class="room-name-wrap">
+										<span class="status-dot orange"></span>
+										<span class="room-name">{thread.name}</span>
+									</span>
+									<span class="room-time">{formatClock(thread.lastActivity)}</span>
+								</span>
+								<span class="item-bottom">
+									<span class="room-preview">{getThreadPreview(thread)}</span>
+								</span>
+							</span>
+						</button>
+					{/each}
+				{/if}
+			{/if}
 		{:else}
-			{#if myRooms.length > 0}
-				<div class="section-label">Joined</div>
-				{#each myRooms as thread (thread.id)}
-					<button type="button" class={getRoomItemClasses(thread)} on:click={() => selectRoom(thread)}>
+			{#if streamlinedParentRoomId}
+				<div class="streamlined-context">
+					<button type="button" class="streamlined-back" on:click={openRootRoomList}>
+						<span aria-hidden="true">&larr;</span>
+						<span>Back</span>
+					</button>
+					<span class="streamlined-parent" title={activeStreamlinedParent?.name || ''}>
+						{activeStreamlinedParent?.name || 'Room'}
+					</span>
+				</div>
+			{/if}
+			{#if streamlinedThreads.length === 0}
+				<div class="empty-label">
+					{streamlinedParentRoomId ? 'No child rooms yet.' : 'No chats matched your search.'}
+				</div>
+			{:else}
+				{#each streamlinedThreads as thread (thread.id)}
+					<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
 						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -449,56 +642,21 @@
 							on:click|stopPropagation={() => jumpToOrigin(thread)}
 							on:keydown={(event) => onAvatarKeyDown(event, thread)}
 						>
-							{thread.name.charAt(0).toUpperCase()}
+							{getTreeAvatarLabel(thread)}
 						</span>
 						<span class="item-main">
 							<span class="item-top">
 								<span class="room-name-wrap">
-									<span class="status-dot green"></span>
+									<span class="status-dot {thread.status === 'joined' ? 'green' : 'orange'}"></span>
 									<span class="room-name">{thread.name}</span>
 								</span>
 								<span class="room-time">{formatClock(thread.lastActivity)}</span>
 							</span>
 							<span class="item-bottom">
-								<span class="room-preview">{thread.lastMessage || 'No messages yet'}</span>
-								{#if thread.unread > 0}
+								<span class="room-preview">{getThreadPreview(thread)}</span>
+								{#if thread.status === 'joined' && thread.unread > 0}
 									<span class="unread">{thread.unread}</span>
 								{/if}
-							</span>
-						</span>
-					</button>
-				{/each}
-			{/if}
-
-			{#if discoverableRooms.length > 0}
-				<div class="section-label">Discover</div>
-				{#each discoverableRooms as thread (thread.id)}
-					<button type="button" class={getRoomItemClasses(thread)} on:click={() => selectRoom(thread)}>
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-						<span
-							class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
-								? 'jumpable'
-								: ''}"
-							role={canJumpToOrigin(thread) ? 'button' : undefined}
-							tabindex={canJumpToOrigin(thread) ? 0 : undefined}
-							title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
-							on:click|stopPropagation={() => jumpToOrigin(thread)}
-							on:keydown={(event) => onAvatarKeyDown(event, thread)}
-						>
-							{thread.name.charAt(0).toUpperCase()}
-						</span>
-						<span class="item-main">
-							<span class="item-top">
-								<span class="room-name-wrap">
-									<span class="status-dot orange"></span>
-									<span class="room-name">{thread.name}</span>
-								</span>
-								<span class="room-time">{formatClock(thread.lastActivity)}</span>
-							</span>
-							<span class="item-bottom">
-								<span class="room-preview">{thread.lastMessage || 'Preview and join'}</span>
 							</span>
 						</span>
 					</button>
@@ -573,8 +731,11 @@
 		flex-direction: column;
 		border-right: 1px solid #dfdfe4;
 		background: #f5f5f6;
+		width: 100%;
+		max-width: 100%;
 		height: 100%;
 		min-height: 0;
+		overflow-x: hidden;
 	}
 
 	.room-list-header {
@@ -582,6 +743,8 @@
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
+		gap: 0.5rem;
+		min-width: 0;
 		position: relative;
 		border-bottom: 1px solid #e3e3e8;
 	}
@@ -590,12 +753,16 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
+		min-width: 0;
+		flex: 1;
 	}
 
 	.list-actions {
 		position: relative;
 		display: inline-flex;
 		gap: 0.35rem;
+		align-items: center;
+		flex-shrink: 0;
 	}
 
 	.room-list-header h2 {
@@ -629,10 +796,11 @@
 	.room-items {
 		flex: 1;
 		overflow: auto;
+		overflow-x: hidden;
 		display: flex;
 		flex-direction: column;
 		gap: 0.36rem;
-		padding: 0.5rem 0;
+		padding: 0.5rem 0.5rem;
 	}
 
 	.section-label {
@@ -645,8 +813,10 @@
 	}
 
 	.room-item {
-		width: 90%;
-		margin: 0 auto;
+		width: 100%;
+		max-width: 100%;
+		min-width: 0;
+		margin: 0;
 		display: flex;
 		gap: 0.75rem;
 		padding: 0.8rem 0.85rem;
@@ -660,6 +830,8 @@
 			background 140ms ease,
 			color 140ms ease,
 			border-color 140ms ease;
+		box-sizing: border-box;
+		overflow: hidden;
 	}
 
 	.room-item:hover {
@@ -697,6 +869,9 @@
 		align-items: center;
 		justify-content: center;
 		font-weight: 700;
+		font-size: 0.78rem;
+		line-height: 1;
+		font-variant-numeric: tabular-nums;
 		flex-shrink: 0;
 	}
 
@@ -738,6 +913,7 @@
 		justify-content: space-between;
 		align-items: center;
 		gap: 0.6rem;
+		min-width: 0;
 	}
 
 	.room-name-wrap {
@@ -745,6 +921,7 @@
 		align-items: center;
 		gap: 0.4rem;
 		min-width: 0;
+		flex: 1;
 	}
 
 	.status-dot {
@@ -776,11 +953,17 @@
 		font-size: 0.78rem;
 		color: #72727c;
 		white-space: nowrap;
+		flex-shrink: 0;
+		max-width: 4rem;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.room-preview {
 		font-size: 0.82rem;
 		color: #696974;
+		flex: 1;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -803,10 +986,15 @@
 		border: 1px solid #d5d5dc;
 		background: #f8f8f9;
 		border-radius: 6px;
-		padding: 0.35rem 0.55rem;
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
 		font-size: 0.78rem;
 		cursor: pointer;
 		color: #33333b;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
 	}
 
 	.icon-button:disabled {
@@ -815,11 +1003,56 @@
 	}
 
 	.map-icon-button {
-		text-transform: lowercase;
+		font-size: 0;
 	}
 
-	.edit-icon-button {
-		text-transform: lowercase;
+	.view-icon-button {
+		font-size: 0;
+	}
+
+	.view-icon-button.active {
+		background: #2f3138;
+		border-color: #2f3138;
+		color: #ffffff;
+	}
+
+	.menu-icon-button {
+		font-size: 0.8rem;
+	}
+
+	.streamlined-context {
+		display: flex;
+		align-items: center;
+		justify-content: flex-start;
+		gap: 0.5rem;
+		padding: 0.2rem 0.35rem 0.35rem;
+		margin-bottom: 0.2rem;
+		border-bottom: 1px solid #e6e6ec;
+	}
+
+	.streamlined-back {
+		border: 1px solid #d6d6dc;
+		background: #f8f8f9;
+		border-radius: 999px;
+		padding: 0.18rem 0.55rem;
+		font-size: 0.74rem;
+		font-weight: 600;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		cursor: pointer;
+		color: #3a3a42;
+		flex-shrink: 0;
+	}
+
+	.streamlined-parent {
+		font-size: 0.76rem;
+		font-weight: 600;
+		color: #5d5d66;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.room-menu {

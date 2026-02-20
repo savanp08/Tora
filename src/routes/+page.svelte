@@ -4,6 +4,7 @@
 	import { currentUser, authToken } from '$lib/store';
 	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
 	import { generateRoomName } from '$lib/utils/nameGenerator';
+	import { setSessionToken } from '$lib/utils/sessionToken';
 	import { onMount } from 'svelte';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[home-client]';
@@ -48,13 +49,18 @@
 	}
 
 	function normalizeRoomNameInput(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return '';
+		}
+		return trimmed.replace(/\s+/g, ' ').slice(0, 20);
+	}
+
+	function normalizeRoomIdValue(value: string) {
 		return value
-			.trim()
 			.toLowerCase()
-			.replace(/[^a-z0-9\s_-]/g, '')
-			.replace(/[\s-]+/g, '_')
-			.replace(/_+/g, '_')
-			.replace(/^_+|_+$/g, '');
+			.trim()
+			.replace(/[^a-z0-9]/g, '');
 	}
 
 	function normalizeUsernameInput(value: string) {
@@ -128,14 +134,19 @@
 
 			currentUser.set({ id: data.userId || userIdentity.id, username: userToJoin });
 			authToken.set(data.token);
+			setSessionToken(data.token || '');
 
+			const resolvedRoomID = normalizeRoomIdValue(String(data.roomId || ''));
+			if (!resolvedRoomID) {
+				throw new Error('Server returned an invalid room id');
+			}
 			const resolvedRoomName = data.roomName || normalizedRoomName;
 			const createdAt = Number(data.createdAt);
 			const createdAtQuery =
 				Number.isFinite(createdAt) && createdAt > 0 ? `&createdAt=${createdAt}` : '';
-			clientLog('navigate-chat-room', { roomId: data.roomId, roomName: resolvedRoomName });
+			clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
 			goto(
-				`/chat/${data.roomId}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}`
+				`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}`
 			);
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
@@ -151,11 +162,15 @@
 
 		currentUser.set(user);
 		authToken.set(token);
+		setSessionToken(token || '');
 
 		alert(`Welcome back, ${user.username}!`);
 	}
 
-	$: canSubmit = selectedMode === 'create' ? normalizeRoomNameInput(roomName) !== '' : normalizeRoomNameInput(roomName) !== '' || normalizeRoomCodeInput(roomCode) !== '';
+	$: canSubmit =
+		selectedMode === 'create'
+			? normalizeRoomNameInput(roomName) !== ''
+			: normalizeRoomNameInput(roomName) !== '' || normalizeRoomCodeInput(roomCode) !== '';
 </script>
 
 <div class="container">
@@ -180,11 +195,11 @@
 						<input
 							id="room-name-input"
 							type="text"
-							placeholder="e.g. lunch_plan"
+							placeholder="e.g. Product Sprint"
 							bind:value={roomName}
 							on:focus={onRoomNameFocus}
 						/>
-						<small>Use words to create or join by name.</small>
+						<small>Used as display name (max 20 chars).</small>
 					</div>
 					<div class="or-divider" aria-hidden="true">or</div>
 					<div class="field-group room-code-group">

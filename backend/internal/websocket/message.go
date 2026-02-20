@@ -17,13 +17,14 @@ import (
 )
 
 const (
-	messageQueueKey   = "msg_queue"
-	roomHistoryPrefix = "room:history:"
-	roomHistoryTTL    = 21600
-	roomHistorySize   = 50
-	scyllaMessageTTL  = 21600
-	messageBreakMeta  = "message:break:"
-	roomKeyPrefix     = "room:"
+	messageQueueKey           = "msg_queue"
+	roomHistoryPrefix         = "room:history:"
+	roomHistoryTTL            = 21600
+	roomHistorySize           = 50
+	scyllaMessageTTL          = 21600
+	messageBreakMeta          = "message:break:"
+	roomKeyPrefix             = "room:"
+	DeletedMessagePlaceholder = "This message was deleted"
 )
 
 type MessageService struct {
@@ -76,10 +77,14 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 	ttlSeconds := s.resolveRoomTTLSeconds(context.Background(), msg.RoomID)
 	messagesTable := s.Scylla.Table("messages")
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		messagesTable,
 		ttlSeconds,
 	)
+	var editedAt interface{}
+	if msg.EditedAt != nil && !msg.EditedAt.IsZero() {
+		editedAt = *msg.EditedAt
+	}
 	if err := safeExecScyllaQuery(
 		s.Scylla.Session,
 		query,
@@ -89,6 +94,16 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 		msg.SenderName,
 		msg.Content,
 		msg.Type,
+		msg.MediaURL,
+		msg.MediaType,
+		msg.FileName,
+		msg.IsEdited,
+		editedAt,
+		msg.HasBreakRoom,
+		msg.BreakRoomID,
+		msg.BreakJoinCount,
+		msg.ReplyToMessageID,
+		msg.ReplyToSnippet,
 		msg.CreatedAt,
 	); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "panic") {
@@ -219,6 +234,16 @@ func (s *MessageService) ensureSchema() {
 			sender_name text,
 			content text,
 			type text,
+			media_url text,
+			media_type text,
+			file_name text,
+			is_edited boolean,
+			edited_at timestamp,
+			has_break_room boolean,
+			break_room_id text,
+			break_join_count int,
+			reply_to_message_id text,
+			reply_to_snippet text,
 			PRIMARY KEY ((room_id), created_at, message_id)
 		) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`,
 		messagesTable,
@@ -227,7 +252,8 @@ func (s *MessageService) ensureSchema() {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		if err := safeExecScyllaQuery(s.Scylla.Session, query); err == nil {
-			return
+			lastErr = nil
+			break
 		} else {
 			lastErr = err
 			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
@@ -235,6 +261,25 @@ func (s *MessageService) ensureSchema() {
 	}
 	if lastErr != nil {
 		log.Printf("[message-service] ensure messages schema failed: %v", lastErr)
+		return
+	}
+
+	alterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD media_url text`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD media_type text`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD file_name text`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD is_edited boolean`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD edited_at timestamp`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD has_break_room boolean`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD break_room_id text`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD break_join_count int`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD reply_to_message_id text`, messagesTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD reply_to_snippet text`, messagesTable),
+	}
+	for _, alterQuery := range alterQueries {
+		if err := safeExecScyllaQuery(s.Scylla.Session, alterQuery); err != nil && !isSchemaAlreadyApplied(err) {
+			log.Printf("[message-service] ensure messages schema alter failed: %v", err)
+		}
 	}
 }
 
@@ -348,13 +393,13 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 
 	messagesTable := s.Scylla.Table("messages")
 	query := fmt.Sprintf(
-		`SELECT room_id, message_id, sender_id, sender_name, content, type, created_at FROM %s WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`,
+		`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`,
 		messagesTable,
 	)
 	args := []interface{}{roomID, limit}
 	if before != nil {
 		query = fmt.Sprintf(
-			`SELECT room_id, message_id, sender_id, sender_name, content, type, created_at FROM %s WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`,
+			`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`,
 			messagesTable,
 		)
 		args = []interface{}{roomID, *before, limit}
@@ -369,17 +414,42 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 	var senderName string
 	var content string
 	var msgType string
+	var mediaURL string
+	var mediaType string
+	var fileName string
+	var isEdited bool
+	var editedAt time.Time
+	var hasBreakRoom bool
+	var breakRoomID string
+	var breakJoinCount int
+	var replyToMessageID string
+	var replyToSnippet string
 	var createdAt time.Time
 
-	for iter.Scan(&dbRoomID, &messageID, &senderID, &senderName, &content, &msgType, &createdAt) {
+	for iter.Scan(&dbRoomID, &messageID, &senderID, &senderName, &content, &msgType, &mediaURL, &mediaType, &fileName, &isEdited, &editedAt, &hasBreakRoom, &breakRoomID, &breakJoinCount, &replyToMessageID, &replyToSnippet, &createdAt) {
+		var editedAtPtr *time.Time
+		if !editedAt.IsZero() {
+			editedCopy := editedAt
+			editedAtPtr = &editedCopy
+		}
 		messages = append(messages, models.Message{
-			ID:         messageID,
-			RoomID:     dbRoomID,
-			SenderID:   senderID,
-			SenderName: senderName,
-			Content:    content,
-			Type:       msgType,
-			CreatedAt:  createdAt,
+			ID:               messageID,
+			RoomID:           dbRoomID,
+			SenderID:         senderID,
+			SenderName:       senderName,
+			Content:          content,
+			Type:             msgType,
+			MediaURL:         mediaURL,
+			MediaType:        mediaType,
+			FileName:         fileName,
+			IsEdited:         isEdited,
+			EditedAt:         editedAtPtr,
+			HasBreakRoom:     hasBreakRoom,
+			BreakRoomID:      breakRoomID,
+			BreakJoinCount:   breakJoinCount,
+			ReplyToMessageID: replyToMessageID,
+			ReplyToSnippet:   replyToSnippet,
+			CreatedAt:        createdAt,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -397,6 +467,16 @@ func safeExecScyllaQuery(session *gocql.Session, query string, args ...interface
 	}()
 
 	return session.Query(query, args...).Exec()
+}
+
+func isSchemaAlreadyApplied(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowered := strings.ToLower(err.Error())
+	return strings.Contains(lowered, "already exists") ||
+		strings.Contains(lowered, "duplicate") ||
+		strings.Contains(lowered, "conflicts with an existing column")
 }
 
 func toString(value interface{}) string {
@@ -431,4 +511,218 @@ func toTime(value interface{}) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messageID, content string, editedAt time.Time) error {
+	roomID = normalizeRoomID(roomID)
+	messageID = normalizeMessageID(messageID)
+	content = strings.TrimSpace(content)
+	if roomID == "" || messageID == "" || content == "" {
+		return fmt.Errorf("invalid edit payload")
+	}
+	if len(content) > maxTextChars {
+		content = content[:maxTextChars]
+	}
+	if editedAt.IsZero() {
+		editedAt = time.Now().UTC()
+	}
+
+	createdAt, err := s.getMessageCreatedAt(ctx, roomID, messageID)
+	if err != nil {
+		return err
+	}
+
+	if s.Scylla == nil || s.Scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	messagesTable := s.Scylla.Table("messages")
+	updateQuery := fmt.Sprintf(
+		`UPDATE %s SET content = ?, type = ?, media_url = ?, media_type = ?, file_name = ?, is_edited = ?, edited_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		messagesTable,
+	)
+	if err := safeExecScyllaQuery(
+		s.Scylla.Session,
+		updateQuery,
+		content,
+		"text",
+		"",
+		"",
+		"",
+		true,
+		editedAt,
+		roomID,
+		createdAt,
+		messageID,
+	); err != nil {
+		return fmt.Errorf("update message content: %w", err)
+	}
+
+	if cacheErr := s.upsertCachedMessage(ctx, roomID, messageID, func(msg *models.Message) {
+		msg.Content = content
+		msg.Type = "text"
+		msg.MediaURL = ""
+		msg.MediaType = ""
+		msg.FileName = ""
+		msg.IsEdited = true
+		editedCopy := editedAt
+		msg.EditedAt = &editedCopy
+	}); cacheErr != nil {
+		log.Printf("[message-service] cache edit sync failed room=%s message=%s err=%v", roomID, messageID, cacheErr)
+	}
+
+	return nil
+}
+
+func (s *MessageService) MarkMessageDeleted(ctx context.Context, roomID, messageID string, editedAt time.Time) error {
+	roomID = normalizeRoomID(roomID)
+	messageID = normalizeMessageID(messageID)
+	if roomID == "" || messageID == "" {
+		return fmt.Errorf("invalid delete payload")
+	}
+	if editedAt.IsZero() {
+		editedAt = time.Now().UTC()
+	}
+
+	createdAt, err := s.getMessageCreatedAt(ctx, roomID, messageID)
+	if err != nil {
+		return err
+	}
+
+	if s.Scylla == nil || s.Scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	messagesTable := s.Scylla.Table("messages")
+	updateQuery := fmt.Sprintf(
+		`UPDATE %s SET content = ?, type = ?, media_url = ?, media_type = ?, file_name = ?, is_edited = ?, edited_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`,
+		messagesTable,
+	)
+	if err := safeExecScyllaQuery(
+		s.Scylla.Session,
+		updateQuery,
+		DeletedMessagePlaceholder,
+		"deleted",
+		"",
+		"",
+		"",
+		false,
+		editedAt,
+		roomID,
+		createdAt,
+		messageID,
+	); err != nil {
+		return fmt.Errorf("mark message deleted: %w", err)
+	}
+
+	if cacheErr := s.upsertCachedMessage(ctx, roomID, messageID, func(msg *models.Message) {
+		msg.Content = DeletedMessagePlaceholder
+		msg.Type = "deleted"
+		msg.MediaURL = ""
+		msg.MediaType = ""
+		msg.FileName = ""
+		msg.IsEdited = false
+		msg.EditedAt = nil
+		msg.ReplyToMessageID = ""
+		msg.ReplyToSnippet = ""
+	}); cacheErr != nil {
+		log.Printf("[message-service] cache delete sync failed room=%s message=%s err=%v", roomID, messageID, cacheErr)
+	}
+
+	return nil
+}
+
+func (s *MessageService) IsMessageOwnedBy(ctx context.Context, roomID, messageID, userID string) (bool, error) {
+	roomID = normalizeRoomID(roomID)
+	messageID = normalizeMessageID(messageID)
+	userID = strings.TrimSpace(userID)
+	if roomID == "" || messageID == "" || userID == "" {
+		return false, fmt.Errorf("invalid ownership lookup payload")
+	}
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return false, fmt.Errorf("scylla session is not configured")
+	}
+
+	messagesTable := s.Scylla.Table("messages")
+	lookupQuery := fmt.Sprintf(
+		`SELECT sender_id FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`,
+		messagesTable,
+	)
+	var senderID string
+	if err := s.Scylla.Session.Query(lookupQuery, roomID, messageID).WithContext(ctx).Scan(&senderID); err != nil {
+		return false, fmt.Errorf("lookup message owner: %w", err)
+	}
+
+	return strings.TrimSpace(senderID) == userID, nil
+}
+
+func (s *MessageService) getMessageCreatedAt(ctx context.Context, roomID, messageID string) (time.Time, error) {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return time.Time{}, fmt.Errorf("scylla session is not configured")
+	}
+	messagesTable := s.Scylla.Table("messages")
+	lookupQuery := fmt.Sprintf(
+		`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`,
+		messagesTable,
+	)
+	var createdAt time.Time
+	if err := s.Scylla.Session.Query(lookupQuery, roomID, messageID).WithContext(ctx).Scan(&createdAt); err != nil {
+		return time.Time{}, fmt.Errorf("lookup message created_at: %w", err)
+	}
+	if createdAt.IsZero() {
+		return time.Time{}, fmt.Errorf("message not found")
+	}
+	return createdAt, nil
+}
+
+func (s *MessageService) upsertCachedMessage(
+	ctx context.Context,
+	roomID, messageID string,
+	mutate func(*models.Message),
+) error {
+	if s == nil || s.Redis == nil || s.Redis.Client == nil || roomID == "" || messageID == "" || mutate == nil {
+		return nil
+	}
+
+	historyKey := roomHistoryPrefix + roomID
+	entries, err := s.Redis.Client.LRange(ctx, historyKey, 0, -1).Result()
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	updated := false
+	serialized := make([]string, 0, len(entries))
+	for _, raw := range entries {
+		var msg models.Message
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+			serialized = append(serialized, raw)
+			continue
+		}
+		if !updated && normalizeMessageID(msg.ID) == messageID {
+			mutate(&msg)
+			updated = true
+		}
+		encoded, marshalErr := json.Marshal(msg)
+		if marshalErr != nil {
+			serialized = append(serialized, raw)
+			continue
+		}
+		serialized = append(serialized, string(encoded))
+	}
+
+	if !updated {
+		return nil
+	}
+
+	ttl := s.resolveRoomTTLSeconds(ctx, roomID)
+	pipe := s.Redis.Client.TxPipeline()
+	pipe.Del(ctx, historyKey)
+	if len(serialized) > 0 {
+		pipe.RPush(ctx, historyKey, serialized)
+		pipe.LTrim(ctx, historyKey, -roomHistorySize, -1)
+		pipe.Expire(ctx, historyKey, time.Duration(ttl)*time.Second)
+	}
+	_, execErr := pipe.Exec(ctx)
+	return execErr
 }

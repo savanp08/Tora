@@ -10,6 +10,7 @@
 
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;
+	export let activeReply: { messageId: string; senderName: string; content: string } | null = null;
 
 	let mediaInput: HTMLInputElement | null = null;
 	let fileInput: HTMLInputElement | null = null;
@@ -25,6 +26,8 @@
 		send: { type: MediaMessageType; content: string; fileName?: string } | undefined;
 		attach: { file: File | null; type: 'media' | 'file'; error?: string };
 		removeAttachment: void;
+		cancelReply: void;
+		typing: { value: string };
 	}>();
 
 	onDestroy(() => {
@@ -146,6 +149,10 @@
 		dispatch('removeAttachment');
 	}
 
+	function cancelReply() {
+		dispatch('cancelReply');
+	}
+
 	function onSend() {
 		if (isProcessingAttachment) {
 			return;
@@ -164,6 +171,10 @@
 		}
 	}
 
+	function onComposerInput() {
+		dispatch('typing', { value: draftMessage });
+	}
+
 	function getAttachmentLabel(type: MediaMessageType | null) {
 		if (type === 'image') {
 			return 'Image ready to send';
@@ -176,9 +187,27 @@
 		}
 		return 'Attachment ready to send';
 	}
+
+	function getReplyPreviewText() {
+		if (!activeReply) {
+			return '';
+		}
+		const normalized = `${activeReply.senderName}: ${activeReply.content}`.trim();
+		if (normalized.length <= 120) {
+			return normalized;
+		}
+		return `${normalized.slice(0, 117)}...`;
+	}
 </script>
 
 <footer class="composer">
+	{#if activeReply}
+		<div class="reply-preview-panel">
+			<div class="reply-preview-label">Replying to</div>
+			<div class="reply-preview-content">{getReplyPreviewText()}</div>
+			<button type="button" class="reply-preview-cancel" on:click={cancelReply}>Cancel</button>
+		</div>
+	{/if}
 	{#if attachedFile}
 		<div class="attachment-preview-panel">
 			<div class="attachment-preview-header">
@@ -249,6 +278,7 @@
 			bind:value={draftMessage}
 			rows="1"
 			placeholder={attachedFile ? 'Add a caption (optional)' : 'Type a message'}
+			on:input={onComposerInput}
 			on:keydown={onComposerKeyDown}
 			disabled={isProcessingAttachment}
 		></textarea>
@@ -275,6 +305,46 @@
 		flex-direction: column;
 		gap: 0.4rem;
 		flex-shrink: 0;
+	}
+
+	.reply-preview-panel {
+		border: 1px solid #dddde2;
+		background: #f8f8fa;
+		border-radius: 10px;
+		padding: 0.5rem 0.58rem;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-rows: auto auto;
+		column-gap: 0.5rem;
+		row-gap: 0.18rem;
+		align-items: center;
+	}
+
+	.reply-preview-label {
+		grid-column: 1;
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: #4f4f58;
+	}
+
+	.reply-preview-content {
+		grid-column: 1;
+		font-size: 0.78rem;
+		color: #2d2d36;
+		line-height: 1.28;
+		word-break: break-word;
+	}
+
+	.reply-preview-cancel {
+		grid-column: 2;
+		grid-row: 1 / span 2;
+		border: 1px solid #d1d1d8;
+		background: #ffffff;
+		border-radius: 8px;
+		padding: 0.28rem 0.52rem;
+		font-size: 0.72rem;
+		cursor: pointer;
+		color: #2f2f37;
 	}
 
 	.attachment-preview-panel {

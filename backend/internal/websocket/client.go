@@ -59,8 +59,12 @@ type Client struct {
 	disconnectOnce  sync.Once
 	sendCloseOnce   sync.Once
 	subscriptionsMu sync.RWMutex
-	subscribedRooms map[string]struct{}
+	subscribedRooms map[string]RoomSubscription
 	onDisconnect    func()
+}
+
+type RoomSubscription struct {
+	CanWrite bool
 }
 
 func (c *Client) LoadHistory(ctx context.Context, service *MessageService, roomID string) {
@@ -142,7 +146,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		JoinedAt:        time.Now().UTC(),
 		msgLimiter:      rate.NewLimiter(rate.Every(250*time.Millisecond), 8),
 		clientIP:        clientIP,
-		subscribedRooms: make(map[string]struct{}),
+		subscribedRooms: make(map[string]RoomSubscription),
 		onDisconnect: func() {
 			releaseReservation()
 		},
@@ -185,6 +189,37 @@ func (c *Client) readPump() {
 			}
 			continue
 		}
+		if typing, isTyping := parseTypingPayload(raw); isTyping {
+			if c.Hub != nil {
+				c.Hub.typing <- &ClientTypingEvent{
+					Client:   c,
+					RoomID:   typing.RoomID,
+					IsTyping: typing.IsTyping,
+				}
+			}
+			continue
+		}
+		if edit, isEdit := parseMessageEditPayload(raw); isEdit {
+			if c.Hub != nil {
+				c.Hub.messageEdit <- &ClientMessageEditEvent{
+					Client:    c,
+					RoomID:    edit.RoomID,
+					MessageID: edit.MessageID,
+					Content:   edit.Content,
+				}
+			}
+			continue
+		}
+		if deletion, isDelete := parseMessageDeletePayload(raw); isDelete {
+			if c.Hub != nil {
+				c.Hub.messageDelete <- &ClientMessageDeleteEvent{
+					Client:    c,
+					RoomID:    deletion.RoomID,
+					MessageID: deletion.MessageID,
+				}
+			}
+			continue
+		}
 
 		var msg models.Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
@@ -200,6 +235,10 @@ func (c *Client) readPump() {
 		}
 		if !c.isSubscribedToRoom(msg.RoomID) {
 			log.Printf("[ws] message rejected user=%s room=%s reason=not_subscribed", c.UserID, msg.RoomID)
+			continue
+		}
+		if !c.canWriteToRoom(msg.RoomID) {
+			log.Printf("[ws] message rejected user=%s room=%s reason=read_only_subscription", c.UserID, msg.RoomID)
 			continue
 		}
 		if c.msgLimiter != nil && !c.msgLimiter.Allow() {
@@ -227,21 +266,13 @@ func normalizeRoomID(raw string) string {
 	}
 
 	var builder strings.Builder
-	prevSeparator := false
 	for _, ch := range normalized {
-		switch {
-		case (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'):
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
 			builder.WriteRune(ch)
-			prevSeparator = false
-		case ch == ' ' || ch == '-' || ch == '_':
-			if builder.Len() > 0 && !prevSeparator {
-				builder.WriteByte('_')
-				prevSeparator = true
-			}
 		}
 	}
 
-	return strings.Trim(builder.String(), "_")
+	return builder.String()
 }
 
 func normalizeUsername(raw string) string {
@@ -315,6 +346,53 @@ type subscribePayload struct {
 	Rooms   []string `json:"rooms"`
 }
 
+type typingEnvelope struct {
+	Type    string          `json:"type"`
+	RoomID  string          `json:"roomId"`
+	RoomID2 string          `json:"room_id"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type typingPayload struct {
+	RoomID  string `json:"roomId"`
+	RoomID2 string `json:"room_id"`
+}
+
+type messageEditEnvelope struct {
+	Type       string          `json:"type"`
+	RoomID     string          `json:"roomId"`
+	RoomID2    string          `json:"room_id"`
+	MessageID  string          `json:"messageId"`
+	MessageID2 string          `json:"message_id"`
+	Content    string          `json:"content"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
+type messageDeleteEnvelope struct {
+	Type       string          `json:"type"`
+	RoomID     string          `json:"roomId"`
+	RoomID2    string          `json:"room_id"`
+	MessageID  string          `json:"messageId"`
+	MessageID2 string          `json:"message_id"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
+type clientTypingPayload struct {
+	RoomID   string
+	IsTyping bool
+}
+
+type clientMessageEditPayload struct {
+	RoomID    string
+	MessageID string
+	Content   string
+}
+
+type clientMessageDeletePayload struct {
+	RoomID    string
+	MessageID string
+}
+
 func parseSubscribeRoomIDs(raw []byte) ([]string, bool) {
 	if len(raw) == 0 {
 		return nil, false
@@ -362,6 +440,148 @@ func parseSubscribeRoomIDs(raw []byte) ([]string, bool) {
 	return roomIDs, true
 }
 
+func parseTypingPayload(raw []byte) (clientTypingPayload, bool) {
+	if len(raw) == 0 {
+		return clientTypingPayload{}, false
+	}
+	var envelope typingEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientTypingPayload{}, false
+	}
+	eventType := strings.ToLower(strings.TrimSpace(envelope.Type))
+	if eventType != "typing_start" && eventType != "typing_stop" {
+		return clientTypingPayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	if roomID == "" && len(envelope.Payload) > 0 {
+		var payload typingPayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+			roomID = normalizeRoomID(payload.RoomID)
+			if roomID == "" {
+				roomID = normalizeRoomID(payload.RoomID2)
+			}
+		}
+	}
+	if roomID == "" {
+		return clientTypingPayload{}, false
+	}
+
+	return clientTypingPayload{
+		RoomID:   roomID,
+		IsTyping: eventType == "typing_start",
+	}, true
+}
+
+func parseMessageEditPayload(raw []byte) (clientMessageEditPayload, bool) {
+	if len(raw) == 0 {
+		return clientMessageEditPayload{}, false
+	}
+	var envelope messageEditEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientMessageEditPayload{}, false
+	}
+	if strings.ToLower(strings.TrimSpace(envelope.Type)) != "message_edit" {
+		return clientMessageEditPayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	messageID := normalizeMessageID(envelope.MessageID)
+	if messageID == "" {
+		messageID = normalizeMessageID(envelope.MessageID2)
+	}
+	content := strings.TrimSpace(envelope.Content)
+
+	if len(envelope.Payload) > 0 {
+		var payload messageEditEnvelope
+		if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+			if roomID == "" {
+				roomID = normalizeRoomID(payload.RoomID)
+				if roomID == "" {
+					roomID = normalizeRoomID(payload.RoomID2)
+				}
+			}
+			if messageID == "" {
+				messageID = normalizeMessageID(payload.MessageID)
+				if messageID == "" {
+					messageID = normalizeMessageID(payload.MessageID2)
+				}
+			}
+			if content == "" {
+				content = strings.TrimSpace(payload.Content)
+			}
+		}
+	}
+
+	if roomID == "" || messageID == "" || content == "" {
+		return clientMessageEditPayload{}, false
+	}
+	if len(content) > maxTextChars {
+		content = content[:maxTextChars]
+	}
+
+	return clientMessageEditPayload{
+		RoomID:    roomID,
+		MessageID: messageID,
+		Content:   content,
+	}, true
+}
+
+func parseMessageDeletePayload(raw []byte) (clientMessageDeletePayload, bool) {
+	if len(raw) == 0 {
+		return clientMessageDeletePayload{}, false
+	}
+	var envelope messageDeleteEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientMessageDeletePayload{}, false
+	}
+	if strings.ToLower(strings.TrimSpace(envelope.Type)) != "message_delete" {
+		return clientMessageDeletePayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	messageID := normalizeMessageID(envelope.MessageID)
+	if messageID == "" {
+		messageID = normalizeMessageID(envelope.MessageID2)
+	}
+
+	if len(envelope.Payload) > 0 && (roomID == "" || messageID == "") {
+		var payload messageDeleteEnvelope
+		if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+			if roomID == "" {
+				roomID = normalizeRoomID(payload.RoomID)
+				if roomID == "" {
+					roomID = normalizeRoomID(payload.RoomID2)
+				}
+			}
+			if messageID == "" {
+				messageID = normalizeMessageID(payload.MessageID)
+				if messageID == "" {
+					messageID = normalizeMessageID(payload.MessageID2)
+				}
+			}
+		}
+	}
+
+	if roomID == "" || messageID == "" {
+		return clientMessageDeletePayload{}, false
+	}
+
+	return clientMessageDeletePayload{
+		RoomID:    roomID,
+		MessageID: messageID,
+	}, true
+}
+
 func normalizeInboundMessage(msg *models.Message) bool {
 	if msg == nil {
 		return false
@@ -372,6 +592,14 @@ func normalizeInboundMessage(msg *models.Message) bool {
 	msg.MediaURL = strings.TrimSpace(msg.MediaURL)
 	msg.MediaType = strings.ToLower(strings.TrimSpace(msg.MediaType))
 	msg.FileName = strings.TrimSpace(msg.FileName)
+	msg.ReplyToMessageID = normalizeMessageID(msg.ReplyToMessageID)
+	msg.ReplyToSnippet = strings.TrimSpace(msg.ReplyToSnippet)
+	if len(msg.ReplyToSnippet) > 140 {
+		msg.ReplyToSnippet = msg.ReplyToSnippet[:140]
+	}
+	if msg.ReplyToMessageID == "" {
+		msg.ReplyToSnippet = ""
+	}
 
 	switch msg.Type {
 	case "", "text":
@@ -394,6 +622,24 @@ func normalizeInboundMessage(msg *models.Message) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeMessageID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, ch := range trimmed {
+		if (ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '_' ||
+			ch == '-' {
+			builder.WriteRune(ch)
+		}
+	}
+	return builder.String()
 }
 
 func extractClientIP(r *http.Request) string {
@@ -426,7 +672,7 @@ func extractClientIP(r *http.Request) string {
 }
 
 func estimateMessageBytes(msg models.Message) int {
-	estimated := len(msg.ID) + len(msg.RoomID) + len(msg.SenderID) + len(msg.SenderName) + len(msg.Content) + len(msg.Type) + len(msg.MediaURL) + len(msg.MediaType) + len(msg.FileName)
+	estimated := len(msg.ID) + len(msg.RoomID) + len(msg.SenderID) + len(msg.SenderName) + len(msg.Content) + len(msg.Type) + len(msg.MediaURL) + len(msg.MediaType) + len(msg.FileName) + len(msg.ReplyToMessageID) + len(msg.ReplyToSnippet)
 	if estimated <= 0 {
 		return 0
 	}
@@ -461,12 +707,14 @@ func (c *Client) closeSendChannel() {
 	})
 }
 
-func (c *Client) subscribeToRoom(roomID string) {
+func (c *Client) subscribeToRoom(roomID string, canWrite bool) {
 	if c == nil || roomID == "" {
 		return
 	}
 	c.subscriptionsMu.Lock()
-	c.subscribedRooms[roomID] = struct{}{}
+	subscription := c.subscribedRooms[roomID]
+	subscription.CanWrite = subscription.CanWrite || canWrite
+	c.subscribedRooms[roomID] = subscription
 	c.subscriptionsMu.Unlock()
 }
 
@@ -487,6 +735,19 @@ func (c *Client) isSubscribedToRoom(roomID string) bool {
 	_, exists := c.subscribedRooms[roomID]
 	c.subscriptionsMu.RUnlock()
 	return exists
+}
+
+func (c *Client) canWriteToRoom(roomID string) bool {
+	if c == nil || roomID == "" {
+		return false
+	}
+	c.subscriptionsMu.RLock()
+	subscription, exists := c.subscribedRooms[roomID]
+	c.subscriptionsMu.RUnlock()
+	if !exists {
+		return false
+	}
+	return subscription.CanWrite
 }
 
 func reserveWSConnection(clientIP string) (func(), int, string) {

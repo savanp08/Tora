@@ -1,0 +1,3 @@
+./auth.go
+./room.go
+./upload.go

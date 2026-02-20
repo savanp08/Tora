@@ -272,15 +272,10 @@ function toWebSocketURL(raw: string) {
 }
 
 function normalizeRoomID(raw: string) {
-	const normalized = raw.toLowerCase().trim();
-	if (!normalized) {
-		return '';
-	}
-	return normalized
-		.replace(/[^a-z0-9\s_-]/g, '')
-		.replace(/[\s-]+/g, '_')
-		.replace(/_+/g, '_')
-		.replace(/^_+|_+$/g, '');
+	return raw
+		.toLowerCase()
+		.trim()
+		.replace(/[^a-z0-9]/g, '');
 }
 
 function normalizeIdentifier(raw: string) {

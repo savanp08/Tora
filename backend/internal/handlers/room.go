@@ -2,16 +2,18 @@ package handlers
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
+	mrand "math/rand"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/database"
@@ -20,13 +22,20 @@ import (
 )
 
 const (
-	roomDefaultTTL     = 6 * time.Hour
-	roomExtendedTTL    = 24 * time.Hour
-	roomMaxExtendAge   = 14 * 24 * time.Hour
-	roomHistoryTTL     = roomDefaultTTL
-	roomHistorySize    = 50
-	roomCodeDigits     = 6
-	messageBreakPrefix = "message:break:"
+	roomDefaultTTL       = 6 * time.Hour
+	roomExtendedTTL      = 24 * time.Hour
+	roomMaxExtendAge     = 15 * 24 * time.Hour
+	roomMaxDescendants   = 6
+	roomHistoryTTL       = roomDefaultTTL
+	roomHistorySize      = 50
+	roomCodeDigits       = 6
+	roomNameMaxLength    = 20
+	roomIDLength         = 14
+	roomIDAlphabet       = "abcdefghijklmnopqrstuvwxyz0123456789"
+	roomTreeNumberPrefix = "user:tree_numbers:"
+	roomNameIndexPrefix  = "room:name:"
+	messageBreakPrefix   = "message:break:"
+	roomNameRetryLimit   = 3
 )
 
 var (
@@ -35,11 +44,21 @@ var (
 	JoinRoomLimiter   = security.NewLimiter(20, time.Minute, 20, 15*time.Minute)
 	ExtendRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
 
-	roomSuffixWords = []string{
-		"hub", "zone", "chat", "base", "net",
-		"talk", "lounge", "pulse", "nest", "crew",
-		"loop", "dock", "den", "forge", "space",
-		"spot", "sync", "stream", "wave", "link",
+	roomNameAdjectives = []string{
+		"happy", "silly", "cool", "lazy", "wild", "calm", "brave", "smart", "kind", "busy",
+		"cozy", "dizzy", "lucky", "jolly", "nice", "proud", "quiet", "wise", "pure", "warm",
+		"zany", "wacky", "funky", "groovy", "sleepy", "hyper", "chill", "hasty", "spicy", "fresh",
+		"tiny", "huge", "tall", "short", "soft", "hard", "shiny", "bright", "dark", "clean",
+		"fast", "slow", "swift", "rapid", "quick", "turbo", "sonic", "mega", "ultra", "mighty",
+		"cyber", "pixel", "retro", "modern", "alpha", "beta", "prime", "royal", "meta", "magic",
+	}
+	roomNameNouns = []string{
+		"bear", "cat", "dog", "fox", "wolf", "lion", "tiger", "duck", "frog", "fish",
+		"bird", "owl", "crow", "hawk", "dove", "deer", "elk", "moose", "goat", "sheep",
+		"horse", "pony", "rat", "mouse", "bat", "whale", "shark", "crab", "squid", "eel",
+		"snake", "cobra", "viper", "panda", "koala", "otter", "beetle", "lizard", "raven", "falcon",
+		"cloud", "stone", "river", "ocean", "wave", "comet", "orbit", "galaxy", "nebula", "dune",
+		"spark", "pulse", "core", "forge", "vault", "tower", "lab", "haven", "crew", "grid",
 	}
 )
 
@@ -49,10 +68,13 @@ type RoomHandler struct {
 }
 
 func NewRoomHandler(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *RoomHandler {
-	return &RoomHandler{redis: redisStore, scylla: scyllaStore}
+	handler := &RoomHandler{redis: redisStore, scylla: scyllaStore}
+	handler.ensureRoomSchema()
+	return handler
 }
 
 type JoinRoomRequest struct {
+	RoomID   string `json:"roomId"`
 	RoomName string `json:"roomName"`
 	RoomCode string `json:"roomCode"`
 	Username string `json:"username"`
@@ -68,6 +90,7 @@ type JoinRoomResponse struct {
 	UserID    string `json:"userId"`
 	Token     string `json:"token"`
 	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
 }
 
 type ExtendRoomRequest struct {
@@ -77,6 +100,7 @@ type ExtendRoomRequest struct {
 type ExtendRoomResponse struct {
 	RoomID           string `json:"roomId"`
 	ExpiresInSeconds int64  `json:"expiresInSeconds"`
+	ExpiresAt        int64  `json:"expiresAt,omitempty"`
 	Message          string `json:"message"`
 }
 
@@ -104,6 +128,7 @@ type CreateBreakRoomResponse struct {
 	ParentRoomID    string `json:"parentRoomId"`
 	OriginMessageID string `json:"originMessageId"`
 	CreatedAt       int64  `json:"createdAt"`
+	ExpiresAt       int64  `json:"expiresAt,omitempty"`
 }
 
 type SidebarRoom struct {
@@ -112,8 +137,10 @@ type SidebarRoom struct {
 	Status          string `json:"status"`
 	ParentRoomID    string `json:"parentRoomId,omitempty"`
 	OriginMessageID string `json:"originMessageId,omitempty"`
+	TreeNumber      int    `json:"treeNumber"`
 	MemberCount     int    `json:"memberCount"`
 	CreatedAt       int64  `json:"createdAt"`
+	ExpiresAt       int64  `json:"expiresAt,omitempty"`
 }
 
 type SidebarRoomsResponse struct {
@@ -134,7 +161,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
 		return
 	}
-	log.Printf("[room] join requested raw_room=%q room_code=%q username=%q type=%q mode=%q", req.RoomName, req.RoomCode, req.Username, req.Type, req.Mode)
+	log.Printf("[room] join requested room_id=%q room_name=%q room_code=%q username=%q type=%q mode=%q", req.RoomID, req.RoomName, req.RoomCode, req.Username, req.Type, req.Mode)
 
 	roomType := strings.TrimSpace(req.Type)
 	if roomType == "" {
@@ -152,36 +179,24 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 
 	ctx := context.Background()
 	normalizedRoomCode := normalizeRoomCode(req.RoomCode)
-	baseSlug := slugifyRoomName(req.RoomName)
+	requestedRoomName := normalizeRoomName(req.RoomName)
+	requestedRoomID := normalizeRoomID(req.RoomID)
+
 	if mode == "create" {
-		if baseSlug == "" {
+		if requestedRoomName == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Room name must contain letters or numbers"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Room name is required"})
 			return
 		}
 	} else {
-		if baseSlug == "" && normalizedRoomCode == "" {
+		if requestedRoomID == "" && requestedRoomName == "" && normalizedRoomCode == "" {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Provide a room name or 6-digit room code"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Provide room name or 6-digit room code"})
 			return
-		}
-		if normalizedRoomCode != "" {
-			resolvedRoomID, err := h.resolveRoomIDByCode(ctx, normalizedRoomCode)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
-				return
-			}
-			if resolvedRoomID == "" {
-				w.WriteHeader(http.StatusNotFound)
-				json.NewEncoder(w).Encode(map[string]string{"error": "Room code not found"})
-				return
-			}
-			baseSlug = resolvedRoomID
 		}
 	}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	createdAt := time.Now().Unix()
 
 	normalizedUsername := normalizeUsername(req.Username)
@@ -195,11 +210,70 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	token := "temp_token_for_" + normalizedUsername
 
-	finalRoomID := baseSlug
-	finalRoomName := baseSlug
-	finalRoomCode := normalizedRoomCode
+	finalRoomID := ""
+	finalRoomName := requestedRoomName
 	if mode == "join" {
-		exists, err := h.roomExists(ctx, baseSlug)
+		if normalizedRoomCode != "" {
+			resolvedRoomID, err := h.resolveRoomIDByCode(ctx, normalizedRoomCode)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
+				return
+			}
+			if resolvedRoomID == "" {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Room code not found"})
+				return
+			}
+			finalRoomID = resolvedRoomID
+		} else {
+			if requestedRoomName != "" {
+				resolvedRoomID, err := h.resolveRoomIDByName(ctx, requestedRoomName)
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room name"})
+					return
+				}
+				if resolvedRoomID != "" {
+					finalRoomID = resolvedRoomID
+				}
+			}
+
+			if finalRoomID == "" && requestedRoomID != "" {
+				existsAsID, err := h.roomExists(ctx, requestedRoomID)
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+					return
+				}
+				if existsAsID {
+					finalRoomID = requestedRoomID
+				}
+			}
+
+			// Backward compatibility for clients that still send room names in roomId.
+			if finalRoomID == "" && requestedRoomID != "" {
+				resolvedLegacyRoomID, err := h.resolveRoomIDByName(ctx, requestedRoomID)
+				if err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room name"})
+					return
+				}
+				if resolvedLegacyRoomID != "" {
+					finalRoomID = resolvedLegacyRoomID
+					if finalRoomName == "" {
+						finalRoomName = requestedRoomID
+					}
+				}
+			}
+		}
+		if finalRoomID == "" {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+			return
+		}
+
+		exists, err := h.roomExists(ctx, finalRoomID)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -211,67 +285,47 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		name, err := h.getRoomName(ctx, baseSlug)
+		name, err := h.getRoomName(ctx, finalRoomID)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read room data"})
 			return
 		}
-		if strings.TrimSpace(name) != "" {
-			finalRoomName = name
+		if normalized := normalizeRoomName(name); normalized != "" {
+			finalRoomName = normalized
+		} else {
+			finalRoomName = requestedRoomName
+			if finalRoomName == "" {
+				finalRoomName = "Room"
+			}
 		}
 	} else {
-		created, err := h.tryCreateRoom(ctx, baseSlug, baseSlug, roomType, createdAt, "", "")
+		// "New" must always create a room. If the requested root name exists,
+		// generate alternates before falling back to a 3-digit suffix.
+		resolvedCreateName, resolveErr := h.resolveCreateRoomName(ctx, requestedRoomName, rng)
+		if resolveErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room name availability"})
+			return
+		}
+		finalRoomName = resolvedCreateName
+
+		nextRoomID, err := h.allocateUniqueRoomID(ctx)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to allocate room id"})
+			return
+		}
+		finalRoomID = nextRoomID
+		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
 			return
 		}
-
 		if !created {
-			suffixOrder := rng.Perm(len(roomSuffixWords))
-			for i := 0; i < 3 && i < len(suffixOrder); i++ {
-				candidateID := fmt.Sprintf("%s_%s", baseSlug, roomSuffixWords[suffixOrder[i]])
-				candidateName := candidateID
-
-				created, err = h.tryCreateRoom(ctx, candidateID, candidateName, roomType, createdAt, "", "")
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
-					return
-				}
-
-				if created {
-					finalRoomID = candidateID
-					finalRoomName = candidateName
-					break
-				}
-			}
-		}
-
-		if !created {
-			for attempts := 0; attempts < 10; attempts++ {
-				fallbackID := fmt.Sprintf("%s_%04d", baseSlug, rng.Intn(9000)+1000)
-				fallbackName := fallbackID
-
-				created, err = h.tryCreateRoom(ctx, fallbackID, fallbackName, roomType, createdAt, "", "")
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
-					return
-				}
-
-				if created {
-					finalRoomID = fallbackID
-					finalRoomName = fallbackName
-					break
-				}
-			}
-		}
-
-		if !created {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to allocate unique room name"})
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create room, retry"})
 			return
 		}
 	}
@@ -282,8 +336,6 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
 		return
 	}
-	finalRoomCode = roomCode
-
 	memberCount, err := h.registerRoomMembership(ctx, finalRoomID, userID)
 	if err != nil {
 		if errors.Is(err, errRoomFull) {
@@ -310,14 +362,19 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	if finalCreatedAt <= 0 {
 		finalCreatedAt = createdAt
 	}
+	if err := h.indexRoomName(ctx, finalRoomID, finalRoomName, finalCreatedAt); err != nil {
+		log.Printf("[room] join name-index sync failed room=%s err=%v", finalRoomID, err)
+	}
+	expiresAt := h.getRoomExpiryUnix(ctx, finalRoomID)
 
 	response := JoinRoomResponse{
 		RoomID:    finalRoomID,
 		RoomName:  finalRoomName,
-		RoomCode:  finalRoomCode,
+		RoomCode:  roomCode,
 		UserID:    userID,
 		Token:     token,
 		CreatedAt: finalCreatedAt,
+		ExpiresAt: expiresAt,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -340,7 +397,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parentRoomID := slugifyRoomName(req.ParentRoomID)
+	parentRoomID := normalizeRoomID(req.ParentRoomID)
 	originMessageID := strings.TrimSpace(req.OriginMessageID)
 	if parentRoomID == "" || originMessageID == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -361,27 +418,39 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parentRoomName, err := h.getRoomName(ctx, parentRoomID)
+	rootRoomID, err := h.resolveRootRoomID(ctx, parentRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read parent room"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room tree"})
 		return
 	}
-	if parentRoomName == "" {
-		parentRoomName = parentRoomID
+	descendantCount, err := h.countDescendants(ctx, rootRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to evaluate child room limit"})
+		return
+	}
+	if descendantCount >= roomMaxDescendants {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Root room has reached the child limit (6)"})
+		return
 	}
 
-	prefixSlug := slugifyRoomName(truncate(req.RoomName, 24))
-	if prefixSlug == "" {
-		prefixSlug = "topic"
+	sourceMessageText, err := h.resolveSourceMessageText(ctx, parentRoomID, originMessageID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read source message"})
+		return
 	}
-	parentSuffix := slugifyRoomName(parentRoomName)
-	if parentSuffix == "" {
-		parentSuffix = parentRoomID
+	sourceMessageText = strings.TrimSpace(sourceMessageText)
+	if sourceMessageText == "" {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Source message text not found"})
+		return
 	}
-	parentSuffix = truncate(parentSuffix, 5)
-	if parentSuffix == "" {
-		parentSuffix = "root"
+	branchRoomName := deriveBranchRoomName(sourceMessageText)
+	if branchRoomName == "" {
+		branchRoomName = "Branch"
 	}
 
 	createdAt := time.Now().Unix()
@@ -395,49 +464,32 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		roomType = "ephemeral"
 	}
 
-	existingChildren, err := h.redis.Client.SCard(ctx, roomChildrenKey(parentRoomID)).Result()
+	finalRoomID, err := h.allocateUniqueRoomID(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to allocate break room id"})
+		return
+	}
+	created, err := h.tryCreateRoom(
+		ctx,
+		finalRoomID,
+		branchRoomName,
+		roomType,
+		createdAt,
+		parentRoomID,
+		originMessageID,
+	)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room"})
 		return
 	}
-
-	finalRoomID := ""
-	finalRoomName := ""
-	created := false
-	nextIndex := int(existingChildren) + 1
-	if nextIndex < 1 {
-		nextIndex = 1
-	}
-	for offset := 0; offset < 5000; offset++ {
-		sequence := nextIndex + offset
-		candidateID := fmt.Sprintf("%s_%s_%d", prefixSlug, parentSuffix, sequence)
-		created, err = h.tryCreateRoom(
-			ctx,
-			candidateID,
-			candidateID,
-			roomType,
-			createdAt,
-			parentRoomID,
-			originMessageID,
-		)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room"})
-			return
-		}
-		if created {
-			finalRoomID = candidateID
-			finalRoomName = candidateID
-			break
-		}
-	}
-
 	if !created {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to allocate unique break room"})
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room, retry"})
 		return
 	}
+	finalRoomName := branchRoomName
 
 	if err := h.redis.Client.SAdd(ctx, roomChildrenKey(parentRoomID), finalRoomID).Err(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -474,6 +526,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 	h.tryUpdateBreakMetadataInScylla(parentRoomID, originMessageID, finalRoomID, memberCount)
 
 	log.Printf("[room] break created room=%s parent=%s origin=%s", finalRoomID, parentRoomID, originMessageID)
+	expiresAt := h.getRoomExpiryUnix(ctx, finalRoomID)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(CreateBreakRoomResponse{
@@ -482,6 +535,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		ParentRoomID:    parentRoomID,
 		OriginMessageID: originMessageID,
 		CreatedAt:       createdAt,
+		ExpiresAt:       expiresAt,
 	})
 }
 
@@ -494,39 +548,94 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	joinedRoomIDs, err := h.redis.Client.SMembers(ctx, userRoomsKey(userID)).Result()
+	joinedRoomIDsRaw, err := h.redis.Client.SMembers(ctx, userRoomsKey(userID)).Result()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load user rooms"})
 		return
 	}
 
+	membershipCache := make(map[string]bool, len(joinedRoomIDsRaw))
+	joinedRoomIDs := make([]string, 0, len(joinedRoomIDsRaw))
+	joinedSet := make(map[string]struct{}, len(joinedRoomIDsRaw))
+	for _, rawRoomID := range joinedRoomIDsRaw {
+		roomID := normalizeRoomID(rawRoomID)
+		if roomID == "" {
+			continue
+		}
+		if _, exists := joinedSet[roomID]; exists {
+			continue
+		}
+		joinedSet[roomID] = struct{}{}
+		membershipCache[roomID] = true
+		joinedRoomIDs = append(joinedRoomIDs, roomID)
+	}
+
 	roomsMap := make(map[string]SidebarRoom)
+	visited := make(map[string]struct{}, len(joinedRoomIDs))
+
+	// Always include rooms the user is already a member of.
 	for _, roomID := range joinedRoomIDs {
+		if roomID == "" {
+			continue
+		}
+		if _, seen := visited[roomID]; seen {
+			continue
+		}
+		visited[roomID] = struct{}{}
+
 		room, ok, err := h.loadSidebarRoom(ctx, roomID, "joined")
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load sidebar rooms"})
-			return
+			continue
 		}
 		if ok {
 			roomsMap[roomID] = room
 		}
 	}
 
-	for _, parentRoomID := range joinedRoomIDs {
-		children, err := h.redis.Client.SMembers(ctx, roomChildrenKey(parentRoomID)).Result()
-		if err != nil {
+	// Include descendants recursively so tree navigation can drill into child rooms at any depth.
+	queue := append([]string(nil), joinedRoomIDs...)
+	expandedParents := make(map[string]struct{}, len(joinedRoomIDs))
+	for len(queue) > 0 {
+		parentRoomID := normalizeRoomID(queue[0])
+		queue = queue[1:]
+		if parentRoomID == "" {
 			continue
 		}
-		for _, childRoomID := range children {
-			if _, exists := roomsMap[childRoomID]; exists {
+		if _, expanded := expandedParents[parentRoomID]; expanded {
+			continue
+		}
+		expandedParents[parentRoomID] = struct{}{}
+
+		children, childrenErr := h.redis.Client.SMembers(ctx, roomChildrenKey(parentRoomID)).Result()
+		if childrenErr != nil {
+			continue
+		}
+		for _, childRawID := range children {
+			childRoomID := normalizeRoomID(childRawID)
+			if childRoomID == "" {
 				continue
 			}
 
+			exists, existsErr := h.roomExists(ctx, childRoomID)
+			if existsErr != nil {
+				continue
+			}
+			if !exists {
+				_ = h.redis.Client.SRem(ctx, roomChildrenKey(parentRoomID), childRawID).Err()
+				continue
+			}
+
+			isJoined, known := membershipCache[childRoomID]
+			if !known {
+				isMember, memberErr := h.redis.Client.SIsMember(ctx, roomMembersKey(childRoomID), userID).Result()
+				if memberErr == nil {
+					membershipCache[childRoomID] = isMember
+					isJoined = isMember
+				}
+			}
 			status := "discoverable"
-			isMember, err := h.redis.Client.SIsMember(ctx, roomMembersKey(childRoomID), userID).Result()
-			if err == nil && isMember {
+			if isJoined {
 				status = "joined"
 			}
 
@@ -536,9 +645,13 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 			}
 			if ok {
 				roomsMap[childRoomID] = room
+				visited[childRoomID] = struct{}{}
+				queue = append(queue, childRoomID)
 			}
 		}
 	}
+
+	h.assignTreeNumbers(ctx, userID, roomsMap)
 
 	rooms := make([]SidebarRoom, 0, len(roomsMap))
 	for _, room := range roomsMap {
@@ -572,7 +685,7 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[room] extend requested room_id=%q", req.RoomID)
 
-	roomID := slugifyRoomName(req.RoomID)
+	roomID := normalizeRoomID(req.RoomID)
 	if roomID == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "roomId is required"})
@@ -580,9 +693,9 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := context.Background()
-	roomKey := roomKey(roomID)
+	roomRedisKey := roomKey(roomID)
 
-	exists, err := h.redis.Client.Exists(ctx, roomKey).Result()
+	exists, err := h.redis.Client.Exists(ctx, roomRedisKey).Result()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -594,7 +707,7 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createdAtRaw, err := h.redis.Client.HGet(ctx, roomKey, "created_at").Result()
+	createdAtRaw, err := h.redis.Client.HGet(ctx, roomRedisKey, "created_at").Result()
 	if err == redis.Nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Room metadata is incomplete"})
@@ -613,38 +726,69 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	age := time.Since(time.Unix(createdAtUnix, 0))
-	if age >= roomMaxExtendAge {
-		log.Printf("[room] extend denied room_id=%s age_hours=%.2f", roomID, age.Hours())
+	createdAt := time.Unix(createdAtUnix, 0)
+	maxExpiry := createdAt.Add(roomMaxExtendAge)
+	maxRemaining := time.Until(maxExpiry)
+	if maxRemaining <= 0 {
+		log.Printf("[room] extend denied room_id=%s reason=max_age_reached", roomID)
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Room has reached its 15-day limit"})
 		return
 	}
 
-	if err := h.redis.Client.Expire(ctx, roomKey, roomExtendedTTL).Err(); err != nil {
+	currentTTL, err := h.redis.Client.TTL(ctx, roomRedisKey).Result()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read room expiry"})
+		return
+	}
+	if currentTTL < 0 {
+		currentTTL = 0
+	}
+
+	nextTTL := currentTTL + roomExtendedTTL
+	if nextTTL > maxRemaining {
+		nextTTL = maxRemaining
+	}
+	if nextTTL <= currentTTL {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Room has reached its 15-day limit"})
+		return
+	}
+	if nextTTL < time.Second {
+		nextTTL = time.Second
+	}
+
+	if err := h.redis.Client.Expire(ctx, roomRedisKey, nextTTL).Err(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to extend room"})
 		return
 	}
 	if roomCode, codeErr := h.ensureRoomCode(ctx, roomID); codeErr == nil && roomCode != "" {
-		_ = h.redis.Client.Set(ctx, roomCodeKey(roomCode), roomID, roomExtendedTTL).Err()
+		_ = h.redis.Client.Set(ctx, roomCodeKey(roomCode), roomID, nextTTL).Err()
 	}
-	_ = h.redis.Client.Expire(ctx, roomMembersKey(roomID), roomExtendedTTL).Err()
-	_ = h.redis.Client.Expire(ctx, roomChildrenKey(roomID), roomExtendedTTL).Err()
-	_ = h.redis.Client.Expire(ctx, roomHistoryKey(roomID), roomExtendedTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomMembersKey(roomID), nextTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomChildrenKey(roomID), nextTTL).Err()
+	_ = h.redis.Client.Expire(ctx, roomHistoryKey(roomID), nextTTL).Err()
 
-	if err := h.refreshRoomMessageTTL(ctx, roomID, roomExtendedTTL); err != nil {
+	if err := h.refreshRoomMessageTTL(ctx, roomID, nextTTL); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to extend room messages"})
 		return
 	}
 
-	log.Printf("[room] extend success room_id=%s ttl_seconds=%d", roomID, int64(roomExtendedTTL.Seconds()))
+	expiresAt := time.Now().Add(nextTTL).Unix()
+	log.Printf("[room] extend success room_id=%s ttl_seconds=%d", roomID, int64(nextTTL.Seconds()))
+	responseMessage := "Room extended for 24 hours"
+	if nextTTL < currentTTL+roomExtendedTTL {
+		responseMessage = "Room extended to its 15-day limit"
+	}
 
 	response := ExtendRoomResponse{
 		RoomID:           roomID,
-		ExpiresInSeconds: int64(roomExtendedTTL.Seconds()),
-		Message:          "Room extended for 24 hours",
+		ExpiresInSeconds: int64(nextTTL.Seconds()),
+		ExpiresAt:        expiresAt,
+		Message:          responseMessage,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -660,8 +804,8 @@ func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roomID := slugifyRoomName(req.RoomID)
-	nextName := slugifyRoomName(req.RoomName)
+	roomID := normalizeRoomID(req.RoomID)
+	nextName := normalizeRoomName(req.RoomName)
 	if roomID == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "roomId is required"})
@@ -686,14 +830,32 @@ func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	previousLookup := ""
+	if storedLookup, lookupErr := h.redis.Client.HGet(ctx, roomKey(roomID), "name_lookup").Result(); lookupErr == nil {
+		previousLookup = strings.TrimSpace(storedLookup)
+	} else if lookupErr == redis.Nil {
+		if existingName, nameErr := h.getRoomName(ctx, roomID); nameErr == nil {
+			previousLookup = normalizeRoomNameLookup(existingName)
+		}
+	}
+	nextLookup := normalizeRoomNameLookup(nextName)
+
 	if err := h.redis.Client.HSet(ctx, roomKey(roomID), map[string]interface{}{
-		"name":       nextName,
-		"updated_at": time.Now().Unix(),
+		"name":        nextName,
+		"name_lookup": nextLookup,
+		"updated_at":  time.Now().Unix(),
 	}).Err(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to rename room"})
 		return
 	}
+	if previousLookup != "" && previousLookup != nextLookup {
+		_ = h.redis.Client.ZRem(ctx, roomNameLookupKey(previousLookup), roomID).Err()
+	}
+	if err := h.indexRoomName(ctx, roomID, nextName, time.Now().Unix()); err != nil {
+		log.Printf("[room] rename name-index update failed room=%s err=%v", roomID, err)
+	}
+	h.upsertRoomRecord(ctx, roomID, nextName, "", "", "")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -703,29 +865,74 @@ func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func slugifyRoomName(raw string) string {
+func normalizeRoomID(raw string) string {
 	normalized := strings.ToLower(strings.TrimSpace(raw))
 	if normalized == "" {
 		return ""
 	}
 
 	var builder strings.Builder
-	prevSeparator := false
-
 	for _, ch := range normalized {
-		switch {
-		case (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'):
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
 			builder.WriteRune(ch)
-			prevSeparator = false
-		case ch == ' ' || ch == '-' || ch == '_':
-			if builder.Len() > 0 && !prevSeparator {
-				builder.WriteByte('_')
-				prevSeparator = true
-			}
 		}
 	}
 
-	return strings.Trim(builder.String(), "_")
+	return builder.String()
+}
+
+func normalizeRoomName(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	lastWasSpace := false
+	for _, ch := range trimmed {
+		if ch == '\n' || ch == '\r' || ch == '\t' {
+			ch = ' '
+		}
+		if ch < 32 {
+			continue
+		}
+		if ch == ' ' {
+			if builder.Len() == 0 || lastWasSpace {
+				continue
+			}
+			builder.WriteByte(' ')
+			lastWasSpace = true
+			continue
+		}
+		builder.WriteRune(ch)
+		lastWasSpace = false
+	}
+
+	return truncateRunes(strings.TrimSpace(builder.String()), roomNameMaxLength)
+}
+
+func normalizeRoomNameLookup(raw string) string {
+	normalized := normalizeRoomName(raw)
+	if normalized == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(normalized))
+}
+
+func deriveBranchRoomName(sourceText string) string {
+	return truncateRunes(strings.TrimSpace(sourceText), roomNameMaxLength)
+}
+
+func truncateRunes(input string, max int) string {
+	trimmed := strings.TrimSpace(input)
+	if max <= 0 || trimmed == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(trimmed) <= max {
+		return trimmed
+	}
+	runes := []rune(trimmed)
+	return strings.TrimSpace(string(runes[:max]))
 }
 
 func normalizeUsername(raw string) string {
@@ -796,6 +1003,504 @@ func normalizeRoomCode(raw string) string {
 	return code
 }
 
+func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomName string, rng *mrand.Rand) (string, error) {
+	candidate := normalizeRoomName(requestedRoomName)
+	if candidate == "" {
+		candidate = "Room"
+	}
+
+	existingRootRoomID, err := h.resolveRoomIDByName(ctx, candidate)
+	if err != nil {
+		return "", err
+	}
+	if existingRootRoomID == "" {
+		return candidate, nil
+	}
+
+	lastGenerated := ""
+	for attempt := 0; attempt < roomNameRetryLimit; attempt++ {
+		generated := normalizeRoomName(generateRoomNameFromGeneratorLogic(rng))
+		if generated == "" {
+			continue
+		}
+		lastGenerated = generated
+		existsID, existsErr := h.resolveRoomIDByName(ctx, generated)
+		if existsErr != nil {
+			return "", existsErr
+		}
+		if existsID == "" {
+			return generated, nil
+		}
+	}
+
+	if lastGenerated == "" {
+		lastGenerated = normalizeRoomName(generateRoomNameFromGeneratorLogic(rng))
+	}
+	if lastGenerated == "" {
+		lastGenerated = "room"
+	}
+
+	base := truncateRunes(lastGenerated, roomNameMaxLength-3)
+	if base == "" {
+		base = "room"
+	}
+
+	for attempt := 0; attempt < 1000; attempt++ {
+		fallback := normalizeRoomName(fmt.Sprintf("%s%03d", base, randomThreeDigit(rng)))
+		if fallback == "" {
+			continue
+		}
+		existsID, existsErr := h.resolveRoomIDByName(ctx, fallback)
+		if existsErr != nil {
+			return "", existsErr
+		}
+		if existsID == "" {
+			return fallback, nil
+		}
+	}
+
+	return "", fmt.Errorf("failed to resolve available room name")
+}
+
+func generateRoomNameFromGeneratorLogic(rng *mrand.Rand) string {
+	normalizedRng := ensureMathRand(rng)
+	adjective := randomWordFromList(normalizedRng, roomNameAdjectives)
+	noun := randomWordFromList(normalizedRng, roomNameNouns)
+
+	base := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%s_%s", adjective, noun)))
+	if base == "_" || base == "" {
+		return "room"
+	}
+
+	if normalizedRng.Float64() < 0.5 {
+		return fmt.Sprintf("%s%02d", base, randomTwoDigit(normalizedRng))
+	}
+	return base
+}
+
+func ensureMathRand(rng *mrand.Rand) *mrand.Rand {
+	if rng != nil {
+		return rng
+	}
+	return mrand.New(mrand.NewSource(time.Now().UnixNano()))
+}
+
+func randomWordFromList(rng *mrand.Rand, words []string) string {
+	if len(words) == 0 {
+		return "room"
+	}
+	return words[rng.Intn(len(words))]
+}
+
+func randomTwoDigit(rng *mrand.Rand) int {
+	return rng.Intn(90) + 10
+}
+
+func randomThreeDigit(rng *mrand.Rand) int {
+	return rng.Intn(1000)
+}
+
+func (h *RoomHandler) allocateUniqueRoomID(ctx context.Context) (string, error) {
+	for attempts := 0; attempts < 64; attempts++ {
+		candidate, err := generateRoomID(roomIDLength)
+		if err != nil {
+			return "", err
+		}
+		exists, err := h.roomExists(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("failed to allocate unique room id")
+}
+
+func generateRoomID(length int) (string, error) {
+	if length <= 0 {
+		return "", fmt.Errorf("room id length must be positive")
+	}
+	randomBytes := make([]byte, length)
+	if _, err := crand.Read(randomBytes); err != nil {
+		return "", err
+	}
+
+	encoded := make([]byte, length)
+	for index, value := range randomBytes {
+		encoded[index] = roomIDAlphabet[int(value)%len(roomIDAlphabet)]
+	}
+	return string(encoded), nil
+}
+
+func (h *RoomHandler) resolveSourceMessageText(ctx context.Context, roomID string, messageID string) (string, error) {
+	roomID = normalizeRoomID(roomID)
+	messageID = strings.TrimSpace(messageID)
+	if roomID == "" || messageID == "" {
+		return "", nil
+	}
+
+	if h.redis != nil && h.redis.Client != nil {
+		entries, err := h.redis.Client.LRange(ctx, roomHistoryKey(roomID), 0, -1).Result()
+		if err != nil && err != redis.Nil {
+			return "", err
+		}
+		for index := len(entries) - 1; index >= 0; index-- {
+			raw := entries[index]
+
+			var message models.Message
+			if err := json.Unmarshal([]byte(raw), &message); err == nil && strings.TrimSpace(message.ID) == messageID {
+				if content := strings.TrimSpace(message.Content); content != "" {
+					return content, nil
+				}
+			}
+
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+				continue
+			}
+			if strings.TrimSpace(toString(payload["id"])) != messageID {
+				continue
+			}
+			for _, key := range []string{"content", "text", "caption"} {
+				if content := strings.TrimSpace(toString(payload[key])); content != "" {
+					return content, nil
+				}
+			}
+		}
+	}
+
+	if h.scylla != nil && h.scylla.Session != nil {
+		messagesTable := h.scylla.Table("messages")
+		query := fmt.Sprintf(`SELECT content FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`, messagesTable)
+		iter := h.scylla.Session.Query(query, roomID, messageID).WithContext(ctx).Iter()
+		var content string
+		if iter.Scan(&content) {
+			_ = iter.Close()
+			return strings.TrimSpace(content), nil
+		}
+		if err := iter.Close(); err != nil {
+			return "", err
+		}
+	}
+
+	return "", nil
+}
+
+func (h *RoomHandler) assignTreeNumbers(ctx context.Context, userID string, roomsMap map[string]SidebarRoom) {
+	if len(roomsMap) == 0 {
+		return
+	}
+
+	rootByRoom := make(map[string]string, len(roomsMap))
+	rootSet := make(map[string]struct{}, len(roomsMap))
+	rootCache := make(map[string]string, len(roomsMap))
+	for roomID := range roomsMap {
+		rootID := h.resolveTreeRootID(ctx, roomID, roomsMap, rootCache)
+		if rootID == "" {
+			rootID = roomID
+		}
+		rootByRoom[roomID] = rootID
+		rootSet[rootID] = struct{}{}
+	}
+
+	rootNumbers := make(map[string]int, len(rootSet))
+	maxAssigned := 0
+	if h.redis != nil && h.redis.Client != nil {
+		stored, err := h.redis.Client.HGetAll(ctx, roomTreeNumbersKey(userID)).Result()
+		if err == nil {
+			for rawRoot, rawNumber := range stored {
+				rootID := normalizeRoomID(rawRoot)
+				if rootID == "" {
+					continue
+				}
+				number, convErr := strconv.Atoi(rawNumber)
+				if convErr != nil || number <= 0 {
+					continue
+				}
+				rootNumbers[rootID] = number
+				if number > maxAssigned {
+					maxAssigned = number
+				}
+			}
+		}
+	}
+
+	roots := make([]string, 0, len(rootSet))
+	for rootID := range rootSet {
+		roots = append(roots, rootID)
+	}
+	sort.Strings(roots)
+
+	pendingWrites := make(map[string]interface{})
+	for _, rootID := range roots {
+		if _, exists := rootNumbers[rootID]; exists {
+			continue
+		}
+		maxAssigned++
+		rootNumbers[rootID] = maxAssigned
+		pendingWrites[rootID] = maxAssigned
+	}
+	if len(pendingWrites) > 0 && h.redis != nil && h.redis.Client != nil {
+		_ = h.redis.Client.HSet(ctx, roomTreeNumbersKey(userID), pendingWrites).Err()
+		_ = h.redis.Client.Expire(ctx, roomTreeNumbersKey(userID), 90*24*time.Hour).Err()
+	}
+
+	for roomID, room := range roomsMap {
+		rootID := rootByRoom[roomID]
+		number := rootNumbers[rootID]
+		if number <= 0 {
+			number = 1
+		}
+		room.TreeNumber = number
+		roomsMap[roomID] = room
+	}
+}
+
+func (h *RoomHandler) resolveTreeRootID(ctx context.Context, roomID string, roomsMap map[string]SidebarRoom, rootCache map[string]string) string {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return ""
+	}
+	if cached, exists := rootCache[roomID]; exists {
+		return cached
+	}
+
+	seen := make(map[string]struct{})
+	trail := make([]string, 0, 8)
+	cursor := roomID
+	for cursor != "" {
+		if cached, exists := rootCache[cursor]; exists {
+			cursor = cached
+			break
+		}
+		if _, exists := seen[cursor]; exists {
+			break
+		}
+		seen[cursor] = struct{}{}
+		trail = append(trail, cursor)
+
+		parentID := ""
+		if room, exists := roomsMap[cursor]; exists {
+			parentID = normalizeRoomID(room.ParentRoomID)
+		} else {
+			resolvedParentID, err := h.getParentRoomID(ctx, cursor)
+			if err != nil {
+				parentID = ""
+			} else {
+				parentID = resolvedParentID
+			}
+		}
+		if parentID == "" {
+			break
+		}
+		cursor = parentID
+	}
+
+	rootID := cursor
+	if rootID == "" && len(trail) > 0 {
+		rootID = trail[len(trail)-1]
+	}
+	for _, traversed := range trail {
+		rootCache[traversed] = rootID
+	}
+	return rootID
+}
+
+func (h *RoomHandler) getParentRoomID(ctx context.Context, roomID string) (string, error) {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return "", nil
+	}
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return "", nil
+	}
+	parentID, err := h.redis.Client.HGet(ctx, roomKey(roomID), "parent_room_id").Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return normalizeRoomID(parentID), nil
+}
+
+func (h *RoomHandler) resolveRootRoomID(ctx context.Context, roomID string) (string, error) {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return "", nil
+	}
+
+	seen := make(map[string]struct{})
+	cursor := roomID
+	for cursor != "" {
+		if _, loop := seen[cursor]; loop {
+			return roomID, nil
+		}
+		seen[cursor] = struct{}{}
+
+		parentID, err := h.getParentRoomID(ctx, cursor)
+		if err != nil {
+			return "", err
+		}
+		if parentID == "" {
+			return cursor, nil
+		}
+		cursor = parentID
+	}
+
+	return roomID, nil
+}
+
+func (h *RoomHandler) countDescendants(ctx context.Context, rootRoomID string) (int, error) {
+	rootRoomID = normalizeRoomID(rootRoomID)
+	if rootRoomID == "" || h == nil || h.redis == nil || h.redis.Client == nil {
+		return 0, nil
+	}
+
+	seen := map[string]struct{}{rootRoomID: {}}
+	queue := []string{rootRoomID}
+	count := 0
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+
+		children, err := h.redis.Client.SMembers(ctx, roomChildrenKey(parentID)).Result()
+		if err != nil && err != redis.Nil {
+			return count, err
+		}
+
+		for _, rawChildID := range children {
+			childID := normalizeRoomID(rawChildID)
+			if childID == "" {
+				_ = h.redis.Client.SRem(ctx, roomChildrenKey(parentID), rawChildID).Err()
+				continue
+			}
+			if _, exists := seen[childID]; exists {
+				continue
+			}
+
+			exists, err := h.roomExists(ctx, childID)
+			if err != nil {
+				return count, err
+			}
+			if !exists {
+				_ = h.redis.Client.SRem(ctx, roomChildrenKey(parentID), rawChildID).Err()
+				continue
+			}
+
+			seen[childID] = struct{}{}
+			count++
+			queue = append(queue, childID)
+		}
+	}
+
+	return count, nil
+}
+
+func (h *RoomHandler) ensureRoomSchema() {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return
+	}
+
+	roomsTable := h.scylla.Table("rooms")
+	createQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		room_id text PRIMARY KEY,
+		name text,
+		type text,
+		parent_room_id text,
+		origin_message_id text,
+		created_at timestamp,
+		updated_at timestamp
+	)`, roomsTable)
+	if err := h.scylla.Session.Query(createQuery).Exec(); err != nil {
+		log.Printf("[room] ensure rooms schema failed: %v", err)
+		return
+	}
+
+	// Ensure upgraded nodes have the tree-link column even if the table was created earlier.
+	alterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
+	}
+	for _, query := range alterQueries {
+		if err := h.scylla.Session.Query(query).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
+			log.Printf("[room] ensure rooms schema alter failed: %v", err)
+		}
+	}
+}
+
+func isSchemaAlreadyAppliedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowered := strings.ToLower(err.Error())
+	return strings.Contains(lowered, "already exists") ||
+		strings.Contains(lowered, "conflicts with an existing column") ||
+		strings.Contains(lowered, "duplicate")
+}
+
+func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, roomType, parentRoomID, originMessageID string) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return
+	}
+
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return
+	}
+	roomName = normalizeRoomName(roomName)
+	if roomName == "" {
+		if cachedName, err := h.getRoomName(ctx, roomID); err == nil {
+			roomName = normalizeRoomName(cachedName)
+		}
+		if roomName == "" {
+			roomName = truncateRunes(roomID, roomNameMaxLength)
+		}
+	}
+	roomType = strings.TrimSpace(roomType)
+	if roomType == "" {
+		if cachedType, err := h.getRoomType(ctx, roomID); err == nil {
+			roomType = strings.TrimSpace(cachedType)
+		}
+		if roomType == "" {
+			roomType = "ephemeral"
+		}
+	}
+	parentRoomID = normalizeRoomID(parentRoomID)
+	if parentRoomID == "" {
+		if cachedParentID, err := h.getParentRoomID(ctx, roomID); err == nil {
+			parentRoomID = normalizeRoomID(cachedParentID)
+		}
+	}
+	originMessageID = strings.TrimSpace(originMessageID)
+	if originMessageID == "" && h.redis != nil && h.redis.Client != nil {
+		if cachedOrigin, err := h.redis.Client.HGet(ctx, roomKey(roomID), "origin_message_id").Result(); err == nil {
+			originMessageID = strings.TrimSpace(cachedOrigin)
+		}
+	}
+
+	createdAt := time.Now().UTC()
+	if storedCreatedAt, err := h.getRoomCreatedAt(ctx, roomID); err == nil && storedCreatedAt > 0 {
+		createdAt = time.Unix(storedCreatedAt, 0).UTC()
+	}
+	updatedAt := time.Now().UTC()
+
+	roomsTable := h.scylla.Table("rooms")
+	query := fmt.Sprintf(`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, roomsTable)
+	if err := h.scylla.Session.Query(
+		query,
+		roomID,
+		roomName,
+		roomType,
+		parentRoomID,
+		originMessageID,
+		createdAt,
+		updatedAt,
+	).WithContext(ctx).Exec(); err != nil {
+		log.Printf("[room] upsert scylla room failed room=%s err=%v", roomID, err)
+	}
+}
+
 func (h *RoomHandler) tryCreateRoom(
 	ctx context.Context,
 	roomID,
@@ -821,7 +1526,11 @@ func (h *RoomHandler) tryCreateRoom(
 }
 
 func (h *RoomHandler) roomExists(ctx context.Context, roomID string) (bool, error) {
-	count, err := h.redis.Client.Exists(ctx, roomKey(roomID)).Result()
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return false, nil
+	}
+	count, err := h.redis.Client.Exists(ctx, roomKey(normalizedRoomID)).Result()
 	if err != nil {
 		return false, err
 	}
@@ -829,11 +1538,12 @@ func (h *RoomHandler) roomExists(ctx context.Context, roomID string) (bool, erro
 }
 
 func (h *RoomHandler) effectiveRoomTTL(ctx context.Context, roomID string) time.Duration {
-	if h == nil || h.redis == nil || h.redis.Client == nil || roomID == "" {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if h == nil || h.redis == nil || h.redis.Client == nil || normalizedRoomID == "" {
 		return roomDefaultTTL
 	}
 
-	ttl, err := h.redis.Client.TTL(ctx, roomKey(roomID)).Result()
+	ttl, err := h.redis.Client.TTL(ctx, roomKey(normalizedRoomID)).Result()
 	if err != nil || ttl <= 0 {
 		return roomDefaultTTL
 	}
@@ -841,7 +1551,11 @@ func (h *RoomHandler) effectiveRoomTTL(ctx context.Context, roomID string) time.
 }
 
 func (h *RoomHandler) getRoomName(ctx context.Context, roomID string) (string, error) {
-	name, err := h.redis.Client.HGet(ctx, roomKey(roomID), "name").Result()
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return "", nil
+	}
+	name, err := h.redis.Client.HGet(ctx, roomKey(normalizedRoomID), "name").Result()
 	if err == redis.Nil {
 		return "", nil
 	}
@@ -849,7 +1563,11 @@ func (h *RoomHandler) getRoomName(ctx context.Context, roomID string) (string, e
 }
 
 func (h *RoomHandler) getRoomType(ctx context.Context, roomID string) (string, error) {
-	roomType, err := h.redis.Client.HGet(ctx, roomKey(roomID), "type").Result()
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return "", nil
+	}
+	roomType, err := h.redis.Client.HGet(ctx, roomKey(normalizedRoomID), "type").Result()
 	if err == redis.Nil {
 		return "", nil
 	}
@@ -857,7 +1575,11 @@ func (h *RoomHandler) getRoomType(ctx context.Context, roomID string) (string, e
 }
 
 func (h *RoomHandler) getRoomCreatedAt(ctx context.Context, roomID string) (int64, error) {
-	raw, err := h.redis.Client.HGet(ctx, roomKey(roomID), "created_at").Result()
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return 0, nil
+	}
+	raw, err := h.redis.Client.HGet(ctx, roomKey(normalizedRoomID), "created_at").Result()
 	if err == redis.Nil {
 		return 0, nil
 	}
@@ -873,6 +1595,18 @@ func (h *RoomHandler) getRoomCreatedAt(ctx context.Context, roomID string) (int6
 	return parsed, nil
 }
 
+func (h *RoomHandler) getRoomExpiryUnix(ctx context.Context, roomID string) int64 {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" || h == nil || h.redis == nil || h.redis.Client == nil {
+		return 0
+	}
+	ttl, err := h.redis.Client.TTL(ctx, roomKey(normalizedRoomID)).Result()
+	if err != nil || ttl <= 0 {
+		return 0
+	}
+	return time.Now().Add(ttl).Unix()
+}
+
 func (h *RoomHandler) resolveRoomIDByCode(ctx context.Context, roomCode string) (string, error) {
 	if roomCode == "" {
 		return "", nil
@@ -886,7 +1620,7 @@ func (h *RoomHandler) resolveRoomIDByCode(ctx context.Context, roomCode string) 
 		return "", err
 	}
 
-	normalizedRoomID := slugifyRoomName(roomID)
+	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {
 		return "", nil
 	}
@@ -903,7 +1637,147 @@ func (h *RoomHandler) resolveRoomIDByCode(ctx context.Context, roomCode string) 
 	return normalizedRoomID, nil
 }
 
+func (h *RoomHandler) resolveRoomIDByName(ctx context.Context, roomName string) (string, error) {
+	nameLookup := normalizeRoomNameLookup(roomName)
+	if nameLookup == "" {
+		return "", nil
+	}
+
+	nameKey := roomNameLookupKey(nameLookup)
+	// Name-based joins from landing/auth flows must resolve only to root rooms.
+	// Branches can duplicate names and should never be selected here.
+	candidateIDs, err := h.redis.Client.ZRange(ctx, nameKey, 0, 100).Result()
+	if err != nil {
+		return "", err
+	}
+
+	for _, rawCandidate := range candidateIDs {
+		candidateID := normalizeRoomID(rawCandidate)
+		if candidateID == "" {
+			_ = h.redis.Client.ZRem(ctx, nameKey, rawCandidate).Err()
+			continue
+		}
+		exists, existsErr := h.roomExists(ctx, candidateID)
+		if existsErr != nil {
+			return "", existsErr
+		}
+		if !exists {
+			_ = h.redis.Client.ZRem(ctx, nameKey, rawCandidate).Err()
+			continue
+		}
+
+		meta, metaErr := h.redis.Client.HMGet(ctx, roomKey(candidateID), "name_lookup", "name", "parent_room_id").Result()
+		if metaErr != nil {
+			return "", metaErr
+		}
+
+		candidateLookup := ""
+		if len(meta) > 0 {
+			candidateLookup = normalizeRoomNameLookup(toString(meta[0]))
+		}
+		if candidateLookup == "" && len(meta) > 1 {
+			candidateLookup = normalizeRoomNameLookup(toString(meta[1]))
+		}
+		if candidateLookup != nameLookup {
+			_ = h.redis.Client.ZRem(ctx, nameKey, rawCandidate).Err()
+			continue
+		}
+
+		parentRoomID := ""
+		if len(meta) > 2 {
+			parentRoomID = normalizeRoomID(toString(meta[2]))
+		}
+		if parentRoomID != "" {
+			continue
+		}
+		return candidateID, nil
+	}
+
+	return h.resolveRoomIDByNameFromScan(ctx, nameLookup)
+}
+
+func (h *RoomHandler) resolveRoomIDByNameFromScan(ctx context.Context, nameLookup string) (string, error) {
+	var (
+		cursor      uint64
+		bestRoomID  string
+		bestCreated int64
+	)
+
+	for {
+		keys, nextCursor, err := h.redis.Client.Scan(ctx, cursor, "room:*", 200).Result()
+		if err != nil {
+			return "", err
+		}
+		for _, key := range keys {
+			// Skip secondary keys like room:<id>:members / :children.
+			if strings.Count(key, ":") != 1 {
+				continue
+			}
+			roomID := normalizeRoomID(strings.TrimPrefix(key, "room:"))
+			if roomID == "" {
+				continue
+			}
+
+			meta, metaErr := h.redis.Client.HMGet(ctx, roomKey(roomID), "name_lookup", "name", "parent_room_id", "created_at").Result()
+			if metaErr != nil {
+				continue
+			}
+
+			lookup := ""
+			if len(meta) > 0 {
+				lookup = normalizeRoomNameLookup(toString(meta[0]))
+			}
+			if lookup == "" && len(meta) > 1 {
+				lookup = normalizeRoomNameLookup(toString(meta[1]))
+			}
+			if lookup != nameLookup {
+				continue
+			}
+
+			parentRoomID := ""
+			if len(meta) > 2 {
+				parentRoomID = normalizeRoomID(toString(meta[2]))
+			}
+			if parentRoomID != "" {
+				continue
+			}
+
+			createdAt := int64(0)
+			if len(meta) > 3 {
+				createdAt, _ = strconv.ParseInt(toString(meta[3]), 10, 64)
+			}
+			if bestRoomID == "" {
+				bestCreated = createdAt
+				bestRoomID = roomID
+				continue
+			}
+			// Prefer the earliest root room for stable user-facing joins by name.
+			if createdAt > 0 {
+				if bestCreated <= 0 || createdAt < bestCreated {
+					bestCreated = createdAt
+					bestRoomID = roomID
+				}
+				continue
+			}
+			if bestCreated <= 0 && roomID < bestRoomID {
+				bestRoomID = roomID
+			}
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	if bestRoomID != "" {
+		_ = h.indexRoomName(ctx, bestRoomID, nameLookup, bestCreated)
+	}
+	return bestRoomID, nil
+}
+
 func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string, error) {
+	roomID = normalizeRoomID(roomID)
 	if roomID == "" {
 		return "", fmt.Errorf("room id is required")
 	}
@@ -920,7 +1794,7 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 		return "", err
 	}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	for attempts := 0; attempts < 40; attempts++ {
 		code := fmt.Sprintf("%0*d", roomCodeDigits, rng.Intn(1000000))
 		created, err := h.redis.Client.SetNX(ctx, roomCodeKey(code), roomID, codeTTL).Result()
@@ -941,6 +1815,31 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 	return "", fmt.Errorf("failed to allocate room code")
 }
 
+func (h *RoomHandler) indexRoomName(ctx context.Context, roomID, roomName string, createdAt int64) error {
+	roomID = normalizeRoomID(roomID)
+	lookup := normalizeRoomNameLookup(roomName)
+	if roomID == "" || lookup == "" {
+		return nil
+	}
+	if createdAt <= 0 {
+		createdAt = time.Now().Unix()
+	}
+
+	nameKey := roomNameLookupKey(lookup)
+	if err := h.redis.Client.ZAdd(
+		ctx,
+		nameKey,
+		redis.Z{
+			Score:  float64(createdAt),
+			Member: roomID,
+		},
+	).Err(); err != nil {
+		return err
+	}
+	_ = h.redis.Client.Expire(ctx, nameKey, roomMaxExtendAge).Err()
+	return nil
+}
+
 func (h *RoomHandler) createRoom(
 	ctx context.Context,
 	roomID,
@@ -950,30 +1849,53 @@ func (h *RoomHandler) createRoom(
 	parentRoomID string,
 	originMessageID string,
 ) error {
-	if err := h.redis.Client.HSet(ctx, roomKey(roomID), map[string]interface{}{
-		"id":                roomID,
-		"name":              roomName,
-		"type":              roomType,
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("room id is required")
+	}
+	normalizedRoomName := normalizeRoomName(roomName)
+	if normalizedRoomName == "" {
+		normalizedRoomName = "Room"
+	}
+	normalizedRoomType := strings.TrimSpace(roomType)
+	if normalizedRoomType == "" {
+		normalizedRoomType = "ephemeral"
+	}
+	normalizedNameLookup := normalizeRoomNameLookup(normalizedRoomName)
+	normalizedParentID := normalizeRoomID(parentRoomID)
+	normalizedOriginMessageID := strings.TrimSpace(originMessageID)
+
+	if err := h.redis.Client.HSet(ctx, roomKey(normalizedRoomID), map[string]interface{}{
+		"id":                normalizedRoomID,
+		"name":              normalizedRoomName,
+		"name_lookup":       normalizedNameLookup,
+		"type":              normalizedRoomType,
 		"created_at":        createdAt,
-		"parent_room_id":    parentRoomID,
-		"origin_message_id": originMessageID,
+		"parent_room_id":    normalizedParentID,
+		"origin_message_id": normalizedOriginMessageID,
 		"member_count":      0,
 	}).Err(); err != nil {
 		return err
 	}
 
-	if err := h.redis.Client.Expire(ctx, roomKey(roomID), roomDefaultTTL).Err(); err != nil {
+	if err := h.redis.Client.Expire(ctx, roomKey(normalizedRoomID), roomDefaultTTL).Err(); err != nil {
 		return err
 	}
 
-	if _, err := h.ensureRoomCode(ctx, roomID); err != nil {
+	if _, err := h.ensureRoomCode(ctx, normalizedRoomID); err != nil {
 		return err
 	}
+	if err := h.indexRoomName(ctx, normalizedRoomID, normalizedRoomName, createdAt); err != nil {
+		return err
+	}
+	h.upsertRoomRecord(ctx, normalizedRoomID, normalizedRoomName, normalizedRoomType, normalizedParentID, normalizedOriginMessageID)
 
 	return nil
 }
 
 func (h *RoomHandler) registerRoomMembership(ctx context.Context, roomID, userID string) (int, error) {
+	roomID = normalizeRoomID(roomID)
+	userID = normalizeIdentifier(userID)
 	if roomID == "" || userID == "" {
 		return 0, fmt.Errorf("room and user are required")
 	}
@@ -1015,12 +1937,16 @@ func (h *RoomHandler) registerRoomMembership(ctx context.Context, roomID, userID
 }
 
 func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, memberCount int) error {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return nil
+	}
 	meta, err := h.redis.Client.HGetAll(ctx, roomKey(roomID)).Result()
 	if err != nil {
 		return err
 	}
 
-	parentRoomID := slugifyRoomName(meta["parent_room_id"])
+	parentRoomID := normalizeRoomID(meta["parent_room_id"])
 	originMessageID := strings.TrimSpace(meta["origin_message_id"])
 	if parentRoomID == "" || originMessageID == "" {
 		return nil
@@ -1043,6 +1969,10 @@ func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, mem
 }
 
 func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string) (SidebarRoom, bool, error) {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return SidebarRoom{}, false, nil
+	}
 	meta, err := h.redis.Client.HGetAll(ctx, roomKey(roomID)).Result()
 	if err != nil {
 		return SidebarRoom{}, false, err
@@ -1053,19 +1983,26 @@ func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string
 
 	name := strings.TrimSpace(meta["name"])
 	if name == "" {
-		name = roomID
+		name = "Room"
+	}
+	name = normalizeRoomName(name)
+	if name == "" {
+		name = "Room"
 	}
 	createdAt, _ := strconv.ParseInt(meta["created_at"], 10, 64)
 	memberCount64, _ := strconv.ParseInt(meta["member_count"], 10, 64)
+	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
 
 	return SidebarRoom{
 		RoomID:          roomID,
 		RoomName:        name,
 		Status:          status,
-		ParentRoomID:    strings.TrimSpace(meta["parent_room_id"]),
+		ParentRoomID:    normalizeRoomID(meta["parent_room_id"]),
 		OriginMessageID: strings.TrimSpace(meta["origin_message_id"]),
+		TreeNumber:      0,
 		MemberCount:     int(memberCount64),
 		CreatedAt:       createdAt,
+		ExpiresAt:       expiresAt,
 	}, true, nil
 }
 
@@ -1076,11 +2013,11 @@ func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string, 
 
 	messagesTable := h.scylla.Table("messages")
 	selectQuery := fmt.Sprintf(
-		`SELECT created_at, message_id, sender_id, sender_name, content, type FROM %s WHERE room_id = ?`,
+		`SELECT created_at, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet FROM %s WHERE room_id = ?`,
 		messagesTable,
 	)
 	upsertQuery := fmt.Sprintf(
-		`INSERT INTO %s (room_id, created_at, message_id, sender_id, sender_name, content, type) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?`,
+		`INSERT INTO %s (room_id, created_at, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL ?`,
 		messagesTable,
 	)
 	ttlSeconds := int(ttl / time.Second)
@@ -1093,10 +2030,24 @@ func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string, 
 		senderName string
 		content    string
 		msgType    string
+		mediaURL   string
+		mediaType  string
+		fileName   string
+		isEdited   bool
+		editedAt   time.Time
+		hasBreak   bool
+		breakID    string
+		breakCount int
+		replyToID  string
+		replySnip  string
 	)
 
 	refreshedCount := 0
-	for iter.Scan(&createdAt, &messageID, &senderID, &senderName, &content, &msgType) {
+	for iter.Scan(&createdAt, &messageID, &senderID, &senderName, &content, &msgType, &mediaURL, &mediaType, &fileName, &isEdited, &editedAt, &hasBreak, &breakID, &breakCount, &replyToID, &replySnip) {
+		var editedAtArg interface{}
+		if !editedAt.IsZero() {
+			editedAtArg = editedAt
+		}
 		if err := h.scylla.Session.Query(
 			upsertQuery,
 			roomID,
@@ -1106,6 +2057,16 @@ func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string, 
 			senderName,
 			content,
 			msgType,
+			mediaURL,
+			mediaType,
+			fileName,
+			isEdited,
+			editedAtArg,
+			hasBreak,
+			breakID,
+			breakCount,
+			replyToID,
+			replySnip,
 			ttlSeconds,
 		).WithContext(ctx).Exec(); err != nil {
 			_ = iter.Close()
@@ -1193,12 +2154,28 @@ func (h *RoomHandler) tryUpdateBreakMetadataInScylla(parentRoomID, originMessage
 	}
 
 	messagesTable := h.scylla.Table("messages")
+	var createdAt time.Time
+	iter := h.scylla.Session.Query(
+		fmt.Sprintf(`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? ALLOW FILTERING LIMIT 1`, messagesTable),
+		parentRoomID,
+		originMessageID,
+	).Iter()
+	if !iter.Scan(&createdAt) {
+		_ = iter.Close()
+		return
+	}
+	if err := iter.Close(); err != nil {
+		log.Printf("[room] scylla break metadata lookup failed room=%s msg=%s err=%v", parentRoomID, originMessageID, err)
+		return
+	}
+
 	err := h.scylla.Session.Query(
-		fmt.Sprintf(`UPDATE %s SET has_break_room = ?, break_room_id = ?, break_join_count = ? WHERE room_id = ? AND message_id = ?`, messagesTable),
+		fmt.Sprintf(`UPDATE %s SET has_break_room = ?, break_room_id = ?, break_join_count = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`, messagesTable),
 		true,
 		breakRoomID,
 		joinCount,
 		parentRoomID,
+		createdAt,
 		originMessageID,
 	).Exec()
 	if err != nil {
@@ -1240,6 +2217,14 @@ func roomHistoryKey(roomID string) string {
 
 func roomCodeKey(roomCode string) string {
 	return "room:code:" + roomCode
+}
+
+func roomNameLookupKey(nameLookup string) string {
+	return roomNameIndexPrefix + strings.ToLower(strings.TrimSpace(nameLookup))
+}
+
+func roomTreeNumbersKey(userID string) string {
+	return roomTreeNumberPrefix + normalizeIdentifier(userID)
 }
 
 func toString(value interface{}) string {

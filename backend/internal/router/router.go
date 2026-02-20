@@ -67,6 +67,7 @@ func New(
 		r.Post("/rooms/rename", roomHandler.RenameRoom)
 		r.Post("/rooms/break", roomHandler.CreateBreakRoom)
 		r.Get("/rooms/sidebar", roomHandler.GetSidebarRooms)
+		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
 		r.Post("/upload/presigned", uploadHandler.GenerateUploadURL)
 		r.Post("/upload", uploadHandler.UploadProxy)
 		r.Get("/upload/object/*", uploadHandler.ServeObject)

@@ -6,10 +6,20 @@
 	import ChatSidebar from '$lib/components/chat/ChatSidebar.svelte';
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
-	import { currentUser } from '$lib/store';
+	import { authToken, currentUser } from '$lib/store';
+	import {
+		getTrustedDevicePreference,
+		isOfflineCacheSupported,
+		loadEncryptedRoomMessages,
+		saveEncryptedRoomMessages,
+		setTrustedDevicePreference,
+		wipeEncryptedRoomCache,
+		type TrustedDevicePreference
+	} from '$lib/utils/offlineCache';
 	import { getOrInitIdentity } from '$lib/utils/identity';
-	import { globalMessages, initGlobalSocket, sendSocketPayload, subscribeToRooms } from '$lib/ws';
-	import { onDestroy, onMount } from 'svelte';
+	import { clearSessionToken, getSessionToken } from '$lib/utils/sessionToken';
+	import { closeGlobalSocket, globalMessages, initGlobalSocket, sendSocketPayload, subscribeToRooms } from '$lib/ws';
+	import { onDestroy, onMount, tick } from 'svelte';
 
 	type ThreadStatus = 'joined' | 'discoverable';
 
@@ -23,6 +33,13 @@
 		mediaUrl?: string;
 		mediaType?: string;
 		fileName?: string;
+		isEdited?: boolean;
+		editedAt?: number;
+		isDeleted?: boolean;
+		replyToMessageId?: string;
+		replyToSnippet?: string;
+		totalReplies?: number;
+		branchesCreated?: number;
 		createdAt: number;
 		hasBreakRoom?: boolean;
 		breakRoomId?: string;
@@ -46,6 +63,7 @@
 		memberCount?: number;
 		parentRoomId?: string;
 		originMessageId?: string;
+		treeNumber?: number;
 	};
 
 	type OnlineMember = {
@@ -57,6 +75,7 @@
 
 	type RoomMeta = {
 		createdAt: number;
+		expiresAt: number;
 	};
 
 	type SidebarRoom = {
@@ -65,19 +84,37 @@
 		status: ThreadStatus;
 		parentRoomId?: string;
 		originMessageId?: string;
+		treeNumber?: number;
 		memberCount?: number;
 		createdAt?: number;
+		expiresAt?: number;
+	};
+
+	type ReplyTarget = {
+		messageId: string;
+		senderName: string;
+		content: string;
 	};
 
 	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
-	const ROOM_MAX_LIFESPAN_MS = 15 * 24 * 60 * 60 * 1000;
+	const ROOM_DEFAULT_LIFESPAN_MS = 6 * 60 * 60 * 1000;
+	const TYPING_PING_INTERVAL_MS = 5000;
+	const TYPING_STOP_DELAY_MS = 5000;
+	const TYPING_SAFETY_TIMEOUT_MS = 7000;
+	const DELETED_MESSAGE_PLACEHOLDER = 'This message was deleted';
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
+	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
 	let roomMembershipSynced: Record<string, boolean> = {};
 	let roomMembershipSyncing: Record<string, boolean> = {};
 	let unsubscribeGlobalMessages: (() => void) | null = null;
+	let typingStopTimer: ReturnType<typeof setTimeout> | null = null;
+	let typingLastPingAt = 0;
+	let typingIsActive = false;
+	let typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	let cachePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 	let toastMessage = '';
 	let showToast = false;
@@ -103,13 +140,26 @@
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
 	let onlineByRoom: Record<string, OnlineMember[]> = {};
 	let roomMetaById: Record<string, RoomMeta> = {};
+	let typingUsersByRoom: Record<string, Record<string, { name: string; expiresAt: number }>> = {};
+	let historyLoadingByRoom: Record<string, boolean> = {};
+	let historyHasMoreByRoom: Record<string, boolean> = {};
+	let offlineHydratedByRoom: Record<string, boolean> = {};
+	let trustedDevicePreference: TrustedDevicePreference = 'unset';
+	let showTrustedDevicePrompt = false;
+	let trustedCachingEnabled = false;
 	let isExtendingRoom = false;
 	let expandedMessages: Record<string, boolean> = {};
+	let activeReply: ReplyTarget | null = null;
 	let identityReady = !browser;
 	let headerActionsEl: HTMLDivElement | null = null;
+	let roomExpiryTickMs = Date.now();
+	let chatWindowRef: {
+		capturePrependAnchor?: () => { scrollTop: number; scrollHeight: number } | null;
+		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
+	} | null = null;
 
-	$: roomId = toRoomSlug(decodeURIComponent($page.params.roomId ?? ''));
-	$: roomNameFromURL = toRoomSlug(
+	$: roomId = normalizeRoomIDValue(decodeURIComponent($page.params.roomId ?? ''));
+	$: roomNameFromURL = normalizeRoomNameValue(
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
 	);
 	$: roomCreatedAtFromURL = parseTimestampParam($page.url.searchParams.get('createdAt'));
@@ -122,8 +172,12 @@
 		createThread(roomId || 'default_room', roomNameFromURL || undefined, 'joined');
 	$: currentMessages = messagesByRoom[roomId] ?? [];
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
-	$: activeUnreadCount = activeThread?.unread ?? 0;
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
+	$: activeUnreadCount = activeThread?.unread ?? 0;
+	$: activeTypingUsers = getActiveTypingUsers(roomId);
+	$: typingIndicatorText = formatTypingIndicator(activeTypingUsers);
+	$: isLoadingOlderHistory = historyLoadingByRoom[roomId] ?? false;
+	$: hasMoreOlderHistory = historyHasMoreByRoom[roomId] ?? true;
 	$: myRooms = filterThreadsByStatus(roomThreads, 'joined');
 	$: discoverableRooms = filterThreadsByStatus(roomThreads, 'discoverable');
 	$: filteredMyRooms = filterThreadList(myRooms, chatListSearch, messagesByRoom, roomId);
@@ -146,11 +200,15 @@
 		initGlobalSocket(currentUserId, currentUsername);
 	}
 	$: if (browser && identityReady) {
-		const joinedRoomIDs = myRooms.map((thread) => thread.id);
-		if (roomId && isMember && !joinedRoomIDs.includes(roomId)) {
-			joinedRoomIDs.push(roomId);
+		// Subscribe to all rooms visible in sidebar so discoverable rooms get read-only previews.
+		const readableRoomIDs = roomThreads.map((thread) => thread.id);
+		if (roomId && !readableRoomIDs.includes(roomId)) {
+			readableRoomIDs.push(roomId);
 		}
-		subscribeToRooms(joinedRoomIDs);
+		subscribeToRooms(readableRoomIDs);
+	}
+	$: if (browser && trustedCachingEnabled && roomId && !offlineHydratedByRoom[roomId]) {
+		void hydrateOfflineCache(roomId);
 	}
 	$: if (browser && roomId && roomId !== lastToastRoom) {
 		showJoinToast(roomId);
@@ -159,6 +217,7 @@
 		focusRoomTracker = roomId;
 		focusConsumedForRoom = false;
 		focusMessageId = '';
+		activeReply = null;
 	}
 	$: if (!focusConsumedForRoom && focusMessageIdFromURL) {
 		focusMessageId = focusMessageIdFromURL;
@@ -171,15 +230,23 @@
 			unsubscribeGlobalMessages();
 			unsubscribeGlobalMessages = null;
 		}
+		clearTypingStopTimer();
+		clearAllTypingSafetyTimers();
+		clearAllCachePersistTimers();
 		clearSidebarRefreshTimer();
+		clearRoomExpiryTicker();
 		clearToastTimer();
 	});
 
 	onMount(() => {
-		void initializeIdentity();
 		if (!browser) {
 			return;
 		}
+		initializeTrustedDevicePreference();
+		if (trustedCachingEnabled && roomId) {
+			void hydrateOfflineCache(roomId);
+		}
+		void initializeIdentity();
 		unsubscribeGlobalMessages = globalMessages.subscribe((event) => {
 			if (!event) {
 				return;
@@ -198,6 +265,11 @@
 		updateViewportMode();
 		window.addEventListener('pointerdown', onDocumentPointerDown);
 		window.addEventListener('resize', updateViewportMode);
+		clearRoomExpiryTicker();
+		roomExpiryTickMs = Date.now();
+		roomExpiryTicker = setInterval(() => {
+			roomExpiryTickMs = Date.now();
+		}, 60000);
 		return () => {
 			if (unsubscribeGlobalMessages) {
 				unsubscribeGlobalMessages();
@@ -205,6 +277,7 @@
 			}
 			window.removeEventListener('pointerdown', onDocumentPointerDown);
 			window.removeEventListener('resize', updateViewportMode);
+			clearRoomExpiryTicker();
 		};
 	});
 
@@ -216,6 +289,238 @@
 		if (!isMobileView) {
 			mobilePane = 'chat';
 		}
+	}
+
+	function clearTypingStopTimer() {
+		if (typingStopTimer) {
+			clearTimeout(typingStopTimer);
+			typingStopTimer = null;
+		}
+	}
+
+	function sendTypingStart() {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const now = Date.now();
+		if (typingIsActive && now-typingLastPingAt < TYPING_PING_INTERVAL_MS) {
+			return;
+		}
+		typingIsActive = true;
+		typingLastPingAt = now;
+		sendSocketPayload({
+			type: 'typing_start',
+			roomId
+		});
+	}
+
+	function sendTypingStop() {
+		if (!typingIsActive || !roomId || !isMember) {
+			clearTypingStopTimer();
+			typingIsActive = false;
+			return;
+		}
+		typingIsActive = false;
+		typingLastPingAt = 0;
+		clearTypingStopTimer();
+		sendSocketPayload({
+			type: 'typing_stop',
+			roomId
+		});
+	}
+
+	function scheduleTypingStop() {
+		clearTypingStopTimer();
+		typingStopTimer = setTimeout(() => {
+			sendTypingStop();
+		}, TYPING_STOP_DELAY_MS);
+	}
+
+	function onComposerTyping(event: CustomEvent<{ value: string }>) {
+		const value = (event.detail?.value || '').trim();
+		if (!value) {
+			sendTypingStop();
+			return;
+		}
+		sendTypingStart();
+		scheduleTypingStop();
+	}
+
+	function clearAllTypingSafetyTimers() {
+		for (const timer of typingSafetyTimers.values()) {
+			clearTimeout(timer);
+		}
+		typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	}
+
+	function typingTimerKey(targetRoomId: string, userId: string) {
+		return `${targetRoomId}:${userId}`;
+	}
+
+	function setTypingIndicator(
+		targetRoomId: string,
+		userId: string,
+		userName: string,
+		expiresAt: number = Date.now() + TYPING_SAFETY_TIMEOUT_MS
+	) {
+		if (!targetRoomId || !userId) {
+			return;
+		}
+		const roomIndicators = typingUsersByRoom[targetRoomId] ?? {};
+		typingUsersByRoom = {
+			...typingUsersByRoom,
+			[targetRoomId]: {
+				...roomIndicators,
+				[userId]: {
+					name: userName || 'User',
+					expiresAt
+				}
+			}
+		};
+
+		const key = typingTimerKey(targetRoomId, userId);
+		const existing = typingSafetyTimers.get(key);
+		if (existing) {
+			clearTimeout(existing);
+		}
+		const timer = setTimeout(() => {
+			clearTypingIndicator(targetRoomId, userId);
+		}, TYPING_SAFETY_TIMEOUT_MS);
+		typingSafetyTimers.set(key, timer);
+	}
+
+	function clearTypingIndicator(targetRoomId: string, userId: string) {
+		if (!targetRoomId || !userId) {
+			return;
+		}
+		const roomIndicators = typingUsersByRoom[targetRoomId];
+		if (!roomIndicators || !roomIndicators[userId]) {
+			return;
+		}
+
+		const nextRoomIndicators = { ...roomIndicators };
+		delete nextRoomIndicators[userId];
+		const nextTypingByRoom = { ...typingUsersByRoom };
+		if (Object.keys(nextRoomIndicators).length === 0) {
+			delete nextTypingByRoom[targetRoomId];
+		} else {
+			nextTypingByRoom[targetRoomId] = nextRoomIndicators;
+		}
+		typingUsersByRoom = nextTypingByRoom;
+
+		const key = typingTimerKey(targetRoomId, userId);
+		const existing = typingSafetyTimers.get(key);
+		if (existing) {
+			clearTimeout(existing);
+			typingSafetyTimers.delete(key);
+		}
+	}
+
+	function getActiveTypingUsers(targetRoomId: string) {
+		if (!targetRoomId) {
+			return [];
+		}
+		const roomIndicators = typingUsersByRoom[targetRoomId] ?? {};
+		const now = Date.now();
+		const active = Object.entries(roomIndicators)
+			.filter(([userId, entry]) => {
+				if (!entry || entry.expiresAt <= now) {
+					clearTypingIndicator(targetRoomId, userId);
+					return false;
+				}
+				return normalizeIdentifier(userId) !== normalizeIdentifier(currentUserId);
+			})
+			.map(([, entry]) => entry.name);
+		return active;
+	}
+
+	function formatTypingIndicator(names: string[]) {
+		if (!names || names.length === 0) {
+			return '';
+		}
+		if (names.length === 1) {
+			return `${names[0]} is typing...`;
+		}
+		if (names.length === 2) {
+			return `${names[0]} and ${names[1]} are typing...`;
+		}
+		return `${names[0]} and ${names.length - 1} others are typing...`;
+	}
+
+	function initializeTrustedDevicePreference() {
+		const preference = getTrustedDevicePreference();
+		trustedDevicePreference = preference;
+		showTrustedDevicePrompt = preference === 'unset';
+		trustedCachingEnabled = preference === 'yes' && isOfflineCacheSupported();
+	}
+
+	function onTrustedDeviceChoice(choice: 'yes' | 'no') {
+		setTrustedDevicePreference(choice);
+		trustedDevicePreference = choice;
+		showTrustedDevicePrompt = false;
+		trustedCachingEnabled = choice === 'yes' && isOfflineCacheSupported();
+		if (trustedCachingEnabled && roomId) {
+			void hydrateOfflineCache(roomId);
+		}
+	}
+
+	function clearAllCachePersistTimers() {
+		for (const timer of cachePersistTimers.values()) {
+			clearTimeout(timer);
+		}
+		cachePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	}
+
+	function queueOfflineCachePersist(targetRoomId: string) {
+		if (!browser || !trustedCachingEnabled || !targetRoomId) {
+			return;
+		}
+		const existing = cachePersistTimers.get(targetRoomId);
+		if (existing) {
+			clearTimeout(existing);
+		}
+		const timer = setTimeout(() => {
+			void persistOfflineCache(targetRoomId);
+		}, 350);
+		cachePersistTimers.set(targetRoomId, timer);
+	}
+
+	async function persistOfflineCache(targetRoomId: string) {
+		if (!browser || !trustedCachingEnabled || !targetRoomId) {
+			return;
+		}
+		cachePersistTimers.delete(targetRoomId);
+		const token = getSessionToken() || ($authToken ?? '');
+		if (!token) {
+			return;
+		}
+		const payload = (messagesByRoom[targetRoomId] ?? []).slice(-50);
+		await saveEncryptedRoomMessages(targetRoomId, payload, token);
+	}
+
+	async function hydrateOfflineCache(targetRoomId: string) {
+		if (!browser || !trustedCachingEnabled || !targetRoomId || offlineHydratedByRoom[targetRoomId]) {
+			return;
+		}
+		offlineHydratedByRoom = {
+			...offlineHydratedByRoom,
+			[targetRoomId]: true
+		};
+		const token = getSessionToken() || ($authToken ?? '');
+		if (!token) {
+			return;
+		}
+		const cached = await loadEncryptedRoomMessages(targetRoomId, token);
+		if (!Array.isArray(cached) || cached.length === 0) {
+			return;
+		}
+		const hydrated = cached
+			.map((entry) => parseIncomingMessage(entry, targetRoomId))
+			.filter((entry): entry is ChatMessage => Boolean(entry));
+		if (hydrated.length === 0) {
+			return;
+		}
+		mergeMessages(targetRoomId, hydrated);
 	}
 
 	async function initializeIdentity() {
@@ -252,6 +557,13 @@
 		}
 	}
 
+	function clearRoomExpiryTicker() {
+		if (roomExpiryTicker) {
+			clearInterval(roomExpiryTicker);
+			roomExpiryTicker = null;
+		}
+	}
+
 	function clearToastTimer() {
 		if (toastTimer) {
 			clearTimeout(toastTimer);
@@ -261,7 +573,9 @@
 
 	function showJoinToast(activeRoomId: string) {
 		lastToastRoom = activeRoomId;
-		toastMessage = `Joined Room: ${activeRoomId}`;
+		const activeName =
+			roomThreads.find((thread) => thread.id === activeRoomId)?.name || roomNameFromURL || 'Room';
+		toastMessage = `Joined Room: ${activeName}`;
 		showToast = true;
 		clearToastTimer();
 		toastTimer = setTimeout(() => {
@@ -323,17 +637,28 @@
 		roomThreads = sortThreads([createThread(targetRoomId, nameOverride, status), ...roomThreads]);
 	}
 
-	function ensureRoomMeta(targetRoomId: string, createdAt: number) {
-		if (!targetRoomId || !Number.isFinite(createdAt) || createdAt <= 0) {
+	function ensureRoomMeta(targetRoomId: string, createdAt: number, expiresAt = 0) {
+		if (!targetRoomId) {
 			return;
 		}
 		const existing = roomMetaById[targetRoomId];
-		if (existing?.createdAt === createdAt) {
+		const safeCreatedAt =
+			Number.isFinite(createdAt) && createdAt > 0 ? createdAt : (existing?.createdAt ?? 0);
+		const safeExpiresAt =
+			Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : (existing?.expiresAt ?? 0);
+		if (
+			existing &&
+			existing.createdAt === safeCreatedAt &&
+			existing.expiresAt === safeExpiresAt
+		) {
 			return;
 		}
 		roomMetaById = {
 			...roomMetaById,
-			[targetRoomId]: { createdAt }
+			[targetRoomId]: {
+				createdAt: safeCreatedAt,
+				expiresAt: safeExpiresAt
+			}
 		};
 	}
 
@@ -344,7 +669,12 @@
 		onlineByRoom = {
 			...onlineByRoom,
 			[targetRoomId]: dedupeMembers([
-				{ id: currentUserId, name: currentUsername, isOnline: true, joinedAt: Date.now() }
+				{
+					id: currentUserId,
+					name: currentUsername,
+					isOnline: true,
+					joinedAt: Date.now()
+				}
 			])
 		};
 	}
@@ -409,7 +739,7 @@
 	}
 
 	function markRoomMembershipSynced(targetRoomId: string) {
-		const normalizedRoomId = toRoomSlug(targetRoomId);
+		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
 		if (!normalizedRoomId) {
 			return;
 		}
@@ -420,7 +750,7 @@
 	}
 
 	async function syncRoomMembership(targetRoomId: string) {
-		const normalizedRoomId = toRoomSlug(targetRoomId);
+		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
 		if (!browser || !normalizedRoomId || !isMember) {
 			return;
 		}
@@ -435,7 +765,7 @@
 
 		try {
 			const payload = {
-				roomName: normalizedRoomId,
+				roomId: normalizedRoomId,
 				username: currentUsername,
 				userId: normalizeIdentifier(currentUserId),
 				mode: 'join'
@@ -453,10 +783,12 @@
 			}
 
 			markRoomMembershipSynced(normalizedRoomId);
-			const joinedName = toStringValue(data.roomName) || formatRoomName(normalizedRoomId);
+			const joinedName =
+				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(normalizedRoomId);
 			const joinedCreatedAt = toTimestamp(data.createdAt);
+			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 			ensureRoomThread(normalizedRoomId, joinedName, 'joined');
-			ensureRoomMeta(normalizedRoomId, joinedCreatedAt);
+			ensureRoomMeta(normalizedRoomId, joinedCreatedAt, joinedExpiresAt);
 			await refreshSidebarRooms();
 		} catch (error) {
 			clientLog('api-room-sync-error', {
@@ -487,27 +819,32 @@
 			const incoming = Array.isArray(data.rooms) ? (data.rooms as SidebarRoom[]) : [];
 			const existing = new Map(roomThreads.map((thread) => [thread.id, thread]));
 			const nextThreads = incoming.reduce<ChatThread[]>((acc, room) => {
-				const roomID = toRoomSlug(room.roomId);
+				const roomID = normalizeRoomIDValue(room.roomId);
 				if (!roomID) {
 					return acc;
 				}
 
 				const prev = existing.get(roomID);
 				const createdAt = normalizeEpoch(Number(room.createdAt ?? 0));
-				if (createdAt > 0) {
-					ensureRoomMeta(roomID, createdAt);
+				const expiresAt = parseOptionalTimestamp(room.expiresAt);
+				if (createdAt > 0 || expiresAt > 0) {
+					ensureRoomMeta(roomID, createdAt, expiresAt);
 				}
 
 				const next: ChatThread = {
 					id: roomID,
-					name: toStringValue(room.roomName) || prev?.name || formatRoomName(roomID),
+					name:
+						normalizeRoomNameValue(toStringValue(room.roomName)) ||
+						prev?.name ||
+						formatRoomName(roomID),
 					lastMessage: prev?.lastMessage || '',
 					lastActivity: prev?.lastActivity || createdAt || Date.now(),
 					unread: prev?.unread || 0,
 					status: room.status === 'discoverable' ? 'discoverable' : 'joined',
 					memberCount: typeof room.memberCount === 'number' ? room.memberCount : prev?.memberCount,
 					parentRoomId: toStringValue(room.parentRoomId) || prev?.parentRoomId || undefined,
-					originMessageId: toStringValue(room.originMessageId) || prev?.originMessageId || undefined
+					originMessageId: toStringValue(room.originMessageId) || prev?.originMessageId || undefined,
+					treeNumber: toInt(room.treeNumber ?? prev?.treeNumber ?? 0)
 				};
 
 				acc.push(next);
@@ -550,10 +887,11 @@
 	}
 
 	function selectRoom(targetRoomId: string, memberState: boolean, focusMsgID = '') {
-		const normalizedTargetRoomId = toRoomSlug(targetRoomId);
+		const normalizedTargetRoomId = normalizeRoomIDValue(targetRoomId);
 		if (!normalizedTargetRoomId) {
 			return;
 		}
+		sendTypingStop();
 		if (normalizedTargetRoomId === roomId) {
 			if (isMobileView) {
 				mobilePane = 'chat';
@@ -626,7 +964,7 @@
 			fallbackIsMember: boolean;
 		}>
 	) {
-		const parentRoomID = toRoomSlug(event.detail.parentRoomId);
+		const parentRoomID = normalizeRoomIDValue(event.detail.parentRoomId);
 		const originMessageID = normalizeMessageID(event.detail.originMessageId);
 		if (!parentRoomID || !originMessageID) {
 			selectRoom(event.detail.fallbackRoomId, event.detail.fallbackIsMember);
@@ -703,13 +1041,13 @@
 	}
 
 	function resolveEnvelopeRoomID(envelope: SocketEnvelope) {
-		const directRoomID = toRoomSlug(toStringValue(envelope.roomId ?? envelope.room_id));
+		const directRoomID = normalizeRoomIDValue(toStringValue(envelope.roomId ?? envelope.room_id));
 		if (directRoomID) {
 			return directRoomID;
 		}
 		if (envelope.payload && typeof envelope.payload === 'object') {
 			const payload = envelope.payload as Record<string, unknown>;
-			return toRoomSlug(toStringValue(payload.roomId ?? payload.room_id));
+			return normalizeRoomIDValue(toStringValue(payload.roomId ?? payload.room_id));
 		}
 		return '';
 	}
@@ -772,6 +1110,29 @@
 			if (leaving) {
 				removeOnlineMember(targetRoomId, leaving.id);
 			}
+			return;
+		}
+
+		if ((kind === 'typing_start' || kind === 'typing_stop') && targetRoomId) {
+			const participant = parseMember(envelope.payload, Date.now());
+			if (!participant) {
+				return;
+			}
+			if (kind === 'typing_start') {
+				setTypingIndicator(targetRoomId, participant.id, participant.name);
+			} else {
+				clearTypingIndicator(targetRoomId, participant.id);
+			}
+			return;
+		}
+
+		if (kind === 'message_edit' && targetRoomId) {
+			applyMessageEdit(targetRoomId, envelope.payload);
+			return;
+		}
+
+		if (kind === 'message_delete' && targetRoomId) {
+			applyMessageDelete(targetRoomId, envelope.payload);
 		}
 	}
 
@@ -781,7 +1142,9 @@
 		}
 
 		const source = value as Record<string, unknown>;
-		const nextRoomId = toRoomSlug(toStringValue(source.roomId ?? source.room_id ?? fallbackRoomId));
+		const nextRoomId = normalizeRoomIDValue(
+			toStringValue(source.roomId ?? source.room_id ?? fallbackRoomId)
+		);
 		if (!nextRoomId) {
 			return null;
 		}
@@ -795,6 +1158,11 @@
 			normalizedMediaURL = toAbsoluteMediaURL(rawText);
 			nextContent = '';
 		}
+		const hasBreakRoom =
+			toBool(source.hasBreakRoom ?? source.has_break_room) ||
+			toStringValue(source.breakRoomId ?? source.break_room_id) !== '';
+		const breakRoomId = toStringValue(source.breakRoomId ?? source.break_room_id);
+		const branchCount = Math.max(toInt(source.branchesCreated ?? source.branches_created), hasBreakRoom ? 1 : 0);
 
 		return {
 			id: toStringValue(source.id) || createMessageId(nextRoomId),
@@ -813,13 +1181,23 @@
 					: ''),
 			mediaType: toStringValue(source.mediaType ?? source.media_type ?? source.type ?? nextType),
 			fileName: toStringValue(source.fileName ?? source.file_name),
+			isEdited: toBool(source.isEdited ?? source.is_edited),
+			editedAt: parseOptionalTimestamp(source.editedAt ?? source.edited_at),
+			isDeleted:
+				nextType === 'deleted' ||
+				toBool(source.isDeleted ?? source.is_deleted) ||
+				toStringValue(source.content).trim() === DELETED_MESSAGE_PLACEHOLDER,
+			replyToMessageId: normalizeMessageID(
+				toStringValue(source.replyToMessageId ?? source.reply_to_message_id)
+			),
+			replyToSnippet: toStringValue(source.replyToSnippet ?? source.reply_to_snippet).trim(),
+			totalReplies: toInt(source.totalReplies ?? source.total_replies),
+			branchesCreated: branchCount,
 			createdAt: toTimestamp(
 				source.time ?? source.createdAt ?? source.created_at ?? source.timestamp
 			),
-			hasBreakRoom:
-				toBool(source.hasBreakRoom ?? source.has_break_room) ||
-				toStringValue(source.breakRoomId ?? source.break_room_id) !== '',
-			breakRoomId: toStringValue(source.breakRoomId ?? source.break_room_id),
+			hasBreakRoom,
+			breakRoomId,
 			breakJoinCount: toInt(source.breakJoinCount ?? source.break_join_count),
 			pending: false
 		};
@@ -874,6 +1252,7 @@
 		};
 
 		updateThreadPreview(targetRoomId);
+		queueOfflineCachePersist(targetRoomId);
 		if (shouldCountUnread) {
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
@@ -902,6 +1281,81 @@
 			[targetRoomId]: nextMessages
 		};
 		updateThreadPreview(targetRoomId);
+		queueOfflineCachePersist(targetRoomId);
+	}
+
+	function applyMessageEdit(targetRoomId: string, payload: unknown) {
+		if (!payload || typeof payload !== 'object') {
+			return;
+		}
+		const source = payload as Record<string, unknown>;
+		const messageId = normalizeMessageID(toStringValue(source.messageId ?? source.id));
+		const nextContent = toStringValue(source.content).trim();
+		const editedAt = parseOptionalTimestamp(source.editedAt ?? source.edited_at ?? Date.now());
+		if (!messageId || !nextContent) {
+			return;
+		}
+		const roomMessages = messagesByRoom[targetRoomId] ?? [];
+		const index = roomMessages.findIndex((entry) => entry.id === messageId);
+		if (index < 0) {
+			return;
+		}
+		const nextMessages = [...roomMessages];
+		nextMessages[index] = {
+			...nextMessages[index],
+			content: nextContent,
+			type: 'text',
+			mediaUrl: '',
+			mediaType: '',
+			fileName: '',
+			isEdited: true,
+			editedAt,
+			isDeleted: false,
+			pending: false
+		};
+		messagesByRoom = {
+			...messagesByRoom,
+			[targetRoomId]: nextMessages
+		};
+		updateThreadPreview(targetRoomId);
+		queueOfflineCachePersist(targetRoomId);
+	}
+
+	function applyMessageDelete(targetRoomId: string, payload: unknown) {
+		if (!payload || typeof payload !== 'object') {
+			return;
+		}
+		const source = payload as Record<string, unknown>;
+		const messageId = normalizeMessageID(toStringValue(source.messageId ?? source.id));
+		if (!messageId) {
+			return;
+		}
+		const roomMessages = messagesByRoom[targetRoomId] ?? [];
+		const index = roomMessages.findIndex((entry) => entry.id === messageId);
+		if (index < 0) {
+			return;
+		}
+		const nextMessages = [...roomMessages];
+		nextMessages[index] = {
+			...nextMessages[index],
+			content: DELETED_MESSAGE_PLACEHOLDER,
+			type: 'deleted',
+			mediaUrl: '',
+			mediaType: '',
+			fileName: '',
+			replyToMessageId: '',
+			replyToSnippet: '',
+			isEdited: false,
+			editedAt: parseOptionalTimestamp(source.editedAt ?? source.edited_at),
+			isDeleted: true,
+			pending: false
+		};
+		messagesByRoom = {
+			...messagesByRoom,
+			[targetRoomId]: nextMessages
+		};
+		updateThreadPreview(targetRoomId);
+		queueOfflineCachePersist(targetRoomId);
 	}
 
 	function markRoomAsRead(targetRoomId: string) {
@@ -945,6 +1399,16 @@
 		return [...byId.values()];
 	}
 
+	function buildReplySnippet(senderName: string, content: string) {
+		const normalizedSender = normalizeUsernameValue(senderName) || 'User';
+		const normalizedContent = content.trim().replace(/\s+/g, ' ');
+		const base = normalizedContent ? `${normalizedSender}: ${normalizedContent}` : normalizedSender;
+		if (base.length <= 140) {
+			return base;
+		}
+		return `${base.slice(0, 137)}...`;
+	}
+
 	async function sendMessage(payload?: ComposerMediaPayload) {
 		if (!roomId || !isMember) {
 			showErrorToast('Join room before sending messages');
@@ -958,6 +1422,11 @@
 		if (!text && !isMediaMessage) {
 			return;
 		}
+		const replyTarget = activeReply;
+		const replyToMessageId = replyTarget ? normalizeMessageID(replyTarget.messageId) : '';
+		const replyToSnippet = replyToMessageId
+			? buildReplySnippet(replyTarget?.senderName || '', replyTarget?.content || '')
+			: '';
 
 		let outgoing: ChatMessage;
 		if (isMediaMessage) {
@@ -971,6 +1440,8 @@
 				mediaUrl: mediaContent,
 				mediaType: mediaType,
 				fileName: payload?.fileName?.trim() ?? '',
+				replyToMessageId,
+				replyToSnippet,
 				createdAt: Date.now(),
 				pending: true
 			};
@@ -985,6 +1456,8 @@
 				mediaUrl: '',
 				mediaType: '',
 				fileName: '',
+				replyToMessageId,
+				replyToSnippet,
 				createdAt: Date.now(),
 				pending: true
 			};
@@ -993,8 +1466,10 @@
 		upsertMessage(roomId, outgoing, false);
 		sendSocketPayload(toWireMessage(outgoing));
 		markRoomAsRead(roomId);
+		sendTypingStop();
 		draftMessage = '';
 		attachedFile = null;
+		activeReply = null;
 	}
 
 	function toWireMessage(message: ChatMessage) {
@@ -1019,8 +1494,28 @@
 			mediaUrl: mediaURL,
 			mediaType,
 			fileName: message.fileName ?? '',
+			replyToMessageId: normalizeMessageID(message.replyToMessageId ?? ''),
+			replyToSnippet: (message.replyToSnippet || '').trim(),
+			reply_to_message_id: normalizeMessageID(message.replyToMessageId ?? ''),
+			reply_to_snippet: (message.replyToSnippet || '').trim(),
 			createdAt: new Date(message.createdAt).toISOString()
 		};
+	}
+
+	function onReplyRequest(event: CustomEvent<ReplyTarget>) {
+		const messageId = normalizeMessageID(event.detail.messageId);
+		if (!messageId) {
+			return;
+		}
+		activeReply = {
+			messageId,
+			senderName: normalizeUsernameValue(event.detail.senderName) || 'User',
+			content: (event.detail.content || '').trim()
+		};
+	}
+
+	function clearReplyTarget() {
+		activeReply = null;
 	}
 
 	function handleComposerAttach(event: CustomEvent<{ file: File | null; error?: string }>) {
@@ -1039,7 +1534,7 @@
 	}
 
 	async function renameRoom(targetRoomId: string = roomId) {
-		const normalizedRoomID = toRoomSlug(targetRoomId);
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
 		if (!normalizedRoomID) {
 			return;
 		}
@@ -1053,7 +1548,7 @@
 			return;
 		}
 
-		const normalizedName = toRoomSlug(requested);
+		const normalizedName = normalizeRoomNameValue(requested);
 		if (!normalizedName) {
 			showErrorToast('Room name cannot be empty');
 			return;
@@ -1076,7 +1571,7 @@
 				throw new Error(data.error || 'Failed to rename room');
 			}
 
-			const savedName = toStringValue(data.roomName) || normalizedName;
+			const savedName = normalizeRoomNameValue(toStringValue(data.roomName)) || normalizedName;
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
 					thread.id === normalizedRoomID ? { ...thread, name: savedName } : thread
@@ -1108,7 +1603,7 @@
 			return;
 		}
 
-		const requestedName = toRoomSlug(input);
+		const requestedName = normalizeRoomNameValue(input);
 		if (!requestedName) {
 			return;
 		}
@@ -1130,13 +1625,18 @@
 				throw new Error(data.error || 'Failed to create room');
 			}
 
-			const nextRoomId = toStringValue(data.roomId) || requestedName;
-			const nextRoomName = toStringValue(data.roomName) || formatRoomName(nextRoomId);
+			const nextRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
+			if (!nextRoomId) {
+				throw new Error('Invalid room id returned from server');
+			}
+			const nextRoomName =
+				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(nextRoomId);
 			const nextCreatedAt = toTimestamp(data.createdAt);
+			const nextExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 
 			ensureRoomThread(nextRoomId, nextRoomName, 'joined');
 			markRoomMembershipSynced(nextRoomId);
-			ensureRoomMeta(nextRoomId, nextCreatedAt);
+			ensureRoomMeta(nextRoomId, nextCreatedAt, nextExpiresAt);
 			await refreshSidebarRooms();
 
 			const params = new URLSearchParams({
@@ -1161,7 +1661,7 @@
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					roomName: roomId,
+					roomId,
 					username: currentUsername,
 					userId: normalizeIdentifier(currentUserId),
 					mode: 'join'
@@ -1173,11 +1673,14 @@
 			}
 
 			const joinedName =
-				toStringValue(data.roomName) || activeThread.name || formatRoomName(roomId);
+				normalizeRoomNameValue(toStringValue(data.roomName)) ||
+				activeThread.name ||
+				formatRoomName(roomId);
 			const joinedCreatedAt = toTimestamp(data.createdAt);
+			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 			ensureRoomThread(roomId, joinedName, 'joined');
 			markRoomMembershipSynced(roomId);
-			ensureRoomMeta(roomId, joinedCreatedAt);
+			ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
 					thread.id === roomId ? { ...thread, status: 'joined', name: joinedName } : thread
@@ -1210,6 +1713,14 @@
 			if (!res.ok) {
 				showErrorToast(data.error || 'Room has reached its 15-day limit');
 				return;
+			}
+			const expiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+			const expiresInSeconds = toInt(data.expiresInSeconds ?? data.expires_in_seconds);
+			const createdAt = getRoomCreatedAt(targetRoomId);
+			if (expiresAt > 0) {
+				ensureRoomMeta(targetRoomId, createdAt, expiresAt);
+			} else if (expiresInSeconds > 0) {
+				ensureRoomMeta(targetRoomId, createdAt, Date.now() + expiresInSeconds * 1000);
 			}
 			showErrorToast(data.message || 'Room extended for 24 hours');
 		} catch {
@@ -1259,7 +1770,150 @@
 		}
 		messagesByRoom = { ...messagesByRoom, [roomId]: [] };
 		updateThreadPreview(roomId);
+		queueOfflineCachePersist(roomId);
 		showRoomMenu = false;
+	}
+
+	async function disconnectAndWipe() {
+		showRoomMenu = false;
+		showLeftMenu = false;
+		sendTypingStop();
+		closeGlobalSocket();
+		clearSessionToken();
+		authToken.set(null);
+		currentUser.set(null);
+		try {
+			await wipeEncryptedRoomCache();
+		} catch {
+			// Best effort wipe.
+		}
+		await goto('/');
+	}
+
+	async function onRequestOlderHistory() {
+		if (!roomId) {
+			return;
+		}
+		await loadOlderMessages(roomId);
+	}
+
+	async function loadOlderMessages(targetRoomId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return;
+		}
+		if (historyLoadingByRoom[normalizedRoomID]) {
+			return;
+		}
+		if (historyHasMoreByRoom[normalizedRoomID] === false) {
+			return;
+		}
+
+		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
+		const oldest = roomMessages[0];
+		if (!oldest) {
+			historyHasMoreByRoom = {
+				...historyHasMoreByRoom,
+				[normalizedRoomID]: false
+			};
+			return;
+		}
+
+		historyLoadingByRoom = {
+			...historyLoadingByRoom,
+			[normalizedRoomID]: true
+		};
+		const anchor = chatWindowRef?.capturePrependAnchor?.() ?? null;
+		try {
+			const before = encodeURIComponent(oldest.id);
+			const beforeCreatedAt =
+				Number.isFinite(oldest.createdAt) && oldest.createdAt > 0
+					? `&beforeCreatedAt=${encodeURIComponent(String(oldest.createdAt))}`
+					: '';
+			const res = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/messages?before=${before}${beforeCreatedAt}&limit=50`
+			);
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to load older messages');
+			}
+
+			const payloadMessages = Array.isArray(data.messages) ? data.messages : [];
+			const incoming = payloadMessages
+				.map((entry: unknown) => parseIncomingMessage(entry, normalizedRoomID))
+				.filter((entry: ChatMessage | null): entry is ChatMessage => Boolean(entry));
+			if (incoming.length > 0) {
+				mergeMessages(normalizedRoomID, incoming);
+				await tick();
+				chatWindowRef?.restorePrependAnchor?.(anchor);
+			}
+
+			const hasMore =
+				typeof data.hasMore === 'boolean' ? data.hasMore : incoming.length >= 50;
+			historyHasMoreByRoom = {
+				...historyHasMoreByRoom,
+				[normalizedRoomID]: hasMore
+			};
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to load older messages');
+		} finally {
+			historyLoadingByRoom = {
+				...historyLoadingByRoom,
+				[normalizedRoomID]: false
+			};
+		}
+	}
+
+	function onEditMessageRequest(event: CustomEvent<{ messageId: string; content: string }>) {
+		if (!roomId) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail.messageId);
+		if (!messageId) {
+			return;
+		}
+		const current = (event.detail.content || '').trim();
+		const nextContentRaw = window.prompt('Edit message', current);
+		if (nextContentRaw === null) {
+			return;
+		}
+		const nextContent = nextContentRaw.trim();
+		if (!nextContent || nextContent === current) {
+			return;
+		}
+		applyMessageEdit(roomId, {
+			messageId,
+			content: nextContent,
+			editedAt: Date.now()
+		});
+		sendSocketPayload({
+			type: 'message_edit',
+			roomId,
+			messageId,
+			content: nextContent
+		});
+	}
+
+	function onDeleteMessageRequest(event: CustomEvent<{ messageId: string }>) {
+		if (!roomId) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail.messageId);
+		if (!messageId) {
+			return;
+		}
+		if (!window.confirm('Delete this message?')) {
+			return;
+		}
+		applyMessageDelete(roomId, {
+			messageId,
+			editedAt: Date.now()
+		});
+		sendSocketPayload({
+			type: 'message_delete',
+			roomId,
+			messageId
+		});
 	}
 
 	function toggleMessageExpanded(messageId: string) {
@@ -1285,33 +1939,7 @@
 		}
 	}
 
-	function buildBreakPrefixSuggestion(message: ChatMessage) {
-		const textBased = toRoomSlug(message.content);
-		if (textBased) {
-			return textBased.slice(0, 24);
-		}
-		const fileBased = toRoomSlug(message.fileName || '');
-		if (fileBased) {
-			return fileBased.slice(0, 24);
-		}
-		const senderBased = toRoomSlug(message.senderName);
-		if (senderBased) {
-			return `${senderBased}_topic`.slice(0, 24);
-		}
-		return 'topic';
-	}
-
 	async function createBreakRoom(message: ChatMessage) {
-		const suggestedPrefix = buildBreakPrefixSuggestion(message);
-		const requested = window.prompt(
-			'Child room prefix (final format: prefix_parent5_n)',
-			suggestedPrefix
-		);
-		if (requested === null) {
-			return false;
-		}
-		const normalizedPrefix = toRoomSlug(requested) || suggestedPrefix;
-
 		try {
 			const res = await fetch(`${API_BASE}/api/rooms/break`, {
 				method: 'POST',
@@ -1319,7 +1947,6 @@
 				body: JSON.stringify({
 					parentRoomId: roomId,
 					originMessageId: message.id,
-					roomName: normalizedPrefix,
 					userId: normalizeIdentifier(currentUserId),
 					username: currentUsername
 				})
@@ -1329,12 +1956,14 @@
 				throw new Error(data.error || 'Failed to create break room');
 			}
 
-			const breakRoomId = toRoomSlug(toStringValue(data.roomId));
+			const breakRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
 			if (!breakRoomId) {
 				throw new Error('Invalid break room id');
 			}
-			const breakRoomName = toStringValue(data.roomName) || formatRoomName(breakRoomId);
+			const breakRoomName =
+				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(breakRoomId);
 			const breakCreatedAt = toTimestamp(data.createdAt);
+			const breakExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 
 			messagesByRoom = {
 				...messagesByRoom,
@@ -1344,14 +1973,15 @@
 								...entry,
 								hasBreakRoom: true,
 								breakRoomId,
-								breakJoinCount: Math.max(1, entry.breakJoinCount ?? 0)
+								breakJoinCount: Math.max(1, entry.breakJoinCount ?? 0),
+								branchesCreated: Math.max(1, entry.branchesCreated ?? 0)
 							}
 						: entry
 				)
 			};
 			ensureRoomThread(breakRoomId, breakRoomName, 'joined');
 			markRoomMembershipSynced(breakRoomId);
-			ensureRoomMeta(breakRoomId, breakCreatedAt);
+			ensureRoomMeta(breakRoomId, breakCreatedAt, breakExpiresAt);
 			await refreshSidebarRooms();
 			await goto(
 				`/chat/${encodeURIComponent(breakRoomId)}?name=${encodeURIComponent(breakRoomName)}&member=1`
@@ -1364,7 +1994,7 @@
 	}
 
 	function onJoinBreakRoom(event: CustomEvent<{ roomId: string }>) {
-		const target = toRoomSlug(event.detail.roomId);
+		const target = normalizeRoomIDValue(event.detail.roomId);
 		if (!target) {
 			return;
 		}
@@ -1420,11 +2050,46 @@
 	}
 
 	function getRoomExpiry(targetRoomId: string) {
-		const createdAt = getRoomCreatedAt(targetRoomId);
-		if (!createdAt) {
+		const meta = roomMetaById[targetRoomId];
+		if (!meta) {
 			return 0;
 		}
-		return createdAt + ROOM_MAX_LIFESPAN_MS;
+		if (meta.expiresAt > 0) {
+			return meta.expiresAt;
+		}
+		if (meta.createdAt > 0) {
+			return meta.createdAt + ROOM_DEFAULT_LIFESPAN_MS;
+		}
+		return 0;
+	}
+
+	function getRemainingHoursLabel(targetRoomId: string) {
+		const expiry = getRoomExpiry(targetRoomId);
+		if (!expiry) {
+			return '--';
+		}
+		const remainingMs = Math.max(0, expiry - roomExpiryTickMs);
+		if (remainingMs <= 0) {
+			return '0m';
+		}
+
+		const totalMinutes = remainingMs / (60 * 1000);
+		if (totalMinutes < 60) {
+			const minutes = Math.max(1, Math.round(totalMinutes));
+			return `${minutes}m`;
+		}
+
+		const totalHours = remainingMs / (60 * 60 * 1000);
+		if (totalHours < 24) {
+			const roundedHours = Math.round(totalHours * 10) / 10;
+			const value = roundedHours.toFixed(1);
+			return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
+		}
+
+		const totalDays = remainingMs / (24 * 60 * 60 * 1000);
+		const roundedDays = Math.round(totalDays * 10) / 10;
+		const value = roundedDays.toFixed(1);
+		return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
 	}
 
 	function formatDateTime(timestamp: number) {
@@ -1451,16 +2116,19 @@
 		return normalizeEpoch(numeric);
 	}
 
-	function toRoomSlug(value: string) {
-		const normalized = value.toLowerCase().trim();
-		if (!normalized) {
+	function normalizeRoomIDValue(value: string) {
+		return value
+			.toLowerCase()
+			.trim()
+			.replace(/[^a-z0-9]/g, '');
+	}
+
+	function normalizeRoomNameValue(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) {
 			return '';
 		}
-		return normalized
-			.replace(/[^a-z0-9\s_-]/g, '')
-			.replace(/[\s-]+/g, '_')
-			.replace(/_+/g, '_')
-			.replace(/^_+|_+$/g, '');
+		return trimmed.replace(/\s+/g, ' ').slice(0, 20);
 	}
 
 	function normalizeUsernameValue(value: string) {
@@ -1489,15 +2157,15 @@
 		if (browser && typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
 			return crypto.randomUUID();
 		}
-		return `${targetRoomId}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+		return `m${targetRoomId}${Date.now().toString(36)}${Math.floor(Math.random() * 1000000).toString(36)}`;
 	}
 
 	function formatRoomName(targetRoomId: string) {
-		return targetRoomId
-			.split(/[_-]/)
-			.filter(Boolean)
-			.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-			.join(' ');
+		const trimmed = normalizeRoomIDValue(targetRoomId);
+		if (!trimmed) {
+			return 'Room';
+		}
+		return 'Room';
 	}
 
 	function toTimestamp(value: unknown) {
@@ -1522,6 +2190,37 @@
 			return value.getTime();
 		}
 		return Date.now();
+	}
+
+	function parseOptionalTimestamp(value: unknown) {
+		if (value === null || value === undefined) {
+			return 0;
+		}
+		if (typeof value === 'number') {
+			if (!Number.isFinite(value) || value <= 0) {
+				return 0;
+			}
+			return normalizeEpoch(value);
+		}
+		if (typeof value === 'string') {
+			const trimmed = value.trim();
+			if (!trimmed) {
+				return 0;
+			}
+			const numeric = Number(trimmed);
+			if (Number.isFinite(numeric) && numeric > 0) {
+				return normalizeEpoch(numeric);
+			}
+			const parsed = Date.parse(trimmed);
+			if (Number.isFinite(parsed) && parsed > 0) {
+				return parsed;
+			}
+			return 0;
+		}
+		if (value instanceof Date) {
+			return value.getTime();
+		}
+		return 0;
 	}
 
 	function normalizeEpoch(value: number) {
@@ -1693,18 +2392,27 @@
 				</span>
 			</button>
 
-			<div class="header-actions" bind:this={headerActionsEl}>
-				<button
-					type="button"
-					class="icon-button"
-					on:click|stopPropagation={toggleRoomMenu}
-					title="More options"
-				>
-					...
-				</button>
-				{#if showRoomMenu}
-					<div class="room-menu">
-						<button type="button" on:click|stopPropagation={toggleRoomSearch}>
+				<div class="header-actions" bind:this={headerActionsEl}>
+					<button
+						type="button"
+						class="expiry-pill"
+						on:click|stopPropagation={openRoomDetails}
+						title="Remaining room lifetime"
+						aria-label="Open room lifetime details"
+					>
+						{getRemainingHoursLabel(roomId)}
+					</button>
+					<button
+						type="button"
+						class="icon-button"
+						on:click|stopPropagation={toggleRoomMenu}
+						title="More options"
+					>
+						...
+					</button>
+					{#if showRoomMenu}
+						<div class="room-menu">
+							<button type="button" on:click|stopPropagation={toggleRoomSearch}>
 							{showRoomSearch ? 'Hide search' : 'Search messages'}
 						</button>
 						<button type="button" on:click|stopPropagation={() => void renameRoom(roomId)}>
@@ -1719,10 +2427,27 @@
 						<button type="button" on:click|stopPropagation={clearCurrentRoomMessages}>
 							Clear local
 						</button>
+						<button type="button" on:click|stopPropagation={() => void disconnectAndWipe()}>
+							Disconnect
+						</button>
 					</div>
 				{/if}
 			</div>
 		</header>
+
+		{#if typingIndicatorText}
+			<div class="typing-indicator">{typingIndicatorText}</div>
+		{/if}
+
+		{#if showTrustedDevicePrompt}
+			<div class="trusted-banner" role="status" aria-live="polite">
+				<span>Trusted device? Enable encrypted history caching for faster loading.</span>
+				<div class="trusted-actions">
+					<button type="button" on:click={() => onTrustedDeviceChoice('yes')}>Yes</button>
+					<button type="button" on:click={() => onTrustedDeviceChoice('no')}>No</button>
+				</div>
+			</div>
+		{/if}
 
 		{#if isSelectionMode}
 			<div class="selection-banner">
@@ -1737,6 +2462,7 @@
 		{/if}
 
 		<ChatWindow
+			bind:this={chatWindowRef}
 			messages={currentMessages}
 			{currentUserId}
 			{roomMessageSearch}
@@ -1744,10 +2470,16 @@
 			{isMember}
 			{isSelectionMode}
 			{focusMessageId}
+			isLoadingOlder={isLoadingOlderHistory}
+			hasMoreOlder={hasMoreOlderHistory}
 			on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
 			on:joinBreakRoom={onJoinBreakRoom}
 			on:joinRoom={() => void joinCurrentRoom()}
 			on:messageSelect={onMessageSelected}
+			on:reply={onReplyRequest}
+			on:editMessage={onEditMessageRequest}
+			on:deleteMessage={onDeleteMessageRequest}
+			on:requestOlder={onRequestOlderHistory}
 			on:focusHandled={onFocusHandled}
 		/>
 
@@ -1755,9 +2487,12 @@
 			<ChatComposer
 				bind:draftMessage
 				bind:attachedFile
+				{activeReply}
 				on:send={(event) => void sendMessage(event.detail)}
+				on:typing={onComposerTyping}
 				on:attach={handleComposerAttach}
 				on:removeAttachment={handleComposerRemoveAttachment}
+				on:cancelReply={clearReplyTarget}
 			/>
 		{/if}
 	</section>
@@ -1844,6 +2579,11 @@
 	.chat-window,
 	.online-pane {
 		min-height: 0;
+	}
+
+	.sidebar-pane {
+		min-width: 0;
+		overflow: hidden;
 	}
 
 	.chat-window {
@@ -1938,6 +2678,32 @@
 		flex-shrink: 0;
 	}
 
+	.expiry-pill {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 3.1rem;
+		height: 1.85rem;
+		padding: 0 0.48rem;
+		border-radius: 999px;
+		border: 1px solid #d4d4da;
+		background: #f5f5f7;
+		color: #414149;
+		font-size: 0.76rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
+		cursor: pointer;
+	}
+
+	.expiry-pill:hover {
+		background: #eeeef1;
+	}
+
+	.expiry-pill:focus-visible {
+		outline: 2px solid #8f8f98;
+		outline-offset: 2px;
+	}
+
 	.icon-button {
 		border: 1px solid #d2d2d8;
 		background: #f7f7f8;
@@ -1981,6 +2747,47 @@
 		border-bottom: 1px solid #dfdfe4;
 		font-size: 0.8rem;
 		color: #3a3a42;
+	}
+
+	.typing-indicator {
+		padding: 0.35rem 0.9rem;
+		border-bottom: 1px solid #e4e4e8;
+		background: #fafafc;
+		color: #666873;
+		font-size: 0.75rem;
+		line-height: 1.2;
+	}
+
+	.trusted-banner {
+		padding: 0.5rem 0.9rem;
+		border-bottom: 1px solid #e2e2e7;
+		background: #f8f8fb;
+		color: #383844;
+		font-size: 0.76rem;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem;
+	}
+
+	.trusted-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+
+	.trusted-actions button {
+		border: 1px solid #d3d3da;
+		background: #ffffff;
+		color: #2f2f37;
+		border-radius: 999px;
+		font-size: 0.72rem;
+		padding: 0.18rem 0.54rem;
+		cursor: pointer;
+	}
+
+	.trusted-actions button:hover {
+		background: #f2f2f6;
 	}
 
 	.chat-search-row {
@@ -2192,6 +2999,13 @@
 
 		.chat-header {
 			padding: 0.68rem 0.75rem;
+		}
+
+		.expiry-pill {
+			min-width: 2.7rem;
+			height: 1.65rem;
+			padding: 0 0.4rem;
+			font-size: 0.71rem;
 		}
 
 		.mobile-back-button {
