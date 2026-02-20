@@ -66,6 +66,8 @@ func New(
 		r.Post("/rooms/extend", roomHandler.ExtendRoom)
 		r.Post("/rooms/rename", roomHandler.RenameRoom)
 		r.Post("/rooms/break", roomHandler.CreateBreakRoom)
+		r.Post("/rooms/remove-member", roomHandler.RemoveRoomMember)
+		r.Post("/rooms/delete", roomHandler.DeleteRoom)
 		r.Get("/rooms/sidebar", roomHandler.GetSidebarRooms)
 		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
 		r.Post("/upload/presigned", uploadHandler.GenerateUploadURL)

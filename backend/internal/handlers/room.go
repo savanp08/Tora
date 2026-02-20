@@ -91,6 +91,8 @@ type JoinRoomResponse struct {
 	Token     string `json:"token"`
 	CreatedAt int64  `json:"createdAt"`
 	ExpiresAt int64  `json:"expiresAt,omitempty"`
+	IsAdmin   bool   `json:"isAdmin,omitempty"`
+	ServerNow int64  `json:"serverNow,omitempty"`
 }
 
 type ExtendRoomRequest struct {
@@ -102,6 +104,7 @@ type ExtendRoomResponse struct {
 	ExpiresInSeconds int64  `json:"expiresInSeconds"`
 	ExpiresAt        int64  `json:"expiresAt,omitempty"`
 	Message          string `json:"message"`
+	ServerNow        int64  `json:"serverNow,omitempty"`
 }
 
 type RenameRoomRequest struct {
@@ -129,6 +132,7 @@ type CreateBreakRoomResponse struct {
 	OriginMessageID string `json:"originMessageId"`
 	CreatedAt       int64  `json:"createdAt"`
 	ExpiresAt       int64  `json:"expiresAt,omitempty"`
+	ServerNow       int64  `json:"serverNow,omitempty"`
 }
 
 type SidebarRoom struct {
@@ -141,10 +145,30 @@ type SidebarRoom struct {
 	MemberCount     int    `json:"memberCount"`
 	CreatedAt       int64  `json:"createdAt"`
 	ExpiresAt       int64  `json:"expiresAt,omitempty"`
+	IsAdmin         bool   `json:"isAdmin,omitempty"`
 }
 
 type SidebarRoomsResponse struct {
-	Rooms []SidebarRoom `json:"rooms"`
+	Rooms     []SidebarRoom `json:"rooms"`
+	ServerNow int64         `json:"serverNow,omitempty"`
+}
+
+type RemoveRoomMemberRequest struct {
+	RoomID       string `json:"roomId"`
+	ActorUserID  string `json:"actorUserId"`
+	TargetUserID string `json:"targetUserId"`
+}
+
+type DeleteRoomRequest struct {
+	RoomID      string `json:"roomId"`
+	ActorUserID string `json:"actorUserId"`
+}
+
+type RoomAdminActionResponse struct {
+	RoomID        string `json:"roomId"`
+	RemovedUserID string `json:"removedUserId,omitempty"`
+	Message       string `json:"message"`
+	ServerNow     int64  `json:"serverNow,omitempty"`
 }
 
 func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
@@ -366,6 +390,10 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[room] join name-index sync failed room=%s err=%v", finalRoomID, err)
 	}
 	expiresAt := h.getRoomExpiryUnix(ctx, finalRoomID)
+	isAdmin, adminErr := h.isRoomAdmin(ctx, finalRoomID, userID)
+	if adminErr != nil {
+		log.Printf("[room] admin resolve failed room=%s user=%s err=%v", finalRoomID, userID, adminErr)
+	}
 
 	response := JoinRoomResponse{
 		RoomID:    finalRoomID,
@@ -375,6 +403,8 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		Token:     token,
 		CreatedAt: finalCreatedAt,
 		ExpiresAt: expiresAt,
+		IsAdmin:   isAdmin,
+		ServerNow: time.Now().Unix(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -536,6 +566,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		OriginMessageID: originMessageID,
 		CreatedAt:       createdAt,
 		ExpiresAt:       expiresAt,
+		ServerNow:       time.Now().Unix(),
 	})
 }
 
@@ -664,9 +695,21 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 		return rooms[i].CreatedAt > rooms[j].CreatedAt
 	})
 
+	for idx := range rooms {
+		isAdmin, adminErr := h.isRoomAdmin(ctx, rooms[idx].RoomID, userID)
+		if adminErr != nil {
+			log.Printf("[room] sidebar admin resolve failed room=%s user=%s err=%v", rooms[idx].RoomID, userID, adminErr)
+			continue
+		}
+		rooms[idx].IsAdmin = isAdmin
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(SidebarRoomsResponse{Rooms: rooms})
+	json.NewEncoder(w).Encode(SidebarRoomsResponse{
+		Rooms:     rooms,
+		ServerNow: time.Now().Unix(),
+	})
 }
 
 func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
@@ -789,11 +832,154 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		ExpiresInSeconds: int64(nextTTL.Seconds()),
 		ExpiresAt:        expiresAt,
 		Message:          responseMessage,
+		ServerNow:        time.Now().Unix(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
+}
+
+func (h *RoomHandler) RemoveRoomMember(w http.ResponseWriter, r *http.Request) {
+	var req RemoveRoomMemberRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	roomID := normalizeRoomID(req.RoomID)
+	actorUserID := normalizeIdentifier(req.ActorUserID)
+	targetUserID := normalizeIdentifier(req.TargetUserID)
+	if roomID == "" || actorUserID == "" || targetUserID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "roomId, actorUserId and targetUserId are required"})
+		return
+	}
+	if actorUserID == targetUserID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Admin cannot remove self"})
+		return
+	}
+
+	ctx := context.Background()
+	exists, err := h.roomExists(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+		return
+	}
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+		return
+	}
+
+	isAdmin, err := h.isRoomAdmin(ctx, roomID, actorUserID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room admin"})
+		return
+	}
+	if !isAdmin {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Only room admin can remove members"})
+		return
+	}
+
+	removedCount, err := h.redis.Client.SRem(ctx, roomMembersKey(roomID), targetUserID).Result()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update room members"})
+		return
+	}
+	_ = h.redis.Client.SRem(ctx, userRoomsKey(targetUserID), roomID).Err()
+	_ = h.redis.Client.HDel(ctx, roomMemberJoinedAtKey(roomID), targetUserID).Err()
+
+	memberCount, err := h.redis.Client.SCard(ctx, roomMembersKey(roomID)).Result()
+	if err == nil {
+		_ = h.redis.Client.HSet(ctx, roomKey(roomID), "member_count", memberCount).Err()
+	}
+
+	if removedCount == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Target user is not a room member"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(RoomAdminActionResponse{
+		RoomID:        roomID,
+		RemovedUserID: targetUserID,
+		Message:       "Member removed",
+		ServerNow:     time.Now().Unix(),
+	})
+}
+
+func (h *RoomHandler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
+	var req DeleteRoomRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	roomID := normalizeRoomID(req.RoomID)
+	actorUserID := normalizeIdentifier(req.ActorUserID)
+	if roomID == "" || actorUserID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "roomId and actorUserId are required"})
+		return
+	}
+
+	ctx := context.Background()
+	exists, err := h.roomExists(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+		return
+	}
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+		return
+	}
+
+	isAdmin, err := h.isRoomAdmin(ctx, roomID, actorUserID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room admin"})
+		return
+	}
+	if !isAdmin {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Only room admin can delete this room"})
+		return
+	}
+
+	roomIDsToDelete, err := h.collectRoomSubtreeIDs(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room tree"})
+		return
+	}
+	for _, deleteRoomID := range roomIDsToDelete {
+		if deleteErr := h.deleteSingleRoom(ctx, deleteRoomID); deleteErr != nil {
+			log.Printf("[room] delete failed room=%s err=%v", deleteRoomID, deleteErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete room"})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(RoomAdminActionResponse{
+		RoomID:    roomID,
+		Message:   "Room deleted",
+		ServerNow: time.Now().Unix(),
+	})
 }
 
 func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
@@ -1931,9 +2117,201 @@ func (h *RoomHandler) registerRoomMembership(ctx context.Context, roomID, userID
 	if err := h.redis.Client.SAdd(ctx, userRoomsKey(userID), roomID).Err(); err != nil {
 		return int(count), err
 	}
-	_ = h.redis.Client.Expire(ctx, membersKey, h.effectiveRoomTTL(ctx, roomID)).Err()
+	roomTTL := h.effectiveRoomTTL(ctx, roomID)
+	_ = h.redis.Client.Expire(ctx, membersKey, roomTTL).Err()
+	if err := h.redis.Client.HSetNX(ctx, roomMemberJoinedAtKey(roomID), userID, time.Now().Unix()).Err(); err != nil {
+		return int(count), err
+	}
+	_ = h.redis.Client.Expire(ctx, roomMemberJoinedAtKey(roomID), roomTTL).Err()
 
 	return int(count), nil
+}
+
+func (h *RoomHandler) isRoomAdmin(ctx context.Context, roomID, userID string) (bool, error) {
+	roomID = normalizeRoomID(roomID)
+	userID = normalizeIdentifier(userID)
+	if roomID == "" || userID == "" {
+		return false, nil
+	}
+
+	adminUserID, err := h.resolveRoomAdminUserID(ctx, roomID)
+	if err != nil {
+		return false, err
+	}
+	return adminUserID == userID, nil
+}
+
+func (h *RoomHandler) resolveRoomAdminUserID(ctx context.Context, roomID string) (string, error) {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" || h == nil || h.redis == nil || h.redis.Client == nil {
+		return "", nil
+	}
+
+	members, err := h.redis.Client.SMembers(ctx, roomMembersKey(roomID)).Result()
+	if err != nil {
+		return "", err
+	}
+	if len(members) == 0 {
+		return "", nil
+	}
+
+	memberSet := make(map[string]struct{}, len(members))
+	normalizedMembers := make([]string, 0, len(members))
+	for _, rawMember := range members {
+		memberID := normalizeIdentifier(rawMember)
+		if memberID == "" {
+			_ = h.redis.Client.SRem(ctx, roomMembersKey(roomID), rawMember).Err()
+			continue
+		}
+		memberSet[memberID] = struct{}{}
+		normalizedMembers = append(normalizedMembers, memberID)
+	}
+	if len(normalizedMembers) == 0 {
+		return "", nil
+	}
+
+	joinedRaw, err := h.redis.Client.HGetAll(ctx, roomMemberJoinedAtKey(roomID)).Result()
+	if err != nil && err != redis.Nil {
+		return "", err
+	}
+
+	type memberJoin struct {
+		userID   string
+		joinedAt int64
+	}
+	entries := make([]memberJoin, 0, len(normalizedMembers))
+	for _, memberID := range normalizedMembers {
+		joinedAt := int64(0)
+		if rawTimestamp, ok := joinedRaw[memberID]; ok {
+			if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(rawTimestamp), 10, 64); parseErr == nil {
+				joinedAt = parsed
+			}
+		}
+		if joinedAt <= 0 {
+			joinedAt = time.Now().Unix()
+			_ = h.redis.Client.HSet(ctx, roomMemberJoinedAtKey(roomID), memberID, joinedAt).Err()
+		}
+		entries = append(entries, memberJoin{
+			userID:   memberID,
+			joinedAt: joinedAt,
+		})
+	}
+
+	for trackedMemberID := range joinedRaw {
+		if _, exists := memberSet[trackedMemberID]; exists {
+			continue
+		}
+		_ = h.redis.Client.HDel(ctx, roomMemberJoinedAtKey(roomID), trackedMemberID).Err()
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].joinedAt == entries[j].joinedAt {
+			return entries[i].userID < entries[j].userID
+		}
+		return entries[i].joinedAt < entries[j].joinedAt
+	})
+	return entries[0].userID, nil
+}
+
+func (h *RoomHandler) collectRoomSubtreeIDs(ctx context.Context, rootRoomID string) ([]string, error) {
+	rootRoomID = normalizeRoomID(rootRoomID)
+	if rootRoomID == "" {
+		return nil, nil
+	}
+
+	seen := map[string]struct{}{rootRoomID: {}}
+	queue := []string{rootRoomID}
+	ordered := make([]string, 0, 8)
+	for len(queue) > 0 {
+		roomID := queue[0]
+		queue = queue[1:]
+		ordered = append(ordered, roomID)
+
+		children, err := h.redis.Client.SMembers(ctx, roomChildrenKey(roomID)).Result()
+		if err != nil && err != redis.Nil {
+			return nil, err
+		}
+		for _, rawChildID := range children {
+			childID := normalizeRoomID(rawChildID)
+			if childID == "" {
+				_ = h.redis.Client.SRem(ctx, roomChildrenKey(roomID), rawChildID).Err()
+				continue
+			}
+			if _, exists := seen[childID]; exists {
+				continue
+			}
+			seen[childID] = struct{}{}
+			queue = append(queue, childID)
+		}
+	}
+
+	// Delete descendants first, root last.
+	for left, right := 0, len(ordered)-1; left < right; left, right = left+1, right-1 {
+		ordered[left], ordered[right] = ordered[right], ordered[left]
+	}
+	return ordered, nil
+}
+
+func (h *RoomHandler) deleteSingleRoom(ctx context.Context, roomID string) error {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return nil
+	}
+
+	meta, err := h.redis.Client.HGetAll(ctx, roomKey(roomID)).Result()
+	if err != nil && err != redis.Nil {
+		return err
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+
+	parentRoomID := normalizeRoomID(meta["parent_room_id"])
+	if parentRoomID != "" {
+		_ = h.redis.Client.SRem(ctx, roomChildrenKey(parentRoomID), roomID).Err()
+	}
+
+	if roomCode := normalizeRoomCode(meta["room_code"]); roomCode != "" {
+		_ = h.redis.Client.Del(ctx, roomCodeKey(roomCode)).Err()
+	}
+
+	nameLookup := normalizeRoomNameLookup(meta["name_lookup"])
+	if nameLookup == "" {
+		nameLookup = normalizeRoomNameLookup(meta["name"])
+	}
+	if nameLookup != "" {
+		_ = h.redis.Client.ZRem(ctx, roomNameLookupKey(nameLookup), roomID).Err()
+	}
+
+	members, err := h.redis.Client.SMembers(ctx, roomMembersKey(roomID)).Result()
+	if err == nil {
+		for _, rawMember := range members {
+			memberID := normalizeIdentifier(rawMember)
+			if memberID == "" {
+				continue
+			}
+			_ = h.redis.Client.SRem(ctx, userRoomsKey(memberID), roomID).Err()
+		}
+	}
+
+	if h.scylla != nil && h.scylla.Session != nil {
+		roomsTable := h.scylla.Table("rooms")
+		deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ?`, roomsTable)
+		if execErr := h.scylla.Session.Query(deleteQuery, roomID).WithContext(ctx).Exec(); execErr != nil {
+			log.Printf("[room] delete scylla room failed room=%s err=%v", roomID, execErr)
+		}
+	}
+
+	_, _ = h.redis.Client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Del(ctx, roomMembersKey(roomID))
+		pipe.Del(ctx, roomMemberJoinedAtKey(roomID))
+		pipe.Del(ctx, roomChildrenKey(roomID))
+		pipe.Del(ctx, roomHistoryKey(roomID))
+		pipe.Del(ctx, roomKey(roomID))
+		return nil
+	})
+
+	return nil
 }
 
 func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, memberCount int) error {
@@ -2197,6 +2575,10 @@ func roomKey(roomID string) string {
 
 func roomMembersKey(roomID string) string {
 	return "room:" + roomID + ":members"
+}
+
+func roomMemberJoinedAtKey(roomID string) string {
+	return "room:" + roomID + ":member_joined_at"
 }
 
 func roomChildrenKey(roomID string) string {

@@ -349,6 +349,10 @@ func (h *Hub) broadcastToLocal(msg models.Message) {
 	}
 
 	for client := range clients {
+		if client.canWriteToRoom(msg.RoomID) && !h.isClientRoomMember(client.UserID, msg.RoomID) {
+			client.subscribeToRoom(msg.RoomID, false)
+			continue
+		}
 		select {
 		case client.Send <- msg:
 		default:
@@ -445,6 +449,10 @@ func (h *Hub) handleClientTypingEvent(event *ClientTypingEvent) {
 	if roomID == "" || !client.isSubscribedToRoom(roomID) || !client.canWriteToRoom(roomID) {
 		return
 	}
+	if !h.isClientRoomMember(client.UserID, roomID) {
+		client.subscribeToRoom(roomID, false)
+		return
+	}
 
 	typingEvent := TypingRedisEvent{
 		RoomID:    roomID,
@@ -485,6 +493,10 @@ func (h *Hub) handleClientMessageEditEvent(event *ClientMessageEditEvent) {
 	if !client.isSubscribedToRoom(roomID) || !client.canWriteToRoom(roomID) {
 		return
 	}
+	if !h.isClientRoomMember(client.UserID, roomID) {
+		client.subscribeToRoom(roomID, false)
+		return
+	}
 	ownsMessage, err := h.msgService.IsMessageOwnedBy(context.Background(), roomID, messageID, client.UserID)
 	if err != nil {
 		log.Printf("[ws] message edit ownership check failed room=%s message=%s user=%s err=%v", roomID, messageID, client.UserID, err)
@@ -521,6 +533,10 @@ func (h *Hub) handleClientMessageDeleteEvent(event *ClientMessageDeleteEvent) {
 		return
 	}
 	if !client.isSubscribedToRoom(roomID) || !client.canWriteToRoom(roomID) {
+		return
+	}
+	if !h.isClientRoomMember(client.UserID, roomID) {
+		client.subscribeToRoom(roomID, false)
 		return
 	}
 	ownsMessage, err := h.msgService.IsMessageOwnedBy(context.Background(), roomID, messageID, client.UserID)
@@ -588,6 +604,10 @@ func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 		},
 	}
 	for roomClient := range clients {
+		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
+			roomClient.subscribeToRoom(roomID, false)
+			continue
+		}
 		if !roomClient.canWriteToRoom(roomID) {
 			continue
 		}
@@ -632,6 +652,10 @@ func (h *Hub) broadcastMutationToLocal(event MessageMutationEvent) {
 	}
 
 	for roomClient := range clients {
+		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
+			roomClient.subscribeToRoom(roomID, false)
+			continue
+		}
 		select {
 		case roomClient.Send <- payload:
 		default:
@@ -686,6 +710,10 @@ func (h *Hub) collectWritableOnlineMembers(roomID string) []map[string]interface
 	roomClients := h.rooms[roomID]
 	onlineMembers := make([]map[string]interface{}, 0, len(roomClients))
 	for roomClient := range roomClients {
+		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
+			roomClient.subscribeToRoom(roomID, false)
+			continue
+		}
 		if !roomClient.canWriteToRoom(roomID) {
 			continue
 		}

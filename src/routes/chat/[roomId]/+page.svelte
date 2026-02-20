@@ -22,6 +22,7 @@
 	import { onDestroy, onMount, tick } from 'svelte';
 
 	type ThreadStatus = 'joined' | 'discoverable';
+	type MessageActionMode = 'none' | 'break' | 'edit' | 'delete';
 
 	type ChatMessage = {
 		id: string;
@@ -64,6 +65,7 @@
 		parentRoomId?: string;
 		originMessageId?: string;
 		treeNumber?: number;
+		isAdmin?: boolean;
 	};
 
 	type OnlineMember = {
@@ -88,6 +90,7 @@
 		memberCount?: number;
 		createdAt?: number;
 		expiresAt?: number;
+		isAdmin?: boolean;
 	};
 
 	type ReplyTarget = {
@@ -130,6 +133,8 @@
 	let showRoomSearch = false;
 	let showRoomDetails = false;
 	let isSelectionMode = false;
+	let messageActionMode: MessageActionMode = 'none';
+	let selectedActionMessageId = '';
 	let isMobileView = false;
 	let mobilePane: 'list' | 'chat' = 'chat';
 	let focusMessageId = '';
@@ -153,6 +158,7 @@
 	let identityReady = !browser;
 	let headerActionsEl: HTMLDivElement | null = null;
 	let roomExpiryTickMs = Date.now();
+	let serverClockOffsetMs = 0;
 	let chatWindowRef: {
 		capturePrependAnchor?: () => { scrollTop: number; scrollHeight: number } | null;
 		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
@@ -172,6 +178,7 @@
 		createThread(roomId || 'default_room', roomNameFromURL || undefined, 'joined');
 	$: currentMessages = messagesByRoom[roomId] ?? [];
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
+	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: activeUnreadCount = activeThread?.unread ?? 0;
 	$: activeTypingUsers = getActiveTypingUsers(roomId);
@@ -218,6 +225,9 @@
 		focusConsumedForRoom = false;
 		focusMessageId = '';
 		activeReply = null;
+		messageActionMode = 'none';
+		isSelectionMode = false;
+		selectedActionMessageId = '';
 	}
 	$: if (!focusConsumedForRoom && focusMessageIdFromURL) {
 		focusMessageId = focusMessageIdFromURL;
@@ -592,6 +602,22 @@
 		}, 3000);
 	}
 
+	function setMessageActionMode(mode: MessageActionMode) {
+		messageActionMode = mode;
+		isSelectionMode = mode !== 'none';
+		if (mode === 'none') {
+			selectedActionMessageId = '';
+		}
+	}
+
+	function syncServerClock(rawServerNow: unknown) {
+		const parsed = parseOptionalTimestamp(rawServerNow);
+		if (!parsed || parsed <= 0) {
+			return;
+		}
+		serverClockOffsetMs = parsed - Date.now();
+	}
+
 	function createThread(
 		id: string,
 		nameOverride?: string,
@@ -603,7 +629,8 @@
 			lastMessage: '',
 			lastActivity: Date.now(),
 			unread: 0,
-			status
+			status,
+			isAdmin: false
 		};
 	}
 
@@ -781,13 +808,20 @@
 				clientLog('api-room-sync-failed', { roomId: normalizedRoomId, status: res.status, data });
 				return;
 			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 
 			markRoomMembershipSynced(normalizedRoomId);
 			const joinedName =
 				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(normalizedRoomId);
 			const joinedCreatedAt = toTimestamp(data.createdAt);
 			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+			const joinedIsAdmin = toBool((data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ?? (data as { isAdmin?: unknown; is_admin?: unknown }).is_admin);
 			ensureRoomThread(normalizedRoomId, joinedName, 'joined');
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === normalizedRoomId ? { ...thread, isAdmin: joinedIsAdmin } : thread
+				)
+			);
 			ensureRoomMeta(normalizedRoomId, joinedCreatedAt, joinedExpiresAt);
 			await refreshSidebarRooms();
 		} catch (error) {
@@ -816,6 +850,7 @@
 				clientLog('api-sidebar-failed', { status: res.status, data });
 				return;
 			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 			const incoming = Array.isArray(data.rooms) ? (data.rooms as SidebarRoom[]) : [];
 			const existing = new Map(roomThreads.map((thread) => [thread.id, thread]));
 			const nextThreads = incoming.reduce<ChatThread[]>((acc, room) => {
@@ -844,7 +879,8 @@
 					memberCount: typeof room.memberCount === 'number' ? room.memberCount : prev?.memberCount,
 					parentRoomId: toStringValue(room.parentRoomId) || prev?.parentRoomId || undefined,
 					originMessageId: toStringValue(room.originMessageId) || prev?.originMessageId || undefined,
-					treeNumber: toInt(room.treeNumber ?? prev?.treeNumber ?? 0)
+					treeNumber: toInt(room.treeNumber ?? prev?.treeNumber ?? 0),
+					isAdmin: toBool(room.isAdmin ?? prev?.isAdmin ?? false)
 				};
 
 				acc.push(next);
@@ -911,7 +947,7 @@
 		showRoomMenu = false;
 		showRoomSearch = false;
 		showRoomDetails = false;
-		isSelectionMode = false;
+		setMessageActionMode('none');
 		roomMessageSearch = '';
 		if (isMobileView) {
 			mobilePane = 'chat';
@@ -952,7 +988,7 @@
 		showRoomMenu = false;
 		showRoomSearch = false;
 		showRoomDetails = false;
-		isSelectionMode = false;
+		setMessageActionMode('none');
 		mobilePane = 'list';
 	}
 
@@ -1624,6 +1660,7 @@
 			if (!res.ok) {
 				throw new Error(data.error || 'Failed to create room');
 			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 
 			const nextRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
 			if (!nextRoomId) {
@@ -1633,8 +1670,14 @@
 				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(nextRoomId);
 			const nextCreatedAt = toTimestamp(data.createdAt);
 			const nextExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+			const nextIsAdmin = toBool((data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ?? (data as { isAdmin?: unknown; is_admin?: unknown }).is_admin);
 
 			ensureRoomThread(nextRoomId, nextRoomName, 'joined');
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === nextRoomId ? { ...thread, isAdmin: nextIsAdmin } : thread
+				)
+			);
 			markRoomMembershipSynced(nextRoomId);
 			ensureRoomMeta(nextRoomId, nextCreatedAt, nextExpiresAt);
 			await refreshSidebarRooms();
@@ -1671,6 +1714,7 @@
 			if (!res.ok) {
 				throw new Error(data.error || 'Unable to join room');
 			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 
 			const joinedName =
 				normalizeRoomNameValue(toStringValue(data.roomName)) ||
@@ -1678,12 +1722,15 @@
 				formatRoomName(roomId);
 			const joinedCreatedAt = toTimestamp(data.createdAt);
 			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+			const joinedIsAdmin = toBool((data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ?? (data as { isAdmin?: unknown; is_admin?: unknown }).is_admin);
 			ensureRoomThread(roomId, joinedName, 'joined');
 			markRoomMembershipSynced(roomId);
 			ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
-					thread.id === roomId ? { ...thread, status: 'joined', name: joinedName } : thread
+					thread.id === roomId
+						? { ...thread, status: 'joined', name: joinedName, isAdmin: joinedIsAdmin }
+						: thread
 				)
 			);
 			await refreshSidebarRooms();
@@ -1714,14 +1761,19 @@
 				showErrorToast(data.error || 'Room has reached its 15-day limit');
 				return;
 			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 			const expiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 			const expiresInSeconds = toInt(data.expiresInSeconds ?? data.expires_in_seconds);
 			const createdAt = getRoomCreatedAt(targetRoomId);
-			if (expiresAt > 0) {
-				ensureRoomMeta(targetRoomId, createdAt, expiresAt);
-			} else if (expiresInSeconds > 0) {
-				ensureRoomMeta(targetRoomId, createdAt, Date.now() + expiresInSeconds * 1000);
-			}
+				if (expiresAt > 0) {
+					ensureRoomMeta(targetRoomId, createdAt, expiresAt);
+				} else if (expiresInSeconds > 0) {
+					ensureRoomMeta(
+						targetRoomId,
+						createdAt,
+						Date.now() + serverClockOffsetMs + expiresInSeconds * 1000
+					);
+				}
 			showErrorToast(data.message || 'Room extended for 24 hours');
 		} catch {
 			showErrorToast('Failed to extend room');
@@ -1737,6 +1789,24 @@
 		void extendRoomTTL(roomId);
 	}
 
+	function toggleBreakSelectionMode() {
+		const nextMode: MessageActionMode = messageActionMode === 'break' ? 'none' : 'break';
+		setMessageActionMode(nextMode);
+		showRoomMenu = false;
+	}
+
+	function toggleEditSelectionMode() {
+		const nextMode: MessageActionMode = messageActionMode === 'edit' ? 'none' : 'edit';
+		setMessageActionMode(nextMode);
+		showRoomMenu = false;
+	}
+
+	function toggleDeleteSelectionMode() {
+		const nextMode: MessageActionMode = messageActionMode === 'delete' ? 'none' : 'delete';
+		setMessageActionMode(nextMode);
+		showRoomMenu = false;
+	}
+
 	function toggleRoomMenu() {
 		showRoomMenu = !showRoomMenu;
 		showLeftMenu = false;
@@ -1748,11 +1818,6 @@
 		if (!showRoomSearch) {
 			roomMessageSearch = '';
 		}
-	}
-
-	function toggleSelectionMode() {
-		isSelectionMode = !isSelectionMode;
-		showRoomMenu = false;
 	}
 
 	function openRoomDetails() {
@@ -1777,6 +1842,7 @@
 	async function disconnectAndWipe() {
 		showRoomMenu = false;
 		showLeftMenu = false;
+		setMessageActionMode('none');
 		sendTypingStop();
 		closeGlobalSocket();
 		clearSessionToken();
@@ -1923,6 +1989,104 @@
 		};
 	}
 
+	async function removeMemberFromRoom(targetUserId: string) {
+		if (!roomId || !isActiveRoomAdmin) {
+			return;
+		}
+		const normalizedTargetUserId = normalizeIdentifier(targetUserId);
+		if (!normalizedTargetUserId) {
+			return;
+		}
+		if (normalizeIdentifier(currentUserId) === normalizedTargetUserId) {
+			showErrorToast('Admin cannot remove self');
+			return;
+		}
+		const confirmed = window.confirm('Remove this member from the room?');
+		if (!confirmed) {
+			return;
+		}
+
+		try {
+			const res = await fetch(`${API_BASE}/api/rooms/remove-member`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					roomId,
+					actorUserId: normalizeIdentifier(currentUserId),
+					targetUserId: normalizedTargetUserId
+				})
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to remove member');
+			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			removeOnlineMember(roomId, normalizedTargetUserId);
+			showErrorToast(data.message || 'Member removed');
+			await refreshSidebarRooms();
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to remove member');
+		}
+	}
+
+	async function deleteCurrentRoomAsAdmin() {
+		if (!roomId || !isActiveRoomAdmin) {
+			return;
+		}
+		const confirmed = window.confirm('Delete this room? This also deletes its child rooms.');
+		if (!confirmed) {
+			return;
+		}
+
+		try {
+			const res = await fetch(`${API_BASE}/api/rooms/delete`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					roomId,
+					actorUserId: normalizeIdentifier(currentUserId)
+				})
+			});
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				throw new Error(data.error || 'Failed to delete room');
+			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			setMessageActionMode('none');
+			showRoomMenu = false;
+			showRoomDetails = false;
+
+			const deletedRootId = roomId;
+			const deleteIDs = collectLocalRoomSubtreeIDs(deletedRootId);
+			roomThreads = roomThreads.filter((thread) => !deleteIDs.has(normalizeRoomIDValue(thread.id)));
+			const nextMessages = { ...messagesByRoom };
+			for (const deleteID of deleteIDs) {
+				delete nextMessages[deleteID];
+			}
+			messagesByRoom = nextMessages;
+			const nextOnline = { ...onlineByRoom };
+			for (const deleteID of deleteIDs) {
+				delete nextOnline[deleteID];
+			}
+			onlineByRoom = nextOnline;
+			const nextMeta = { ...roomMetaById };
+			for (const deleteID of deleteIDs) {
+				delete nextMeta[deleteID];
+			}
+			roomMetaById = nextMeta;
+
+			await refreshSidebarRooms();
+			const fallbackJoined = roomThreads.find((thread) => thread.status === 'joined');
+			if (fallbackJoined) {
+				selectRoom(fallbackJoined.id, true);
+			} else {
+				await goto('/');
+			}
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to delete room');
+		}
+	}
+
 	async function onMessageSelected(event: CustomEvent<{ messageId: string }>) {
 		if (!isSelectionMode || !roomId) {
 			return;
@@ -1933,10 +2097,53 @@
 		if (!message) {
 			return;
 		}
-		const created = await createBreakRoom(message);
-		if (created) {
-			isSelectionMode = false;
+		if (messageActionMode === 'break') {
+			const created = await createBreakRoom(message);
+			if (created) {
+				setMessageActionMode('none');
+			}
+			return;
 		}
+
+		if (messageActionMode === 'edit' || messageActionMode === 'delete') {
+			if (normalizeIdentifier(message.senderId) !== normalizeIdentifier(currentUserId)) {
+				showErrorToast('You can only edit/delete your own messages');
+				return;
+			}
+			const loweredType = (message.type || '').toLowerCase();
+			if (loweredType === 'deleted' || (message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER) {
+				showErrorToast('Deleted messages cannot be selected');
+				return;
+			}
+			selectedActionMessageId = message.id;
+			return;
+		}
+	}
+
+	function onSelectedMessageEdit(event: CustomEvent<{ messageId: string }>) {
+		if (!roomId) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail.messageId);
+		if (!messageId) {
+			return;
+		}
+		const message = (messagesByRoom[roomId] ?? []).find((entry) => entry.id === messageId);
+		if (!message) {
+			return;
+		}
+		onEditMessageRequest({
+			detail: {
+				messageId,
+				content: message.content
+			}
+		} as CustomEvent<{ messageId: string; content: string }>);
+		selectedActionMessageId = '';
+	}
+
+	function onSelectedMessageDelete(event: CustomEvent<{ messageId: string }>) {
+		onDeleteMessageRequest(event);
+		selectedActionMessageId = '';
 	}
 
 	async function createBreakRoom(message: ChatMessage) {
@@ -1955,6 +2162,7 @@
 			if (!res.ok) {
 				throw new Error(data.error || 'Failed to create break room');
 			}
+			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 
 			const breakRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
 			if (!breakRoomId) {
@@ -2045,6 +2253,33 @@
 		return filtered;
 	}
 
+	function collectLocalRoomSubtreeIDs(rootRoomId: string) {
+		const normalizedRoot = normalizeRoomIDValue(rootRoomId);
+		const ids = new Set<string>();
+		if (!normalizedRoot) {
+			return ids;
+		}
+		ids.add(normalizedRoot);
+
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const thread of roomThreads) {
+				const threadRoomId = normalizeRoomIDValue(thread.id);
+				const parentRoomId = normalizeRoomIDValue(thread.parentRoomId || '');
+				if (!threadRoomId || !parentRoomId) {
+					continue;
+				}
+				if (!ids.has(parentRoomId) || ids.has(threadRoomId)) {
+					continue;
+				}
+				ids.add(threadRoomId);
+				changed = true;
+			}
+		}
+		return ids;
+	}
+
 	function getRoomCreatedAt(targetRoomId: string) {
 		return roomMetaById[targetRoomId]?.createdAt ?? 0;
 	}
@@ -2068,7 +2303,8 @@
 		if (!expiry) {
 			return '--';
 		}
-		const remainingMs = Math.max(0, expiry - roomExpiryTickMs);
+		const now = roomExpiryTickMs + serverClockOffsetMs;
+		const remainingMs = Math.max(0, expiry - now);
 		if (remainingMs <= 0) {
 			return '0m';
 		}
@@ -2086,10 +2322,17 @@
 			return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
 		}
 
-		const totalDays = remainingMs / (24 * 60 * 60 * 1000);
-		const roundedDays = Math.round(totalDays * 10) / 10;
-		const value = roundedDays.toFixed(1);
-		return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
+		let wholeDays = Math.floor(totalHours / 24);
+		let remainingHours = totalHours - wholeDays * 24;
+		remainingHours = Math.round(remainingHours * 10) / 10;
+		if (remainingHours >= 24) {
+			wholeDays += 1;
+			remainingHours = 0;
+		}
+		if (remainingHours <= 0) {
+			return `${wholeDays}${wholeDays === 1 ? 'day' : 'days'}`;
+		}
+		return `${wholeDays}${wholeDays === 1 ? 'day' : 'days'} ${remainingHours.toFixed(1)}hrs`;
 	}
 
 	function formatDateTime(timestamp: number) {
@@ -2410,28 +2653,39 @@
 					>
 						...
 					</button>
-					{#if showRoomMenu}
-						<div class="room-menu">
-							<button type="button" on:click|stopPropagation={toggleRoomSearch}>
-							{showRoomSearch ? 'Hide search' : 'Search messages'}
-						</button>
-						<button type="button" on:click|stopPropagation={() => void renameRoom(roomId)}>
-							Rename room
-						</button>
-						<button type="button" on:click|stopPropagation={toggleSelectionMode}>
-							{isSelectionMode ? 'Cancel Break Mode' : 'Start Break / New Topic'}
-						</button>
-						<button type="button" on:click|stopPropagation={() => markRoomAsRead(roomId)}>
-							Mark read
-						</button>
-						<button type="button" on:click|stopPropagation={clearCurrentRoomMessages}>
-							Clear local
-						</button>
-						<button type="button" on:click|stopPropagation={() => void disconnectAndWipe()}>
-							Disconnect
-						</button>
-					</div>
-				{/if}
+						{#if showRoomMenu}
+							<div class="room-menu">
+								<button type="button" on:click|stopPropagation={toggleRoomSearch}>
+								{showRoomSearch ? 'Hide search' : 'Search messages'}
+							</button>
+							<button type="button" on:click|stopPropagation={() => void renameRoom(roomId)}>
+								Rename room
+							</button>
+							<button type="button" on:click|stopPropagation={toggleBreakSelectionMode}>
+								{messageActionMode === 'break' ? 'Cancel Break Mode' : 'Start Break / New Topic'}
+							</button>
+							<button type="button" on:click|stopPropagation={toggleEditSelectionMode}>
+								{messageActionMode === 'edit' ? 'Cancel Edit Mode' : 'Edit Message (Select One)'}
+							</button>
+							<button type="button" on:click|stopPropagation={toggleDeleteSelectionMode}>
+								{messageActionMode === 'delete' ? 'Cancel Delete Mode' : 'Delete Message (Select One)'}
+							</button>
+							<button type="button" on:click|stopPropagation={() => markRoomAsRead(roomId)}>
+								Mark read
+							</button>
+							<button type="button" on:click|stopPropagation={clearCurrentRoomMessages}>
+								Clear local
+							</button>
+							{#if isActiveRoomAdmin}
+								<button type="button" on:click|stopPropagation={() => void deleteCurrentRoomAsAdmin()}>
+									Delete Room
+								</button>
+							{/if}
+							<button type="button" on:click|stopPropagation={() => void disconnectAndWipe()}>
+								Disconnect
+							</button>
+						</div>
+					{/if}
 			</div>
 		</header>
 
@@ -2451,7 +2705,13 @@
 
 		{#if isSelectionMode}
 			<div class="selection-banner">
-				Break mode active: click a message to start a new topic room.
+				{#if messageActionMode === 'break'}
+					Break mode active: click a message to start a new topic room.
+				{:else if messageActionMode === 'edit'}
+					Edit mode active: click one of your messages, then use the edit/delete buttons beside it.
+				{:else if messageActionMode === 'delete'}
+					Delete mode active: click one of your messages, then use the edit/delete buttons beside it.
+				{/if}
 			</div>
 		{/if}
 
@@ -2461,27 +2721,31 @@
 			</div>
 		{/if}
 
-		<ChatWindow
-			bind:this={chatWindowRef}
-			messages={currentMessages}
-			{currentUserId}
-			{roomMessageSearch}
-			{expandedMessages}
-			{isMember}
-			{isSelectionMode}
-			{focusMessageId}
-			isLoadingOlder={isLoadingOlderHistory}
-			hasMoreOlder={hasMoreOlderHistory}
-			on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
-			on:joinBreakRoom={onJoinBreakRoom}
-			on:joinRoom={() => void joinCurrentRoom()}
-			on:messageSelect={onMessageSelected}
-			on:reply={onReplyRequest}
-			on:editMessage={onEditMessageRequest}
-			on:deleteMessage={onDeleteMessageRequest}
-			on:requestOlder={onRequestOlderHistory}
-			on:focusHandled={onFocusHandled}
-		/>
+			<ChatWindow
+				bind:this={chatWindowRef}
+				messages={currentMessages}
+				{currentUserId}
+				{roomMessageSearch}
+				{expandedMessages}
+				{isMember}
+				{isSelectionMode}
+				messageActionMode={messageActionMode}
+				selectedMessageId={selectedActionMessageId}
+				{focusMessageId}
+				isLoadingOlder={isLoadingOlderHistory}
+				hasMoreOlder={hasMoreOlderHistory}
+				on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+				on:joinBreakRoom={onJoinBreakRoom}
+				on:joinRoom={() => void joinCurrentRoom()}
+				on:messageSelect={onMessageSelected}
+				on:reply={onReplyRequest}
+				on:editMessage={onEditMessageRequest}
+				on:deleteMessage={onDeleteMessageRequest}
+				on:editSelected={onSelectedMessageEdit}
+				on:deleteSelected={onSelectedMessageDelete}
+				on:requestOlder={onRequestOlderHistory}
+				on:focusHandled={onFocusHandled}
+			/>
 
 		{#if isMember}
 			<ChatComposer
@@ -2557,6 +2821,15 @@
 							<div class="member-name">{member.name}</div>
 							<div class="member-meta">Joined {formatDateTime(member.joinedAt)}</div>
 						</div>
+						{#if isActiveRoomAdmin && normalizeIdentifier(member.id) !== normalizeIdentifier(currentUserId)}
+							<button
+								type="button"
+								class="member-remove-button"
+								on:click={() => void removeMemberFromRoom(member.id)}
+							>
+								Remove
+							</button>
+						{/if}
 					</div>
 				{/each}
 			{/if}
@@ -2828,6 +3101,21 @@
 	.member-meta {
 		font-size: 0.75rem;
 		color: #676767;
+	}
+
+	.member-remove-button {
+		margin-left: auto;
+		border: 1px solid #d6d6dc;
+		background: #ffffff;
+		color: #3a3a42;
+		border-radius: 8px;
+		padding: 0.22rem 0.5rem;
+		font-size: 0.72rem;
+		cursor: pointer;
+	}
+
+	.member-remove-button:hover {
+		background: #f1f1f4;
 	}
 
 	.empty-label {

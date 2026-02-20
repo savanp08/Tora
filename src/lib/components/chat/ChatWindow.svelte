@@ -38,6 +38,8 @@
 	export let expandedMessages: Record<string, boolean> = {};
 	export let isMember = true;
 	export let isSelectionMode = false;
+	export let messageActionMode: 'none' | 'break' | 'edit' | 'delete' = 'none';
+	export let selectedMessageId = '';
 	export let focusMessageId = '';
 	export let isLoadingOlder = false;
 	export let hasMoreOlder = true;
@@ -51,6 +53,8 @@
 		reply: { messageId: string; senderName: string; content: string };
 		editMessage: { messageId: string; content: string };
 		deleteMessage: { messageId: string };
+		editSelected: { messageId: string };
+		deleteSelected: { messageId: string };
 		requestOlder: void;
 	}>();
 
@@ -613,6 +617,7 @@
 						: ''}"
 					class:media-bubble={isMediaBubble(message)}
 					class:deleted={isDeletedMessage(message)}
+					class:selected-target={selectedMessageId === message.id}
 					class:focused={focusedMessageId === message.id}
 					role={isSelectionMode ? 'button' : undefined}
 					tabindex={isSelectionMode ? 0 : undefined}
@@ -805,6 +810,24 @@
 						</button>
 					{/if}
 				</article>
+				{#if selectedMessageId === message.id && (messageActionMode === 'edit' || messageActionMode === 'delete')}
+					<div class="selected-message-actions {isMine ? 'mine' : 'theirs'}">
+						<button
+							type="button"
+							class="selected-action-button"
+							on:click|stopPropagation={() => dispatch('editSelected', { messageId: message.id })}
+						>
+							Edit
+						</button>
+						<button
+							type="button"
+							class="selected-action-button danger"
+							on:click|stopPropagation={() => dispatch('deleteSelected', { messageId: message.id })}
+						>
+							Delete
+						</button>
+					</div>
+				{/if}
 				{#if !isMine}
 					<aside class="message-gutter">
 						{#if totalReplies > 1}
@@ -1036,6 +1059,48 @@
 		box-shadow:
 			0 0 0 2px rgba(245, 158, 11, 0.95),
 			0 8px 18px rgba(0, 0, 0, 0.14);
+	}
+
+	.bubble.selected-target {
+		box-shadow:
+			0 0 0 2px rgba(34, 197, 94, 0.85),
+			0 8px 18px rgba(0, 0, 0, 0.12);
+	}
+
+	.selected-message-actions {
+		flex: 0 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		padding-top: 0.25rem;
+		min-width: 4.8rem;
+	}
+
+	.selected-message-actions.mine {
+		align-items: flex-end;
+	}
+
+	.selected-message-actions.theirs {
+		align-items: flex-start;
+	}
+
+	.selected-action-button {
+		border: 1px solid #d5d5dc;
+		background: #f9f9fb;
+		color: #3f3f49;
+		border-radius: 8px;
+		font-size: 0.74rem;
+		font-weight: 600;
+		padding: 0.24rem 0.48rem;
+		cursor: pointer;
+	}
+
+	.selected-action-button:hover {
+		background: #f0f0f4;
+	}
+
+	.selected-action-button.danger {
+		color: #8f2d2d;
 	}
 
 	.bubble.deleted {

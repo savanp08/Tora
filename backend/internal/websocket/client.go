@@ -241,6 +241,11 @@ func (c *Client) readPump() {
 			log.Printf("[ws] message rejected user=%s room=%s reason=read_only_subscription", c.UserID, msg.RoomID)
 			continue
 		}
+		if c.Hub != nil && !c.Hub.isClientRoomMember(c.UserID, msg.RoomID) {
+			c.subscribeToRoom(msg.RoomID, false)
+			log.Printf("[ws] message rejected user=%s room=%s reason=membership_revoked", c.UserID, msg.RoomID)
+			continue
+		}
 		if c.msgLimiter != nil && !c.msgLimiter.Allow() {
 			log.Printf("[ws] message rate limited room=%s user=%s", msg.RoomID, c.UserID)
 			continue
