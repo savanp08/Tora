@@ -1,23 +1,26 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import AuthModal from '$lib/components/home/AuthModal.svelte';
+	import LoginFooter from '$lib/components/home/LoginFooter.svelte';
+	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
 	import { currentUser, authToken } from '$lib/store';
 	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
+	import {
+		normalizeRoomCodeInput,
+		normalizeRoomIdValue,
+		normalizeRoomNameInput,
+		normalizeUsernameInput,
+		type JoinMode
+	} from '$lib/utils/homeJoin';
 	import { generateRoomName } from '$lib/utils/nameGenerator';
 	import { setSessionToken } from '$lib/utils/sessionToken';
-	import { onDestroy, onMount } from 'svelte';
+	import { onMount } from 'svelte';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[home-client]';
-	type JoinMode = 'create' | 'join';
 
 	let roomName = '';
 	let roomCode = '';
 	let guestUsername = '';
 	let selectedMode: JoinMode = 'create';
-	let authNotice = '';
-	let authNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-
-	let isModalOpen = false;
 	let isJoining = false;
 	let joinError = '';
 
@@ -36,67 +39,9 @@
 		currentUser.set({ id: identity.id, username: identity.username });
 	});
 
-	onDestroy(() => {
-		if (authNoticeTimer) {
-			clearTimeout(authNoticeTimer);
-			authNoticeTimer = null;
-		}
-	});
-
-	function showAuthNotice(message: string) {
-		authNotice = message;
-		if (authNoticeTimer) {
-			clearTimeout(authNoticeTimer);
-		}
-		authNoticeTimer = setTimeout(() => {
-			authNotice = '';
-		}, 2800);
-	}
-
 	function onRoomNameFocus(event: FocusEvent) {
 		const input = event.currentTarget as HTMLInputElement | null;
 		input?.select();
-	}
-
-	function onRoomCodeInput(event: Event) {
-		const input = event.currentTarget as HTMLInputElement | null;
-		if (!input) {
-			return;
-		}
-		const digitsOnly = input.value.replace(/\D+/g, '').slice(0, 6);
-		roomCode = digitsOnly;
-	}
-
-	function normalizeRoomNameInput(value: string) {
-		const trimmed = value.trim();
-		if (!trimmed) {
-			return '';
-		}
-		return trimmed.replace(/\s+/g, ' ').slice(0, 20);
-	}
-
-	function normalizeRoomIdValue(value: string) {
-		return value
-			.toLowerCase()
-			.trim()
-			.replace(/[^a-z0-9]/g, '');
-	}
-
-	function normalizeUsernameInput(value: string) {
-		return value
-			.trim()
-			.replace(/[^a-zA-Z0-9\s_-]/g, '')
-			.replace(/[\s-]+/g, '_')
-			.replace(/_+/g, '_')
-			.replace(/^_+|_+$/g, '');
-	}
-
-	function normalizeRoomCodeInput(value: string) {
-		const digitsOnly = value.replace(/\D+/g, '');
-		if (digitsOnly.length !== 6) {
-			return '';
-		}
-		return digitsOnly;
 	}
 
 	function setMode(mode: JoinMode) {
@@ -159,37 +104,26 @@
 			if (!resolvedRoomID) {
 				throw new Error('Server returned an invalid room id');
 			}
-				const resolvedRoomName = data.roomName || normalizedRoomName;
-				const createdAt = Number(data.createdAt);
-				const createdAtQuery =
-					Number.isFinite(createdAt) && createdAt > 0 ? `&createdAt=${createdAt}` : '';
-				const expiresAt = Number(data.expiresAt ?? data.expires_at);
-				const expiresAtQuery =
-					Number.isFinite(expiresAt) && expiresAt > 0 ? `&expiresAt=${expiresAt}` : '';
-				const serverNow = Number(data.serverNow ?? data.server_now);
-				const serverNowQuery =
-					Number.isFinite(serverNow) && serverNow > 0 ? `&serverNow=${serverNow}` : '';
-				clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
-				goto(
-					`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}${expiresAtQuery}${serverNowQuery}`
-				);
+			const resolvedRoomName = data.roomName || normalizedRoomName;
+			const createdAt = Number(data.createdAt);
+			const createdAtQuery =
+				Number.isFinite(createdAt) && createdAt > 0 ? `&createdAt=${createdAt}` : '';
+			const expiresAt = Number(data.expiresAt ?? data.expires_at);
+			const expiresAtQuery =
+				Number.isFinite(expiresAt) && expiresAt > 0 ? `&expiresAt=${expiresAt}` : '';
+			const serverNow = Number(data.serverNow ?? data.server_now);
+			const serverNowQuery =
+				Number.isFinite(serverNow) && serverNow > 0 ? `&serverNow=${serverNow}` : '';
+			clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
+			goto(
+				`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}${expiresAtQuery}${serverNowQuery}`
+			);
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
 			joinError = e.message;
 		} finally {
 			isJoining = false;
 		}
-	}
-
-	function onAuthSuccess(event: CustomEvent) {
-		const { user, token } = event.detail;
-		clientLog('auth-success', { userId: user?.id, username: user?.username });
-
-		currentUser.set(user);
-		authToken.set(token);
-		setSessionToken(token || '');
-
-		showAuthNotice(`Welcome back, ${user.username}!`);
 	}
 
 	$: canSubmit =
@@ -201,12 +135,7 @@
 <div class="container">
 	<header>
 		<div class="logo">Ephemeral<b>Chat</b></div>
-		<button class="btn-login" on:click={() => (isModalOpen = true)}> Log In / Sign Up </button>
 	</header>
-
-	{#if authNotice}
-		<div class="auth-notice" role="status" aria-live="polite">{authNotice}</div>
-	{/if}
 
 	<main>
 		<div class="hero-box">
@@ -232,16 +161,8 @@
 					</div>
 					<div class="or-divider" aria-hidden="true">or</div>
 					<div class="field-group room-code-group">
-						<label for="room-code-input">6-digit code</label>
-						<input
-							id="room-code-input"
-							type="text"
-							inputmode="numeric"
-							pattern="[0-9]{6}"
-							placeholder="e.g. 409215"
-							bind:value={roomCode}
-							on:input={onRoomCodeInput}
-						/>
+						<label for="room-code-digit-0">6-digit code</label>
+						<OtpCodeInput idPrefix="room-code-digit" bind:value={roomCode} disabled={isJoining} />
 						<small>For quick join when someone shares a code.</small>
 					</div>
 				</div>
@@ -281,12 +202,7 @@
 			<p class="hint">No signup required for ephemeral rooms.</p>
 		</div>
 	</main>
-
-	<AuthModal
-		isOpen={isModalOpen}
-		on:close={() => (isModalOpen = false)}
-		on:success={onAuthSuccess}
-	/>
+	<LoginFooter />
 </div>
 
 <style>
@@ -307,32 +223,13 @@
 
 	header {
 		display: flex;
-		justify-content: space-between;
+		justify-content: flex-start;
 		align-items: center;
 		margin-bottom: 60px;
 	}
 
-	.auth-notice {
-		margin: -34px auto 22px;
-		padding: 0.48rem 0.82rem;
-		border-radius: 999px;
-		background: #191921;
-		color: #ffffff;
-		font-size: 0.82rem;
-		font-weight: 600;
-		width: fit-content;
-		max-width: 92vw;
-	}
 	.logo {
 		font-size: 1.5rem;
-	}
-	.btn-login {
-		padding: 8px 16px;
-		background: transparent;
-		border: 2px solid #333;
-		cursor: pointer;
-		border-radius: 4px;
-		font-weight: bold;
 	}
 
 	main {
@@ -412,10 +309,6 @@
 		font-size: 1rem;
 	}
 
-	.room-code-group input {
-		letter-spacing: 0.14em;
-		font-variant-numeric: tabular-nums;
-	}
 	button {
 		padding: 12px;
 		color: white;

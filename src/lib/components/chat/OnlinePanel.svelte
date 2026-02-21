@@ -1,10 +1,5 @@
 <script lang="ts">
-	type OnlineMember = {
-		id: string;
-		name: string;
-		isOnline: boolean;
-		joinedAt: number;
-	};
+	import type { OnlineMember } from '$lib/types/chat';
 
 	export let members: OnlineMember[] = [];
 	export let isDarkMode = false;

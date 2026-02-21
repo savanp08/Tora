@@ -1,30 +1,7 @@
 <script lang="ts">
 	import { afterUpdate, createEventDispatcher, onDestroy, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
-
-	type ChatMessage = {
-		id: string;
-		roomId: string;
-		senderId: string;
-		senderName: string;
-		content: string;
-		type: string;
-		mediaUrl?: string;
-		mediaType?: string;
-		fileName?: string;
-		isEdited?: boolean;
-		editedAt?: number;
-		isDeleted?: boolean;
-		replyToMessageId?: string;
-		replyToSnippet?: string;
-		totalReplies?: number;
-		branchesCreated?: number;
-		createdAt: number;
-		hasBreakRoom?: boolean;
-		breakRoomId?: string;
-		breakJoinCount?: number;
-		pending?: boolean;
-	};
+	import type { ChatMessage, MessageActionMode } from '$lib/types/chat';
 
 	type ReplyPreview = {
 		messageId: string;
@@ -39,7 +16,7 @@
 	export let isMember = true;
 	export let isDarkMode = false;
 	export let isSelectionMode = false;
-	export let messageActionMode: 'none' | 'break' | 'edit' | 'delete' = 'none';
+	export let messageActionMode: MessageActionMode = 'none';
 	export let selectedMessageId = '';
 	export let focusMessageId = '';
 	export let isLoadingOlder = false;

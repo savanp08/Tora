@@ -7,6 +7,53 @@
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
 	import { authToken, currentUser } from '$lib/store';
+	import type {
+		ChatMessage,
+		ChatThread,
+		ComposerMediaPayload,
+		MessageActionMode,
+		OnlineMember,
+		ReplyTarget,
+		RoomMenuMode,
+		RoomMeta,
+		SidebarRoom,
+		SocketEnvelope,
+		ThemePreference,
+		ThreadStatus,
+		UiDialogState
+	} from '$lib/types/chat';
+	import {
+		createMessageId,
+		formatDateTime,
+		formatRoomName,
+		normalizeEpoch,
+		normalizeIdentifier,
+		normalizeMessageID,
+		normalizeRoomIDValue,
+		normalizeRoomNameValue,
+		normalizeUsernameValue,
+		parseOptionalTimestamp,
+		parseTimestampParam,
+		resolveRoomMembership,
+		toBool,
+		toInt,
+		toStringValue,
+		toTimestamp
+	} from '$lib/utils/chat/core';
+	import {
+		buildReplySnippet,
+		DELETED_MESSAGE_PLACEHOLDER,
+		getMessagePreviewText,
+		parseIncomingMessage,
+		parseMember,
+		toWireMessage
+	} from '$lib/utils/chat/messages';
+	import {
+		collectLocalRoomSubtreeIDs,
+		filterThreadList,
+		filterThreadsByStatus,
+		sortThreads
+	} from '$lib/utils/chat/threadList';
 	import {
 		getTrustedDevicePreference,
 		isOfflineCacheSupported,
@@ -21,127 +68,13 @@
 	import { closeGlobalSocket, globalMessages, initGlobalSocket, sendSocketPayload, subscribeToRooms } from '$lib/ws';
 	import { onDestroy, onMount, tick } from 'svelte';
 
-	type ThreadStatus = 'joined' | 'discoverable' | 'left';
-	type MessageActionMode = 'none' | 'break' | 'edit' | 'delete';
-	type RoomMenuMode = 'create' | 'join';
-
-	type UiDialogState =
-		| { kind: 'none' }
-		| {
-				kind: 'confirm';
-				title: string;
-				message: string;
-				confirmLabel: string;
-				cancelLabel: string;
-				danger: boolean;
-		  }
-		| {
-				kind: 'prompt';
-				title: string;
-				message: string;
-				value: string;
-				placeholder: string;
-				maxLength: number;
-				confirmLabel: string;
-				cancelLabel: string;
-				danger: boolean;
-				multiline: boolean;
-		  }
-		| {
-				kind: 'roomAction';
-				title: string;
-				message: string;
-				roomName: string;
-				mode: RoomMenuMode;
-				confirmLabel: string;
-				cancelLabel: string;
-		  };
-
-	type ChatMessage = {
-		id: string;
-		roomId: string;
-		senderId: string;
-		senderName: string;
-		content: string;
-		type: string;
-		mediaUrl?: string;
-		mediaType?: string;
-		fileName?: string;
-		isEdited?: boolean;
-		editedAt?: number;
-		isDeleted?: boolean;
-		replyToMessageId?: string;
-		replyToSnippet?: string;
-		totalReplies?: number;
-		branchesCreated?: number;
-		createdAt: number;
-		hasBreakRoom?: boolean;
-		breakRoomId?: string;
-		breakJoinCount?: number;
-		pending?: boolean;
-	};
-
-	type ComposerMediaPayload = {
-		type: 'image' | 'video' | 'file';
-		content: string;
-		fileName?: string;
-	};
-
-	type ChatThread = {
-		id: string;
-		name: string;
-		lastMessage: string;
-		lastActivity: number;
-		unread: number;
-		status: ThreadStatus;
-		memberCount?: number;
-		parentRoomId?: string;
-		originMessageId?: string;
-		treeNumber?: number;
-		isAdmin?: boolean;
-	};
-
-	type OnlineMember = {
-		id: string;
-		name: string;
-		isOnline: boolean;
-		joinedAt: number;
-	};
-
-	type RoomMeta = {
-		createdAt: number;
-		expiresAt: number;
-	};
-
-	type SidebarRoom = {
-		roomId: string;
-		roomName: string;
-		status: ThreadStatus;
-		parentRoomId?: string;
-		originMessageId?: string;
-		treeNumber?: number;
-		memberCount?: number;
-		createdAt?: number;
-		expiresAt?: number;
-		isAdmin?: boolean;
-	};
-
-	type ReplyTarget = {
-		messageId: string;
-		senderName: string;
-		content: string;
-	};
-
 	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
 	const TYPING_PING_INTERVAL_MS = 5000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
-	const DELETED_MESSAGE_PLACEHOLDER = 'This message was deleted';
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
-
-	type ThemePreference = 'system' | 'light' | 'dark';
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
@@ -663,7 +596,7 @@
 			return;
 		}
 		const hydrated = cached
-			.map((entry) => parseIncomingMessage(entry, targetRoomId))
+			.map((entry) => parseIncomingMessage(entry, targetRoomId, API_BASE))
 			.filter((entry): entry is ChatMessage => Boolean(entry));
 		if (hydrated.length === 0) {
 			return;
@@ -1073,34 +1006,6 @@
 		roomThreads = sortThreads(merged);
 	}
 
-	function getMessagePreviewText(message: ChatMessage) {
-		const content = (message.content || '').trim();
-		if (message.type === 'image') {
-			if (content && !isLikelyMediaURL(content)) {
-				return content;
-			}
-			return 'Photo';
-		}
-		if (message.type === 'video') {
-			if (content && !isLikelyMediaURL(content)) {
-				return content;
-			}
-			return 'Video';
-		}
-		if (message.type === 'file') {
-			if (content && !isLikelyMediaURL(content)) {
-				return content;
-			}
-			const fileName = (message.fileName || '').trim();
-			return fileName ? `File: ${fileName}` : 'Attachment';
-		}
-		return content;
-	}
-
-	function sortThreads(threads: ChatThread[]) {
-		return [...threads].sort((a, b) => b.lastActivity - a.lastActivity);
-	}
-
 	function markRoomMembershipSynced(targetRoomId: string) {
 		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
 		if (!normalizedRoomId) {
@@ -1375,17 +1280,10 @@
 		}
 	}
 
-	type SocketEnvelope = {
-		type: string;
-		payload: unknown;
-		roomId?: unknown;
-		room_id?: unknown;
-	};
-
 	function handleGlobalPayload(payload: unknown) {
 		if (Array.isArray(payload)) {
 			const parsedMessages = payload
-				.map((entry) => parseIncomingMessage(entry, ''))
+				.map((entry) => parseIncomingMessage(entry, '', API_BASE))
 				.filter((entry): entry is ChatMessage => Boolean(entry));
 			if (parsedMessages.length === 0) {
 				return;
@@ -1411,7 +1309,7 @@
 			return;
 		}
 
-		const single = parseIncomingMessage(payload, '');
+		const single = parseIncomingMessage(payload, '', API_BASE);
 		if (single) {
 			addIncomingMessage(single);
 		}
@@ -1445,7 +1343,7 @@
 		if (kind === 'history' || kind === 'recent_messages' || kind === 'initial_messages') {
 			if (Array.isArray(envelope.payload)) {
 				const history = envelope.payload
-					.map((entry) => parseIncomingMessage(entry, targetRoomId))
+					.map((entry) => parseIncomingMessage(entry, targetRoomId, API_BASE))
 					.filter((entry): entry is ChatMessage => Boolean(entry));
 				if (history.length > 0) {
 					const grouped = new Map<string, ChatMessage[]>();
@@ -1466,7 +1364,7 @@
 		}
 
 		if (kind === 'new_message') {
-			const message = parseIncomingMessage(envelope.payload, targetRoomId);
+			const message = parseIncomingMessage(envelope.payload, targetRoomId, API_BASE);
 			if (message) {
 				addIncomingMessage(message);
 			}
@@ -1521,91 +1419,6 @@
 		if (kind === 'message_delete' && targetRoomId) {
 			applyMessageDelete(targetRoomId, envelope.payload);
 		}
-	}
-
-	function parseIncomingMessage(value: unknown, fallbackRoomId: string): ChatMessage | null {
-		if (!value || typeof value !== 'object') {
-			return null;
-		}
-
-		const source = value as Record<string, unknown>;
-		const nextRoomId = normalizeRoomIDValue(
-			toStringValue(source.roomId ?? source.room_id ?? fallbackRoomId)
-		);
-		if (!nextRoomId) {
-			return null;
-		}
-
-		const nextType = toStringValue(source.type ?? 'text') || 'text';
-		const rawText = toStringValue(source.text ?? source.content ?? source.caption ?? '');
-		const rawMediaURL = toStringValue(source.mediaUrl ?? source.media_url ?? '');
-		let normalizedMediaURL = toAbsoluteMediaURL(rawMediaURL);
-		let nextContent = rawText;
-		if (isMediaMessageType(nextType) && !normalizedMediaURL && isLikelyMediaURL(rawText)) {
-			normalizedMediaURL = toAbsoluteMediaURL(rawText);
-			nextContent = '';
-		}
-		const hasBreakRoom =
-			toBool(source.hasBreakRoom ?? source.has_break_room) ||
-			toStringValue(source.breakRoomId ?? source.break_room_id) !== '';
-		const breakRoomId = toStringValue(source.breakRoomId ?? source.break_room_id);
-		const branchCount = Math.max(toInt(source.branchesCreated ?? source.branches_created), hasBreakRoom ? 1 : 0);
-
-		return {
-			id: toStringValue(source.id) || createMessageId(nextRoomId),
-			roomId: nextRoomId,
-			senderId: toStringValue(source.userId ?? source.senderId ?? source.sender_id ?? 'unknown'),
-			senderName:
-				normalizeUsernameValue(
-					toStringValue(source.username ?? source.senderName ?? source.sender_name ?? 'Unknown')
-				) || 'Unknown',
-			content: nextContent,
-			type: nextType,
-			mediaUrl:
-				normalizedMediaURL ||
-				(isMediaMessageType(nextType) && isLikelyMediaURL(rawText)
-					? toAbsoluteMediaURL(rawText)
-					: ''),
-			mediaType: toStringValue(source.mediaType ?? source.media_type ?? source.type ?? nextType),
-			fileName: toStringValue(source.fileName ?? source.file_name),
-			isEdited: toBool(source.isEdited ?? source.is_edited),
-			editedAt: parseOptionalTimestamp(source.editedAt ?? source.edited_at),
-			isDeleted:
-				nextType === 'deleted' ||
-				toBool(source.isDeleted ?? source.is_deleted) ||
-				toStringValue(source.content).trim() === DELETED_MESSAGE_PLACEHOLDER,
-			replyToMessageId: normalizeMessageID(
-				toStringValue(source.replyToMessageId ?? source.reply_to_message_id)
-			),
-			replyToSnippet: toStringValue(source.replyToSnippet ?? source.reply_to_snippet).trim(),
-			totalReplies: toInt(source.totalReplies ?? source.total_replies),
-			branchesCreated: branchCount,
-			createdAt: toTimestamp(
-				source.time ?? source.createdAt ?? source.created_at ?? source.timestamp
-			),
-			hasBreakRoom,
-			breakRoomId,
-			breakJoinCount: toInt(source.breakJoinCount ?? source.break_join_count),
-			pending: false
-		};
-	}
-
-	function parseMember(value: unknown, fallbackIndex: number): OnlineMember | null {
-		if (!value || typeof value !== 'object') {
-			return null;
-		}
-		const source = value as Record<string, unknown>;
-		const memberId = toStringValue(
-			source.id ?? source.userId ?? source.user_id ?? `member-${fallbackIndex}`
-		);
-		const memberName =
-			toStringValue(source.name ?? source.username ?? source.userName ?? source.user_name) ||
-			memberId;
-		const joinedAt = toTimestamp(source.joinedAt ?? source.joined_at ?? Date.now());
-		if (!memberId) {
-			return null;
-		}
-		return { id: memberId, name: memberName, isOnline: true, joinedAt };
 	}
 
 	function addIncomingMessage(message: ChatMessage) {
@@ -1786,16 +1599,6 @@
 		return [...byId.values()];
 	}
 
-	function buildReplySnippet(senderName: string, content: string) {
-		const normalizedSender = normalizeUsernameValue(senderName) || 'User';
-		const normalizedContent = content.trim().replace(/\s+/g, ' ');
-		const base = normalizedContent ? `${normalizedSender}: ${normalizedContent}` : normalizedSender;
-		if (base.length <= 140) {
-			return base;
-		}
-		return `${base.slice(0, 137)}...`;
-	}
-
 	async function sendMessage(payload?: ComposerMediaPayload) {
 		if (!roomId || !isMember) {
 			showErrorToast('Join room before sending messages');
@@ -1857,36 +1660,6 @@
 		draftMessage = '';
 		attachedFile = null;
 		activeReply = null;
-	}
-
-	function toWireMessage(message: ChatMessage) {
-		const mediaType = isMediaMessageType(message.type) ? message.type : '';
-		const mediaURL = mediaType
-			? (message.mediaUrl || '').trim() || (isLikelyMediaURL(message.content) ? message.content : '')
-			: '';
-		const contentText =
-			mediaType && mediaURL && message.content.trim() === mediaURL ? '' : message.content;
-
-		return {
-			id: message.id,
-			roomId: message.roomId,
-			userId: message.senderId,
-			username: message.senderName,
-			text: contentText,
-			time: new Date(message.createdAt).toISOString(),
-			senderId: message.senderId,
-			senderName: message.senderName,
-			content: contentText,
-			type: message.type,
-			mediaUrl: mediaURL,
-			mediaType,
-			fileName: message.fileName ?? '',
-			replyToMessageId: normalizeMessageID(message.replyToMessageId ?? ''),
-			replyToSnippet: (message.replyToSnippet || '').trim(),
-			reply_to_message_id: normalizeMessageID(message.replyToMessageId ?? ''),
-			reply_to_snippet: (message.replyToSnippet || '').trim(),
-			createdAt: new Date(message.createdAt).toISOString()
-		};
 	}
 
 	function onReplyRequest(event: CustomEvent<ReplyTarget>) {
@@ -2286,7 +2059,7 @@
 
 			const payloadMessages = Array.isArray(data.messages) ? data.messages : [];
 			const incoming = payloadMessages
-				.map((entry: unknown) => parseIncomingMessage(entry, normalizedRoomID))
+				.map((entry: unknown) => parseIncomingMessage(entry, normalizedRoomID, API_BASE))
 				.filter((entry: ChatMessage | null): entry is ChatMessage => Boolean(entry));
 			if (incoming.length > 0) {
 				mergeMessages(normalizedRoomID, incoming);
@@ -2465,7 +2238,7 @@
 			showRoomDetails = false;
 
 			const deletedRootId = roomId;
-			const deleteIDs = collectLocalRoomSubtreeIDs(deletedRootId);
+			const deleteIDs = collectLocalRoomSubtreeIDs(deletedRootId, roomThreads);
 			roomThreads = roomThreads.filter((thread) => !deleteIDs.has(normalizeRoomIDValue(thread.id)));
 			const nextMessages = { ...messagesByRoom };
 			for (const deleteID of deleteIDs) {
@@ -2703,71 +2476,6 @@
 		selectRoom(target, match.status === 'joined');
 	}
 
-	function filterThreadsByStatus(threads: ChatThread[], status: ThreadStatus) {
-		return threads.filter((thread) => thread.status === status);
-	}
-
-	function filterThreadList(
-		threads: ChatThread[],
-		searchQuery: string,
-		messageMap: Record<string, ChatMessage[]>,
-		activeRoomId: string
-	) {
-		const query = searchQuery.trim().toLowerCase();
-		if (!query) {
-			return threads;
-		}
-		const filtered = threads.filter((thread) => {
-			if (thread.name.toLowerCase().includes(query)) {
-				return true;
-			}
-			if (thread.lastMessage.toLowerCase().includes(query)) {
-				return true;
-			}
-			const messages = messageMap[thread.id] ?? [];
-			return messages.some(
-				(message) =>
-					message.content.toLowerCase().includes(query) ||
-					message.senderName.toLowerCase().includes(query)
-			);
-		});
-
-		if (activeRoomId && !filtered.some((thread) => thread.id === activeRoomId)) {
-			const active = threads.find((thread) => thread.id === activeRoomId);
-			if (active) {
-				return [active, ...filtered];
-			}
-		}
-		return filtered;
-	}
-
-	function collectLocalRoomSubtreeIDs(rootRoomId: string) {
-		const normalizedRoot = normalizeRoomIDValue(rootRoomId);
-		const ids = new Set<string>();
-		if (!normalizedRoot) {
-			return ids;
-		}
-		ids.add(normalizedRoot);
-
-		let changed = true;
-		while (changed) {
-			changed = false;
-			for (const thread of roomThreads) {
-				const threadRoomId = normalizeRoomIDValue(thread.id);
-				const parentRoomId = normalizeRoomIDValue(thread.parentRoomId || '');
-				if (!threadRoomId || !parentRoomId) {
-					continue;
-				}
-				if (!ids.has(parentRoomId) || ids.has(threadRoomId)) {
-					continue;
-				}
-				ids.add(threadRoomId);
-				changed = true;
-			}
-		}
-		return ids;
-	}
-
 	function getRoomCreatedAt(targetRoomId: string) {
 		return roomMetaById[targetRoomId]?.createdAt ?? 0;
 	}
@@ -2800,263 +2508,19 @@
 			return `${minutes}m`;
 		}
 
-			const totalHours = remainingMs / (60 * 60 * 1000);
-			if (totalHours < 24) {
-				const roundedHours = Math.round(totalHours * 10) / 10;
-				const value = roundedHours.toFixed(1);
-				return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
-			}
-
-			const totalDays = totalHours / 24;
-			const roundedDays = Math.round(totalDays * 10) / 10;
-			const value = roundedDays.toFixed(1);
-			return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
+		const totalHours = remainingMs / (60 * 60 * 1000);
+		if (totalHours < 24) {
+			const roundedHours = Math.round(totalHours * 10) / 10;
+			const value = roundedHours.toFixed(1);
+			return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
 		}
 
-	function formatDateTime(timestamp: number) {
-		if (!Number.isFinite(timestamp) || timestamp <= 0) {
-			return 'Unknown';
-		}
-		return new Date(timestamp).toLocaleString([], {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit'
-		});
+		const totalDays = totalHours / 24;
+		const roundedDays = Math.round(totalDays * 10) / 10;
+		const value = roundedDays.toFixed(1);
+		return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
 	}
 
-	function parseTimestampParam(value: string | null) {
-		if (!value) {
-			return 0;
-		}
-		const numeric = Number(value);
-		if (!Number.isFinite(numeric) || numeric <= 0) {
-			return 0;
-		}
-		return normalizeEpoch(numeric);
-	}
-
-	function normalizeRoomIDValue(value: string) {
-		return value
-			.toLowerCase()
-			.trim()
-			.replace(/[^a-z0-9]/g, '');
-	}
-
-	function normalizeRoomNameValue(value: string) {
-		const trimmed = value.trim();
-		if (!trimmed) {
-			return '';
-		}
-		return trimmed.replace(/\s+/g, ' ').slice(0, 20);
-	}
-
-	function normalizeUsernameValue(value: string) {
-		return value
-			.trim()
-			.replace(/[^a-zA-Z0-9\s_-]/g, '')
-			.replace(/[\s-]+/g, '_')
-			.replace(/_+/g, '_')
-			.replace(/^_+|_+$/g, '');
-	}
-
-	function normalizeIdentifier(value: string) {
-		return value
-			.trim()
-			.replace(/[^a-zA-Z0-9\s_-]/g, '')
-			.replace(/[\s-]+/g, '_')
-			.replace(/_+/g, '_')
-			.replace(/^_+|_+$/g, '');
-	}
-
-	function normalizeMessageID(value: string) {
-		return value.trim().replace(/[^a-zA-Z0-9_-]/g, '');
-	}
-
-	function createMessageId(targetRoomId: string) {
-		if (browser && typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-			return crypto.randomUUID();
-		}
-		return `m${targetRoomId}${Date.now().toString(36)}${Math.floor(Math.random() * 1000000).toString(36)}`;
-	}
-
-	function formatRoomName(targetRoomId: string) {
-		const trimmed = normalizeRoomIDValue(targetRoomId);
-		if (!trimmed) {
-			return 'Room';
-		}
-		return 'Room';
-	}
-
-	function toTimestamp(value: unknown) {
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			return normalizeEpoch(value);
-		}
-		if (typeof value === 'string') {
-			const trimmed = value.trim();
-			if (!trimmed) {
-				return Date.now();
-			}
-			const asNumber = Number(trimmed);
-			if (Number.isFinite(asNumber)) {
-				return normalizeEpoch(asNumber);
-			}
-			const parsed = Date.parse(trimmed);
-			if (Number.isFinite(parsed)) {
-				return parsed;
-			}
-		}
-		if (value instanceof Date) {
-			return value.getTime();
-		}
-		return Date.now();
-	}
-
-	function parseOptionalTimestamp(value: unknown) {
-		if (value === null || value === undefined) {
-			return 0;
-		}
-		if (typeof value === 'number') {
-			if (!Number.isFinite(value) || value <= 0) {
-				return 0;
-			}
-			return normalizeEpoch(value);
-		}
-		if (typeof value === 'string') {
-			const trimmed = value.trim();
-			if (!trimmed) {
-				return 0;
-			}
-			const numeric = Number(trimmed);
-			if (Number.isFinite(numeric) && numeric > 0) {
-				return normalizeEpoch(numeric);
-			}
-			const parsed = Date.parse(trimmed);
-			if (Number.isFinite(parsed) && parsed > 0) {
-				return parsed;
-			}
-			return 0;
-		}
-		if (value instanceof Date) {
-			return value.getTime();
-		}
-		return 0;
-	}
-
-	function normalizeEpoch(value: number) {
-		if (value > 0 && value < 1_000_000_000_000) {
-			return value * 1000;
-		}
-		return value;
-	}
-
-	function toBool(value: unknown) {
-		if (typeof value === 'boolean') {
-			return value;
-		}
-		if (typeof value === 'string') {
-			const lower = value.toLowerCase();
-			return lower === '1' || lower === 'true';
-		}
-		if (typeof value === 'number') {
-			return value === 1;
-		}
-		return false;
-	}
-
-	function toInt(value: unknown) {
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			return Math.trunc(value);
-		}
-		if (typeof value === 'string') {
-			const parsed = Number(value);
-			if (Number.isFinite(parsed)) {
-				return Math.trunc(parsed);
-			}
-		}
-		return 0;
-	}
-
-	function toStringValue(value: unknown) {
-		if (typeof value === 'string') {
-			return value;
-		}
-		if (typeof value === 'number' || typeof value === 'boolean') {
-			return String(value);
-		}
-		return '';
-	}
-
-	function isMediaMessageType(value: string) {
-		const normalized = value.trim().toLowerCase();
-		return normalized === 'image' || normalized === 'video' || normalized === 'file';
-	}
-
-	function isLikelyMediaURL(value: string) {
-		const trimmed = value.trim();
-		return (
-			trimmed.startsWith('http://') ||
-			trimmed.startsWith('https://') ||
-			trimmed.startsWith('blob:') ||
-			trimmed.startsWith('data:') ||
-			trimmed.startsWith('/')
-		);
-	}
-
-	function toAbsoluteMediaURL(value: string) {
-		const trimmed = value.trim();
-		if (!trimmed) {
-			return '';
-		}
-		if (trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
-			return trimmed;
-		}
-		if (/^https?:\/\//i.test(trimmed)) {
-			try {
-				const parsed = new URL(trimmed);
-				if (parsed.hostname.endsWith('.r2.cloudflarestorage.com')) {
-					const pathParts = parsed.pathname.split('/').filter(Boolean);
-					if (pathParts.length >= 2) {
-						const objectKey = decodeIfNeeded(pathParts.slice(1).join('/'));
-						return `${API_BASE}/api/upload/object/${encodeURIComponent(objectKey)}`;
-					}
-				}
-			} catch {
-				return trimmed;
-			}
-			return trimmed;
-		}
-		if (trimmed.startsWith('/')) {
-			return `${API_BASE}${trimmed}`;
-		}
-		return `${API_BASE}/${trimmed}`;
-	}
-
-	function decodeIfNeeded(value: string) {
-		try {
-			return decodeURIComponent(value);
-		} catch {
-			return value;
-		}
-	}
-
-	function resolveRoomMembership(roomID: string, threads: ChatThread[], memberHint: string | null) {
-		if (!roomID) {
-			return true;
-		}
-		if (memberHint === '0') {
-			return false;
-		}
-		if (memberHint === '1') {
-			return true;
-		}
-		const thread = threads.find((entry) => entry.id === roomID);
-		if (!thread) {
-			return false;
-		}
-		return thread.status === 'joined';
-	}
 </script>
 
 {#if showToast}

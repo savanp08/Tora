@@ -6,11 +6,12 @@
 		uploadToR2,
 		type MediaMessageType
 	} from '$lib/utils/media';
+	import type { ReplyTarget } from '$lib/types/chat';
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;
-	export let activeReply: { messageId: string; senderName: string; content: string } | null = null;
+	export let activeReply: ReplyTarget | null = null;
 	export let isDarkMode = false;
 
 	let mediaInput: HTMLInputElement | null = null;

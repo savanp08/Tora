@@ -1,21 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
-
-	type ThreadStatus = 'joined' | 'discoverable' | 'left';
-
-	type ChatThread = {
-		id: string;
-		name: string;
-		lastMessage: string;
-		lastActivity: number;
-		unread: number;
-		status: ThreadStatus;
-		memberCount?: number;
-		parentRoomId?: string;
-		originMessageId?: string;
-		treeNumber?: number;
-	};
+	import type { ChatThread, ThemePreference, ThreadStatus } from '$lib/types/chat';
 
 	type TreeRow = {
 		thread: ChatThread;
@@ -53,7 +39,7 @@
 	export let chatListSearch = '';
 	export let isMobileView = false;
 	export let isDarkMode = false;
-	export let themePreference: 'system' | 'light' | 'dark' = 'system';
+	export let themePreference: ThemePreference = 'system';
 
 	const dispatch = createEventDispatcher<{
 		select: { id: string; isMember: boolean; status: ThreadStatus };
