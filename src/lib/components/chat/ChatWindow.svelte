@@ -37,6 +37,7 @@
 	export let roomMessageSearch = '';
 	export let expandedMessages: Record<string, boolean> = {};
 	export let isMember = true;
+	export let isDarkMode = false;
 	export let isSelectionMode = false;
 	export let messageActionMode: 'none' | 'break' | 'edit' | 'delete' = 'none';
 	export let selectedMessageId = '';
@@ -575,7 +576,7 @@
 	}
 </script>
 
-<div class="messages-shell {isSelectionMode ? 'selection-mode' : ''}">
+<div class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode ? 'theme-dark' : ''}">
 	<div class="messages" bind:this={viewport} on:scroll={onMessagesScroll}>
 		<div class="top-sentinel" bind:this={topSentinel} aria-hidden="true"></div>
 		{#if isLoadingOlder}
@@ -919,6 +920,10 @@
 		position: relative;
 	}
 
+	.messages-shell.theme-dark {
+		background: linear-gradient(180deg, #0c1423 0%, #0a1220 100%);
+	}
+
 	.messages {
 		--meta-gutter-size: clamp(2.6rem, 7vw, 3.1rem);
 		--action-icon-size: clamp(1.2rem, 2.8vw, 1.5rem);
@@ -939,6 +944,10 @@
 		background: linear-gradient(180deg, #f7f7f8 0%, #f1f1f3 100%);
 	}
 
+	.messages-shell.theme-dark .messages {
+		background: linear-gradient(180deg, #0f192c 0%, #0b1525 100%);
+	}
+
 	.top-sentinel {
 		height: 1px;
 		width: 100%;
@@ -951,6 +960,10 @@
 		color: #71717a;
 	}
 
+	.messages-shell.theme-dark .older-history-indicator {
+		color: #94a3b8;
+	}
+
 	.readonly-banner {
 		margin: 0 0 0.4rem;
 		padding: 0.45rem 0.65rem;
@@ -959,6 +972,12 @@
 		background: #f3f3f3;
 		color: #202020;
 		font-size: 0.78rem;
+	}
+
+	.messages-shell.theme-dark .readonly-banner {
+		border-color: #334155;
+		background: #111b30;
+		color: #dbe7ff;
 	}
 
 	.join-footer {
@@ -1007,6 +1026,10 @@
 		padding: 1rem;
 	}
 
+	.messages-shell.theme-dark .empty-thread {
+		color: #9fb0cf;
+	}
+
 	.message-row {
 		display: flex;
 		align-items: flex-start;
@@ -1046,6 +1069,12 @@
 		border: 1px solid #dfdfe5;
 		border-radius: 999px;
 		padding: 0.16rem 0.22rem;
+	}
+
+	.messages-shell.theme-dark .gutter-stat {
+		background: rgba(15, 23, 42, 0.8);
+		border-color: #334155;
+		color: #bfd0ed;
 	}
 
 	.message-row.mine .gutter-stat {
@@ -1172,6 +1201,12 @@
 		overflow: visible;
 	}
 
+	.messages-shell.theme-dark .bubble {
+		background: #1c2536;
+		border-color: #334155;
+		color: #e2e8f0;
+	}
+
 	.selection-mode .bubble.selectable {
 		cursor: pointer;
 		outline: 1px dashed transparent;
@@ -1185,6 +1220,12 @@
 		background: #2f3138;
 		border-color: #2f3138;
 		color: #f3f5f8;
+	}
+
+	.messages-shell.theme-dark .bubble.mine {
+		background: #1e293b;
+		border-color: #334155;
+		color: #e6edf8;
 	}
 
 	.bubble.media-bubble {
@@ -1317,6 +1358,14 @@
 		color: #d8d8d8;
 	}
 
+	.messages-shell.theme-dark .bubble-meta {
+		color: #aebbd2;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .bubble-meta {
+		color: #c9d6eb;
+	}
+
 	.meta-right {
 		display: inline-flex;
 		align-items: center;
@@ -1359,6 +1408,12 @@
 		cursor: pointer;
 	}
 
+	.messages-shell.theme-dark .reply-snippet {
+		border-color: #3a4b67;
+		background: #142036;
+		color: #c5d2ea;
+	}
+
 	.bubble.mine .reply-snippet {
 		border-color: rgba(255, 255, 255, 0.22);
 		background: rgba(255, 255, 255, 0.12);
@@ -1367,6 +1422,10 @@
 
 	.reply-snippet:hover {
 		background: #ececf0;
+	}
+
+	.messages-shell.theme-dark .reply-snippet:hover {
+		background: #1a2a44;
 	}
 
 	.bubble.mine .reply-snippet:hover {
@@ -1403,6 +1462,12 @@
 		padding: 0.08rem 0.33rem;
 		font-size: 0.68rem;
 		cursor: pointer;
+	}
+
+	.messages-shell.theme-dark .break-indicator {
+		border-color: #334155;
+		background: #0f172a;
+		color: #dbe7ff;
 	}
 
 	.break-indicator-count {

@@ -52,6 +52,8 @@
 	export let showLeftMenu = false;
 	export let chatListSearch = '';
 	export let isMobileView = false;
+	export let isDarkMode = false;
+	export let themePreference: 'system' | 'light' | 'dark' = 'system';
 
 	const dispatch = createEventDispatcher<{
 		select: { id: string; isMember: boolean; status: ThreadStatus };
@@ -62,6 +64,7 @@
 			fallbackIsMember: boolean;
 		};
 		toggleMenu: void;
+		toggleTheme: void;
 		createRoom: void;
 		renameRoom: { roomId: string };
 	}>();
@@ -533,28 +536,42 @@
 	}
 </script>
 
-<aside class="room-list">
+<aside class="room-list {isDarkMode ? 'theme-dark' : ''}">
 	<div class="room-list-header">
 		<div class="list-title">
 			<h2>Chats</h2>
 			<span class="thread-count">{totalRooms}</span>
 		</div>
-		<div class="list-actions">
+			<div class="list-actions">
 			<button
-				type="button"
-				class="icon-button map-icon-button"
-				on:click={openRelationsMap}
-				title="View room relations map"
-				aria-label="View room relations map"
-				bind:this={relationsTriggerEl}
-			>
-				<IconSet name="tree-map" size={14} />
-			</button>
-			<button
-				type="button"
-				class="icon-button view-icon-button {isFullView ? 'active' : ''}"
-				on:click={toggleFullView}
-				title={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
+					type="button"
+					class="icon-button theme-icon-button {isDarkMode ? 'active' : ''}"
+					on:click={() => dispatch('toggleTheme')}
+					title={isDarkMode
+						? 'Switch to light mode'
+						: themePreference === 'system'
+							? 'Switch to dark mode (system mode active)'
+							: 'Switch to dark mode'}
+					aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+				>
+					<IconSet name="theme" size={14} />
+				</button>
+				<button
+					type="button"
+					class="icon-button map-icon-button"
+					on:click={openRelationsMap}
+					title="View room relations map"
+					aria-label="View room relations map"
+					bind:this={relationsTriggerEl}
+				>
+					<IconSet name="tree-map" size={14} />
+				</button>
+				
+				<button
+					type="button"
+					class="icon-button view-icon-button {isFullView ? 'active' : ''}"
+					on:click={toggleFullView}
+					title={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
 				aria-label={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
 			>
 				<IconSet name="list-vertical" size={14} />
@@ -567,18 +584,18 @@
 			>
 				...
 			</button>
-			{#if showLeftMenu}
-				<div class="room-menu left-menu">
-					<button type="button" on:click={() => dispatch('createRoom')}>New room</button>
-					<button type="button" on:click={requestRenameRoom} disabled={!activeRoomId}>Rename room</button>
-					<button type="button" on:click={openRelationsMap}>Relations map</button>
-					<button type="button" on:click={toggleFullView}>
-						{isFullView ? 'Streamlined view' : 'Full view'}
-					</button>
-				</div>
-			{/if}
+				{#if showLeftMenu}
+					<div class="room-menu left-menu">
+						<button type="button" on:click={() => dispatch('createRoom')}>New room</button>
+						<button type="button" on:click={requestRenameRoom} disabled={!activeRoomId}>Rename room</button>
+						<button type="button" on:click={openRelationsMap}>Relations map</button>
+						<button type="button" on:click={toggleFullView}>
+							{isFullView ? 'Streamlined view' : 'Full view'}
+						</button>
+					</div>
+				{/if}
+			</div>
 		</div>
-	</div>
 	<div class="room-list-search">
 		<input type="text" bind:value={chatListSearch} placeholder="Search names or messages" />
 	</div>
@@ -829,6 +846,11 @@
 		overflow-x: hidden;
 	}
 
+	.room-list.theme-dark {
+		background: linear-gradient(180deg, #0f1729 0%, #0b1323 100%);
+		color: #dbe5f8;
+	}
+
 	.room-list-header {
 		padding: 0.95rem 0.95rem 0.72rem;
 		display: flex;
@@ -838,6 +860,10 @@
 		min-width: 0;
 		position: relative;
 		border-bottom: 1px solid #e3e3e8;
+	}
+
+	.room-list.theme-dark .room-list-header {
+		border-bottom-color: #253049;
 	}
 
 	.list-title {
@@ -870,6 +896,11 @@
 		border-radius: 999px;
 	}
 
+	.room-list.theme-dark .thread-count {
+		background: #1f293d;
+		color: #cdd9f0;
+	}
+
 	.room-list-search {
 		padding: 0 1rem 0.75rem;
 	}
@@ -882,6 +913,12 @@
 		font-size: 0.92rem;
 		background: #fafafb;
 		color: #2b2b33;
+	}
+
+	.room-list.theme-dark .room-list-search input {
+		border-color: #2c3852;
+		background: #111b2f;
+		color: #dbe7ff;
 	}
 
 	.room-items {
@@ -901,6 +938,10 @@
 		text-transform: uppercase;
 		color: #666666;
 		padding: 0.55rem 0.9rem 0.35rem;
+	}
+
+	.room-list.theme-dark .section-label {
+		color: #93a4c4;
 	}
 
 	.room-item {
@@ -925,9 +966,20 @@
 		overflow: hidden;
 	}
 
+	.room-list.theme-dark .room-item {
+		border-color: #2b3851;
+		background: #121d33;
+		box-shadow: 0 3px 10px rgba(2, 8, 23, 0.38);
+	}
+
 	.room-item:hover {
 		background: #f3f3f5;
 		border-color: #ccccd4;
+	}
+
+	.room-list.theme-dark .room-item:hover {
+		background: #192742;
+		border-color: #3b4b67;
 	}
 
 	.room-item.related-child {
@@ -943,6 +995,11 @@
 	.room-item.selected {
 		background: #2f3138;
 		border-color: #2f3138;
+	}
+
+	.room-list.theme-dark .room-item.selected {
+		background: #1e293b;
+		border-color: #334155;
 	}
 
 	.room-item.discoverable.selected {
@@ -1053,6 +1110,10 @@
 		white-space: nowrap;
 	}
 
+	.room-list.theme-dark .room-name {
+		color: #e6eefc;
+	}
+
 	.room-time {
 		font-size: 0.78rem;
 		color: #72727c;
@@ -1063,6 +1124,10 @@
 		text-overflow: ellipsis;
 	}
 
+	.room-list.theme-dark .room-time {
+		color: #9eb0d0;
+	}
+
 	.room-preview {
 		font-size: 0.82rem;
 		color: #696974;
@@ -1071,6 +1136,10 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.room-list.theme-dark .room-preview {
+		color: #a9b8d4;
 	}
 
 	.unread {
@@ -1084,6 +1153,11 @@
 		align-items: center;
 		justify-content: center;
 		font-weight: 700;
+	}
+
+	.room-list.theme-dark .unread {
+		background: #2563eb;
+		color: #eff6ff;
 	}
 
 	.icon-button {
@@ -1101,6 +1175,12 @@
 		justify-content: center;
 	}
 
+	.room-list.theme-dark .icon-button {
+		border-color: #2b3853;
+		background: #111b2f;
+		color: #d6e1f6;
+	}
+
 	.icon-button:disabled {
 		opacity: 0.55;
 		cursor: not-allowed;
@@ -1108,6 +1188,22 @@
 
 	.map-icon-button {
 		font-size: 0;
+	}
+
+	.theme-icon-button {
+		font-size: 0;
+	}
+
+	.theme-icon-button.active {
+		background: #2f3138;
+		border-color: #2f3138;
+		color: #ffffff;
+	}
+
+	.room-list.theme-dark .theme-icon-button.active {
+		background: #1f304c;
+		border-color: #35507d;
+		color: #dbeafe;
 	}
 
 	.view-icon-button {
@@ -1172,6 +1268,12 @@
 		z-index: 100;
 	}
 
+	.room-list.theme-dark .room-menu {
+		background: #111b2f;
+		border-color: #2d3b57;
+		box-shadow: 0 12px 24px rgba(2, 8, 23, 0.45);
+	}
+
 	.left-menu {
 		left: 0;
 		right: auto;
@@ -1187,6 +1289,11 @@
 		cursor: pointer;
 	}
 
+	.room-list.theme-dark .room-menu button {
+		background: #111b2f;
+		color: #dbe7ff;
+	}
+
 	.room-menu button:disabled {
 		color: #9898a1;
 		cursor: not-allowed;
@@ -1194,6 +1301,10 @@
 
 	.room-menu button:hover {
 		background: #f1f1f3;
+	}
+
+	.room-list.theme-dark .room-menu button:hover {
+		background: #1b2a45;
 	}
 
 	.room-menu button:disabled:hover {
@@ -1219,6 +1330,10 @@
 		color: #666666;
 		font-size: 0.84rem;
 		padding: 1rem;
+	}
+
+	.room-list.theme-dark .empty-label {
+		color: #9fb0ce;
 	}
 
 	.relations-backdrop {

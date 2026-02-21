@@ -10,6 +10,7 @@
 		| 'edit'
 		| 'trash'
 		| 'more-horizontal'
+		| 'theme'
 		| 'chevron-down'
 		| 'tree-map'
 		| 'list-vertical';
@@ -71,6 +72,16 @@
 		<circle cx="5" cy="12" r="1.6"></circle>
 		<circle cx="12" cy="12" r="1.6"></circle>
 		<circle cx="19" cy="12" r="1.6"></circle>
+	{:else if name === 'theme'}
+		<circle cx="12" cy="12" r="3.5"></circle>
+		<path d="M12 2v2"></path>
+		<path d="M12 20v2"></path>
+		<path d="M4.93 4.93l1.41 1.41"></path>
+		<path d="M17.66 17.66l1.41 1.41"></path>
+		<path d="M2 12h2"></path>
+		<path d="M20 12h2"></path>
+		<path d="M4.93 19.07l1.41-1.41"></path>
+		<path d="M17.66 6.34l1.41-1.41"></path>
 	{:else if name === 'chevron-down'}
 		<polyline points="6 9 12 15 18 9"></polyline>
 	{:else if name === 'tree-map'}

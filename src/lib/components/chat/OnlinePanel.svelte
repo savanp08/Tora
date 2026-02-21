@@ -7,9 +7,10 @@
 	};
 
 	export let members: OnlineMember[] = [];
+	export let isDarkMode = false;
 </script>
 
-<aside class="online-panel">
+<aside class="online-panel {isDarkMode ? 'theme-dark' : ''}">
 	<div class="online-header">
 		<h3>Online</h3>
 		<span>{members.length}</span>
@@ -20,11 +21,8 @@
 		{:else}
 			{#each members as member (member.id)}
 				<div class="online-member">
-					<span class="member-dot {member.isOnline ? 'online' : 'away'}"></span>
-					<div class="member-body">
-						<span class="member-name">{member.name}</span>
-						<span class="member-meta">{member.isOnline ? 'Online now' : 'Away'}</span>
-					</div>
+					<span class="member-dot"></span>
+					<span class="member-name">{member.name}</span>
 				</div>
 			{/each}
 		{/if}
@@ -40,6 +38,10 @@
 		min-height: 0;
 	}
 
+	.online-panel.theme-dark {
+		background: linear-gradient(180deg, #0f1729 0%, #0b1323 100%);
+	}
+
 	.online-header {
 		padding: 0.95rem 0.95rem 0.8rem;
 		display: flex;
@@ -48,10 +50,18 @@
 		border-bottom: 1px solid #e3e8f0;
 	}
 
+	.online-panel.theme-dark .online-header {
+		border-bottom-color: #253049;
+	}
+
 	.online-header h3 {
 		margin: 0;
 		font-size: 1rem;
 		color: #1c2533;
+	}
+
+	.online-panel.theme-dark .online-header h3 {
+		color: #dbe8ff;
 	}
 
 	.online-header span {
@@ -61,6 +71,11 @@
 		background: #2f3138;
 		padding: 0.2rem 0.5rem;
 		border-radius: 999px;
+	}
+
+	.online-panel.theme-dark .online-header span {
+		background: #1f2c43;
+		color: #d9e6ff;
 	}
 
 	.online-list {
@@ -81,6 +96,13 @@
 		border-radius: 12px;
 		background: #ffffff;
 		box-shadow: 0 1px 5px rgba(15, 23, 42, 0.05);
+		white-space: nowrap;
+	}
+
+	.online-panel.theme-dark .online-member {
+		border-color: #2c3853;
+		background: #111d33;
+		box-shadow: 0 3px 10px rgba(2, 8, 23, 0.36);
 	}
 
 	.member-dot {
@@ -89,35 +111,22 @@
 		border-radius: 50%;
 		flex-shrink: 0;
 		box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.92), 0 0 0 3px rgba(17, 24, 39, 0.18);
-	}
-
-	.member-dot.online {
 		background: #22c55e;
-	}
-
-	.member-dot.away {
-		background: #f59e0b;
-	}
-
-	.member-body {
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 0.18rem;
 	}
 
 	.member-name {
 		font-size: 0.88rem;
 		font-weight: 600;
 		color: #141d2a;
+		flex: 1;
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.member-meta {
-		font-size: 0.75rem;
-		color: #6d7788;
+	.online-panel.theme-dark .member-name {
+		color: #e4eeff;
 	}
 
 	.empty-label {
@@ -127,6 +136,12 @@
 		border: 1px dashed #d8dee9;
 		border-radius: 12px;
 		background: #f9fbff;
+	}
+
+	.online-panel.theme-dark .empty-label {
+		color: #9fb0ce;
+		border-color: #30405e;
+		background: #111d33;
 	}
 
 	@media (max-width: 1199px) {

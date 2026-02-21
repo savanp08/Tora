@@ -139,9 +139,14 @@
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
 	const DELETED_MESSAGE_PLACEHOLDER = 'This message was deleted';
+	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
+
+	type ThemePreference = 'system' | 'light' | 'dark';
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
+	let systemThemeMediaQuery: MediaQueryList | null = null;
+	let removeSystemThemeListener: (() => void) | null = null;
 	let roomMembershipSynced: Record<string, boolean> = {};
 	let roomMembershipSyncing: Record<string, boolean> = {};
 	let unsubscribeGlobalMessages: (() => void) | null = null;
@@ -164,6 +169,8 @@
 	let showRoomMenu = false;
 	let showRoomSearch = false;
 	let showRoomDetails = false;
+	let themePreference: ThemePreference = 'system';
+	let isDarkMode = false;
 	let isSelectionMode = false;
 	let messageActionMode: MessageActionMode = 'none';
 	let selectedActionMessageId = '';
@@ -300,12 +307,18 @@
 		clearSidebarRefreshTimer();
 		clearRoomExpiryTicker();
 		clearToastTimer();
+		if (removeSystemThemeListener) {
+			removeSystemThemeListener();
+			removeSystemThemeListener = null;
+		}
+		systemThemeMediaQuery = null;
 	});
 
 	onMount(() => {
 		if (!browser) {
 			return;
 		}
+		initializeThemePreference();
 		initializeTrustedDevicePreference();
 		if (trustedCachingEnabled && roomId) {
 			void hydrateOfflineCache(roomId);
@@ -342,8 +355,79 @@
 			window.removeEventListener('pointerdown', onDocumentPointerDown);
 			window.removeEventListener('resize', updateViewportMode);
 			clearRoomExpiryTicker();
+			if (removeSystemThemeListener) {
+				removeSystemThemeListener();
+				removeSystemThemeListener = null;
+			}
 		};
 	});
+
+	$: if (browser) {
+		document.body.classList.toggle('theme-dark', isDarkMode);
+		document.body.dataset.theme = isDarkMode ? 'dark' : 'light';
+	}
+
+	function initializeThemePreference() {
+		if (!browser) {
+			return;
+		}
+		systemThemeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+		registerSystemThemeListener();
+		const saved = window.localStorage.getItem(THEME_PREFERENCE_KEY);
+		if (saved === 'dark' || saved === 'light' || saved === 'system') {
+			applyThemePreference(saved, false);
+			return;
+		}
+		applyThemePreference('system', false);
+	}
+
+	function registerSystemThemeListener() {
+		if (!systemThemeMediaQuery || removeSystemThemeListener) {
+			return;
+		}
+		const onSystemThemeChange = () => {
+			if (themePreference !== 'system') {
+				return;
+			}
+			isDarkMode = Boolean(systemThemeMediaQuery?.matches);
+		};
+		if (typeof systemThemeMediaQuery.addEventListener === 'function') {
+			systemThemeMediaQuery.addEventListener('change', onSystemThemeChange);
+			removeSystemThemeListener = () => {
+				systemThemeMediaQuery?.removeEventListener('change', onSystemThemeChange);
+			};
+			return;
+		}
+		systemThemeMediaQuery.addListener(onSystemThemeChange);
+		removeSystemThemeListener = () => {
+			systemThemeMediaQuery?.removeListener(onSystemThemeChange);
+		};
+	}
+
+	function resolveDarkMode(preference: ThemePreference) {
+		if (preference === 'dark') {
+			return true;
+		}
+		if (preference === 'light') {
+			return false;
+		}
+		return Boolean(systemThemeMediaQuery?.matches);
+	}
+
+	function applyThemePreference(preference: ThemePreference, persist = true) {
+		themePreference = preference;
+		isDarkMode = resolveDarkMode(preference);
+		if (browser && persist) {
+			window.localStorage.setItem(THEME_PREFERENCE_KEY, preference);
+		}
+	}
+
+	function toggleThemePreference() {
+		// Toggle dark/light while system remains the default for first-time users.
+		const next: ThemePreference = isDarkMode ? 'light' : 'dark';
+		applyThemePreference(next);
+		showLeftMenu = false;
+	}
 
 	function updateViewportMode() {
 		if (!browser) {
@@ -3069,28 +3153,32 @@
 	</div>
 {/if}
 
-<section
-	class="chat-shell"
-	class:mobile-list-only={isMobileView && mobilePane === 'list'}
-	class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
->
-	<div class="sidebar-pane">
-		<ChatSidebar
+	<section
+		class="chat-shell"
+		class:theme-dark={isDarkMode}
+		class:mobile-list-only={isMobileView && mobilePane === 'list'}
+		class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
+	>
+		<div class="sidebar-pane">
+			<ChatSidebar
 			myRooms={filteredMyRooms}
 			discoverableRooms={filteredDiscoverableRooms}
 			leftRooms={filteredLeftRooms}
 			accessibleParentRoomIds={roomThreads.map((thread) => thread.id)}
-			activeRoomId={roomId}
-			{isMobileView}
-			{showLeftMenu}
-			bind:chatListSearch
-			on:select={onSidebarSelect}
-			on:jumpOrigin={onJumpToBreakOrigin}
-			on:toggleMenu={toggleLeftMenu}
-			on:createRoom={createRoomFromMenu}
-			on:renameRoom={(event) => void renameRoom(event.detail.roomId)}
-		/>
-	</div>
+				activeRoomId={roomId}
+				{isMobileView}
+				{showLeftMenu}
+				{isDarkMode}
+				{themePreference}
+				bind:chatListSearch
+				on:select={onSidebarSelect}
+				on:jumpOrigin={onJumpToBreakOrigin}
+				on:toggleMenu={toggleLeftMenu}
+				on:toggleTheme={toggleThemePreference}
+				on:createRoom={createRoomFromMenu}
+				on:renameRoom={(event) => void renameRoom(event.detail.roomId)}
+			/>
+		</div>
 
 	<section class="chat-window">
 		<header class="chat-header">
@@ -3212,17 +3300,18 @@
 			</div>
 		{/if}
 
-			<ChatWindow
-				bind:this={chatWindowRef}
-				messages={currentMessages}
-				{currentUserId}
-				{roomMessageSearch}
-				{expandedMessages}
-				{isMember}
-				{isSelectionMode}
-				messageActionMode={messageActionMode}
-				selectedMessageId={selectedActionMessageId}
-				{focusMessageId}
+				<ChatWindow
+					bind:this={chatWindowRef}
+					messages={currentMessages}
+					{currentUserId}
+					{roomMessageSearch}
+					{expandedMessages}
+					{isMember}
+					{isSelectionMode}
+					{isDarkMode}
+					messageActionMode={messageActionMode}
+					selectedMessageId={selectedActionMessageId}
+					{focusMessageId}
 				isLoadingOlder={isLoadingOlderHistory}
 				hasMoreOlder={hasMoreOlderHistory}
 				on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
@@ -3239,23 +3328,24 @@
 			/>
 
 		{#if isMember}
-			<ChatComposer
-				bind:draftMessage
-				bind:attachedFile
-				{activeReply}
-				on:send={(event) => void sendMessage(event.detail)}
-				on:typing={onComposerTyping}
-				on:attach={handleComposerAttach}
+				<ChatComposer
+					bind:draftMessage
+					bind:attachedFile
+					{activeReply}
+					{isDarkMode}
+					on:send={(event) => void sendMessage(event.detail)}
+					on:typing={onComposerTyping}
+					on:attach={handleComposerAttach}
 				on:removeAttachment={handleComposerRemoveAttachment}
 				on:cancelReply={clearReplyTarget}
 			/>
 		{/if}
 	</section>
 
-	<div class="online-pane">
-		<OnlinePanel members={currentOnlineMembers} />
-	</div>
-</section>
+		<div class="online-pane">
+			<OnlinePanel members={currentOnlineMembers} {isDarkMode} />
+		</div>
+	</section>
 
 {#if showRoomDetails}
 	{#if isMobileView}
@@ -3298,7 +3388,7 @@
 				>
 					{isExtendingRoom ? 'Extending...' : 'Extend Room (24h)'}
 				</button>
-				<p>Manually extends this room and its messages for 24 hours.</p>
+				<p>Manually extends this room and its messages for 24 hours (Max 14 extensions).</p>
 			</div>
 
 			<h4 class="members-title">Members</h4>
@@ -3332,7 +3422,7 @@
 	.chat-shell {
 		--panel-border: #d9dee8;
 		--panel-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
-		height: calc(100vh - 72px);
+		height: calc(98vh);
 		min-height: 620px;
 		display: grid;
 		grid-template-columns: 330px minmax(0, 1fr) 280px;
@@ -3360,6 +3450,8 @@
 
 	.sidebar-pane {
 		display: flex;
+		align-self: center;
+		height: 93%;
 	}
 
 	.chat-window {
@@ -3371,7 +3463,114 @@
 
 	.online-pane {
 		display: flex;
+		align-self: center;
+		height: 85%;
 		background: linear-gradient(180deg, #fbfcff 0%, #f2f5fa 100%);
+	}
+
+	.chat-shell.theme-dark {
+		--panel-border: #2a364d;
+		--panel-shadow: 0 12px 28px rgba(2, 8, 23, 0.45);
+		background:
+			radial-gradient(1300px 460px at -10% -35%, rgba(59, 130, 246, 0.18) 0%, transparent 58%),
+			radial-gradient(1100px 400px at 110% 0%, rgba(45, 212, 191, 0.14) 0%, transparent 55%),
+			#060b14;
+	}
+
+	.chat-shell.theme-dark .sidebar-pane,
+	.chat-shell.theme-dark .chat-window,
+	.chat-shell.theme-dark .online-pane {
+		background: #0b1324;
+		border-color: var(--panel-border);
+	}
+
+	.chat-shell.theme-dark .chat-header {
+		background: #0f1a2e;
+		border-bottom-color: #2b3a53;
+	}
+
+	.chat-shell.theme-dark .room-title-button {
+		color: #e2ebfb;
+	}
+
+	.chat-shell.theme-dark .title-sub {
+		color: #9fb2d2;
+	}
+
+	.chat-shell.theme-dark .mobile-back-button {
+		border-color: #314059;
+		background: #101a2e;
+		color: #d8e3fa;
+	}
+
+	.chat-shell.theme-dark .expiry-pill {
+		border-color: #314059;
+		background: #101a2e;
+		color: #d8e3fa;
+	}
+
+	.chat-shell.theme-dark .expiry-pill:hover {
+		background: #16233c;
+	}
+
+	.chat-shell.theme-dark .icon-button {
+		border-color: #314059;
+		background: #101a2e;
+		color: #d8e3fa;
+	}
+
+	.chat-shell.theme-dark .room-menu {
+		background: #111d33;
+		border-color: #2f3f5b;
+		box-shadow: 0 14px 28px rgba(2, 8, 23, 0.5);
+	}
+
+	.chat-shell.theme-dark .room-menu button {
+		background: #111d33;
+		color: #dbe8ff;
+	}
+
+	.chat-shell.theme-dark .room-menu button:hover {
+		background: #1b2a45;
+	}
+
+	.chat-shell.theme-dark .selection-banner {
+		background: #101a2e;
+		border-bottom-color: #2f3f5b;
+		color: #c5d3ec;
+	}
+
+	.chat-shell.theme-dark .typing-indicator {
+		background: #0f1a2e;
+		border-bottom-color: #2e3d58;
+		color: #9fb1d0;
+	}
+
+	.chat-shell.theme-dark .trusted-banner {
+		background: #0f1a2e;
+		border-bottom-color: #2e3d58;
+		color: #d2def2;
+	}
+
+	.chat-shell.theme-dark .trusted-actions button {
+		border-color: #34445f;
+		background: #13203a;
+		color: #d9e6ff;
+	}
+
+	.chat-shell.theme-dark .chat-search-row {
+		background: #0f1a2e;
+		border-bottom-color: #2f3f5b;
+	}
+
+	.chat-shell.theme-dark .chat-search-row input {
+		border-color: #314059;
+		background: #111d33;
+		color: #dbe7ff;
+	}
+
+	.chat-shell.theme-dark .chat-search-row input::placeholder {
+		color: #8ea2c3;
 	}
 
 	.chat-header {
@@ -3904,15 +4103,32 @@
 			grid-template-columns: 290px minmax(0, 1fr);
 		}
 
+		.sidebar-pane {
+			align-self: stretch;
+			height: 100%;
+		}
+
 		.online-pane {
 			display: none;
+		}
+	}
+
+	@media (max-height: 860px) {
+		.sidebar-pane {
+			align-self: stretch;
+			height: 100%;
+		}
+
+		.online-pane {
+			align-self: stretch;
+			height: 100%;
 		}
 	}
 
 	@media (max-width: 900px) {
 		.chat-shell {
 			grid-template-columns: 1fr;
-			height: calc(100dvh - 72px);
+			height: calc(98vh);
 			min-height: 0;
 			gap: 0.55rem;
 			padding: 0.55rem;
@@ -3943,6 +4159,11 @@
 
 		.sidebar-pane,
 		.chat-window {
+			height: 100%;
+		}
+
+		.sidebar-pane {
+			align-self: stretch;
 			height: 100%;
 		}
 
