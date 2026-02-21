@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/security"
 )
 
 const (
@@ -153,6 +154,10 @@ func (h *RoomHandler) queryRoomMessagesPage(
 		&replySnippet,
 		&createdAt,
 	) {
+		if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
+			content = decrypted
+		}
+
 		var editedAtPtr *time.Time
 		if !editedAt.IsZero() {
 			editedCopy := editedAt

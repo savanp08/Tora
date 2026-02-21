@@ -14,6 +14,7 @@ type Config struct {
 	Port                   string
 	RedisAddr              string
 	RedisPass              string
+	AppSecretKey           string
 	ScyllaHosts            []string
 	ScyllaKeyspace         string
 	AstraBundlePath        string
@@ -38,6 +39,7 @@ func LoadConfig() *Config {
 	if err := godotenv.Load("../.env", ".env"); err != nil {
 		log.Println("No .env file found, using system env variables")
 	}
+	appSecretKey := requireAppSecretKey()
 
 	r2EndpointURL := getAnyEnv("", "R2_S3_endpoint_url", "R2_S3_ENDPOINT_URL")
 	r2AccountID := getAnyEnv("", "R2_ACCOUNT_ID")
@@ -63,6 +65,7 @@ func LoadConfig() *Config {
 		Port:                   getEnv("PORT", "8080"),
 		RedisAddr:              getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPass:              getEnv("REDIS_PASS", ""),
+		AppSecretKey:           appSecretKey,
 		ScyllaHosts:            parseCSVEnv("SCYLLA_HOSTS", "127.0.0.1"),
 		ScyllaKeyspace:         getAnyEnv("converse", "SCYLLA_KEYSPACE", "KEYSPACE_NAME"),
 		AstraBundlePath:        getAnyEnv("", "ASTRA_BUNDLE_PATH"),
@@ -82,6 +85,17 @@ func LoadConfig() *Config {
 		MaxDailyWsConnections:  getInt64Env("MAX_DAILY_WS_CONNECTIONS", 15000),
 		MaxDailyFilesUploaded:  getInt64Env("MAX_DAILY_FILES_UPLOADED", 3000),
 	}
+}
+
+func requireAppSecretKey() string {
+	key, exists := os.LookupEnv("APP_SECRET_KEY")
+	if !exists || key == "" {
+		log.Fatal("APP_SECRET_KEY must be set and exactly 32 characters long")
+	}
+	if len(key) != 32 {
+		log.Fatalf("APP_SECRET_KEY must be exactly 32 characters long (got %d)", len(key))
+	}
+	return key
 }
 
 func getEnv(key, fallback string) string {

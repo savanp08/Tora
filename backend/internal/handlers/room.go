@@ -1542,6 +1542,9 @@ func (h *RoomHandler) resolveSourceMessageText(ctx context.Context, roomID strin
 		var content string
 		if iter.Scan(&content) {
 			_ = iter.Close()
+			if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
+				content = decrypted
+			}
 			return strings.TrimSpace(content), nil
 		}
 		if err := iter.Close(); err != nil {

@@ -1179,9 +1179,9 @@
 	}
 
 	.messages-shell.theme-dark .bubble {
-		background: #1c2536;
-		border-color: #334155;
-		color: #e2e8f0;
+		background: #101b2d;
+		border-color: #2f3f59;
+		color: #f1f5ff;
 	}
 
 	.selection-mode .bubble.selectable {
@@ -1200,8 +1200,8 @@
 	}
 
 	.messages-shell.theme-dark .bubble.mine {
-		background: #1e293b;
-		border-color: #334155;
+		background: #1c2c46;
+		border-color: #3f5479;
 		color: #e6edf8;
 	}
 
@@ -1503,6 +1503,10 @@
 		font-size: 0.8rem;
 	}
 
+	.messages-shell.theme-dark .file-link {
+		color: #d8e2f1;
+	}
+
 	.file-link:hover {
 		text-decoration: underline;
 	}
@@ -1520,11 +1524,20 @@
 		box-sizing: border-box;
 	}
 
+	.messages-shell.theme-dark .file-card {
+		border-color: #3a4b66;
+		background: #16243b;
+	}
+
 	.file-meta {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
 		color: #141414;
+	}
+
+	.messages-shell.theme-dark .file-meta {
+		color: #d3deee;
 	}
 
 	.file-name {
@@ -1538,6 +1551,10 @@
 		font-size: 0.68rem;
 		color: #666666;
 		margin-top: 0.1rem;
+	}
+
+	.messages-shell.theme-dark .file-ext {
+		color: #9fb0c8;
 	}
 
 	.file-actions {
@@ -1567,17 +1584,33 @@
 		word-break: break-word;
 	}
 
+	.messages-shell.theme-dark .bubble-content {
+		color: #ccd8ea;
+	}
+
 	.bubble-content.deleted-text {
 		font-style: italic;
 		color: #6d6d76;
+	}
+
+	.messages-shell.theme-dark .bubble-content.deleted-text {
+		color: #a9b8ce;
 	}
 
 	.bubble.mine .bubble-content {
 		color: #f2f2f2;
 	}
 
+	.messages-shell.theme-dark .bubble.mine .bubble-content {
+		color: #d7deea;
+	}
+
 	.bubble.mine .bubble-content.deleted-text {
 		color: #d3d4dc;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .bubble-content.deleted-text {
+		color: #b3bfd3;
 	}
 
 	.media-caption {
@@ -1589,8 +1622,16 @@
 		word-break: break-word;
 	}
 
+	.messages-shell.theme-dark .media-caption {
+		color: #cad7ea;
+	}
+
 	.bubble.mine .media-caption {
 		color: #e6e6e6;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .media-caption {
+		color: #ced8ea;
 	}
 
 	.bubble-content.collapsed {
@@ -1627,8 +1668,16 @@
 		cursor: pointer;
 	}
 
+	.messages-shell.theme-dark .read-more-btn {
+		color: #c9d5e8;
+	}
+
 	.bubble.mine .read-more-btn {
 		color: #f2f2f2;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .read-more-btn {
+		color: #d5dff0;
 	}
 
 	@media (max-width: 900px) {

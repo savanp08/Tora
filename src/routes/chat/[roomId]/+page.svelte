@@ -3,7 +3,11 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
+	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
+	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
+	import ChatStatusBars from '$lib/components/chat/ChatStatusBars.svelte';
 	import ChatSidebar from '$lib/components/chat/ChatSidebar.svelte';
+	import ChatUiDialog from '$lib/components/chat/ChatUiDialog.svelte';
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
 	import { authToken, currentUser } from '$lib/store';
@@ -23,9 +27,11 @@
 		UiDialogState
 	} from '$lib/types/chat';
 	import {
+		getUTF8ByteLength,
 		createMessageId,
 		formatDateTime,
 		formatRoomName,
+		MESSAGE_TEXT_MAX_BYTES,
 		normalizeEpoch,
 		normalizeIdentifier,
 		normalizeMessageID,
@@ -54,6 +60,31 @@
 		filterThreadsByStatus,
 		sortThreads
 	} from '$lib/utils/chat/threadList';
+import {
+	applyMessageDeleteState,
+	applyMessageEditState,
+	createThread as createThreadState,
+		dedupeMembers as dedupeMembersState,
+		ensureOnlineSeed as ensureOnlineSeedState,
+		ensureRoomMeta as ensureRoomMetaState,
+		ensureRoomThread as ensureRoomThreadState,
+		markRoomAsRead as markRoomAsReadState,
+		mergeMessagesState,
+		removeOnlineMember as removeOnlineMemberState,
+		updateThreadPreview as updateThreadPreviewState,
+	upsertMessageState,
+	upsertOnlineMember as upsertOnlineMemberState
+} from '$lib/utils/chat/pageState';
+	import {
+		buildConfirmDialog,
+		buildPromptDialog,
+		buildRoomActionDialog,
+		resolveCloseDialogValue,
+		resolveConfirmDialogValue,
+		updatePromptDialogValue,
+		updateRoomActionDialogMode,
+		updateRoomActionDialogName
+	} from '$lib/utils/chat/dialogState';
 	import {
 		getTrustedDevicePreference,
 		isOfflineCacheSupported,
@@ -99,7 +130,6 @@
 	let draftMessage = '';
 	let attachedFile: File | null = null;
 	let showLeftMenu = false;
-	let showRoomMenu = false;
 	let showRoomSearch = false;
 	let showRoomDetails = false;
 	let themePreference: ThemePreference = 'system';
@@ -128,12 +158,12 @@
 	let expandedMessages: Record<string, boolean> = {};
 	let activeReply: ReplyTarget | null = null;
 	let identityReady = !browser;
-	let headerActionsEl: HTMLDivElement | null = null;
 	let roomExpiryTickMs = Date.now();
 	let serverClockOffsetMs = 0;
+	let serverNowAnchorMs = 0;
+	let serverNowAnchorPerfMs = 0;
 	let uiDialog: UiDialogState = { kind: 'none' };
 	let uiDialogResolver: ((value: unknown) => void) | null = null;
-	let uiDialogInputEl: HTMLInputElement | HTMLTextAreaElement | null = null;
 	let chatWindowRef: {
 		capturePrependAnchor?: () => { scrollTop: number; scrollHeight: number } | null;
 		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
@@ -186,7 +216,7 @@
 		}
 		ensureRoomMeta(roomId, roomCreatedAtFromURL, roomExpiresAtFromURL);
 	}
-	$: if (serverNowFromURL > 0) {
+	$: if (serverNowFromURL > 0 && serverNowAnchorMs <= 0) {
 		syncServerClock(serverNowFromURL);
 	}
 	$: if (browser && identityReady && roomId && isMember) {
@@ -263,17 +293,7 @@
 			}
 			handleGlobalPayload(event.payload);
 		});
-		const onDocumentPointerDown = (event: PointerEvent) => {
-			const target = event.target;
-			if (!(target instanceof Node)) {
-				return;
-			}
-			if (showRoomMenu && headerActionsEl && !headerActionsEl.contains(target)) {
-				showRoomMenu = false;
-			}
-		};
 		updateViewportMode();
-		window.addEventListener('pointerdown', onDocumentPointerDown);
 		window.addEventListener('resize', updateViewportMode);
 		clearRoomExpiryTicker();
 		roomExpiryTickMs = Date.now();
@@ -285,7 +305,6 @@
 				unsubscribeGlobalMessages();
 				unsubscribeGlobalMessages = null;
 			}
-			window.removeEventListener('pointerdown', onDocumentPointerDown);
 			window.removeEventListener('resize', updateViewportMode);
 			clearRoomExpiryTicker();
 			if (removeSystemThemeListener) {
@@ -683,28 +702,7 @@
 	}
 
 	function closeUiDialog() {
-		switch (uiDialog.kind) {
-			case 'confirm':
-				resolveActiveUiDialog(false);
-				return;
-			case 'prompt':
-				resolveActiveUiDialog(null);
-				return;
-			case 'roomAction':
-				resolveActiveUiDialog(null);
-				return;
-			default:
-				resolveActiveUiDialog(null);
-		}
-	}
-
-	function focusUiDialogInputSoon() {
-		void tick().then(() => {
-			uiDialogInputEl?.focus();
-			if (uiDialogInputEl instanceof HTMLInputElement) {
-				uiDialogInputEl.select();
-			}
-		});
+		resolveActiveUiDialog(resolveCloseDialogValue(uiDialog));
 	}
 
 	function openConfirmDialog(config: {
@@ -715,14 +713,7 @@
 		danger?: boolean;
 	}) {
 		resolveActiveUiDialog(false);
-		uiDialog = {
-			kind: 'confirm',
-			title: config.title,
-			message: config.message,
-			confirmLabel: config.confirmLabel || 'Confirm',
-			cancelLabel: config.cancelLabel || 'Cancel',
-			danger: Boolean(config.danger)
-		};
+		uiDialog = buildConfirmDialog(config);
 		return new Promise<boolean>((resolve) => {
 			uiDialogResolver = (value) => resolve(Boolean(value));
 		});
@@ -740,19 +731,7 @@
 		multiline?: boolean;
 	}) {
 		resolveActiveUiDialog(null);
-		uiDialog = {
-			kind: 'prompt',
-			title: config.title,
-			message: config.message,
-			value: config.initialValue ?? '',
-			placeholder: config.placeholder ?? '',
-			maxLength: Math.max(1, config.maxLength ?? 2000),
-			confirmLabel: config.confirmLabel || 'Save',
-			cancelLabel: config.cancelLabel || 'Cancel',
-			danger: Boolean(config.danger),
-			multiline: Boolean(config.multiline)
-		};
-		focusUiDialogInputSoon();
+		uiDialog = buildPromptDialog(config);
 		return new Promise<string | null>((resolve) => {
 			uiDialogResolver = (value) => {
 				if (typeof value === 'string') {
@@ -766,16 +745,7 @@
 
 	function openRoomActionDialog(initialName = '') {
 		resolveActiveUiDialog(null);
-		uiDialog = {
-			kind: 'roomAction',
-			title: 'Open Room',
-			message: 'Choose whether to create a new room or join an existing one.',
-			roomName: normalizeRoomNameValue(initialName),
-			mode: 'create',
-			confirmLabel: 'Continue',
-			cancelLabel: 'Cancel'
-		};
-		focusUiDialogInputSoon();
+		uiDialog = buildRoomActionDialog(initialName, normalizeRoomNameValue);
 		return new Promise<{ mode: RoomMenuMode; roomName: string } | null>((resolve) => {
 			uiDialogResolver = (value) => {
 				if (
@@ -794,76 +764,20 @@
 		});
 	}
 
-	function onUiDialogBackdropClick() {
-		closeUiDialog();
-	}
-
 	function onUiDialogConfirm() {
-		if (uiDialog.kind === 'confirm') {
-			resolveActiveUiDialog(true);
-			return;
-		}
-		if (uiDialog.kind === 'prompt') {
-			resolveActiveUiDialog(uiDialog.value);
-			return;
-		}
-		if (uiDialog.kind === 'roomAction') {
-			resolveActiveUiDialog({
-				mode: uiDialog.mode,
-				roomName: uiDialog.roomName
-			});
-		}
-	}
-
-	function onUiDialogKeyDown(event: KeyboardEvent) {
-		if (event.key === 'Escape') {
-			event.preventDefault();
-			closeUiDialog();
-			return;
-		}
-		if (event.key === 'Enter' && uiDialog.kind !== 'none') {
-			if (uiDialog.kind === 'prompt' && uiDialog.multiline) {
-				return;
-			}
-			if (
-				(uiDialog.kind === 'prompt' && promptSubmitDisabled) ||
-				(uiDialog.kind === 'roomAction' && roomActionSubmitDisabled)
-			) {
-				return;
-			}
-			event.preventDefault();
-			onUiDialogConfirm();
-		}
+		resolveActiveUiDialog(resolveConfirmDialogValue(uiDialog));
 	}
 
 	function updateUiPromptValue(value: string) {
-		if (uiDialog.kind !== 'prompt') {
-			return;
-		}
-		uiDialog = {
-			...uiDialog,
-			value: value.slice(0, uiDialog.maxLength)
-		};
+		uiDialog = updatePromptDialogValue(uiDialog, value);
 	}
 
 	function updateRoomActionMode(mode: RoomMenuMode) {
-		if (uiDialog.kind !== 'roomAction') {
-			return;
-		}
-		uiDialog = {
-			...uiDialog,
-			mode
-		};
+		uiDialog = updateRoomActionDialogMode(uiDialog, mode);
 	}
 
 	function updateRoomActionName(value: string) {
-		if (uiDialog.kind !== 'roomAction') {
-			return;
-		}
-		uiDialog = {
-			...uiDialog,
-			roomName: value.slice(0, 20)
-		};
+		uiDialog = updateRoomActionDialogName(uiDialog, value);
 	}
 
 	function setMessageActionMode(mode: MessageActionMode) {
@@ -880,6 +794,25 @@
 			return;
 		}
 		serverClockOffsetMs = parsed - Date.now();
+		if (browser && typeof performance !== 'undefined') {
+			serverNowAnchorMs = parsed;
+			serverNowAnchorPerfMs = performance.now();
+		}
+	}
+
+	function getApproxServerNowMs(tickMs?: number) {
+		// Keep `tickMs` as an optional input so callers can create a reactive dependency on the minute ticker.
+		void tickMs;
+		if (
+			browser &&
+			serverNowAnchorMs > 0 &&
+			serverNowAnchorPerfMs > 0 &&
+			typeof performance !== 'undefined'
+		) {
+			const elapsedMs = Math.max(0, performance.now() - serverNowAnchorPerfMs);
+			return serverNowAnchorMs + elapsedMs;
+		}
+		return Date.now() + serverClockOffsetMs;
 	}
 
 	function createThread(
@@ -887,15 +820,7 @@
 		nameOverride?: string,
 		status: ThreadStatus = 'joined'
 	): ChatThread {
-		return {
-			id,
-			name: nameOverride ?? formatRoomName(id),
-			lastMessage: '',
-			lastActivity: Date.now(),
-			unread: 0,
-			status,
-			isAdmin: false
-		};
+		return createThreadState(id, formatRoomName, nameOverride, status);
 	}
 
 	function ensureRoomThread(
@@ -903,107 +828,34 @@
 		nameOverride?: string,
 		status: ThreadStatus = 'joined'
 	) {
-		const existing = roomThreads.find((thread) => thread.id === targetRoomId);
-		if (existing) {
-			const nextName = nameOverride || existing.name;
-			let nextStatus: ThreadStatus = existing.status;
-			if (status === 'joined') {
-				nextStatus = 'joined';
-			} else if (existing.status !== 'joined' && existing.status !== 'left') {
-				nextStatus = status;
-			}
-			if (nextName === existing.name && nextStatus === existing.status) {
-				return;
-			}
-
-			roomThreads = sortThreads(
-				roomThreads.map((thread) =>
-					thread.id === targetRoomId
-						? {
-								...thread,
-								name: nextName,
-								status: nextStatus
-							}
-						: thread
-				)
-			);
-			return;
-		}
-
-		roomThreads = sortThreads([createThread(targetRoomId, nameOverride, status), ...roomThreads]);
+		roomThreads = ensureRoomThreadState(
+			roomThreads,
+			targetRoomId,
+			{ createThread },
+			nameOverride,
+			status
+		);
 	}
 
 	function ensureRoomMeta(targetRoomId: string, createdAt: number, expiresAt = 0) {
-		if (!targetRoomId) {
-			return;
-		}
-		const existing = roomMetaById[targetRoomId];
-		const safeCreatedAt =
-			Number.isFinite(createdAt) && createdAt > 0 ? createdAt : (existing?.createdAt ?? 0);
-		const safeExpiresAt =
-			Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : (existing?.expiresAt ?? 0);
-		if (
-			existing &&
-			existing.createdAt === safeCreatedAt &&
-			existing.expiresAt === safeExpiresAt
-		) {
-			return;
-		}
-		roomMetaById = {
-			...roomMetaById,
-			[targetRoomId]: {
-				createdAt: safeCreatedAt,
-				expiresAt: safeExpiresAt
-			}
-		};
+		roomMetaById = ensureRoomMetaState(roomMetaById, targetRoomId, createdAt, expiresAt);
 	}
 
 	function ensureOnlineSeed(targetRoomId: string) {
-		if (onlineByRoom[targetRoomId]?.length) {
-			return;
-		}
-		onlineByRoom = {
-			...onlineByRoom,
-			[targetRoomId]: dedupeMembers([
-				{
-					id: currentUserId,
-					name: currentUsername,
-					isOnline: true,
-					joinedAt: Date.now()
-				}
-			])
-		};
+		onlineByRoom = ensureOnlineSeedState(
+			onlineByRoom,
+			targetRoomId,
+			currentUserId,
+			currentUsername
+		);
 	}
 
 	function updateThreadPreview(targetRoomId: string) {
-		const roomMessages = messagesByRoom[targetRoomId] ?? [];
-		const lastMessage = roomMessages[roomMessages.length - 1];
-		const fallbackName = formatRoomName(targetRoomId);
-		if (!lastMessage) {
-			ensureRoomThread(targetRoomId, fallbackName, 'joined');
-			return;
-		}
-
-		const merged = roomThreads.some((thread) => thread.id === targetRoomId)
-			? roomThreads.map((thread) =>
-					thread.id === targetRoomId
-						? {
-								...thread,
-								name: thread.name || fallbackName,
-								lastMessage: getMessagePreviewText(lastMessage),
-								lastActivity: lastMessage.createdAt
-							}
-						: thread
-				)
-			: [
-					{
-						...createThread(targetRoomId, fallbackName, 'joined'),
-						lastMessage: getMessagePreviewText(lastMessage),
-						lastActivity: lastMessage.createdAt
-					},
-					...roomThreads
-				];
-		roomThreads = sortThreads(merged);
+		roomThreads = updateThreadPreviewState(roomThreads, messagesByRoom, targetRoomId, {
+			formatRoomName,
+			getMessagePreviewText,
+			createThread
+		});
 	}
 
 	function markRoomMembershipSynced(targetRoomId: string) {
@@ -1195,7 +1047,6 @@
 		}
 		clientLog('select-room', { fromRoom: roomId, toRoom: normalizedTargetRoomId, memberState });
 		showLeftMenu = false;
-		showRoomMenu = false;
 		showRoomSearch = false;
 		showRoomDetails = false;
 		setMessageActionMode('none');
@@ -1231,7 +1082,7 @@
 			focusMessageId = '';
 			focusConsumedForRoom = true;
 		}
-		params.set('serverNow', String(Date.now() + serverClockOffsetMs));
+		params.set('serverNow', String(getApproxServerNowMs()));
 
 		const query = params.toString();
 		void goto(`/chat/${encodeURIComponent(normalizedTargetRoomId)}${query ? `?${query}` : ''}`);
@@ -1241,7 +1092,6 @@
 		if (!isMobileView) {
 			return;
 		}
-		showRoomMenu = false;
 		showRoomSearch = false;
 		showRoomDetails = false;
 		setMessageActionMode('none');
@@ -1430,173 +1280,85 @@
 	}
 
 	function upsertMessage(targetRoomId: string, message: ChatMessage, shouldCountUnread: boolean) {
-		const roomMessages = messagesByRoom[targetRoomId] ?? [];
-		const existingIndex = roomMessages.findIndex((entry) => entry.id === message.id);
-
-		let nextMessages: ChatMessage[];
-		if (existingIndex >= 0) {
-			nextMessages = [...roomMessages];
-			nextMessages[existingIndex] = {
-				...nextMessages[existingIndex],
-				...message,
-				pending: false
-			};
-		} else {
-			nextMessages = [...roomMessages, message];
-		}
-
-		nextMessages.sort((a, b) => a.createdAt - b.createdAt);
-		messagesByRoom = {
-			...messagesByRoom,
-			[targetRoomId]: nextMessages
-		};
-
-		updateThreadPreview(targetRoomId);
+		const next = upsertMessageState(
+			messagesByRoom,
+			roomThreads,
+			targetRoomId,
+			message,
+			shouldCountUnread,
+			{
+				formatRoomName,
+				getMessagePreviewText,
+				createThread
+			}
+		);
+		messagesByRoom = next.messagesByRoom;
+		roomThreads = next.roomThreads;
 		queueOfflineCachePersist(targetRoomId);
-		if (shouldCountUnread) {
-			roomThreads = sortThreads(
-				roomThreads.map((thread) =>
-					thread.id === targetRoomId ? { ...thread, unread: thread.unread + 1 } : thread
-				)
-			);
-		}
 	}
 
 	function mergeMessages(targetRoomId: string, incoming: ChatMessage[]) {
-		if (incoming.length === 0) {
-			return;
+		const next = mergeMessagesState(messagesByRoom, roomThreads, targetRoomId, incoming, {
+			formatRoomName,
+			getMessagePreviewText,
+			createThread
+		});
+		messagesByRoom = next.messagesByRoom;
+		roomThreads = next.roomThreads;
+		if (incoming.length > 0) {
+			queueOfflineCachePersist(targetRoomId);
 		}
-		const existing = messagesByRoom[targetRoomId] ?? [];
-		const merged = new Map<string, ChatMessage>();
-		for (const message of existing) {
-			merged.set(message.id, message);
-		}
-		for (const message of incoming) {
-			const current = merged.get(message.id);
-			merged.set(message.id, { ...current, ...message, pending: false });
-		}
-		const nextMessages = [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
-		messagesByRoom = {
-			...messagesByRoom,
-			[targetRoomId]: nextMessages
-		};
-		updateThreadPreview(targetRoomId);
-		queueOfflineCachePersist(targetRoomId);
 	}
 
 	function applyMessageEdit(targetRoomId: string, payload: unknown) {
-		if (!payload || typeof payload !== 'object') {
+		const next = applyMessageEditState(messagesByRoom, roomThreads, targetRoomId, payload, {
+			formatRoomName,
+			getMessagePreviewText,
+			createThread
+		});
+		if (!next.changed) {
 			return;
 		}
-		const source = payload as Record<string, unknown>;
-		const messageId = normalizeMessageID(toStringValue(source.messageId ?? source.id));
-		const nextContent = toStringValue(source.content).trim();
-		const editedAt = parseOptionalTimestamp(source.editedAt ?? source.edited_at ?? Date.now());
-		if (!messageId || !nextContent) {
-			return;
-		}
-		const roomMessages = messagesByRoom[targetRoomId] ?? [];
-		const index = roomMessages.findIndex((entry) => entry.id === messageId);
-		if (index < 0) {
-			return;
-		}
-		const nextMessages = [...roomMessages];
-		nextMessages[index] = {
-			...nextMessages[index],
-			content: nextContent,
-			type: 'text',
-			mediaUrl: '',
-			mediaType: '',
-			fileName: '',
-			isEdited: true,
-			editedAt,
-			isDeleted: false,
-			pending: false
-		};
-		messagesByRoom = {
-			...messagesByRoom,
-			[targetRoomId]: nextMessages
-		};
-		updateThreadPreview(targetRoomId);
+		messagesByRoom = next.messagesByRoom;
+		roomThreads = next.roomThreads;
 		queueOfflineCachePersist(targetRoomId);
 	}
 
 	function applyMessageDelete(targetRoomId: string, payload: unknown) {
-		if (!payload || typeof payload !== 'object') {
+		const next = applyMessageDeleteState(
+			messagesByRoom,
+			roomThreads,
+			targetRoomId,
+			payload,
+			DELETED_MESSAGE_PLACEHOLDER,
+			{
+				formatRoomName,
+				getMessagePreviewText,
+				createThread
+			}
+		);
+		if (!next.changed) {
 			return;
 		}
-		const source = payload as Record<string, unknown>;
-		const messageId = normalizeMessageID(toStringValue(source.messageId ?? source.id));
-		if (!messageId) {
-			return;
-		}
-		const roomMessages = messagesByRoom[targetRoomId] ?? [];
-		const index = roomMessages.findIndex((entry) => entry.id === messageId);
-		if (index < 0) {
-			return;
-		}
-		const nextMessages = [...roomMessages];
-		nextMessages[index] = {
-			...nextMessages[index],
-			content: DELETED_MESSAGE_PLACEHOLDER,
-			type: 'deleted',
-			mediaUrl: '',
-			mediaType: '',
-			fileName: '',
-			replyToMessageId: '',
-			replyToSnippet: '',
-			isEdited: false,
-			editedAt: parseOptionalTimestamp(source.editedAt ?? source.edited_at),
-			isDeleted: true,
-			pending: false
-		};
-		messagesByRoom = {
-			...messagesByRoom,
-			[targetRoomId]: nextMessages
-		};
-		updateThreadPreview(targetRoomId);
+		messagesByRoom = next.messagesByRoom;
+		roomThreads = next.roomThreads;
 		queueOfflineCachePersist(targetRoomId);
 	}
 
 	function markRoomAsRead(targetRoomId: string) {
-		if (!targetRoomId) {
-			return;
-		}
-		roomThreads = sortThreads(
-			roomThreads.map((thread) => (thread.id === targetRoomId ? { ...thread, unread: 0 } : thread))
-		);
+		roomThreads = markRoomAsReadState(roomThreads, targetRoomId);
 	}
 
 	function upsertOnlineMember(targetRoomId: string, member: OnlineMember) {
-		const members = onlineByRoom[targetRoomId] ?? [];
-		const existingIndex = members.findIndex((entry) => entry.id === member.id);
-		let next: OnlineMember[];
-		if (existingIndex >= 0) {
-			next = [...members];
-			next[existingIndex] = { ...next[existingIndex], ...member, isOnline: true };
-		} else {
-			next = [...members, { ...member, isOnline: true }];
-		}
-		onlineByRoom = {
-			...onlineByRoom,
-			[targetRoomId]: dedupeMembers(next)
-		};
+		onlineByRoom = upsertOnlineMemberState(onlineByRoom, targetRoomId, member);
 	}
 
 	function removeOnlineMember(targetRoomId: string, memberId: string) {
-		const members = onlineByRoom[targetRoomId] ?? [];
-		onlineByRoom = {
-			...onlineByRoom,
-			[targetRoomId]: members.filter((member) => member.id !== memberId)
-		};
+		onlineByRoom = removeOnlineMemberState(onlineByRoom, targetRoomId, memberId);
 	}
 
 	function dedupeMembers(members: OnlineMember[]) {
-		const byId = new Map<string, OnlineMember>();
-		for (const member of members) {
-			byId.set(member.id, member);
-		}
-		return [...byId.values()];
+		return dedupeMembersState(members);
 	}
 
 	async function sendMessage(payload?: ComposerMediaPayload) {
@@ -1606,6 +1368,9 @@
 		}
 
 		const text = draftMessage.trim();
+		if (getUTF8ByteLength(text) > MESSAGE_TEXT_MAX_BYTES) {
+			return;
+		}
 		const mediaType = payload?.type;
 		const mediaContent = payload?.content?.trim() ?? '';
 		const isMediaMessage = Boolean(mediaType && mediaContent);
@@ -1690,7 +1455,6 @@
 
 	function toggleLeftMenu() {
 		showLeftMenu = !showLeftMenu;
-		showRoomMenu = false;
 	}
 
 	async function renameRoom(targetRoomId: string = roomId) {
@@ -1699,7 +1463,6 @@
 			return;
 		}
 		showLeftMenu = false;
-		showRoomMenu = false;
 
 		const existing = roomThreads.find((thread) => thread.id === normalizedRoomID);
 		const currentName = existing?.name || formatRoomName(normalizedRoomID);
@@ -1757,7 +1520,6 @@
 			}
 
 			showLeftMenu = false;
-			showRoomMenu = false;
 			showErrorToast('Room renamed');
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to rename room');
@@ -1831,7 +1593,7 @@
 			if (nextExpiresAt > 0) {
 				params.set('expiresAt', String(nextExpiresAt));
 			}
-			params.set('serverNow', String(Date.now() + serverClockOffsetMs));
+			params.set('serverNow', String(getApproxServerNowMs()));
 			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}`);
 		} catch (error) {
 			showErrorToast(
@@ -1891,7 +1653,7 @@
 			if (joinedExpiresAt > 0) {
 				params.set('expiresAt', String(joinedExpiresAt));
 			}
-			params.set('serverNow', String(Date.now() + serverClockOffsetMs));
+			params.set('serverNow', String(getApproxServerNowMs()));
 			await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}`);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Unable to join room');
@@ -1924,7 +1686,7 @@
 					ensureRoomMeta(
 						targetRoomId,
 						createdAt,
-						Date.now() + serverClockOffsetMs + expiresInSeconds * 1000
+						getApproxServerNowMs() + expiresInSeconds * 1000
 					);
 				}
 			showErrorToast(data.message || 'Room extended for 24 hours');
@@ -1945,29 +1707,20 @@
 	function toggleBreakSelectionMode() {
 		const nextMode: MessageActionMode = messageActionMode === 'break' ? 'none' : 'break';
 		setMessageActionMode(nextMode);
-		showRoomMenu = false;
 	}
 
 	function toggleEditSelectionMode() {
 		const nextMode: MessageActionMode = messageActionMode === 'edit' ? 'none' : 'edit';
 		setMessageActionMode(nextMode);
-		showRoomMenu = false;
 	}
 
 	function toggleDeleteSelectionMode() {
 		const nextMode: MessageActionMode = messageActionMode === 'delete' ? 'none' : 'delete';
 		setMessageActionMode(nextMode);
-		showRoomMenu = false;
-	}
-
-	function toggleRoomMenu() {
-		showRoomMenu = !showRoomMenu;
-		showLeftMenu = false;
 	}
 
 	function toggleRoomSearch() {
 		showRoomSearch = !showRoomSearch;
-		showRoomMenu = false;
 		if (!showRoomSearch) {
 			roomMessageSearch = '';
 		}
@@ -1975,7 +1728,6 @@
 
 	function openRoomDetails() {
 		showRoomDetails = true;
-		showRoomMenu = false;
 	}
 
 	function closeRoomDetails() {
@@ -1989,11 +1741,9 @@
 		messagesByRoom = { ...messagesByRoom, [roomId]: [] };
 		updateThreadPreview(roomId);
 		queueOfflineCachePersist(roomId);
-		showRoomMenu = false;
 	}
 
 	async function disconnectAndWipe() {
-		showRoomMenu = false;
 		showLeftMenu = false;
 		setMessageActionMode('none');
 		sendTypingStop();
@@ -2234,7 +1984,6 @@
 			}
 			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 			setMessageActionMode('none');
-			showRoomMenu = false;
 			showRoomDetails = false;
 
 			const deletedRootId = roomId;
@@ -2301,7 +2050,6 @@
 			}
 			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 			setMessageActionMode('none');
-			showRoomMenu = false;
 			showRoomDetails = false;
 			showRoomSearch = false;
 
@@ -2446,7 +2194,7 @@
 			const params = new URLSearchParams({
 				name: breakRoomName,
 				member: '1',
-				serverNow: String(Date.now() + serverClockOffsetMs)
+				serverNow: String(getApproxServerNowMs())
 			});
 			if (breakCreatedAt > 0) {
 				params.set('createdAt', String(breakCreatedAt));
@@ -2496,7 +2244,7 @@
 		if (!expiry) {
 			return '--';
 		}
-		const now = roomExpiryTickMs + serverClockOffsetMs;
+		const now = getApproxServerNowMs(roomExpiryTickMs);
 		const remainingMs = Math.max(0, expiry - now);
 		if (remainingMs <= 0) {
 			return '0m';
@@ -2527,360 +2275,144 @@
 	<div class="toast" role="status" aria-live="polite">{toastMessage}</div>
 {/if}
 
-{#if uiDialog.kind !== 'none'}
-	<button
-		type="button"
-		class="ui-dialog-backdrop"
-		aria-label="Close dialog"
-		on:click={onUiDialogBackdropClick}
-	></button>
-	<div
-		class="ui-dialog"
-		role="dialog"
-		aria-modal="true"
-		aria-labelledby="ui-dialog-title"
-		tabindex="-1"
-		on:keydown={onUiDialogKeyDown}
-	>
-		<header class="ui-dialog-header">
-			<h3 id="ui-dialog-title">{uiDialog.title}</h3>
-		</header>
-		<div class="ui-dialog-body">
-			<p>{uiDialog.message}</p>
-			{#if uiDialog.kind === 'prompt'}
-				{#if uiDialog.multiline}
-					<textarea
-						class="ui-dialog-input ui-dialog-textarea"
-						value={uiDialog.value}
-						placeholder={uiDialog.placeholder}
-						maxlength={uiDialog.maxLength}
-						rows={5}
-						bind:this={uiDialogInputEl}
-						on:input={(event) =>
-							updateUiPromptValue((event.currentTarget as HTMLTextAreaElement).value)}
-					></textarea>
-				{:else}
-					<input
-						class="ui-dialog-input"
-						type="text"
-						value={uiDialog.value}
-						placeholder={uiDialog.placeholder}
-						maxlength={uiDialog.maxLength}
-						bind:this={uiDialogInputEl}
-						on:input={(event) =>
-							updateUiPromptValue((event.currentTarget as HTMLInputElement).value)}
-					/>
-				{/if}
-			{:else if uiDialog.kind === 'roomAction'}
-				<div class="ui-dialog-mode-toggle">
-					<button
-						type="button"
-						class="ui-dialog-mode-btn {uiDialog.mode === 'create' ? 'active' : ''}"
-						on:click={() => updateRoomActionMode('create')}
-					>
-						New
-					</button>
-					<button
-						type="button"
-						class="ui-dialog-mode-btn {uiDialog.mode === 'join' ? 'active' : ''}"
-						on:click={() => updateRoomActionMode('join')}
-					>
-						Existing
-					</button>
-				</div>
-				<input
-					class="ui-dialog-input"
-					type="text"
-					value={uiDialog.roomName}
-					placeholder="Room name"
-					maxlength={20}
-					bind:this={uiDialogInputEl}
-					on:input={(event) =>
-						updateRoomActionName((event.currentTarget as HTMLInputElement).value)}
-				/>
-			{/if}
-		</div>
-		<footer class="ui-dialog-actions">
-			<button type="button" class="ui-dialog-btn" on:click={closeUiDialog}>
-				{uiDialog.cancelLabel}
-			</button>
-			<button
-				type="button"
-				class="ui-dialog-btn primary {uiDialog.kind === 'confirm' && uiDialog.danger ? 'danger' : ''}"
-				on:click={onUiDialogConfirm}
-				disabled={(uiDialog.kind === 'prompt' && promptSubmitDisabled) ||
-					(uiDialog.kind === 'roomAction' && roomActionSubmitDisabled)}
-			>
-				{uiDialog.confirmLabel}
-			</button>
-		</footer>
-	</div>
-{/if}
+<ChatUiDialog
+	dialog={uiDialog}
+	{promptSubmitDisabled}
+	{roomActionSubmitDisabled}
+	on:close={closeUiDialog}
+	on:confirm={onUiDialogConfirm}
+	on:promptInput={(event) => updateUiPromptValue(event.detail.value)}
+	on:roomModeChange={(event) => updateRoomActionMode(event.detail.mode)}
+	on:roomNameInput={(event) => updateRoomActionName(event.detail.value)}
+/>
 
-	<section
-		class="chat-shell"
-		class:theme-dark={isDarkMode}
-		class:mobile-list-only={isMobileView && mobilePane === 'list'}
-		class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
-	>
-		<div class="sidebar-pane">
-			<ChatSidebar
+<section
+	class="chat-shell"
+	class:theme-dark={isDarkMode}
+	class:mobile-list-only={isMobileView && mobilePane === 'list'}
+	class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
+>
+	<div class="sidebar-pane">
+		<ChatSidebar
 			myRooms={filteredMyRooms}
 			discoverableRooms={filteredDiscoverableRooms}
 			leftRooms={filteredLeftRooms}
 			accessibleParentRoomIds={roomThreads.map((thread) => thread.id)}
-				activeRoomId={roomId}
-				{isMobileView}
-				{showLeftMenu}
-				{isDarkMode}
-				{themePreference}
-				bind:chatListSearch
-				on:select={onSidebarSelect}
-				on:jumpOrigin={onJumpToBreakOrigin}
-				on:toggleMenu={toggleLeftMenu}
-				on:toggleTheme={toggleThemePreference}
-				on:createRoom={createRoomFromMenu}
-				on:renameRoom={(event) => void renameRoom(event.detail.roomId)}
-			/>
-		</div>
+			activeRoomId={roomId}
+			{isMobileView}
+			{showLeftMenu}
+			{isDarkMode}
+			{themePreference}
+			bind:chatListSearch
+			on:select={onSidebarSelect}
+			on:jumpOrigin={onJumpToBreakOrigin}
+			on:toggleMenu={toggleLeftMenu}
+			on:toggleTheme={toggleThemePreference}
+			on:createRoom={createRoomFromMenu}
+			on:renameRoom={(event) => void renameRoom(event.detail.roomId)}
+		/>
+	</div>
 
 	<section class="chat-window">
-		<header class="chat-header">
-			{#if isMobileView}
-				<button
-					type="button"
-					class="mobile-back-button"
-					on:pointerdown|stopPropagation
-					on:click|stopPropagation={showMobileRoomList}
-					aria-label="Back to room list"
-				>
-					Rooms
-				</button>
-			{/if}
-			<button type="button" class="room-title-button" on:click={openRoomDetails}>
-				<span class="presence-dot"></span>
-				<span class="title-text">
-					<span class="title-main">{activeThread.name}</span>
-					<span class="title-sub">
-						{currentOnlineMembers.length} online
-						{#if activeUnreadCount > 0}
-							- {activeUnreadCount} unread
-						{/if}
-						{#if !isMember}
-							- discoverable
-						{/if}
-					</span>
-				</span>
-			</button>
+		<ChatRoomHeader
+			roomName={activeThread.name}
+			onlineCount={currentOnlineMembers.length}
+			unreadCount={activeUnreadCount}
+			{isMember}
+			{isActiveRoomAdmin}
+			{isMobileView}
+			{isDarkMode}
+			{messageActionMode}
+			{showRoomSearch}
+			remainingLabel={getRemainingHoursLabel(roomId)}
+			on:showMobileList={showMobileRoomList}
+			on:openRoomDetails={openRoomDetails}
+			on:toggleRoomSearch={toggleRoomSearch}
+			on:renameRoom={() => void renameRoom(roomId)}
+			on:toggleBreakSelectionMode={toggleBreakSelectionMode}
+			on:toggleEditSelectionMode={toggleEditSelectionMode}
+			on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
+			on:markRead={() => markRoomAsRead(roomId)}
+			on:clearLocal={clearCurrentRoomMessages}
+			on:leaveRoom={() => void leaveCurrentRoom()}
+			on:deleteRoom={() => void deleteCurrentRoomAsAdmin()}
+			on:disconnect={() => void disconnectAndWipe()}
+		/>
 
-				<div class="header-actions" bind:this={headerActionsEl}>
-					<button
-						type="button"
-						class="expiry-pill"
-						on:click|stopPropagation={openRoomDetails}
-						title="Remaining room lifetime"
-						aria-label="Open room lifetime details"
-					>
-						{getRemainingHoursLabel(roomId)}
-					</button>
-					<button
-						type="button"
-						class="icon-button"
-						on:click|stopPropagation={toggleRoomMenu}
-						title="More options"
-					>
-						...
-					</button>
-						{#if showRoomMenu}
-							<div class="room-menu">
-								<button type="button" on:click|stopPropagation={toggleRoomSearch}>
-								{showRoomSearch ? 'Hide search' : 'Search messages'}
-							</button>
-							<button type="button" on:click|stopPropagation={() => void renameRoom(roomId)}>
-								Rename room
-							</button>
-							<button type="button" on:click|stopPropagation={toggleBreakSelectionMode}>
-								{messageActionMode === 'break' ? 'Cancel Break Mode' : 'Start Break / New Topic'}
-							</button>
-							<button type="button" on:click|stopPropagation={toggleEditSelectionMode}>
-								{messageActionMode === 'edit' ? 'Cancel Edit Mode' : 'Edit Message (Select One)'}
-							</button>
-							<button type="button" on:click|stopPropagation={toggleDeleteSelectionMode}>
-								{messageActionMode === 'delete' ? 'Cancel Delete Mode' : 'Delete Message (Select One)'}
-							</button>
-							<button type="button" on:click|stopPropagation={() => markRoomAsRead(roomId)}>
-								Mark read
-							</button>
-							<button type="button" on:click|stopPropagation={clearCurrentRoomMessages}>
-								Clear local
-							</button>
-							{#if isMember}
-								<button type="button" on:click|stopPropagation={() => void leaveCurrentRoom()}>
-									Leave Room
-								</button>
-							{/if}
-							{#if isActiveRoomAdmin}
-								<button type="button" on:click|stopPropagation={() => void deleteCurrentRoomAsAdmin()}>
-									Delete Room
-								</button>
-							{/if}
-							<button type="button" on:click|stopPropagation={() => void disconnectAndWipe()}>
-								Disconnect
-							</button>
-						</div>
-					{/if}
-			</div>
-		</header>
+		<ChatStatusBars
+			{typingIndicatorText}
+			{showTrustedDevicePrompt}
+			{isSelectionMode}
+			{messageActionMode}
+			{showRoomSearch}
+			bind:roomMessageSearch
+			{isDarkMode}
+			on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
+		/>
 
-		{#if typingIndicatorText}
-			<div class="typing-indicator">{typingIndicatorText}</div>
-		{/if}
-
-		{#if showTrustedDevicePrompt}
-			<div class="trusted-banner" role="status" aria-live="polite">
-				<span>Trusted device? Enable encrypted history caching for faster loading.</span>
-				<div class="trusted-actions">
-					<button type="button" on:click={() => onTrustedDeviceChoice('yes')}>Yes</button>
-					<button type="button" on:click={() => onTrustedDeviceChoice('no')}>No</button>
-				</div>
-			</div>
-		{/if}
-
-		{#if isSelectionMode}
-			<div class="selection-banner">
-				{#if messageActionMode === 'break'}
-					Break mode active: click a message to start a new topic room.
-				{:else if messageActionMode === 'edit'}
-					Edit mode active: click one of your messages, then use the edit/delete buttons beside it.
-				{:else if messageActionMode === 'delete'}
-					Delete mode active: click one of your messages, then use the edit/delete buttons beside it.
-				{/if}
-			</div>
-		{/if}
-
-		{#if showRoomSearch}
-			<div class="chat-search-row">
-				<input type="text" bind:value={roomMessageSearch} placeholder="Search in this room" />
-			</div>
-		{/if}
-
-				<ChatWindow
-					bind:this={chatWindowRef}
-					messages={currentMessages}
-					{currentUserId}
-					{roomMessageSearch}
-					{expandedMessages}
-					{isMember}
-					{isSelectionMode}
-					{isDarkMode}
-					messageActionMode={messageActionMode}
-					selectedMessageId={selectedActionMessageId}
-					{focusMessageId}
-				isLoadingOlder={isLoadingOlderHistory}
-				hasMoreOlder={hasMoreOlderHistory}
-				on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
-				on:joinBreakRoom={onJoinBreakRoom}
-				on:joinRoom={() => void joinCurrentRoom()}
-				on:messageSelect={onMessageSelected}
-				on:reply={onReplyRequest}
-				on:editMessage={onEditMessageRequest}
-				on:deleteMessage={onDeleteMessageRequest}
-				on:editSelected={onSelectedMessageEdit}
-				on:deleteSelected={onSelectedMessageDelete}
-				on:requestOlder={onRequestOlderHistory}
-				on:focusHandled={onFocusHandled}
-			/>
+		<ChatWindow
+			bind:this={chatWindowRef}
+			messages={currentMessages}
+			{currentUserId}
+			{roomMessageSearch}
+			{expandedMessages}
+			{isMember}
+			{isSelectionMode}
+			{isDarkMode}
+			messageActionMode={messageActionMode}
+			selectedMessageId={selectedActionMessageId}
+			{focusMessageId}
+			isLoadingOlder={isLoadingOlderHistory}
+			hasMoreOlder={hasMoreOlderHistory}
+			on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+			on:joinBreakRoom={onJoinBreakRoom}
+			on:joinRoom={() => void joinCurrentRoom()}
+			on:messageSelect={onMessageSelected}
+			on:reply={onReplyRequest}
+			on:editMessage={onEditMessageRequest}
+			on:deleteMessage={onDeleteMessageRequest}
+			on:editSelected={onSelectedMessageEdit}
+			on:deleteSelected={onSelectedMessageDelete}
+			on:requestOlder={onRequestOlderHistory}
+			on:focusHandled={onFocusHandled}
+		/>
 
 		{#if isMember}
-				<ChatComposer
-					bind:draftMessage
-					bind:attachedFile
-					{activeReply}
-					{isDarkMode}
-					on:send={(event) => void sendMessage(event.detail)}
-					on:typing={onComposerTyping}
-					on:attach={handleComposerAttach}
+			<ChatComposer
+				bind:draftMessage
+				bind:attachedFile
+				{activeReply}
+				{isDarkMode}
+				messageLimit={MESSAGE_TEXT_MAX_BYTES}
+				on:send={(event) => void sendMessage(event.detail)}
+				on:typing={onComposerTyping}
+				on:attach={handleComposerAttach}
 				on:removeAttachment={handleComposerRemoveAttachment}
 				on:cancelReply={clearReplyTarget}
 			/>
 		{/if}
 	</section>
 
-		<div class="online-pane">
-			<OnlinePanel members={currentOnlineMembers} {isDarkMode} />
-		</div>
-	</section>
+	<div class="online-pane">
+		<OnlinePanel members={currentOnlineMembers} {isDarkMode} />
+	</div>
+</section>
 
-{#if showRoomDetails}
-	{#if isMobileView}
-		<button
-			type="button"
-			class="mobile-info-backdrop"
-			aria-label="Close room details"
-			on:click={closeRoomDetails}
-		></button>
-	{/if}
-	<section
-		class="mobile-info-panel room-details-panel"
-		class:desktop-room-panel={!isMobileView}
-		role="dialog"
-		aria-modal="true"
-	>
-		<header>
-			<h3>{activeThread.name}</h3>
-			<button type="button" on:click={closeRoomDetails}>Close</button>
-		</header>
-		<div class="mobile-info-content">
-			<div class="room-details-card">
-				<h4>Room Details</h4>
-				<div class="room-detail-row">
-					<span>Created</span>
-					<strong>{formatDateTime(getRoomCreatedAt(roomId))}</strong>
-				</div>
-				<div class="room-detail-row">
-					<span>Expires</span>
-					<strong>{formatDateTime(getRoomExpiry(roomId))}</strong>
-				</div>
-			</div>
-
-			<div class="room-actions">
-				<button
-					type="button"
-					class="extend-room-button"
-					on:click={requestRoomExtension}
-					disabled={isExtendingRoom}
-				>
-					{isExtendingRoom ? 'Extending...' : 'Extend Room (24h)'}
-				</button>
-				<p>Manually extends this room and its messages for 24 hours (Max 14 extensions).</p>
-			</div>
-
-			<h4 class="members-title">Members</h4>
-			{#if currentOnlineMembers.length === 0}
-				<div class="empty-label">No online members.</div>
-			{:else}
-				{#each currentOnlineMembers as member (member.id)}
-					<div class="online-member">
-						<span class="member-dot"></span>
-						<div>
-							<div class="member-name">{member.name}</div>
-							<div class="member-meta">Joined {formatDateTime(member.joinedAt)}</div>
-						</div>
-						{#if isActiveRoomAdmin && normalizeIdentifier(member.id) !== normalizeIdentifier(currentUserId)}
-							<button
-								type="button"
-								class="member-remove-button"
-								on:click={() => void removeMemberFromRoom(member.id)}
-							>
-								Remove
-							</button>
-						{/if}
-					</div>
-				{/each}
-			{/if}
-		</div>
-	</section>
-{/if}
+<ChatRoomDetailsPanel
+	show={showRoomDetails}
+	{isMobileView}
+	roomName={activeThread.name}
+	createdLabel={formatDateTime(getRoomCreatedAt(roomId))}
+	expiresLabel={formatDateTime(getRoomExpiry(roomId))}
+	{isExtendingRoom}
+	currentOnlineMembers={currentOnlineMembers}
+	{isActiveRoomAdmin}
+	{currentUserId}
+	{formatDateTime}
+	on:close={closeRoomDetails}
+	on:extend={requestRoomExtension}
+	on:removeMember={(event) => void removeMemberFromRoom(event.detail.memberId)}
+/>
 
 <style>
 	.chat-shell {
@@ -2948,484 +2480,10 @@
 		border-color: var(--panel-border);
 	}
 
-	.chat-shell.theme-dark .chat-header {
-		background: #0f1a2e;
-		border-bottom-color: #2b3a53;
-	}
-
-	.chat-shell.theme-dark .room-title-button {
-		color: #e2ebfb;
-	}
-
-	.chat-shell.theme-dark .title-sub {
-		color: #9fb2d2;
-	}
-
-	.chat-shell.theme-dark .mobile-back-button {
-		border-color: #314059;
-		background: #101a2e;
-		color: #d8e3fa;
-	}
-
-	.chat-shell.theme-dark .expiry-pill {
-		border-color: #314059;
-		background: #101a2e;
-		color: #d8e3fa;
-	}
-
-	.chat-shell.theme-dark .expiry-pill:hover {
-		background: #16233c;
-	}
-
-	.chat-shell.theme-dark .icon-button {
-		border-color: #314059;
-		background: #101a2e;
-		color: #d8e3fa;
-	}
-
-	.chat-shell.theme-dark .room-menu {
-		background: #111d33;
-		border-color: #2f3f5b;
-		box-shadow: 0 14px 28px rgba(2, 8, 23, 0.5);
-	}
-
-	.chat-shell.theme-dark .room-menu button {
-		background: #111d33;
-		color: #dbe8ff;
-	}
-
-	.chat-shell.theme-dark .room-menu button:hover {
-		background: #1b2a45;
-	}
-
-	.chat-shell.theme-dark .selection-banner {
-		background: #101a2e;
-		border-bottom-color: #2f3f5b;
-		color: #c5d3ec;
-	}
-
-	.chat-shell.theme-dark .typing-indicator {
-		background: #0f1a2e;
-		border-bottom-color: #2e3d58;
-		color: #9fb1d0;
-	}
-
-	.chat-shell.theme-dark .trusted-banner {
-		background: #0f1a2e;
-		border-bottom-color: #2e3d58;
-		color: #d2def2;
-	}
-
-	.chat-shell.theme-dark .trusted-actions button {
-		border-color: #34445f;
-		background: #13203a;
-		color: #d9e6ff;
-	}
-
-	.chat-shell.theme-dark .chat-search-row {
-		background: #0f1a2e;
-		border-bottom-color: #2f3f5b;
-	}
-
-	.chat-shell.theme-dark .chat-search-row input {
-		border-color: #314059;
-		background: #111d33;
-		color: #dbe7ff;
-	}
-
-	.chat-shell.theme-dark .chat-search-row input::placeholder {
-		color: #8ea2c3;
-	}
-
-	.chat-header {
-		position: relative;
-		background: #fcfcfd;
-		border-bottom: 1px solid #e2e2e7;
-		padding: 0.8rem 1rem;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.85rem;
-	}
-
-	.mobile-back-button {
-		display: none;
-		border: 1px solid #cdced4;
-		background: #f8f8f9;
-		color: #35353d;
-		border-radius: 999px;
-		padding: 0.35rem 0.65rem;
-		font-size: 0.78rem;
-		font-weight: 600;
-		cursor: pointer;
-		flex-shrink: 0;
-	}
-
-	.room-title-button {
-		display: flex;
-		align-items: center;
-		gap: 0.55rem;
-		color: #2e2e36;
-		min-width: 0;
-		flex: 1;
-		border: none;
-		background: transparent;
-		padding: 0;
-		margin: 0;
-		text-align: left;
-		cursor: pointer;
-	}
-
-	.room-title-button:focus-visible {
-		outline: 2px solid #8f8f98;
-		outline-offset: 4px;
-		border-radius: 8px;
-	}
-
-	.presence-dot {
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		background: #22c55e;
-	}
-
-	.title-text {
-		display: inline-flex;
-		flex-direction: column;
-		align-items: flex-start;
-		min-width: 0;
-	}
-
-	.title-main {
-		font-size: 0.98rem;
-		font-weight: 700;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.title-sub {
-		font-size: 0.76rem;
-		color: #6d6d76;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.header-actions {
-		display: flex;
-		align-items: center;
-		gap: 0.45rem;
-		position: relative;
-		cursor: default;
-		flex-shrink: 0;
-	}
-
-	.expiry-pill {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-width: 3.1rem;
-		height: 1.85rem;
-		padding: 0 0.48rem;
-		border-radius: 999px;
-		border: 1px solid #d4d4da;
-		background: #f5f5f7;
-		color: #414149;
-		font-size: 0.76rem;
-		font-weight: 700;
-		letter-spacing: 0.01em;
-		cursor: pointer;
-	}
-
-	.expiry-pill:hover {
-		background: #eeeef1;
-	}
-
-	.expiry-pill:focus-visible {
-		outline: 2px solid #8f8f98;
-		outline-offset: 2px;
-	}
-
-	.icon-button {
-		border: 1px solid #d2d2d8;
-		background: #f7f7f8;
-		border-radius: 6px;
-		padding: 0.35rem 0.55rem;
-		font-size: 0.78rem;
-		cursor: pointer;
-		color: #33333b;
-	}
-
-	.room-menu {
-		position: absolute;
-		top: calc(100% + 6px);
-		right: 0;
-		background: #fcfcfd;
-		border: 1px solid #dedee4;
-		border-radius: 8px;
-		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
-		overflow: hidden;
-		min-width: 170px;
-		z-index: 100;
-	}
-
-	.room-menu button {
-		width: 100%;
-		border: none;
-		background: #fcfcfd;
-		padding: 0.55rem 0.75rem;
-		text-align: left;
-		font-size: 0.84rem;
-		cursor: pointer;
-	}
-
-	.room-menu button:hover {
-		background: #f1f1f3;
-	}
-
-	.selection-banner {
-		padding: 0.45rem 0.9rem;
-		background: #f1f1f3;
-		border-bottom: 1px solid #dfdfe4;
-		font-size: 0.8rem;
-		color: #3a3a42;
-	}
-
-	.typing-indicator {
-		padding: 0.35rem 0.9rem;
-		border-bottom: 1px solid #e4e4e8;
-		background: #fafafc;
-		color: #666873;
-		font-size: 0.75rem;
-		line-height: 1.2;
-	}
-
-	.trusted-banner {
-		padding: 0.5rem 0.9rem;
-		border-bottom: 1px solid #e2e2e7;
-		background: #f8f8fb;
-		color: #383844;
-		font-size: 0.76rem;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.6rem;
-	}
-
-	.trusted-actions {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.35rem;
-	}
-
-	.trusted-actions button {
-		border: 1px solid #d3d3da;
-		background: #ffffff;
-		color: #2f2f37;
-		border-radius: 999px;
-		font-size: 0.72rem;
-		padding: 0.18rem 0.54rem;
-		cursor: pointer;
-	}
-
-	.trusted-actions button:hover {
-		background: #f2f2f6;
-	}
-
-	.chat-search-row {
-		padding: 0.65rem 0.9rem;
-		background: #fcfcfd;
-		border-bottom: 1px solid #e3e3e8;
-	}
-
-	.chat-search-row input {
-		width: 100%;
-		border: 1px solid #d6d6dc;
-		border-radius: 8px;
-		padding: 0.55rem 0.7rem;
-		font-size: 0.9rem;
-		background: #fafafb;
-		color: #2a2a31;
-	}
-
-	.online-member {
-		display: flex;
-		align-items: center;
-		gap: 0.52rem;
-		padding: 0.45rem 0.2rem;
-	}
-
-	.member-dot {
-		width: 9px;
-		height: 9px;
-		border-radius: 50%;
-		background: #22c55e;
-	}
-
-	.member-name {
-		font-size: 0.88rem;
-		color: #141414;
-	}
-
-	.member-meta {
-		font-size: 0.75rem;
-		color: #676767;
-	}
-
-	.member-remove-button {
-		margin-left: auto;
-		border: 1px solid #d6d6dc;
-		background: #ffffff;
-		color: #3a3a42;
-		border-radius: 8px;
-		padding: 0.22rem 0.5rem;
-		font-size: 0.72rem;
-		cursor: pointer;
-	}
-
-	.member-remove-button:hover {
-		background: #f1f1f4;
-	}
-
-	.empty-label {
-		color: #666666;
-		font-size: 0.84rem;
-		padding: 1rem;
-	}
-
-	.mobile-info-backdrop {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.45);
-		border: none;
-		z-index: 150;
-	}
-
-	.mobile-info-panel {
-		position: fixed;
-		right: 0;
-		top: 0;
-		height: 100vh;
-		width: min(92vw, 320px);
-		background: #fbfcfe;
-		z-index: 160;
-		box-shadow: -14px 0 30px rgba(0, 0, 0, 0.24);
-		display: flex;
-		flex-direction: column;
-	}
-
-	.desktop-room-panel {
-		top: 84px;
-		right: 18px;
-		height: auto;
-		width: min(34vw, 360px);
-		max-height: calc(100vh - 104px);
-		border-radius: 14px;
-		border: 1px solid #d7dfeb;
-		box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
-	}
-
-	.mobile-info-panel header {
-		padding: 0.9rem 1rem;
-		border-bottom: 1px solid #dddddd;
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-	}
-
-	.mobile-info-panel header h3 {
-		margin: 0;
-		font-size: 1rem;
-	}
-
-	.mobile-info-panel header button {
-		border: 1px solid #c9c9c9;
-		background: #ffffff;
-		border-radius: 7px;
-		padding: 0.32rem 0.5rem;
-		cursor: pointer;
-		color: #111111;
-	}
-
-	.mobile-info-content {
-		padding: 0.7rem 0.85rem;
-		overflow: auto;
-	}
-
-	.room-actions {
-		margin-bottom: 0.9rem;
-		padding: 0.75rem;
-		border: 1px solid #dddddf;
-		border-radius: 10px;
-		background: #f4f4f5;
-	}
-
-	.room-details-card {
-		margin-bottom: 0.9rem;
-		padding: 0.75rem;
-		border: 1px solid #dddddf;
-		border-radius: 10px;
-		background: #f4f4f5;
-	}
-
-	.room-details-card h4 {
-		margin: 0 0 0.5rem;
-		font-size: 0.88rem;
-		color: #111111;
-	}
-
-	.room-detail-row {
-		display: flex;
-		justify-content: space-between;
-		align-items: baseline;
-		gap: 0.65rem;
-		font-size: 0.8rem;
-		color: #5c5c5c;
-	}
-
-	.room-detail-row + .room-detail-row {
-		margin-top: 0.35rem;
-	}
-
-	.room-detail-row strong {
-		color: #111111;
-		font-weight: 600;
-	}
-
-	.members-title {
-		margin: 0 0 0.35rem;
-		font-size: 0.88rem;
-		color: #111111;
-	}
-
-	.room-actions p {
-		margin: 0.45rem 0 0;
-		font-size: 0.78rem;
-		color: #5c5c5c;
-	}
-
-	.extend-room-button {
-		width: 100%;
-		border: 1px solid #111111;
-		background: #111111;
-		color: #ffffff;
-		border-radius: 8px;
-		padding: 0.48rem 0.65rem;
-		font-size: 0.84rem;
-		font-weight: 600;
-		cursor: pointer;
-	}
-
-	.extend-room-button:disabled {
-		opacity: 0.7;
-		cursor: not-allowed;
-	}
-
-	.toast {
-		position: fixed;
-		top: 0.8rem;
-		left: 50%;
+		.toast {
+			position: fixed;
+			top: 0.8rem;
+			left: 50%;
 		transform: translateX(-50%);
 		background: #111111;
 		color: #ffffff;
@@ -3434,133 +2492,9 @@
 		font-size: 0.87rem;
 		font-weight: 600;
 		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
-		z-index: 500;
-		pointer-events: none;
-	}
-
-	.ui-dialog-backdrop {
-		position: fixed;
-		inset: 0;
-		border: none;
-		background: rgba(12, 12, 16, 0.5);
-		z-index: 520;
-	}
-
-	.ui-dialog {
-		position: fixed;
-		left: 50%;
-		top: 50%;
-		transform: translate(-50%, -50%);
-		width: min(92vw, 460px);
-		background: #fcfcfd;
-		border: 1px solid #d9d9e0;
-		border-radius: 14px;
-		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.22);
-		z-index: 530;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-
-	.ui-dialog-header {
-		padding: 0.9rem 1rem 0.45rem;
-		border-bottom: 1px solid #ececf1;
-	}
-
-	.ui-dialog-header h3 {
-		margin: 0;
-		font-size: 1rem;
-		color: #1f1f26;
-	}
-
-	.ui-dialog-body {
-		padding: 0.8rem 1rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.65rem;
-	}
-
-	.ui-dialog-body p {
-		margin: 0;
-		font-size: 0.84rem;
-		color: #4b4b56;
-		line-height: 1.35;
-	}
-
-	.ui-dialog-input {
-		width: 100%;
-		border: 1px solid #d6d6dc;
-		border-radius: 8px;
-		padding: 0.55rem 0.65rem;
-		font-size: 0.88rem;
-		background: #ffffff;
-		color: #17171d;
-		box-sizing: border-box;
-	}
-
-	.ui-dialog-textarea {
-		resize: vertical;
-		min-height: 110px;
-		font-family: inherit;
-		line-height: 1.35;
-	}
-
-	.ui-dialog-mode-toggle {
-		display: inline-flex;
-		gap: 0.35rem;
-	}
-
-	.ui-dialog-mode-btn {
-		border: 1px solid #d1d1d8;
-		background: #f3f3f6;
-		color: #393944;
-		border-radius: 999px;
-		padding: 0.28rem 0.74rem;
-		font-size: 0.78rem;
-		font-weight: 600;
-		cursor: pointer;
-	}
-
-	.ui-dialog-mode-btn.active {
-		background: #25252d;
-		border-color: #25252d;
-		color: #ffffff;
-	}
-
-	.ui-dialog-actions {
-		display: flex;
-		justify-content: flex-end;
-		gap: 0.5rem;
-		padding: 0.75rem 1rem 0.95rem;
-		border-top: 1px solid #ececf1;
-	}
-
-	.ui-dialog-btn {
-		border: 1px solid #d1d1d8;
-		background: #f8f8fa;
-		color: #34343e;
-		border-radius: 8px;
-		padding: 0.4rem 0.7rem;
-		font-size: 0.8rem;
-		font-weight: 600;
-		cursor: pointer;
-	}
-
-	.ui-dialog-btn.primary {
-		background: #222228;
-		border-color: #222228;
-		color: #ffffff;
-	}
-
-	.ui-dialog-btn.primary.danger {
-		background: #8f1d1d;
-		border-color: #8f1d1d;
-	}
-
-	.ui-dialog-btn:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
-	}
+			z-index: 500;
+			pointer-events: none;
+		}
 
 	@media (max-width: 1199px) {
 		.chat-shell {
@@ -3589,33 +2523,18 @@
 		}
 	}
 
-	@media (max-width: 900px) {
-		.chat-shell {
-			grid-template-columns: 1fr;
-			height: calc(98vh);
-			min-height: 0;
-			gap: 0.55rem;
-			padding: 0.55rem;
-		}
+		@media (max-width: 900px) {
+			.chat-shell {
+				grid-template-columns: 1fr;
+				height: calc(98vh);
+				min-height: 0;
+				gap: 0.55rem;
+				padding: 0.55rem;
+			}
 
-		.chat-header {
-			padding: 0.68rem 0.75rem;
-		}
-
-		.expiry-pill {
-			min-width: 2.7rem;
-			height: 1.65rem;
-			padding: 0 0.4rem;
-			font-size: 0.71rem;
-		}
-
-		.mobile-back-button {
-			display: inline-flex;
-		}
-
-		.chat-shell.mobile-chat-only .sidebar-pane {
-			display: none;
-		}
+			.chat-shell.mobile-chat-only .sidebar-pane {
+				display: none;
+			}
 
 		.chat-shell.mobile-list-only .chat-window {
 			display: none;

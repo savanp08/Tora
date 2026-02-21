@@ -1,6 +1,14 @@
 import type { ChatThread } from '$lib/types/chat';
 
 const MS_EPOCH_THRESHOLD = 1_000_000_000_000;
+export const MESSAGE_TEXT_MAX_BYTES = 4000;
+
+export function getUTF8ByteLength(value: string) {
+	if (!value) {
+		return 0;
+	}
+	return new TextEncoder().encode(value).length;
+}
 
 export function parseTimestampParam(value: string | null) {
 	if (!value) {

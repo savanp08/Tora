@@ -12,7 +12,7 @@ type User struct {
 }
 
 type Message struct {
-	ID               string     `json:"id"`
+	ID               string     `json:"id"` 
 	RoomID           string     `json:"roomId"`
 	SenderID         string     `json:"senderId"`
 	SenderName       string     `json:"senderName"`

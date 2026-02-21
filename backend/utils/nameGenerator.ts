@@ -181,7 +181,7 @@ const adjectives = [
 	'Wooden',
 	'Metal',
 	'Plastic',
-	'Paper',
+	'Paper', 
 	'Glass',
 	'Stone',
 	'Rocky',

@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/security"
 )
 
 const (
@@ -85,6 +86,12 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 	if msg.EditedAt != nil && !msg.EditedAt.IsZero() {
 		editedAt = *msg.EditedAt
 	}
+
+	encryptedContent, err := security.EncryptMessage(msg.Content)
+	if err != nil {
+		return fmt.Errorf("encrypt message content: %w", err)
+	}
+
 	if err := safeExecScyllaQuery(
 		s.Scylla.Session,
 		query,
@@ -92,7 +99,7 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 		msg.ID,
 		msg.SenderID,
 		msg.SenderName,
-		msg.Content,
+		encryptedContent,
 		msg.Type,
 		msg.MediaURL,
 		msg.MediaType,
@@ -427,6 +434,10 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 	var createdAt time.Time
 
 	for iter.Scan(&dbRoomID, &messageID, &senderID, &senderName, &content, &msgType, &mediaURL, &mediaType, &fileName, &isEdited, &editedAt, &hasBreakRoom, &breakRoomID, &breakJoinCount, &replyToMessageID, &replyToSnippet, &createdAt) {
+		if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
+			content = decrypted
+		}
+
 		var editedAtPtr *time.Time
 		if !editedAt.IsZero() {
 			editedCopy := editedAt
@@ -540,10 +551,14 @@ func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messa
 		`UPDATE %s SET content = ?, type = ?, media_url = ?, media_type = ?, file_name = ?, is_edited = ?, edited_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`,
 		messagesTable,
 	)
+	encryptedContent, encryptErr := security.EncryptMessage(content)
+	if encryptErr != nil {
+		return fmt.Errorf("encrypt message content: %w", encryptErr)
+	}
 	if err := safeExecScyllaQuery(
 		s.Scylla.Session,
 		updateQuery,
-		content,
+		encryptedContent,
 		"text",
 		"",
 		"",
@@ -596,10 +611,14 @@ func (s *MessageService) MarkMessageDeleted(ctx context.Context, roomID, message
 		`UPDATE %s SET content = ?, type = ?, media_url = ?, media_type = ?, file_name = ?, is_edited = ?, edited_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`,
 		messagesTable,
 	)
+	encryptedPlaceholder, encryptErr := security.EncryptMessage(DeletedMessagePlaceholder)
+	if encryptErr != nil {
+		return fmt.Errorf("encrypt deleted message placeholder: %w", encryptErr)
+	}
 	if err := safeExecScyllaQuery(
 		s.Scylla.Session,
 		updateQuery,
-		DeletedMessagePlaceholder,
+		encryptedPlaceholder,
 		"deleted",
 		"",
 		"",

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import IconSet from '$lib/components/icons/IconSet.svelte';
+	import { getUTF8ByteLength, MESSAGE_TEXT_MAX_BYTES } from '$lib/utils/chat/core';
 	import {
 		compressMedia,
 		inferMediaMessageType,
@@ -13,6 +14,7 @@
 	export let attachedFile: File | null = null;
 	export let activeReply: ReplyTarget | null = null;
 	export let isDarkMode = false;
+	export let messageLimit = MESSAGE_TEXT_MAX_BYTES;
 
 	let mediaInput: HTMLInputElement | null = null;
 	let fileInput: HTMLInputElement | null = null;
@@ -23,6 +25,13 @@
 	let attachedPickerType: 'media' | 'file' = 'file';
 	let attachmentPreviewURL = '';
 	let attachWrapEl: HTMLDivElement | null = null;
+	let normalizedDraftMessage = '';
+	let draftMessageBytes = 0;
+
+	$: normalizedDraftMessage = draftMessage.trim();
+	$: draftMessageBytes = getUTF8ByteLength(normalizedDraftMessage);
+	$: isOverMessageLimit = draftMessageBytes > messageLimit;
+	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
 
 	const dispatch = createEventDispatcher<{
 		send: { type: MediaMessageType; content: string; fileName?: string } | undefined;
@@ -156,7 +165,7 @@
 	}
 
 	function onSend() {
-		if (isProcessingAttachment) {
+		if (isProcessingAttachment || isOverMessageLimit) {
 			return;
 		}
 		if (attachedFile) {
@@ -288,13 +297,22 @@
 				type="button"
 				class="send-button"
 				on:click={onSend}
-				disabled={isProcessingAttachment}
+				disabled={isProcessingAttachment || isOverMessageLimit}
 				aria-label={attachedFile ? 'Send attachment' : 'Send message'}
-				title={attachedFile ? 'Send attachment' : 'Send message'}
+				title={isOverMessageLimit
+					? `Message is too long (${draftMessageBytes}/${messageLimit})`
+					: attachedFile
+						? 'Send attachment'
+						: 'Send message'}
 			>
 				<IconSet name="send" size={15} />
 			</button>
 		</div>
+		{#if isOverMessageLimit}
+			<div class="composer-limit-hint" role="status" aria-live="polite">
+				Message is too long by {overLimitBy}. Max {messageLimit}.
+			</div>
+		{/if}
 	</footer>
 
 	<style>
@@ -481,6 +499,19 @@
 			border: 1px solid rgba(37, 99, 235, 0.2);
 			border-radius: 8px;
 			padding: 0.36rem 0.5rem;
+		}
+
+		.composer-limit-hint {
+			font-size: 0.74rem;
+			line-height: 1.2;
+			color: #8a2d2d;
+			opacity: 0.92;
+			padding: 0 0.2rem;
+		}
+
+		.composer.theme-dark .composer-limit-hint {
+			color: #fca5a5;
+			opacity: 0.86;
 		}
 
 		.composer-row {
