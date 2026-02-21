@@ -5,7 +5,7 @@
 	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
 	import { generateRoomName } from '$lib/utils/nameGenerator';
 	import { setSessionToken } from '$lib/utils/sessionToken';
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[home-client]';
 	type JoinMode = 'create' | 'join';
@@ -14,6 +14,8 @@
 	let roomCode = '';
 	let guestUsername = '';
 	let selectedMode: JoinMode = 'create';
+	let authNotice = '';
+	let authNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 	let isModalOpen = false;
 	let isJoining = false;
@@ -33,6 +35,23 @@
 		const identity = getOrInitIdentity();
 		currentUser.set({ id: identity.id, username: identity.username });
 	});
+
+	onDestroy(() => {
+		if (authNoticeTimer) {
+			clearTimeout(authNoticeTimer);
+			authNoticeTimer = null;
+		}
+	});
+
+	function showAuthNotice(message: string) {
+		authNotice = message;
+		if (authNoticeTimer) {
+			clearTimeout(authNoticeTimer);
+		}
+		authNoticeTimer = setTimeout(() => {
+			authNotice = '';
+		}, 2800);
+	}
 
 	function onRoomNameFocus(event: FocusEvent) {
 		const input = event.currentTarget as HTMLInputElement | null;
@@ -170,7 +189,7 @@
 		authToken.set(token);
 		setSessionToken(token || '');
 
-		alert(`Welcome back, ${user.username}!`);
+		showAuthNotice(`Welcome back, ${user.username}!`);
 	}
 
 	$: canSubmit =
@@ -184,6 +203,10 @@
 		<div class="logo">Ephemeral<b>Chat</b></div>
 		<button class="btn-login" on:click={() => (isModalOpen = true)}> Log In / Sign Up </button>
 	</header>
+
+	{#if authNotice}
+		<div class="auth-notice" role="status" aria-live="polite">{authNotice}</div>
+	{/if}
 
 	<main>
 		<div class="hero-box">
@@ -287,6 +310,18 @@
 		justify-content: space-between;
 		align-items: center;
 		margin-bottom: 60px;
+	}
+
+	.auth-notice {
+		margin: -34px auto 22px;
+		padding: 0.48rem 0.82rem;
+		border-radius: 999px;
+		background: #191921;
+		color: #ffffff;
+		font-size: 0.82rem;
+		font-weight: 600;
+		width: fit-content;
+		max-width: 92vw;
 	}
 	.logo {
 		font-size: 1.5rem;

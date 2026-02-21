@@ -72,6 +72,7 @@
 	let topSentinel: HTMLDivElement | null = null;
 	let topObserver: IntersectionObserver | null = null;
 	let olderRequestPending = false;
+	let openOwnerActionMessageId = '';
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -555,6 +556,7 @@
 	}
 
 	function onEditMessage(message: ChatMessage) {
+		openOwnerActionMessageId = '';
 		dispatch('editMessage', {
 			messageId: message.id,
 			content: message.content
@@ -562,9 +564,14 @@
 	}
 
 	function onDeleteMessage(message: ChatMessage) {
+		openOwnerActionMessageId = '';
 		dispatch('deleteMessage', {
 			messageId: message.id
 		});
+	}
+
+	function toggleOwnerMessageActions(messageID: string) {
+		openOwnerActionMessageId = openOwnerActionMessageId === messageID ? '' : messageID;
 	}
 </script>
 
@@ -595,7 +602,7 @@
 			{@const replyPreview = getReplyPreview(message)}
 			<div class="message-row {isMine ? 'mine' : 'theirs'}">
 				{#if isMine}
-					<aside class="message-gutter">
+					<aside class="message-gutter mine">
 						{#if totalReplies > 1}
 							<div class="gutter-stat" title={`${totalReplies} replies`}>
 								<IconSet name="reply" size={10} className="gutter-icon" />
@@ -606,6 +613,58 @@
 							<div class="gutter-stat" title={`${branchesCreated} branches`}>
 								<IconSet name="break" size={10} className="gutter-icon" />
 								<strong>{branchesCreated}</strong>
+							</div>
+						{/if}
+						{#if !isDeletedMessage(message)}
+							<div class="gutter-actions mine-actions">
+								<button
+									type="button"
+									class="gutter-action-btn"
+									title="Reply"
+									aria-label="Reply"
+									on:click|stopPropagation={() =>
+										dispatch('reply', {
+											messageId: message.id,
+											senderName: message.senderName,
+											content: getReplyDispatchContent(message)
+										})}
+								>
+									<IconSet name="reply" size={12} className="gutter-action-icon" />
+								</button>
+								<div class="gutter-owner-menu-wrap">
+									<button
+										type="button"
+										class="gutter-action-btn"
+										title="More actions"
+										aria-label="More actions"
+										aria-expanded={openOwnerActionMessageId === message.id}
+										on:click|stopPropagation={() => toggleOwnerMessageActions(message.id)}
+									>
+										<IconSet name="more-horizontal" size={12} className="gutter-action-icon" />
+									</button>
+									<div
+										class="gutter-action-menu {openOwnerActionMessageId === message.id ? 'open' : ''}"
+									>
+										<button
+											type="button"
+											class="gutter-action-btn"
+											title="Edit message"
+											aria-label="Edit message"
+											on:click|stopPropagation={() => onEditMessage(message)}
+										>
+											<IconSet name="edit" size={12} className="gutter-action-icon" />
+										</button>
+										<button
+											type="button"
+											class="gutter-action-btn danger"
+											title="Delete message"
+											aria-label="Delete message"
+											on:click|stopPropagation={() => onDeleteMessage(message)}
+										>
+											<IconSet name="trash" size={12} className="gutter-action-icon" />
+										</button>
+									</div>
+								</div>
 							</div>
 						{/if}
 					</aside>
@@ -646,42 +705,6 @@
 									<IconSet name="copy" size={12} className="copy-icon" />
 								</button>
 							</span>
-							{#if isMine && !isDeletedMessage(message)}
-								<button
-									type="button"
-									class="message-action-btn"
-									title="Edit message"
-									aria-label="Edit message"
-									on:click|stopPropagation={() => onEditMessage(message)}
-								>
-									<IconSet name="edit" size={12} className="message-action-icon" />
-								</button>
-								<button
-									type="button"
-									class="message-action-btn danger"
-									title="Delete message"
-									aria-label="Delete message"
-									on:click|stopPropagation={() => onDeleteMessage(message)}
-								>
-									<IconSet name="trash" size={12} className="message-action-icon" />
-								</button>
-							{/if}
-							{#if !isDeletedMessage(message)}
-							<button
-								type="button"
-								class="reply-edge-btn {isMine ? 'mine' : 'theirs'}"
-								title="Reply"
-								aria-label="Reply"
-								on:click|stopPropagation={() =>
-									dispatch('reply', {
-										messageId: message.id,
-										senderName: message.senderName,
-										content: getReplyDispatchContent(message)
-									})}
-							>
-								<IconSet name="reply" size={12} className="reply-edge-icon" />
-							</button>
-							{/if}
 							{#if message.hasBreakRoom && message.breakRoomId}
 								<button
 									type="button"
@@ -829,7 +852,7 @@
 					</div>
 				{/if}
 				{#if !isMine}
-					<aside class="message-gutter">
+					<aside class="message-gutter theirs">
 						{#if totalReplies > 1}
 							<div class="gutter-stat" title={`${totalReplies} replies`}>
 								<IconSet name="reply" size={10} className="gutter-icon" />
@@ -840,6 +863,24 @@
 							<div class="gutter-stat" title={`${branchesCreated} branches`}>
 								<IconSet name="break" size={10} className="gutter-icon" />
 								<strong>{branchesCreated}</strong>
+							</div>
+						{/if}
+						{#if !isDeletedMessage(message)}
+							<div class="gutter-actions">
+								<button
+									type="button"
+									class="gutter-action-btn"
+									title="Reply"
+									aria-label="Reply"
+									on:click|stopPropagation={() =>
+										dispatch('reply', {
+											messageId: message.id,
+											senderName: message.senderName,
+											content: getReplyDispatchContent(message)
+										})}
+								>
+									<IconSet name="reply" size={12} className="gutter-action-icon" />
+								</button>
 							</div>
 						{/if}
 					</aside>
@@ -988,7 +1029,7 @@
 		padding-top: 0.2rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.2rem;
+		gap: 0.24rem;
 		align-items: center;
 	}
 
@@ -1017,6 +1058,105 @@
 		font-size: 0.66rem;
 		font-weight: 600;
 		color: inherit;
+	}
+
+	.gutter-actions {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.24rem;
+		width: 100%;
+		opacity: 0;
+		visibility: hidden;
+		pointer-events: none;
+		transition: opacity 140ms ease;
+	}
+
+	.message-row:hover .gutter-actions,
+	.message-row:focus-within .gutter-actions {
+		opacity: 1;
+		visibility: visible;
+		pointer-events: auto;
+	}
+
+	.gutter-owner-menu-wrap {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 100%;
+		overflow: visible;
+	}
+
+	.gutter-action-menu {
+		position: absolute;
+		top: 50%;
+		z-index: 2;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.22rem;
+		max-width: 0;
+		opacity: 0;
+		overflow: hidden;
+		pointer-events: none;
+		transform: translateY(-50%);
+		transition:
+			max-width 160ms ease,
+			opacity 140ms ease;
+	}
+
+	.message-row.mine .gutter-action-menu {
+		left: calc(100% + 0.22rem);
+	}
+
+	.message-row.theirs .gutter-action-menu {
+		right: calc(100% + 0.22rem);
+	}
+
+	.gutter-action-menu.open {
+		max-width: calc(var(--action-hit-size) * 2 + 0.45rem);
+		opacity: 1;
+		pointer-events: auto;
+	}
+
+	.gutter-action-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--action-hit-size);
+		height: var(--action-hit-size);
+		border: 1px solid #d5d5dc;
+		border-radius: 999px;
+		background: #f8f8fb;
+		color: #44444f;
+		cursor: pointer;
+		padding: 0;
+		transition:
+			transform 120ms ease,
+			background 140ms ease;
+	}
+
+	.message-row.mine .gutter-action-btn {
+		border-color: rgba(255, 255, 255, 0.28);
+		background: rgba(47, 49, 56, 0.94);
+		color: #e6e7ec;
+	}
+
+	.gutter-action-btn.danger {
+		color: #8f2d2d;
+	}
+
+	.message-row.mine .gutter-action-btn.danger {
+		color: #ffd4d4;
+	}
+
+	.gutter-action-btn:hover {
+		transform: translateY(-1px);
+	}
+
+	.gutter-action-btn:focus-visible {
+		outline: 2px solid #6b7280;
+		outline-offset: 1px;
 	}
 
 	.bubble {
@@ -1201,89 +1341,6 @@
 		opacity: 0.78;
 	}
 
-	.message-action-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: var(--action-hit-size);
-		height: var(--action-hit-size);
-		border: 1px solid #d5d5dc;
-		border-radius: 999px;
-		background: #f8f8fb;
-		color: #45454f;
-		opacity: 0;
-		pointer-events: none;
-		cursor: pointer;
-		padding: 0;
-		transition: opacity 140ms ease;
-	}
-
-	.bubble.mine .message-action-btn {
-		border-color: rgba(255, 255, 255, 0.2);
-		background: rgba(255, 255, 255, 0.12);
-		color: #e6e7ec;
-	}
-
-	.message-action-btn.danger {
-		color: #8f2d2d;
-	}
-
-	.bubble.mine .message-action-btn.danger {
-		color: #ffd4d4;
-	}
-
-	.message-row:hover .message-action-btn,
-	.message-row:focus-within .message-action-btn,
-	.message-action-btn:hover,
-	.message-action-btn:focus-visible {
-		opacity: 0.86;
-		pointer-events: auto;
-	}
-
-	.message-action-btn:hover {
-		opacity: 1;
-	}
-
-	.reply-edge-btn {
-		position: absolute;
-		top: 0.55rem;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: var(--action-hit-size);
-		height: var(--action-hit-size);
-		border: 1px solid #d7d7dd;
-		border-radius: 999px;
-		background: #fdfdfe;
-		color: #44444d;
-		opacity: 0;
-		pointer-events: none;
-		cursor: pointer;
-		transition: opacity 140ms ease;
-		padding: 0;
-		z-index: 1;
-	}
-
-	.reply-edge-btn.mine {
-		left: calc(-1 * var(--meta-gutter-size) + (var(--meta-gutter-size) - var(--action-hit-size)) / 2);
-	}
-
-	.reply-edge-btn.theirs {
-		right: calc(-1 * var(--meta-gutter-size) + (var(--meta-gutter-size) - var(--action-hit-size)) / 2);
-	}
-
-	.message-row:hover .reply-edge-btn,
-	.message-row:focus-within .reply-edge-btn,
-	.reply-edge-btn:hover,
-	.reply-edge-btn:focus-visible {
-		opacity: 0.82;
-		pointer-events: auto;
-	}
-
-	.reply-edge-btn:hover {
-		opacity: 1;
-	}
-
 	.reply-snippet {
 		width: 100%;
 		display: flex;
@@ -1361,7 +1418,7 @@
 		height: var(--copy-icon-size);
 	}
 
-	:global(.reply-edge-icon) {
+	:global(.gutter-action-icon) {
 		width: var(--action-icon-size);
 		height: var(--action-icon-size);
 	}

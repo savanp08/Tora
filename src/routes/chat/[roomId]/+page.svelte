@@ -23,6 +23,39 @@
 
 	type ThreadStatus = 'joined' | 'discoverable' | 'left';
 	type MessageActionMode = 'none' | 'break' | 'edit' | 'delete';
+	type RoomMenuMode = 'create' | 'join';
+
+	type UiDialogState =
+		| { kind: 'none' }
+		| {
+				kind: 'confirm';
+				title: string;
+				message: string;
+				confirmLabel: string;
+				cancelLabel: string;
+				danger: boolean;
+		  }
+		| {
+				kind: 'prompt';
+				title: string;
+				message: string;
+				value: string;
+				placeholder: string;
+				maxLength: number;
+				confirmLabel: string;
+				cancelLabel: string;
+				danger: boolean;
+				multiline: boolean;
+		  }
+		| {
+				kind: 'roomAction';
+				title: string;
+				message: string;
+				roomName: string;
+				mode: RoomMenuMode;
+				confirmLabel: string;
+				cancelLabel: string;
+		  };
 
 	type ChatMessage = {
 		id: string;
@@ -158,6 +191,9 @@
 	let headerActionsEl: HTMLDivElement | null = null;
 	let roomExpiryTickMs = Date.now();
 	let serverClockOffsetMs = 0;
+	let uiDialog: UiDialogState = { kind: 'none' };
+	let uiDialogResolver: ((value: unknown) => void) | null = null;
+	let uiDialogInputEl: HTMLInputElement | HTMLTextAreaElement | null = null;
 	let chatWindowRef: {
 		capturePrependAnchor?: () => { scrollTop: number; scrollHeight: number } | null;
 		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
@@ -248,6 +284,9 @@
 		focusMessageId = focusMessageIdFromURL;
 		focusConsumedForRoom = true;
 	}
+	$: roomActionSubmitDisabled =
+		uiDialog.kind === 'roomAction' ? normalizeRoomNameValue(uiDialog.roomName) === '' : false;
+	$: promptSubmitDisabled = uiDialog.kind === 'prompt' ? uiDialog.value.trim() === '' : false;
 
 	onDestroy(() => {
 		clientLog('component-destroy', { roomId });
@@ -615,6 +654,199 @@
 		toastTimer = setTimeout(() => {
 			showToast = false;
 		}, 3000);
+	}
+
+	function resolveActiveUiDialog(value: unknown) {
+		const resolver = uiDialogResolver;
+		uiDialogResolver = null;
+		uiDialog = { kind: 'none' };
+		if (resolver) {
+			resolver(value);
+		}
+	}
+
+	function closeUiDialog() {
+		switch (uiDialog.kind) {
+			case 'confirm':
+				resolveActiveUiDialog(false);
+				return;
+			case 'prompt':
+				resolveActiveUiDialog(null);
+				return;
+			case 'roomAction':
+				resolveActiveUiDialog(null);
+				return;
+			default:
+				resolveActiveUiDialog(null);
+		}
+	}
+
+	function focusUiDialogInputSoon() {
+		void tick().then(() => {
+			uiDialogInputEl?.focus();
+			if (uiDialogInputEl instanceof HTMLInputElement) {
+				uiDialogInputEl.select();
+			}
+		});
+	}
+
+	function openConfirmDialog(config: {
+		title: string;
+		message: string;
+		confirmLabel?: string;
+		cancelLabel?: string;
+		danger?: boolean;
+	}) {
+		resolveActiveUiDialog(false);
+		uiDialog = {
+			kind: 'confirm',
+			title: config.title,
+			message: config.message,
+			confirmLabel: config.confirmLabel || 'Confirm',
+			cancelLabel: config.cancelLabel || 'Cancel',
+			danger: Boolean(config.danger)
+		};
+		return new Promise<boolean>((resolve) => {
+			uiDialogResolver = (value) => resolve(Boolean(value));
+		});
+	}
+
+	function openPromptDialog(config: {
+		title: string;
+		message: string;
+		initialValue?: string;
+		placeholder?: string;
+		maxLength?: number;
+		confirmLabel?: string;
+		cancelLabel?: string;
+		danger?: boolean;
+		multiline?: boolean;
+	}) {
+		resolveActiveUiDialog(null);
+		uiDialog = {
+			kind: 'prompt',
+			title: config.title,
+			message: config.message,
+			value: config.initialValue ?? '',
+			placeholder: config.placeholder ?? '',
+			maxLength: Math.max(1, config.maxLength ?? 2000),
+			confirmLabel: config.confirmLabel || 'Save',
+			cancelLabel: config.cancelLabel || 'Cancel',
+			danger: Boolean(config.danger),
+			multiline: Boolean(config.multiline)
+		};
+		focusUiDialogInputSoon();
+		return new Promise<string | null>((resolve) => {
+			uiDialogResolver = (value) => {
+				if (typeof value === 'string') {
+					resolve(value);
+					return;
+				}
+				resolve(null);
+			};
+		});
+	}
+
+	function openRoomActionDialog(initialName = '') {
+		resolveActiveUiDialog(null);
+		uiDialog = {
+			kind: 'roomAction',
+			title: 'Open Room',
+			message: 'Choose whether to create a new room or join an existing one.',
+			roomName: normalizeRoomNameValue(initialName),
+			mode: 'create',
+			confirmLabel: 'Continue',
+			cancelLabel: 'Cancel'
+		};
+		focusUiDialogInputSoon();
+		return new Promise<{ mode: RoomMenuMode; roomName: string } | null>((resolve) => {
+			uiDialogResolver = (value) => {
+				if (
+					value &&
+					typeof value === 'object' &&
+					'mode' in value &&
+					'roomName' in value &&
+					(typeof (value as { mode?: unknown }).mode === 'string')
+				) {
+					const parsed = value as { mode: RoomMenuMode; roomName: string };
+					resolve(parsed);
+					return;
+				}
+				resolve(null);
+			};
+		});
+	}
+
+	function onUiDialogBackdropClick() {
+		closeUiDialog();
+	}
+
+	function onUiDialogConfirm() {
+		if (uiDialog.kind === 'confirm') {
+			resolveActiveUiDialog(true);
+			return;
+		}
+		if (uiDialog.kind === 'prompt') {
+			resolveActiveUiDialog(uiDialog.value);
+			return;
+		}
+		if (uiDialog.kind === 'roomAction') {
+			resolveActiveUiDialog({
+				mode: uiDialog.mode,
+				roomName: uiDialog.roomName
+			});
+		}
+	}
+
+	function onUiDialogKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			closeUiDialog();
+			return;
+		}
+		if (event.key === 'Enter' && uiDialog.kind !== 'none') {
+			if (uiDialog.kind === 'prompt' && uiDialog.multiline) {
+				return;
+			}
+			if (
+				(uiDialog.kind === 'prompt' && promptSubmitDisabled) ||
+				(uiDialog.kind === 'roomAction' && roomActionSubmitDisabled)
+			) {
+				return;
+			}
+			event.preventDefault();
+			onUiDialogConfirm();
+		}
+	}
+
+	function updateUiPromptValue(value: string) {
+		if (uiDialog.kind !== 'prompt') {
+			return;
+		}
+		uiDialog = {
+			...uiDialog,
+			value: value.slice(0, uiDialog.maxLength)
+		};
+	}
+
+	function updateRoomActionMode(mode: RoomMenuMode) {
+		if (uiDialog.kind !== 'roomAction') {
+			return;
+		}
+		uiDialog = {
+			...uiDialog,
+			mode
+		};
+	}
+
+	function updateRoomActionName(value: string) {
+		if (uiDialog.kind !== 'roomAction') {
+			return;
+		}
+		uiDialog = {
+			...uiDialog,
+			roomName: value.slice(0, 20)
+		};
 	}
 
 	function setMessageActionMode(mode: MessageActionMode) {
@@ -1614,7 +1846,15 @@
 
 		const existing = roomThreads.find((thread) => thread.id === normalizedRoomID);
 		const currentName = existing?.name || formatRoomName(normalizedRoomID);
-		const requested = window.prompt('Rename room', currentName);
+		const requested = await openPromptDialog({
+			title: 'Rename Room',
+			message: 'Pick a new display name for this room.',
+			initialValue: currentName,
+			placeholder: 'Room name',
+			maxLength: 20,
+			confirmLabel: 'Rename',
+			cancelLabel: 'Cancel'
+		});
 		if (requested === null) {
 			return;
 		}
@@ -1668,16 +1908,18 @@
 	}
 
 	async function createRoomFromMenu() {
-		const input = window.prompt('Enter a room name');
 		showLeftMenu = false;
-		if (!input) {
+		const action = await openRoomActionDialog(roomNameFromURL || '');
+		if (!action) {
 			return;
 		}
 
-		const requestedName = normalizeRoomNameValue(input);
+		const requestedName = normalizeRoomNameValue(action.roomName);
 		if (!requestedName) {
+			showErrorToast('Room name cannot be empty');
 			return;
 		}
+		const roomMode: RoomMenuMode = action.mode;
 
 		try {
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
@@ -1688,12 +1930,17 @@
 					username: currentUsername,
 					userId: normalizeIdentifier(currentUserId),
 					type: 'ephemeral',
-					mode: 'create'
+					mode: roomMode
 				})
 			});
 			const data = await res.json();
 			if (!res.ok) {
-				throw new Error(data.error || 'Failed to create room');
+				throw new Error(
+					data.error ||
+						(roomMode === 'join'
+							? 'Failed to join existing room'
+							: 'Failed to create room')
+				);
 			}
 			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
 
@@ -1730,7 +1977,13 @@
 			params.set('serverNow', String(Date.now() + serverClockOffsetMs));
 			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}`);
 		} catch (error) {
-			showErrorToast(error instanceof Error ? error.message : 'Failed to create room');
+			showErrorToast(
+				error instanceof Error
+					? error.message
+					: roomMode === 'join'
+						? 'Failed to join existing room'
+						: 'Failed to create room'
+			);
 		}
 	}
 
@@ -1973,7 +2226,7 @@
 		}
 	}
 
-	function onEditMessageRequest(event: CustomEvent<{ messageId: string; content: string }>) {
+	async function onEditMessageRequest(event: CustomEvent<{ messageId: string; content: string }>) {
 		if (!roomId) {
 			return;
 		}
@@ -1982,7 +2235,16 @@
 			return;
 		}
 		const current = (event.detail.content || '').trim();
-		const nextContentRaw = window.prompt('Edit message', current);
+		const nextContentRaw = await openPromptDialog({
+			title: 'Edit Message',
+			message: 'Update your message content.',
+			initialValue: current,
+			placeholder: 'Message',
+			maxLength: 2000,
+			confirmLabel: 'Save',
+			cancelLabel: 'Cancel',
+			multiline: true
+		});
 		if (nextContentRaw === null) {
 			return;
 		}
@@ -2003,7 +2265,7 @@
 		});
 	}
 
-	function onDeleteMessageRequest(event: CustomEvent<{ messageId: string }>) {
+	async function onDeleteMessageRequest(event: CustomEvent<{ messageId: string }>) {
 		if (!roomId) {
 			return;
 		}
@@ -2011,7 +2273,14 @@
 		if (!messageId) {
 			return;
 		}
-		if (!window.confirm('Delete this message?')) {
+		const confirmed = await openConfirmDialog({
+			title: 'Delete Message',
+			message: 'This action cannot be undone.',
+			confirmLabel: 'Delete',
+			cancelLabel: 'Cancel',
+			danger: true
+		});
+		if (!confirmed) {
 			return;
 		}
 		applyMessageDelete(roomId, {
@@ -2044,7 +2313,13 @@
 			showErrorToast('Admin cannot remove self');
 			return;
 		}
-		const confirmed = window.confirm('Remove this member from the room?');
+		const confirmed = await openConfirmDialog({
+			title: 'Remove Member',
+			message: 'Remove this member from the room?',
+			confirmLabel: 'Remove',
+			cancelLabel: 'Cancel',
+			danger: true
+		});
 		if (!confirmed) {
 			return;
 		}
@@ -2076,7 +2351,13 @@
 		if (!roomId || !isActiveRoomAdmin) {
 			return;
 		}
-		const confirmed = window.confirm('Delete this room? This also deletes its child rooms.');
+		const confirmed = await openConfirmDialog({
+			title: 'Delete Room',
+			message: 'Delete this room and all its child rooms? This cannot be undone.',
+			confirmLabel: 'Delete Room',
+			cancelLabel: 'Cancel',
+			danger: true
+		});
 		if (!confirmed) {
 			return;
 		}
@@ -2136,7 +2417,13 @@
 		if (!roomId || !isMember) {
 			return;
 		}
-		const confirmed = window.confirm('Leave this room?');
+		const confirmed = await openConfirmDialog({
+			title: 'Leave Room',
+			message: 'You can join again later if the room still exists.',
+			confirmLabel: 'Leave',
+			cancelLabel: 'Cancel',
+			danger: false
+		});
 		if (!confirmed) {
 			return;
 		}
@@ -2228,7 +2515,7 @@
 		}
 	}
 
-	function onSelectedMessageEdit(event: CustomEvent<{ messageId: string }>) {
+	async function onSelectedMessageEdit(event: CustomEvent<{ messageId: string }>) {
 		if (!roomId) {
 			return;
 		}
@@ -2240,7 +2527,7 @@
 		if (!message) {
 			return;
 		}
-		onEditMessageRequest({
+		await onEditMessageRequest({
 			detail: {
 				messageId,
 				content: message.content
@@ -2249,8 +2536,8 @@
 		selectedActionMessageId = '';
 	}
 
-	function onSelectedMessageDelete(event: CustomEvent<{ messageId: string }>) {
-		onDeleteMessageRequest(event);
+	async function onSelectedMessageDelete(event: CustomEvent<{ messageId: string }>) {
+		await onDeleteMessageRequest(event);
 		selectedActionMessageId = '';
 	}
 
@@ -2692,6 +2979,96 @@
 	<div class="toast" role="status" aria-live="polite">{toastMessage}</div>
 {/if}
 
+{#if uiDialog.kind !== 'none'}
+	<button
+		type="button"
+		class="ui-dialog-backdrop"
+		aria-label="Close dialog"
+		on:click={onUiDialogBackdropClick}
+	></button>
+	<div
+		class="ui-dialog"
+		role="dialog"
+		aria-modal="true"
+		aria-labelledby="ui-dialog-title"
+		tabindex="-1"
+		on:keydown={onUiDialogKeyDown}
+	>
+		<header class="ui-dialog-header">
+			<h3 id="ui-dialog-title">{uiDialog.title}</h3>
+		</header>
+		<div class="ui-dialog-body">
+			<p>{uiDialog.message}</p>
+			{#if uiDialog.kind === 'prompt'}
+				{#if uiDialog.multiline}
+					<textarea
+						class="ui-dialog-input ui-dialog-textarea"
+						value={uiDialog.value}
+						placeholder={uiDialog.placeholder}
+						maxlength={uiDialog.maxLength}
+						rows={5}
+						bind:this={uiDialogInputEl}
+						on:input={(event) =>
+							updateUiPromptValue((event.currentTarget as HTMLTextAreaElement).value)}
+					></textarea>
+				{:else}
+					<input
+						class="ui-dialog-input"
+						type="text"
+						value={uiDialog.value}
+						placeholder={uiDialog.placeholder}
+						maxlength={uiDialog.maxLength}
+						bind:this={uiDialogInputEl}
+						on:input={(event) =>
+							updateUiPromptValue((event.currentTarget as HTMLInputElement).value)}
+					/>
+				{/if}
+			{:else if uiDialog.kind === 'roomAction'}
+				<div class="ui-dialog-mode-toggle">
+					<button
+						type="button"
+						class="ui-dialog-mode-btn {uiDialog.mode === 'create' ? 'active' : ''}"
+						on:click={() => updateRoomActionMode('create')}
+					>
+						New
+					</button>
+					<button
+						type="button"
+						class="ui-dialog-mode-btn {uiDialog.mode === 'join' ? 'active' : ''}"
+						on:click={() => updateRoomActionMode('join')}
+					>
+						Existing
+					</button>
+				</div>
+				<input
+					class="ui-dialog-input"
+					type="text"
+					value={uiDialog.roomName}
+					placeholder="Room name"
+					maxlength={20}
+					bind:this={uiDialogInputEl}
+					on:input={(event) =>
+						updateRoomActionName((event.currentTarget as HTMLInputElement).value)}
+				/>
+			{/if}
+		</div>
+		<footer class="ui-dialog-actions">
+			<button type="button" class="ui-dialog-btn" on:click={closeUiDialog}>
+				{uiDialog.cancelLabel}
+			</button>
+			<button
+				type="button"
+				class="ui-dialog-btn primary {uiDialog.kind === 'confirm' && uiDialog.danger ? 'danger' : ''}"
+				on:click={onUiDialogConfirm}
+				disabled={(uiDialog.kind === 'prompt' && promptSubmitDisabled) ||
+					(uiDialog.kind === 'roomAction' && roomActionSubmitDisabled)}
+			>
+				{uiDialog.confirmLabel}
+			</button>
+		</footer>
+	</div>
+{/if}
+
 <section
 	class="chat-shell"
 	class:mobile-list-only={isMobileView && mobilePane === 'list'}
@@ -2953,12 +3330,19 @@
 
 <style>
 	.chat-shell {
+		--panel-border: #d9dee8;
+		--panel-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
 		height: calc(100vh - 72px);
 		min-height: 620px;
 		display: grid;
 		grid-template-columns: 330px minmax(0, 1fr) 280px;
-		border-top: 1px solid #dcdce1;
-		background: #ececef;
+		gap: 0.75rem;
+		padding: 0.75rem;
+		box-sizing: border-box;
+		background:
+			radial-gradient(1400px 480px at -5% -30%, rgba(80, 116, 255, 0.09) 0%, transparent 58%),
+			radial-gradient(1200px 420px at 110% 0%, rgba(20, 184, 166, 0.09) 0%, transparent 55%),
+			#e9edf3;
 		overflow: hidden;
 	}
 
@@ -2966,19 +3350,28 @@
 	.chat-window,
 	.online-pane {
 		min-height: 0;
+		min-width: 0;
+		border: 1px solid var(--panel-border);
+		border-radius: 16px;
+		box-shadow: var(--panel-shadow);
+		overflow: hidden;
+		background: #f8fafd;
 	}
 
 	.sidebar-pane {
-		min-width: 0;
-		overflow: hidden;
+		display: flex;
 	}
 
 	.chat-window {
 		display: flex;
 		flex-direction: column;
-		min-width: 0;
 		overflow: hidden;
-		background: #f5f5f6;
+		background: linear-gradient(180deg, #fcfdff 0%, #f4f6fa 100%);
+	}
+
+	.online-pane {
+		display: flex;
+		background: linear-gradient(180deg, #fbfcff 0%, #f2f5fa 100%);
 	}
 
 	.chat-header {
@@ -3382,6 +3775,130 @@
 		pointer-events: none;
 	}
 
+	.ui-dialog-backdrop {
+		position: fixed;
+		inset: 0;
+		border: none;
+		background: rgba(12, 12, 16, 0.5);
+		z-index: 520;
+	}
+
+	.ui-dialog {
+		position: fixed;
+		left: 50%;
+		top: 50%;
+		transform: translate(-50%, -50%);
+		width: min(92vw, 460px);
+		background: #fcfcfd;
+		border: 1px solid #d9d9e0;
+		border-radius: 14px;
+		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.22);
+		z-index: 530;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
+	.ui-dialog-header {
+		padding: 0.9rem 1rem 0.45rem;
+		border-bottom: 1px solid #ececf1;
+	}
+
+	.ui-dialog-header h3 {
+		margin: 0;
+		font-size: 1rem;
+		color: #1f1f26;
+	}
+
+	.ui-dialog-body {
+		padding: 0.8rem 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.65rem;
+	}
+
+	.ui-dialog-body p {
+		margin: 0;
+		font-size: 0.84rem;
+		color: #4b4b56;
+		line-height: 1.35;
+	}
+
+	.ui-dialog-input {
+		width: 100%;
+		border: 1px solid #d6d6dc;
+		border-radius: 8px;
+		padding: 0.55rem 0.65rem;
+		font-size: 0.88rem;
+		background: #ffffff;
+		color: #17171d;
+		box-sizing: border-box;
+	}
+
+	.ui-dialog-textarea {
+		resize: vertical;
+		min-height: 110px;
+		font-family: inherit;
+		line-height: 1.35;
+	}
+
+	.ui-dialog-mode-toggle {
+		display: inline-flex;
+		gap: 0.35rem;
+	}
+
+	.ui-dialog-mode-btn {
+		border: 1px solid #d1d1d8;
+		background: #f3f3f6;
+		color: #393944;
+		border-radius: 999px;
+		padding: 0.28rem 0.74rem;
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.ui-dialog-mode-btn.active {
+		background: #25252d;
+		border-color: #25252d;
+		color: #ffffff;
+	}
+
+	.ui-dialog-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		padding: 0.75rem 1rem 0.95rem;
+		border-top: 1px solid #ececf1;
+	}
+
+	.ui-dialog-btn {
+		border: 1px solid #d1d1d8;
+		background: #f8f8fa;
+		color: #34343e;
+		border-radius: 8px;
+		padding: 0.4rem 0.7rem;
+		font-size: 0.8rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.ui-dialog-btn.primary {
+		background: #222228;
+		border-color: #222228;
+		color: #ffffff;
+	}
+
+	.ui-dialog-btn.primary.danger {
+		background: #8f1d1d;
+		border-color: #8f1d1d;
+	}
+
+	.ui-dialog-btn:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
 	@media (max-width: 1199px) {
 		.chat-shell {
 			grid-template-columns: 290px minmax(0, 1fr);
@@ -3397,6 +3914,8 @@
 			grid-template-columns: 1fr;
 			height: calc(100dvh - 72px);
 			min-height: 0;
+			gap: 0.55rem;
+			padding: 0.55rem;
 		}
 
 		.chat-header {

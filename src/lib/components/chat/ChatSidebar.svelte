@@ -820,8 +820,8 @@
 	.room-list {
 		display: flex;
 		flex-direction: column;
-		border-right: 1px solid #dfdfe4;
-		background: #f5f5f6;
+		border-right: none;
+		background: linear-gradient(180deg, #fbfcff 0%, #f3f6fb 100%);
 		width: 100%;
 		max-width: 100%;
 		height: 100%;

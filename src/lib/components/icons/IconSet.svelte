@@ -9,6 +9,7 @@
 		| 'send'
 		| 'edit'
 		| 'trash'
+		| 'more-horizontal'
 		| 'chevron-down'
 		| 'tree-map'
 		| 'list-vertical';
@@ -66,6 +67,10 @@
 		<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
 		<line x1="10" y1="11" x2="10" y2="17"></line>
 		<line x1="14" y1="11" x2="14" y2="17"></line>
+	{:else if name === 'more-horizontal'}
+		<circle cx="5" cy="12" r="1.6"></circle>
+		<circle cx="12" cy="12" r="1.6"></circle>
+		<circle cx="19" cy="12" r="1.6"></circle>
 	{:else if name === 'chevron-down'}
 		<polyline points="6 9 12 15 18 9"></polyline>
 	{:else if name === 'tree-map'}
