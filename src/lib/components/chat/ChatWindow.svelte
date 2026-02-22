@@ -21,6 +21,8 @@
 	export let focusMessageId = '';
 	export let isLoadingOlder = false;
 	export let hasMoreOlder = true;
+	export let unreadStartMessageId = '';
+	export let unreadCount = 0;
 
 	const dispatch = createEventDispatcher<{
 		toggleExpand: { messageId: string };
@@ -34,6 +36,7 @@
 		editSelected: { messageId: string };
 		deleteSelected: { messageId: string };
 		requestOlder: void;
+		readProgress: { isNearBottom: boolean; lastSeenMessageId: string };
 	}>();
 
 	const COLLAPSED_MESSAGE_LENGTH = 500;
@@ -51,6 +54,7 @@
 	let topObserver: IntersectionObserver | null = null;
 	let olderRequestPending = false;
 	let openOwnerActionMessageId = '';
+	let autoStickToBottom = true;
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -58,18 +62,23 @@
 
 	$: visibleMessages = getVisibleMessages(messages, roomMessageSearch);
 	$: replyCountByMessageID = buildReplyCountByMessageID(messages);
+	$: effectiveUnreadDividerMessageId = resolveUnreadDividerMessageId(
+		visibleMessages,
+		unreadStartMessageId,
+		unreadCount
+	);
 
 	afterUpdate(() => {
 		if (!viewport) {
 			return;
 		}
 		if (visibleMessages.length !== previousVisibleCount) {
-			const shouldStickToBottom = previousVisibleCount === 0 || isNearBottom;
+			const shouldStickToBottom = previousVisibleCount === 0 || autoStickToBottom;
 			previousVisibleCount = visibleMessages.length;
 			if (shouldStickToBottom) {
 				scrollToBottom('instant');
 			} else {
-				updateScrollState();
+				updateScrollState(false);
 			}
 		}
 		tryFocusMessage();
@@ -162,25 +171,50 @@
 		}
 	}
 
-	function updateScrollState() {
+	function getLastSeenMessageId() {
+		if (!viewport) {
+			return '';
+		}
+		const viewportRect = viewport.getBoundingClientRect();
+		const visibleBottom = viewportRect.bottom - 6;
+		let lastSeenMessageId = '';
+		const nodes = viewport.querySelectorAll<HTMLElement>('[data-message-id]');
+		for (const node of nodes) {
+			const nodeRect = node.getBoundingClientRect();
+			if (nodeRect.top <= visibleBottom) {
+				lastSeenMessageId = node.dataset.messageId || lastSeenMessageId;
+			}
+		}
+		return lastSeenMessageId;
+	}
+
+	function updateScrollState(fromUserScroll = false) {
 		if (!viewport) {
 			return;
 		}
 		const distanceFromBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
-		isNearBottom = distanceFromBottom < 96;
+		isNearBottom = distanceFromBottom < 48;
+		if (fromUserScroll) {
+			autoStickToBottom = distanceFromBottom <= 16;
+		}
 		showScrollToBottom = distanceFromBottom > Math.max(viewport.clientHeight, 300);
+		dispatch('readProgress', {
+			isNearBottom,
+			lastSeenMessageId: getLastSeenMessageId()
+		});
 	}
 
 	function onMessagesScroll() {
-		updateScrollState();
+		updateScrollState(true);
 	}
 
 	function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
 		if (!viewport) {
 			return;
 		}
+		autoStickToBottom = true;
 		viewport.scrollTo({ top: viewport.scrollHeight, behavior });
-		updateScrollState();
+		updateScrollState(false);
 	}
 
 	function setupTopObserver() {
@@ -240,7 +274,56 @@
 		const nextScrollHeight = viewport.scrollHeight;
 		const delta = nextScrollHeight - anchor.scrollHeight;
 		viewport.scrollTop = anchor.scrollTop + delta;
-		updateScrollState();
+		updateScrollState(false);
+	}
+
+	function messageIdMatch(left: string, right: string) {
+		return left.trim() !== '' && right.trim() !== '' && left.trim() === right.trim();
+	}
+
+	function resolveUnreadDividerMessageId(
+		input: ChatMessage[],
+		anchorMessageId: string,
+		nextUnreadCount: number
+	) {
+		if (!Array.isArray(input) || input.length === 0 || nextUnreadCount <= 0) {
+			return '';
+		}
+		const normalizedAnchor = anchorMessageId.trim();
+		if (normalizedAnchor && input.some((message) => messageIdMatch(message.id, normalizedAnchor))) {
+			return normalizedAnchor;
+		}
+		const fallbackIndex = Math.max(0, input.length - nextUnreadCount);
+		return input[Math.min(fallbackIndex, input.length - 1)]?.id ?? '';
+	}
+
+	function shouldShowDayStamp(input: ChatMessage[], index: number) {
+		if (index <= 0) {
+			return true;
+		}
+		const previous = input[index - 1];
+		const current = input[index];
+		if (!previous || !current) {
+			return false;
+		}
+		const previousDate = new Date(previous.createdAt);
+		const currentDate = new Date(current.createdAt);
+		return (
+			previousDate.getFullYear() !== currentDate.getFullYear() ||
+			previousDate.getMonth() !== currentDate.getMonth() ||
+			previousDate.getDate() !== currentDate.getDate()
+		);
+	}
+
+	function formatDayStamp(timestamp: number) {
+		const date = new Date(timestamp);
+		const now = new Date();
+		const isCurrentYear = date.getFullYear() === now.getFullYear();
+		return date.toLocaleDateString([], {
+			month: 'short',
+			day: 'numeric',
+			...(isCurrentYear ? {} : { year: 'numeric' })
+		});
 	}
 
 	function getVisibleMessages(input: ChatMessage[], query: string) {
@@ -573,7 +656,17 @@
 			</div>
 		{/if}
 
-		{#each visibleMessages as message (message.id)}
+		{#each visibleMessages as message, index (message.id)}
+			{#if shouldShowDayStamp(visibleMessages, index)}
+				<div class="day-stamp">
+					<span>{formatDayStamp(message.createdAt)}</span>
+				</div>
+			{/if}
+			{#if effectiveUnreadDividerMessageId && messageIdMatch(message.id, effectiveUnreadDividerMessageId)}
+				<div class="unread-divider" role="separator" aria-label="Unread messages">
+					<span>Unread</span>
+				</div>
+			{/if}
 			{@const isMine = message.senderId === currentUserId}
 			{@const totalReplies = getTotalReplies(message)}
 			{@const branchesCreated = getBranchesCreated(message)}
@@ -935,6 +1028,54 @@
 		margin: 0.12rem 0 0.15rem;
 		font-size: 0.72rem;
 		color: #71717a;
+	}
+
+	.day-stamp {
+		align-self: center;
+		margin: 0.18rem 0 0.05rem;
+		padding: 0.15rem 0.52rem;
+		border-radius: 999px;
+		border: 1px solid #dadde4;
+		background: #f7f8fb;
+		font-size: 0.66rem;
+		font-weight: 600;
+		letter-spacing: 0.01em;
+		color: #667085;
+	}
+
+	.messages-shell.theme-dark .day-stamp {
+		border-color: #30445f;
+		background: #122037;
+		color: #a9bbd8;
+	}
+
+	.unread-divider {
+		align-self: stretch;
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		margin: 0.1rem 0 0.1rem;
+		color: #c24141;
+		font-size: 0.7rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
+	}
+
+	.unread-divider::before,
+	.unread-divider::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: rgba(194, 65, 65, 0.45);
+	}
+
+	.messages-shell.theme-dark .unread-divider {
+		color: #f38a8a;
+	}
+
+	.messages-shell.theme-dark .unread-divider::before,
+	.messages-shell.theme-dark .unread-divider::after {
+		background: rgba(243, 138, 138, 0.5);
 	}
 
 	.messages-shell.theme-dark .older-history-indicator {

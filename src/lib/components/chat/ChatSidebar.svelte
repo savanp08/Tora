@@ -657,6 +657,9 @@
 								</span>
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
+									{#if thread.unread > 0}
+										<span class="unread">{thread.unread}</span>
+									{/if}
 								</span>
 							</span>
 						</button>
@@ -692,6 +695,9 @@
 								</span>
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
+									{#if thread.unread > 0}
+										<span class="unread">{thread.unread}</span>
+									{/if}
 								</span>
 							</span>
 						</button>
@@ -748,7 +754,7 @@
 							</span>
 							<span class="item-bottom">
 								<span class="room-preview">{getThreadPreview(thread)}</span>
-								{#if thread.status === 'joined' && thread.unread > 0}
+								{#if thread.unread > 0}
 									<span class="unread">{thread.unread}</span>
 								{/if}
 							</span>

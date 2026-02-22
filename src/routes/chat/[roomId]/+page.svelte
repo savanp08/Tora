@@ -151,6 +151,7 @@ import {
 	let historyLoadingByRoom: Record<string, boolean> = {};
 	let historyHasMoreByRoom: Record<string, boolean> = {};
 	let offlineHydratedByRoom: Record<string, boolean> = {};
+	let unreadAnchorByRoom: Record<string, string> = {};
 	let trustedDevicePreference: TrustedDevicePreference = 'unset';
 	let showTrustedDevicePrompt = false;
 	let trustedCachingEnabled = false;
@@ -162,6 +163,7 @@ import {
 	let serverClockOffsetMs = 0;
 	let serverNowAnchorMs = 0;
 	let serverNowAnchorPerfMs = 0;
+	let activeRoomNearBottom = true;
 	let uiDialog: UiDialogState = { kind: 'none' };
 	let uiDialogResolver: ((value: unknown) => void) | null = null;
 	let chatWindowRef: {
@@ -192,6 +194,7 @@ import {
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: activeUnreadCount = activeThread?.unread ?? 0;
+	$: activeUnreadStartMessageId = getUnreadStartMessageId(roomId);
 	$: activeTypingUsers = getActiveTypingUsers(roomId);
 	$: typingIndicatorText = formatTypingIndicator(activeTypingUsers);
 	$: isLoadingOlderHistory = historyLoadingByRoom[roomId] ?? false;
@@ -245,6 +248,7 @@ import {
 		focusRoomTracker = roomId;
 		focusConsumedForRoom = false;
 		focusMessageId = '';
+		activeRoomNearBottom = true;
 		activeReply = null;
 		messageActionMode = 'none';
 		isSelectionMode = false;
@@ -1147,9 +1151,6 @@ import {
 			}
 			for (const [targetRoomId, history] of byRoom.entries()) {
 				mergeMessages(targetRoomId, history);
-				if (targetRoomId === roomId) {
-					markRoomAsRead(targetRoomId);
-				}
 			}
 			return;
 		}
@@ -1204,9 +1205,6 @@ import {
 					}
 					for (const [roomID, messages] of grouped.entries()) {
 						mergeMessages(roomID, messages);
-						if (roomID === roomId) {
-							markRoomAsRead(roomID);
-						}
 					}
 				}
 			}
@@ -1272,14 +1270,18 @@ import {
 	}
 
 	function addIncomingMessage(message: ChatMessage) {
-		const shouldCountUnread = message.roomId !== roomId;
+		const isActiveRoom = message.roomId === roomId;
+		const shouldCountUnread = !isActiveRoom || !activeRoomNearBottom;
 		upsertMessage(message.roomId, message, shouldCountUnread);
-		if (message.roomId === roomId) {
-			markRoomAsRead(roomId);
+		if (isActiveRoom && activeRoomNearBottom) {
+			applyReadProgress(roomId, message.id, true);
 		}
 	}
 
 	function upsertMessage(targetRoomId: string, message: ChatMessage, shouldCountUnread: boolean) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		const previousUnread =
+			roomThreads.find((thread) => thread.id === normalizedRoomID)?.unread ?? 0;
 		const next = upsertMessageState(
 			messagesByRoom,
 			roomThreads,
@@ -1294,6 +1296,19 @@ import {
 		);
 		messagesByRoom = next.messagesByRoom;
 		roomThreads = next.roomThreads;
+		if (shouldCountUnread && normalizedRoomID) {
+			const nextUnread =
+				next.roomThreads.find((thread) => thread.id === normalizedRoomID)?.unread ?? 0;
+			if (nextUnread > 0 && !unreadAnchorByRoom[normalizedRoomID] && nextUnread > previousUnread) {
+				const roomMessages = next.messagesByRoom[normalizedRoomID] ?? [];
+				const fallbackIndex = Math.max(0, roomMessages.length - nextUnread);
+				const fallbackAnchor = roomMessages[fallbackIndex]?.id || message.id;
+				unreadAnchorByRoom = {
+					...unreadAnchorByRoom,
+					[normalizedRoomID]: fallbackAnchor
+				};
+			}
+		}
 		queueOfflineCachePersist(targetRoomId);
 	}
 
@@ -1346,7 +1361,116 @@ import {
 	}
 
 	function markRoomAsRead(targetRoomId: string) {
-		roomThreads = markRoomAsReadState(roomThreads, targetRoomId);
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		roomThreads = markRoomAsReadState(roomThreads, normalizedRoomID);
+		if (normalizedRoomID && unreadAnchorByRoom[normalizedRoomID]) {
+			const nextUnreadAnchors = { ...unreadAnchorByRoom };
+			delete nextUnreadAnchors[normalizedRoomID];
+			unreadAnchorByRoom = nextUnreadAnchors;
+		}
+	}
+
+	function getUnreadStartMessageId(targetRoomId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return '';
+		}
+		const explicitAnchor = unreadAnchorByRoom[normalizedRoomID];
+		if (explicitAnchor) {
+			return explicitAnchor;
+		}
+		const unread = roomThreads.find((thread) => thread.id === normalizedRoomID)?.unread ?? 0;
+		if (unread <= 0) {
+			return '';
+		}
+		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
+		if (roomMessages.length === 0) {
+			return '';
+		}
+		const fallbackIndex = Math.max(0, roomMessages.length - unread);
+		return roomMessages[fallbackIndex]?.id ?? '';
+	}
+
+	function applyReadProgress(targetRoomId: string, lastSeenMessageId: string, isNearBottom: boolean) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return;
+		}
+		const thread = roomThreads.find((entry) => entry.id === normalizedRoomID);
+		const unread = thread?.unread ?? 0;
+		if (unread <= 0) {
+			return;
+		}
+
+		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
+		if (roomMessages.length === 0) {
+			return;
+		}
+
+		const anchorMessageID = getUnreadStartMessageId(normalizedRoomID);
+		if (!anchorMessageID) {
+			return;
+		}
+		const anchorIndex = roomMessages.findIndex(
+			(message) => normalizeMessageID(message.id) === normalizeMessageID(anchorMessageID)
+		);
+		if (anchorIndex < 0) {
+			if (isNearBottom) {
+				markRoomAsRead(normalizedRoomID);
+			}
+			return;
+		}
+
+		let seenCount = 0;
+		if (isNearBottom) {
+			seenCount = unread;
+		} else {
+			const seenIndex = roomMessages.findIndex(
+				(message) => normalizeMessageID(message.id) === normalizeMessageID(lastSeenMessageId)
+			);
+			if (seenIndex < anchorIndex) {
+				return;
+			}
+			seenCount = Math.min(unread, seenIndex-anchorIndex+1);
+		}
+		if (seenCount <= 0) {
+			return;
+		}
+
+		const nextUnread = Math.max(0, unread-seenCount);
+		roomThreads = sortThreads(
+			roomThreads.map((entry) =>
+				entry.id === normalizedRoomID ? { ...entry, unread: nextUnread } : entry
+			)
+		);
+
+		if (nextUnread <= 0) {
+			const nextUnreadAnchors = { ...unreadAnchorByRoom };
+			delete nextUnreadAnchors[normalizedRoomID];
+			unreadAnchorByRoom = nextUnreadAnchors;
+			return;
+		}
+
+		const nextAnchorMessage = roomMessages[Math.min(roomMessages.length - 1, anchorIndex + seenCount)];
+		if (nextAnchorMessage?.id) {
+			unreadAnchorByRoom = {
+				...unreadAnchorByRoom,
+				[normalizedRoomID]: nextAnchorMessage.id
+			};
+		}
+	}
+
+	function onChatReadProgress(
+		event: CustomEvent<{ isNearBottom: boolean; lastSeenMessageId: string }>
+	) {
+		if (!roomId) {
+			return;
+		}
+		activeRoomNearBottom = Boolean(event.detail?.isNearBottom);
+		if (roomMessageSearch.trim()) {
+			return;
+		}
+		applyReadProgress(roomId, event.detail?.lastSeenMessageId || '', activeRoomNearBottom);
 	}
 
 	function upsertOnlineMember(targetRoomId: string, member: OnlineMember) {
@@ -1420,7 +1544,7 @@ import {
 
 		upsertMessage(roomId, outgoing, false);
 		sendSocketPayload(toWireMessage(outgoing));
-		markRoomAsRead(roomId);
+		applyReadProgress(roomId, outgoing.id, activeRoomNearBottom);
 		sendTypingStop();
 		draftMessage = '';
 		attachedFile = null;
@@ -1747,6 +1871,7 @@ import {
 		showLeftMenu = false;
 		setMessageActionMode('none');
 		sendTypingStop();
+		unreadAnchorByRoom = {};
 		closeGlobalSocket();
 		clearSessionToken();
 		authToken.set(null);
@@ -2004,6 +2129,11 @@ import {
 				delete nextMeta[deleteID];
 			}
 			roomMetaById = nextMeta;
+			const nextUnreadAnchors = { ...unreadAnchorByRoom };
+			for (const deleteID of deleteIDs) {
+				delete nextUnreadAnchors[deleteID];
+			}
+			unreadAnchorByRoom = nextUnreadAnchors;
 
 			await refreshSidebarRooms();
 			const fallbackJoined = roomThreads.find((thread) => thread.status === 'joined');
@@ -2072,6 +2202,9 @@ import {
 			const nextHistoryHasMore = { ...historyHasMoreByRoom };
 			delete nextHistoryHasMore[leftRoomId];
 			historyHasMoreByRoom = nextHistoryHasMore;
+			const nextUnreadAnchors = { ...unreadAnchorByRoom };
+			delete nextUnreadAnchors[leftRoomId];
+			unreadAnchorByRoom = nextUnreadAnchors;
 
 			await refreshSidebarRooms();
 			showErrorToast((data as { message?: string }).message || 'Room left');
@@ -2354,6 +2487,8 @@ import {
 			bind:this={chatWindowRef}
 			messages={currentMessages}
 			{currentUserId}
+			unreadStartMessageId={activeUnreadStartMessageId}
+			unreadCount={activeUnreadCount}
 			{roomMessageSearch}
 			{expandedMessages}
 			{isMember}
@@ -2375,6 +2510,7 @@ import {
 			on:deleteSelected={onSelectedMessageDelete}
 			on:requestOlder={onRequestOlderHistory}
 			on:focusHandled={onFocusHandled}
+			on:readProgress={onChatReadProgress}
 		/>
 
 		{#if isMember}

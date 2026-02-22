@@ -209,6 +209,7 @@ export function upsertMessageState(
 ) {
 	const roomMessages = messagesByRoom[targetRoomId] ?? [];
 	const existingIndex = roomMessages.findIndex((entry) => entry.id === message.id);
+	const isNewMessage = existingIndex < 0;
 
 	let nextMessages: ChatMessage[];
 	if (existingIndex >= 0) {
@@ -229,7 +230,7 @@ export function upsertMessageState(
 	};
 
 	let nextThreads = updateThreadPreview(roomThreads, nextMessagesByRoom, targetRoomId, deps);
-	if (shouldCountUnread) {
+	if (shouldCountUnread && isNewMessage) {
 		nextThreads = sortThreads(
 			nextThreads.map((thread) =>
 				thread.id === targetRoomId ? { ...thread, unread: thread.unread + 1 } : thread
