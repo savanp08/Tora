@@ -9,7 +9,7 @@ const adjectives = [
 	'Brave',
 	'Smart',
 	'Kind',
-	'Busy',
+	'Busy', 
 	'Cozy',
 	'Dizzy',
 	'Fizzy',
