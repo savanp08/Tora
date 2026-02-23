@@ -74,6 +74,7 @@
 	$: allThreads = dedupeThreads([...myRooms, ...discoverableRooms, ...leftRooms]);
 	$: threadByID = new Map(allThreads.map((thread) => [thread.id, thread]));
 	$: childrenByParent = buildChildrenByParent(allThreads);
+	$: subtreeUnreadByThreadID = buildSubtreeUnreadByThreadID(allThreads, childrenByParent);
 	$: rootThreads = sortSidebarThreads(
 		allThreads.filter((thread) => !thread.parentRoomId || !threadByID.has(thread.parentRoomId))
 	);
@@ -216,6 +217,42 @@
 			);
 		}
 		return index;
+	}
+
+	function normalizeUnread(value: number | undefined) {
+		if (!Number.isFinite(value)) {
+			return 0;
+		}
+		return Math.max(0, Math.floor(value ?? 0));
+	}
+
+	function buildSubtreeUnreadByThreadID(
+		threads: ChatThread[],
+		childIndex: Map<string, ChatThread[]>
+	) {
+		const unreadByID = new Map(threads.map((thread) => [thread.id, normalizeUnread(thread.unread)]));
+		const totals = new Map<string, number>();
+		const walk = (threadID: string, seen: Set<string>) => {
+			if (totals.has(threadID)) {
+				return totals.get(threadID) ?? 0;
+			}
+			if (seen.has(threadID)) {
+				return unreadByID.get(threadID) ?? 0;
+			}
+			const nextSeen = new Set(seen);
+			nextSeen.add(threadID);
+			let total = unreadByID.get(threadID) ?? 0;
+			const children = childIndex.get(threadID) ?? [];
+			for (const child of children) {
+				total += walk(child.id, nextSeen);
+			}
+			totals.set(threadID, total);
+			return total;
+		};
+		for (const thread of threads) {
+			walk(thread.id, new Set<string>());
+		}
+		return totals;
 	}
 
 	function sortSidebarThreads(threads: ChatThread[]) {
@@ -547,6 +584,15 @@
 		}
 		return thread.status === 'joined' ? 'No messages yet' : 'Preview and join';
 	}
+
+	function getUnreadBadgeCount(thread: ChatThread) {
+		const directUnread = normalizeUnread(thread.unread);
+		const isStreamlinedRootList = !isFullView && !streamlinedParentRoomId;
+		if (!isStreamlinedRootList) {
+			return directUnread;
+		}
+		return subtreeUnreadByThreadID.get(thread.id) ?? directUnread;
+	}
 </script>
 
 <aside class="room-list {isDarkMode ? 'theme-dark' : ''}">
@@ -677,8 +723,8 @@
 												{getChildCount(thread.id)}
 											</span>
 										{/if}
-										{#if thread.unread > 0}
-											<span class="unread">{thread.unread}</span>
+										{#if getUnreadBadgeCount(thread) > 0}
+											<span class="unread">{getUnreadBadgeCount(thread)}</span>
 										{/if}
 									</span>
 								</span>
@@ -745,8 +791,8 @@
 												{getChildCount(thread.id)}
 											</span>
 										{/if}
-										{#if thread.unread > 0}
-											<span class="unread">{thread.unread}</span>
+										{#if getUnreadBadgeCount(thread) > 0}
+											<span class="unread">{getUnreadBadgeCount(thread)}</span>
 										{/if}
 									</span>
 								</span>
@@ -813,8 +859,8 @@
 												{getChildCount(thread.id)}
 											</span>
 										{/if}
-										{#if thread.unread > 0}
-											<span class="unread">{thread.unread}</span>
+										{#if getUnreadBadgeCount(thread) > 0}
+											<span class="unread">{getUnreadBadgeCount(thread)}</span>
 										{/if}
 									</span>
 								</span>
@@ -899,8 +945,8 @@
 											{getChildCount(thread.id)}
 										</span>
 									{/if}
-									{#if thread.unread > 0}
-										<span class="unread">{thread.unread}</span>
+									{#if getUnreadBadgeCount(thread) > 0}
+										<span class="unread">{getUnreadBadgeCount(thread)}</span>
 									{/if}
 								</span>
 							</span>

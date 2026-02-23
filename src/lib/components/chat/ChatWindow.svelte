@@ -62,6 +62,7 @@
 	let previousRoomId = '';
 	let previousIsVisible = true;
 	let unreadDividerAnchorId = '';
+	let unreadDividerCount = 0;
 	let scrollTopByRoomId: Record<string, number> = {};
 
 	$: if (!focusMessageId && focusedMessageId) {
@@ -70,16 +71,9 @@
 
 	$: visibleMessages = getVisibleMessages(messages, roomMessageSearch);
 	$: replyCountByMessageID = buildReplyCountByMessageID(messages);
-	$: firstUnreadCandidateId = resolveFirstUnreadId(
-		messages,
-		unreadCount,
-		currentUserId,
-		firstUnreadMessageId,
-		lastReadTimestamp
-	);
 	$: safeUnreadCount = Math.max(0, Math.trunc(Number.isFinite(unreadCount) ? unreadCount : 0));
 	$: unreadDividerLabel =
-		safeUnreadCount === 1 ? '1 unread message' : `${safeUnreadCount} unread messages`;
+		unreadDividerCount === 1 ? '1 unread message' : `${unreadDividerCount} unread messages`;
 	$: firstUnreadId = unreadDividerAnchorId;
 
 	afterUpdate(() => {
@@ -337,28 +331,40 @@
 		};
 	}
 
+	function resolveUnreadDividerCandidateId(unreadTotal: number) {
+		return resolveFirstUnreadId(
+			messages,
+			unreadTotal,
+			currentUserId,
+			firstUnreadMessageId,
+			lastReadTimestamp
+		);
+	}
+
 	function syncUnreadDividerAnchor(forceRecompute: boolean) {
-		if (safeUnreadCount <= 0) {
+		if (forceRecompute) {
+			unreadDividerCount = safeUnreadCount;
+			unreadDividerAnchorId =
+				unreadDividerCount > 0 ? resolveUnreadDividerCandidateId(unreadDividerCount) : '';
+			return;
+		}
+
+		if (unreadDividerCount <= 0) {
 			if (unreadDividerAnchorId) {
 				unreadDividerAnchorId = '';
 			}
 			return;
 		}
 
-		if (forceRecompute) {
-			unreadDividerAnchorId = firstUnreadCandidateId;
-			return;
-		}
-
 		const hasAnchor = Boolean(unreadDividerAnchorId);
 		if (!hasAnchor) {
-			unreadDividerAnchorId = firstUnreadCandidateId;
+			unreadDividerAnchorId = resolveUnreadDividerCandidateId(unreadDividerCount);
 			return;
 		}
 
 		const anchorStillExists = messages.some((message) => message.id === unreadDividerAnchorId);
 		if (!anchorStillExists) {
-			unreadDividerAnchorId = firstUnreadCandidateId;
+			unreadDividerAnchorId = resolveUnreadDividerCandidateId(unreadDividerCount);
 		}
 	}
 
@@ -796,7 +802,7 @@
 					<span>{formatDayStamp(message.createdAt)}</span>
 				</div>
 			{/if}
-			{#if safeUnreadCount > 0 && message.id === firstUnreadId}
+			{#if unreadDividerCount > 0 && message.id === firstUnreadId}
 				<div class="unread-divider" role="separator" aria-label={unreadDividerLabel}>
 					<span>{unreadDividerLabel}</span>
 				</div>
