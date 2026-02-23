@@ -7,7 +7,8 @@
 		uploadToR2,
 		type MediaMessageType
 	} from '$lib/utils/media';
-	import type { ReplyTarget } from '$lib/types/chat';
+	import type { ReplyTarget, TaskChecklistItem } from '$lib/types/chat';
+	import { stringifyTaskMessagePayload } from '$lib/utils/chat/task';
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 
@@ -16,6 +17,7 @@
 	export let activeReply: ReplyTarget | null = null;
 	export let isDarkMode = false;
 	export let messageLimit = MESSAGE_TEXT_MAX_BYTES;
+	export let currentUsername = 'You';
 
 	let mediaInput: HTMLInputElement | null = null;
 	let fileInput: HTMLInputElement | null = null;
@@ -28,6 +30,12 @@
 	let attachWrapEl: HTMLDivElement | null = null;
 	let normalizedDraftMessage = '';
 	let draftMessageBytes = 0;
+	let taskDraftOpen = false;
+	let taskDraftTitle = '';
+	let taskDraftItems: TaskChecklistItem[] = [];
+	let taskNewItemText = '';
+	let taskAddInputOpen = false;
+	let taskDraftError = '';
 	let isRecording = false;
 	let mediaRecorder: MediaRecorder | null = null;
 	let audioChunks: Blob[] = [];
@@ -37,10 +45,14 @@
 	$: draftMessageBytes = getUTF8ByteLength(normalizedDraftMessage);
 	$: isOverMessageLimit = draftMessageBytes > messageLimit;
 	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
-	$: showSendButton = !isRecording && (!!attachedFile || normalizedDraftMessage.length > 0);
+	$: taskDraftReady = taskDraftOpen && taskDraftTitle.trim() !== '' && taskDraftItems.length > 0;
+	$: showSendButton =
+		!isRecording && (!!attachedFile || normalizedDraftMessage.length > 0 || taskDraftOpen);
 
 	const dispatch = createEventDispatcher<{
-		send: { type: MediaMessageType; content: string; fileName?: string; text?: string } | undefined;
+		send:
+			| { type: MediaMessageType | 'task'; content: string; fileName?: string; text?: string }
+			| undefined;
 		attach: { file: File | null; type: 'media' | 'file'; error?: string };
 		removeAttachment: void;
 		cancelReply: void;
@@ -79,9 +91,24 @@
 		showAttachMenu = !showAttachMenu;
 	}
 
-	function chooseAttachmentType(type: 'media' | 'file') {
+	function chooseAttachmentType(type: 'media' | 'file' | 'task') {
 		showAttachMenu = false;
 		attachError = '';
+		taskDraftError = '';
+		if (type === 'task') {
+			clearAttachmentPreview();
+			attachedFile = null;
+			attachedMessageType = null;
+			dispatch('attach', { file: null, type: 'file' });
+			taskDraftOpen = true;
+			taskAddInputOpen = false;
+			if (taskDraftTitle.trim() === '') {
+				taskDraftTitle = 'Task';
+			}
+			return;
+		}
+		taskDraftOpen = false;
+		taskAddInputOpen = false;
 		if (type === 'media') {
 			mediaInput?.click();
 			return;
@@ -181,6 +208,10 @@
 		if (isProcessingAttachment || isOverMessageLimit || isRecording) {
 			return;
 		}
+		if (taskDraftOpen) {
+			submitTaskDraft();
+			return;
+		}
 		if (attachedFile) {
 			void sendAttachment();
 			return;
@@ -214,7 +245,11 @@
 		if (!trimmed) {
 			return '';
 		}
-		if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+		if (
+			/^https?:\/\//i.test(trimmed) ||
+			trimmed.startsWith('blob:') ||
+			trimmed.startsWith('data:')
+		) {
 			return trimmed;
 		}
 		if (trimmed.startsWith('/')) {
@@ -272,7 +307,7 @@
 	}
 
 	async function toggleRecording() {
-		if (isProcessingAttachment || attachedFile) {
+		if (isProcessingAttachment || attachedFile || taskDraftOpen) {
 			return;
 		}
 
@@ -342,6 +377,104 @@
 		}
 		return `${normalized.slice(0, 117)}...`;
 	}
+
+	function clearTaskDraft() {
+		taskDraftOpen = false;
+		taskDraftTitle = '';
+		taskDraftItems = [];
+		taskNewItemText = '';
+		taskAddInputOpen = false;
+		taskDraftError = '';
+	}
+
+	function openTaskDraftAddInput() {
+		taskAddInputOpen = true;
+		taskDraftError = '';
+	}
+
+	function cancelTaskDraftAddInput() {
+		taskAddInputOpen = false;
+		taskNewItemText = '';
+	}
+
+	function addTaskDraftItem() {
+		const text = (taskNewItemText || '').trim();
+		if (!text) {
+			return;
+		}
+		taskDraftItems = [
+			...taskDraftItems,
+			{
+				text,
+				completed: false,
+				completedBy: '',
+				timestamp: 0,
+				createdBy: (currentUsername || 'You').trim() || 'You',
+				createdAt: Date.now()
+			}
+		];
+		taskNewItemText = '';
+		taskAddInputOpen = false;
+		taskDraftError = '';
+	}
+
+	function removeTaskDraftItem(index: number) {
+		if (index < 0 || index >= taskDraftItems.length) {
+			return;
+		}
+		taskDraftItems = taskDraftItems.filter((_, itemIndex) => itemIndex !== index);
+	}
+
+	function onTaskDraftItemKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			addTaskDraftItem();
+			return;
+		}
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelTaskDraftAddInput();
+		}
+	}
+
+	function submitTaskDraft() {
+		const title = taskDraftTitle.trim();
+		if (!title) {
+			taskDraftError = 'Add a title for this task card.';
+			return;
+		}
+		if (taskDraftItems.length === 0) {
+			taskDraftError = 'Add at least one task item.';
+			return;
+		}
+		const content = stringifyTaskMessagePayload({
+			title,
+			tasks: taskDraftItems
+		});
+		dispatch('send', {
+			type: 'task',
+			content
+		});
+		clearTaskDraft();
+	}
+
+	function formatTaskMeta(timestamp: number) {
+		if (!Number.isFinite(timestamp) || timestamp <= 0) {
+			return '';
+		}
+		return new Date(timestamp).toLocaleString([], {
+			month: 'short',
+			day: 'numeric',
+			hour: 'numeric',
+			minute: '2-digit'
+		});
+	}
+
+	function onTaskDraftBackdropClick(event: MouseEvent) {
+		if (event.target === event.currentTarget) {
+			clearTaskDraft();
+		}
+	}
 </script>
 
 <footer class="composer {isDarkMode ? 'theme-dark' : ''}">
@@ -374,6 +507,80 @@
 					<span>{attachedFile.name}</span>
 				</div>
 			{/if}
+		</div>
+	{/if}
+	{#if taskDraftOpen}
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<div class="task-draft-shell" role="presentation" on:click={onTaskDraftBackdropClick}>
+			<section class="task-draft-card" role="group" aria-label="Task preview card">
+				<div class="task-draft-header">
+					<div class="task-draft-kicker">Task Preview</div>
+					<button type="button" class="task-draft-close" on:click={clearTaskDraft}>Cancel</button>
+				</div>
+				<input
+					type="text"
+					class="task-draft-title"
+					bind:value={taskDraftTitle}
+					placeholder="Title"
+				/>
+				<div class="task-draft-list">
+					{#if taskDraftItems.length === 0}
+						<div class="task-draft-empty">No tasks yet. Add your first item.</div>
+					{:else}
+						{#each taskDraftItems as task, index}
+							<div class="task-draft-item">
+								<input type="checkbox" checked={task.completed} disabled />
+								<div class="task-draft-item-content">
+									<div class="task-draft-item-name">{task.text}</div>
+									<div class="task-draft-meta-line">
+										<span>{task.createdBy}</span>
+										<span aria-hidden="true">•</span>
+										<span>{formatTaskMeta(task.createdAt)}</span>
+										<span aria-hidden="true">•</span>
+										<span class="task-draft-meta-finished">open</span>
+									</div>
+								</div>
+								<button
+									type="button"
+									class="task-draft-remove"
+									on:click={() => removeTaskDraftItem(index)}
+									aria-label="Remove task item"
+									title="Remove"
+								>
+									×
+								</button>
+							</div>
+						{/each}
+					{/if}
+				</div>
+				{#if taskAddInputOpen}
+					<div class="task-draft-add-row">
+						<input type="checkbox" disabled aria-hidden="true" />
+						<input
+							type="text"
+							bind:value={taskNewItemText}
+							placeholder="Task name"
+							on:keydown={onTaskDraftItemKeyDown}
+						/>
+						<button type="button" class="add-row-action confirm" on:click={addTaskDraftItem}>Add</button>
+						<button
+							type="button"
+							class="add-row-action"
+							on:click={cancelTaskDraftAddInput}
+						>
+							Cancel
+						</button>
+					</div>
+				{:else}
+					<button type="button" class="task-draft-add-trigger" on:click={openTaskDraftAddInput}>
+						<span class="plus-pill">+</span>
+						<span>Add Task</span>
+					</button>
+				{/if}
+				{#if taskDraftError}
+					<div class="task-draft-error">{taskDraftError}</div>
+				{/if}
+			</section>
 		</div>
 	{/if}
 	{#if attachError}
@@ -419,6 +626,10 @@
 						<IconSet name="file" size={14} />
 						<span>File</span>
 					</button>
+					<button type="button" on:click={() => chooseAttachmentType('task')}>
+						<IconSet name="list-vertical" size={14} />
+						<span>Task</span>
+					</button>
 				</div>
 			{/if}
 		</div>
@@ -428,25 +639,32 @@
 			rows="1"
 			placeholder={isRecording
 				? 'Recording... Click mic to send.'
-				: attachedFile
-					? 'Add a caption (optional)'
-					: 'Type a message'}
+				: taskDraftOpen
+					? 'Task mode active. Press send when ready.'
+					: attachedFile
+						? 'Add a caption (optional)'
+						: 'Type a message'}
 			on:input={onComposerInput}
 			on:keydown={onComposerKeyDown}
-			disabled={isProcessingAttachment || isRecording}
+			disabled={isProcessingAttachment || isRecording || taskDraftOpen}
 		></textarea>
 		{#if showSendButton}
 			<button
 				type="button"
 				class="send-button"
 				on:click={onSend}
-				disabled={isProcessingAttachment || isOverMessageLimit || isRecording}
-				aria-label={attachedFile ? 'Send attachment' : 'Send message'}
+				disabled={isProcessingAttachment ||
+					isOverMessageLimit ||
+					isRecording ||
+					(taskDraftOpen && !taskDraftReady)}
+				aria-label={attachedFile ? 'Send attachment' : taskDraftOpen ? 'Send task' : 'Send message'}
 				title={isOverMessageLimit
 					? `Message is too long (${draftMessageBytes}/${messageLimit})`
 					: attachedFile
 						? 'Send attachment'
-						: 'Send message'}
+						: taskDraftOpen
+							? 'Send task card'
+							: 'Send message'}
 			>
 				<IconSet name="send" size={15} />
 			</button>
@@ -455,7 +673,7 @@
 				type="button"
 				class="mic-button {isRecording ? 'recording' : ''}"
 				on:click={toggleRecording}
-				disabled={isProcessingAttachment || !!attachedFile}
+				disabled={isProcessingAttachment || !!attachedFile || taskDraftOpen}
 				aria-label={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 				title={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 			>
@@ -669,6 +887,328 @@
 		border: 1px solid rgba(37, 99, 235, 0.2);
 		border-radius: 8px;
 		padding: 0.36rem 0.5rem;
+	}
+
+	.task-draft-shell {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1.2rem;
+		background: rgba(12, 18, 31, 0.36);
+		backdrop-filter: blur(8px);
+		-webkit-backdrop-filter: blur(8px);
+		z-index: 520;
+	}
+
+	.task-draft-card {
+		width: min(100%, 46rem);
+		max-height: min(86vh, 760px);
+		border: 1px solid #b8cadf;
+		background: linear-gradient(180deg, #f8fbff 0%, #eef4fc 100%);
+		border-radius: 14px;
+		padding: 0.72rem 0.76rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.56rem;
+		overflow: auto;
+		box-shadow:
+			0 10px 18px rgba(15, 23, 42, 0.08),
+			inset 0 1px 0 rgba(255, 255, 255, 0.78);
+	}
+
+	.composer.theme-dark .task-draft-shell {
+		background: rgba(3, 8, 18, 0.56);
+	}
+
+	.composer.theme-dark .task-draft-card {
+		border-color: #36507a;
+		background: linear-gradient(180deg, #12233f 0%, #0e1d34 100%);
+		box-shadow:
+			0 10px 24px rgba(2, 8, 23, 0.45),
+			inset 0 1px 0 rgba(255, 255, 255, 0.08);
+	}
+
+	.task-draft-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.task-draft-kicker {
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: #3a516f;
+	}
+
+	.composer.theme-dark .task-draft-kicker {
+		color: #97b5df;
+	}
+
+	.task-draft-close {
+		border: 1px solid #bfd0e8;
+		background: #f7fbff;
+		color: #2f4b74;
+		border-radius: 9px;
+		padding: 0.24rem 0.56rem;
+		font-size: 0.72rem;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	.composer.theme-dark .task-draft-close {
+		border-color: #3b5a85;
+		background: #12253f;
+		color: #d6e7ff;
+	}
+
+	.task-draft-title {
+		border: 1px solid #b8cbdf;
+		background: #ffffff;
+		color: #142235;
+		border-radius: 10px;
+		padding: 0.52rem 0.64rem;
+		font-size: 0.95rem;
+		font-weight: 700;
+	}
+
+	.composer.theme-dark .task-draft-title {
+		border-color: #3a5682;
+		background: #0f1f38;
+		color: #edf4ff;
+	}
+
+	.task-draft-title:focus {
+		outline: none;
+		border-color: #60a5fa;
+		box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.22);
+	}
+
+	.task-draft-list {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+	}
+
+	.task-draft-empty {
+		border: 1px dashed #bcd2e9;
+		background: #f6f9ff;
+		border-radius: 10px;
+		padding: 0.5rem 0.6rem;
+		font-size: 0.78rem;
+		color: #526681;
+	}
+
+	.composer.theme-dark .task-draft-empty {
+		border-color: #45628e;
+		background: rgba(16, 35, 62, 0.75);
+		color: #b8cde7;
+	}
+
+	.task-draft-item {
+		display: grid;
+		grid-template-columns: 1rem minmax(0, 1fr) auto;
+		gap: 0.48rem;
+		align-items: center;
+		padding: 0.5rem 0.56rem;
+		border: 1px solid #c7d6ea;
+		border-radius: 10px;
+		background: #ffffff;
+	}
+
+	.composer.theme-dark .task-draft-item {
+		border-color: #3f5e89;
+		background: #132746;
+	}
+
+	.task-draft-item input[type='checkbox'] {
+		width: 0.95rem;
+		height: 0.95rem;
+		accent-color: #16a34a;
+	}
+
+	.task-draft-item-content {
+		display: flex;
+		flex-direction: column;
+		gap: 0.16rem;
+		min-width: 0;
+	}
+
+	.task-draft-item-name {
+		font-size: 0.82rem;
+		color: #122237;
+		word-break: break-word;
+		font-weight: 600;
+	}
+
+	.composer.theme-dark .task-draft-item-name {
+		color: #e7f0ff;
+	}
+
+	.task-draft-meta-line {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.28rem;
+		font-size: 0.67rem;
+		color: #577190;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.composer.theme-dark .task-draft-meta-line {
+		color: #9fbcde;
+	}
+
+	.task-draft-meta-finished {
+		color: #64748b;
+	}
+
+	.composer.theme-dark .task-draft-meta-finished {
+		color: #9fb1ca;
+	}
+
+	.task-draft-remove {
+		border: 1px solid #c5d5e9;
+		background: #f5f8fc;
+		color: #60708a;
+		border-radius: 8px;
+		width: 1.55rem;
+		height: 1.55rem;
+		cursor: pointer;
+		font-size: 1rem;
+		line-height: 1;
+	}
+
+	.composer.theme-dark .task-draft-remove {
+		border-color: #3f5d86;
+		background: #112540;
+		color: #b8cee8;
+	}
+
+	.task-draft-add-trigger {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		border: 1.5px solid #16a34a;
+		background: #ebf9f0;
+		color: #166534;
+		border-radius: 10px;
+		padding: 0.38rem 0.66rem;
+		font-size: 0.79rem;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	.composer.theme-dark .task-draft-add-trigger {
+		border-color: #22c55e;
+		background: rgba(22, 101, 52, 0.2);
+		color: #86efac;
+	}
+
+	.plus-pill {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.1rem;
+		height: 1.1rem;
+		border-radius: 6px;
+		border: 1px solid rgba(22, 101, 52, 0.3);
+		background: #f4fdf7;
+		font-size: 0.9rem;
+		line-height: 1;
+	}
+
+	.composer.theme-dark .plus-pill {
+		border-color: rgba(134, 239, 172, 0.35);
+		background: rgba(22, 163, 74, 0.22);
+	}
+
+	.task-draft-add-row {
+		display: grid;
+		grid-template-columns: 1rem minmax(0, 1fr) auto auto;
+		gap: 0.34rem;
+		align-items: center;
+	}
+
+	.task-draft-add-row input[type='checkbox'] {
+		width: 0.95rem;
+		height: 0.95rem;
+		accent-color: #16a34a;
+	}
+
+	.task-draft-add-row input[type='text'] {
+		border: 1px solid #b9cde3;
+		background: #ffffff;
+		color: #142235;
+		border-radius: 9px;
+		padding: 0.36rem 0.52rem;
+		font-size: 0.79rem;
+		min-width: 0;
+	}
+
+	.composer.theme-dark .task-draft-add-row input[type='text'] {
+		border-color: #3f5e8b;
+		background: #10213b;
+		color: #e8f0ff;
+	}
+
+	.add-row-action {
+		border: 1px solid #bfd0e8;
+		background: #f7fbff;
+		color: #2f4b74;
+		border-radius: 9px;
+		padding: 0.31rem 0.56rem;
+		font-size: 0.73rem;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	.add-row-action.confirm {
+		border-color: #16a34a;
+		background: #ecfdf3;
+		color: #166534;
+	}
+
+	.composer.theme-dark .add-row-action {
+		border-color: #3f5d89;
+		background: #112540;
+		color: #cde1fc;
+	}
+
+	.composer.theme-dark .add-row-action.confirm {
+		border-color: #22c55e;
+		background: rgba(22, 101, 52, 0.2);
+		color: #86efac;
+	}
+
+	.task-draft-error {
+		font-size: 0.74rem;
+		color: #991b1b;
+		background: rgba(248, 113, 113, 0.12);
+		border: 1px solid rgba(220, 38, 38, 0.2);
+		border-radius: 8px;
+		padding: 0.32rem 0.48rem;
+	}
+
+	@media (max-width: 640px) {
+		.task-draft-card {
+			width: min(100%, 100vw - 1rem);
+			max-height: min(88vh, 760px);
+			padding: 0.62rem;
+		}
+
+		.task-draft-add-row {
+			grid-template-columns: 1rem minmax(0, 1fr);
+		}
+
+		.add-row-action {
+			justify-self: start;
+		}
 	}
 
 	.composer-limit-hint {

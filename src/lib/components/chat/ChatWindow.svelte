@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { afterUpdate, createEventDispatcher, onDestroy, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
+	import TaskCard from '$lib/components/chat/TaskCard.svelte';
 	import type { ChatMessage, MessageActionMode } from '$lib/types/chat';
 	import { normalizeIdentifier } from '$lib/utils/chat/core';
+	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 
 	type ReplyPreview = {
 		messageId: string;
@@ -41,6 +43,9 @@
 		deleteSelected: { messageId: string };
 		requestOlder: void;
 		readProgress: { isNearBottom: boolean; lastSeenMessageId: string };
+		toggleTask: { messageId: string; taskIndex: number };
+		addTask: { messageId: string; text: string };
+		discuss: { messageId: string };
 	}>();
 
 	const COLLAPSED_MESSAGE_LENGTH = 500;
@@ -463,11 +468,22 @@
 		if (!normalized) {
 			return input;
 		}
-		return input.filter(
-			(message) =>
-				message.content.toLowerCase().includes(normalized) ||
-				message.senderName.toLowerCase().includes(normalized)
-		);
+		return input.filter((message) => {
+			if (message.senderName.toLowerCase().includes(normalized)) {
+				return true;
+			}
+			if (message.type === 'task') {
+				const parsedTask = parseTaskMessagePayload(message.content || '');
+				if (!parsedTask) {
+					return false;
+				}
+				if (parsedTask.title.toLowerCase().includes(normalized)) {
+					return true;
+				}
+				return parsedTask.tasks.some((task) => task.text.toLowerCase().includes(normalized));
+			}
+			return message.content.toLowerCase().includes(normalized);
+		});
 	}
 
 	function buildReplyCountByMessageID(input: ChatMessage[]) {
@@ -544,6 +560,13 @@
 	}
 
 	function getReplyDispatchContent(message: ChatMessage) {
+		if (message.type === 'task') {
+			const parsedTask = parseTaskMessagePayload(message.content || '');
+			if (parsedTask) {
+				return truncateInlineText(`Task: ${parsedTask.title}`, 220);
+			}
+			return 'Task';
+		}
 		const textContent = (message.content || '').trim();
 		if (textContent) {
 			return truncateInlineText(textContent, 220);
@@ -908,15 +931,17 @@
 								{#if copiedMessageId === message.id}
 									<span class="copied-tip">Copied</span>
 								{/if}
-								<button
-									type="button"
-									class="copy-btn"
-									title="Copy message"
-									aria-label="Copy message"
-									on:click|stopPropagation={() => void copyMessage(message)}
-								>
-									<IconSet name="copy" size={12} className="copy-icon" />
-								</button>
+								{#if message.type !== 'task'}
+									<button
+										type="button"
+										class="copy-btn"
+										title="Copy message"
+										aria-label="Copy message"
+										on:click|stopPropagation={() => void copyMessage(message)}
+									>
+										<IconSet name="copy" size={12} className="copy-icon" />
+									</button>
+								{/if}
 							</span>
 							{#if message.hasBreakRoom && message.breakRoomId}
 								<button
@@ -1044,6 +1069,15 @@
 							{#if getMediaCaption(message)}
 								<div class="media-caption">{getMediaCaption(message)}</div>
 							{/if}
+						{:else if message.type === 'task'}
+							<TaskCard
+								{message}
+								showAddTaskControl={isMember}
+								canEditTasks={isMember}
+								on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
+								on:addTask={(event) => dispatch('addTask', event.detail)}
+								on:discuss={(event) => dispatch('discuss', event.detail)}
+							/>
 						{:else if isCodeBlock(message.content)}
 							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
 						{:else}

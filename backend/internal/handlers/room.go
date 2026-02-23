@@ -73,6 +73,7 @@ type RoomHandler struct {
 func NewRoomHandler(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *RoomHandler {
 	handler := &RoomHandler{redis: redisStore, scylla: scyllaStore}
 	handler.ensureRoomSchema()
+	handler.ensurePinnedDiscussionSchema()
 	return handler
 }
 

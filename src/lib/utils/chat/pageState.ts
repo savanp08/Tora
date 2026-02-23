@@ -1,9 +1,11 @@
-import type { ChatMessage, ChatThread, OnlineMember, RoomMeta, ThreadStatus } from '$lib/types/chat';
-import {
-	normalizeMessageID,
-	parseOptionalTimestamp,
-	toStringValue
-} from '$lib/utils/chat/core';
+import type {
+	ChatMessage,
+	ChatThread,
+	OnlineMember,
+	RoomMeta,
+	ThreadStatus
+} from '$lib/types/chat';
+import { normalizeMessageID, parseOptionalTimestamp, toStringValue } from '$lib/utils/chat/core';
 import { sortThreads } from '$lib/utils/chat/threadList';
 
 type ThreadPreviewDeps = {
@@ -133,7 +135,13 @@ export function updateThreadPreview(
 	const lastMessage = roomMessages[roomMessages.length - 1];
 	const fallbackName = deps.formatRoomName(targetRoomId);
 	if (!lastMessage) {
-		return ensureRoomThread(roomThreads, targetRoomId, { createThread: deps.createThread }, fallbackName, 'joined');
+		return ensureRoomThread(
+			roomThreads,
+			targetRoomId,
+			{ createThread: deps.createThread },
+			fallbackName,
+			'joined'
+		);
 	}
 
 	const merged = roomThreads.some((thread) => thread.id === targetRoomId)
@@ -296,13 +304,21 @@ export function applyMessageEditState(
 		return { messagesByRoom, roomThreads, changed: false };
 	}
 	const nextMessages = [...roomMessages];
+	const currentMessage = nextMessages[index];
+	const requestedType = toStringValue(source.messageType ?? source.message_type ?? source.type)
+		.trim()
+		.toLowerCase();
+	const currentType = (currentMessage.type || '').trim().toLowerCase() || 'text';
+	const resolvedType =
+		requestedType === 'task' || requestedType === 'text' ? requestedType : currentType;
+	const nextType = resolvedType === 'task' ? 'task' : 'text';
 	nextMessages[index] = {
-		...nextMessages[index],
+		...currentMessage,
 		content: nextContent,
-		type: 'text',
-		mediaUrl: '',
-		mediaType: '',
-		fileName: '',
+		type: nextType,
+		mediaUrl: nextType === 'task' ? currentMessage.mediaUrl : '',
+		mediaType: nextType === 'task' ? currentMessage.mediaType : '',
+		fileName: nextType === 'task' ? currentMessage.fileName : '',
 		isEdited: true,
 		editedAt,
 		isDeleted: false,

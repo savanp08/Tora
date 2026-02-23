@@ -61,12 +61,13 @@ type ClientMessageDeleteEvent struct {
 }
 
 type MessageMutationEvent struct {
-	Type      string `json:"type"`
-	RoomID    string `json:"roomId"`
-	MessageID string `json:"messageId"`
-	Content   string `json:"content,omitempty"`
-	IsEdited  bool   `json:"isEdited"`
-	EditedAt  int64  `json:"editedAt,omitempty"`
+	Type        string `json:"type"`
+	RoomID      string `json:"roomId"`
+	MessageID   string `json:"messageId"`
+	Content     string `json:"content,omitempty"`
+	MessageType string `json:"messageType,omitempty"`
+	IsEdited    bool   `json:"isEdited"`
+	EditedAt    int64  `json:"editedAt,omitempty"`
 }
 
 type ClientSubscription struct {
@@ -547,27 +548,42 @@ func (h *Hub) handleClientMessageEditEvent(event *ClientMessageEditEvent) {
 		client.subscribeToRoom(roomID, false)
 		return
 	}
-	ownsMessage, err := h.msgService.IsMessageOwnedBy(context.Background(), roomID, messageID, client.UserID)
+	messageType, typeErr := h.msgService.GetMessageType(context.Background(), roomID, messageID)
+	if typeErr != nil {
+		log.Printf("[ws] message edit type lookup failed room=%s message=%s user=%s err=%v", roomID, messageID, client.UserID, typeErr)
+		return
+	}
+	if messageType != "task" {
+		ownsMessage, err := h.msgService.IsMessageOwnedBy(context.Background(), roomID, messageID, client.UserID)
+		if err != nil {
+			log.Printf("[ws] message edit ownership check failed room=%s message=%s user=%s err=%v", roomID, messageID, client.UserID, err)
+			return
+		}
+		if !ownsMessage {
+			log.Printf("[ws] message edit denied room=%s message=%s user=%s reason=not_owner", roomID, messageID, client.UserID)
+			return
+		}
+	}
+	updatedMessageType, err := h.msgService.UpdateMessageContent(
+		context.Background(),
+		roomID,
+		messageID,
+		content,
+		time.Now().UTC(),
+	)
 	if err != nil {
-		log.Printf("[ws] message edit ownership check failed room=%s message=%s user=%s err=%v", roomID, messageID, client.UserID, err)
-		return
-	}
-	if !ownsMessage {
-		log.Printf("[ws] message edit denied room=%s message=%s user=%s reason=not_owner", roomID, messageID, client.UserID)
-		return
-	}
-	if err := h.msgService.UpdateMessageContent(context.Background(), roomID, messageID, content, time.Now().UTC()); err != nil {
 		log.Printf("[ws] message edit failed room=%s message=%s user=%s err=%v", roomID, messageID, client.UserID, err)
 		return
 	}
 
 	mutation := MessageMutationEvent{
-		Type:      "message_edit",
-		RoomID:    roomID,
-		MessageID: messageID,
-		Content:   content,
-		IsEdited:  true,
-		EditedAt:  time.Now().UTC().UnixMilli(),
+		Type:        "message_edit",
+		RoomID:      roomID,
+		MessageID:   messageID,
+		Content:     content,
+		MessageType: updatedMessageType,
+		IsEdited:    true,
+		EditedAt:    time.Now().UTC().UnixMilli(),
 	}
 	h.publishMutationEvent(mutation)
 }
@@ -697,9 +713,18 @@ func (h *Hub) broadcastMutationToLocal(event MessageMutationEvent) {
 			"content":   event.Content,
 			"isEdited":  event.IsEdited,
 			"editedAt":  event.EditedAt,
-			"type":      map[string]string{"message_delete": "deleted", "message_edit": "text"}[eventType],
 		},
 	}
+	messageType := "deleted"
+	if eventType == "message_edit" {
+		messageType = strings.ToLower(strings.TrimSpace(event.MessageType))
+		if messageType == "" {
+			messageType = "text"
+		}
+	}
+	payloadBody := payload["payload"].(map[string]interface{})
+	payloadBody["type"] = messageType
+	payloadBody["messageType"] = messageType
 
 	for roomClient := range clients {
 		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {

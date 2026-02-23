@@ -12,18 +12,55 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
+	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/security"
 )
 
 const (
-	defaultMessagePageSize = 50
-	maxMessagePageSize     = 100
+	defaultMessagePageSize          = 50
+	maxMessagePageSize              = 100
+	defaultDiscussionCommentsLimit  = 250
+	maxDiscussionCommentsLimit      = 500
+	maxDiscussionCommentContentRune = 2000
+	deletedDiscussionPlaceholder    = "This message was deleted"
 )
 
 type RoomMessagesResponse struct {
 	Messages []models.Message `json:"messages"`
 	HasMore  bool             `json:"hasMore"`
+}
+
+type RoomPinNavigateResponse struct {
+	Message *models.Message `json:"message"`
+}
+
+type RoomDiscussionCommentsResponse struct {
+	Comments []models.Message `json:"comments"`
+}
+
+type RoomDiscussionCommentResponse struct {
+	Comment *models.Message `json:"comment"`
+}
+
+type DiscussionCommentMutationRequest struct {
+	UserID          string `json:"userId"`
+	Username        string `json:"username,omitempty"`
+	Content         string `json:"content,omitempty"`
+	ParentCommentID string `json:"parentCommentId,omitempty"`
+	CreatedAt       int64  `json:"createdAt,omitempty"`
+}
+
+type discussionCommentRow struct {
+	CreatedAt       time.Time
+	CommentID       string
+	ParentCommentID string
+	SenderID        string
+	SenderName      string
+	Content         string
+	IsEdited        bool
+	EditedAt        time.Time
+	IsDeleted       bool
 }
 
 func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +119,436 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *RoomHandler) NavigateRoomPins(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message storage unavailable"})
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	if roomID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
+		return
+	}
+
+	beforeCursor := parseOptionalTimestampParam(r.URL.Query().Get("before"))
+	afterCursor := parseOptionalTimestampParam(r.URL.Query().Get("after"))
+	if beforeCursor.IsZero() == afterCursor.IsZero() {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(
+			map[string]string{"error": "Provide exactly one query parameter: before or after"},
+		)
+		return
+	}
+
+	ctx := r.Context()
+	messageID, createdAt, err := h.lookupAdjacentPinnedMessage(ctx, roomID, beforeCursor, afterCursor)
+	if err != nil {
+		if err == gocql.ErrNotFound {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(RoomPinNavigateResponse{Message: nil})
+			return
+		}
+		log.Printf(
+			"[room-pins] pin lookup failed room=%s before=%s after=%s err=%v",
+			roomID,
+			beforeCursor.UTC().Format(time.RFC3339Nano),
+			afterCursor.UTC().Format(time.RFC3339Nano),
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to navigate room pins"})
+		return
+	}
+
+	message, err := h.lookupMessageByPrimaryKey(ctx, roomID, createdAt, messageID)
+	if err != nil {
+		if err == gocql.ErrNotFound {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(RoomPinNavigateResponse{Message: nil})
+			return
+		}
+		log.Printf(
+			"[room-pins] message lookup failed room=%s message=%s created_at=%s err=%v",
+			roomID,
+			messageID,
+			createdAt.UTC().Format(time.RFC3339Nano),
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load pinned message"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RoomPinNavigateResponse{Message: &message})
+}
+
+func (h *RoomHandler) GetPinnedDiscussionComments(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message storage unavailable"})
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	pinMessageID := normalizeMessageID(chi.URLParam(r, "pinMessageId"))
+	userID := normalizeIdentifier(r.URL.Query().Get("userId"))
+	if roomID == "" || pinMessageID == "" || userID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room, pin, or user id"})
+		return
+	}
+
+	ctx := r.Context()
+	isMember, err := h.isRoomMember(ctx, roomID, userID)
+	if err != nil {
+		log.Printf("[pin-discussion] membership check failed room=%s user=%s err=%v", roomID, userID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify membership"})
+		return
+	}
+	if !isMember {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "User is not a member of this room"})
+		return
+	}
+
+	limit := parseDiscussionCommentsLimit(r.URL.Query().Get("limit"))
+	comments, err := h.queryPinnedDiscussionComments(ctx, roomID, pinMessageID, limit)
+	if err != nil {
+		log.Printf("[pin-discussion] query failed room=%s pin=%s err=%v", roomID, pinMessageID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load discussion comments"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RoomDiscussionCommentsResponse{Comments: comments})
+}
+
+func (h *RoomHandler) CreatePinnedDiscussionComment(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message storage unavailable"})
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	pinMessageID := normalizeMessageID(chi.URLParam(r, "pinMessageId"))
+	if roomID == "" || pinMessageID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room or pin id"})
+		return
+	}
+
+	var req DiscussionCommentMutationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	userID := normalizeIdentifier(req.UserID)
+	senderName := normalizeUsername(req.Username)
+	content := strings.TrimSpace(req.Content)
+	parentCommentID := normalizeMessageID(req.ParentCommentID)
+	if userID == "" || content == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId and content are required"})
+		return
+	}
+	if senderName == "" {
+		senderName = "Guest"
+	}
+	if len([]rune(content)) > maxDiscussionCommentContentRune {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Comment is too long"})
+		return
+	}
+
+	ctx := r.Context()
+	isMember, err := h.isRoomMember(ctx, roomID, userID)
+	if err != nil {
+		log.Printf("[pin-discussion] membership check failed room=%s user=%s err=%v", roomID, userID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify membership"})
+		return
+	}
+	if !isMember {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "User is not a member of this room"})
+		return
+	}
+
+	createdAt := time.Now().UTC()
+	commentID := generateDiscussionCommentID(createdAt)
+	encryptedContent, encryptErr := security.EncryptMessage(content)
+	if encryptErr != nil {
+		log.Printf("[pin-discussion] encrypt failed room=%s pin=%s err=%v", roomID, pinMessageID, encryptErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save discussion comment"})
+		return
+	}
+
+	commentsTable := h.scylla.Table("pin_discussion_comments")
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, pin_message_id, created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		commentsTable,
+	)
+	if err := h.scylla.Session.Query(
+		insertQuery,
+		roomID,
+		pinMessageID,
+		createdAt,
+		commentID,
+		parentCommentID,
+		userID,
+		senderName,
+		encryptedContent,
+		false,
+		nil,
+		false,
+	).WithContext(ctx).Exec(); err != nil {
+		log.Printf("[pin-discussion] insert failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save discussion comment"})
+		return
+	}
+
+	responseComment := discussionRowToModelMessage(roomID, discussionCommentRow{
+		CreatedAt:       createdAt,
+		CommentID:       commentID,
+		ParentCommentID: parentCommentID,
+		SenderID:        userID,
+		SenderName:      senderName,
+		Content:         content,
+		IsEdited:        false,
+		EditedAt:        time.Time{},
+		IsDeleted:       false,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RoomDiscussionCommentResponse{Comment: &responseComment})
+}
+
+func (h *RoomHandler) EditPinnedDiscussionComment(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message storage unavailable"})
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	pinMessageID := normalizeMessageID(chi.URLParam(r, "pinMessageId"))
+	commentID := normalizeMessageID(chi.URLParam(r, "commentId"))
+	if roomID == "" || pinMessageID == "" || commentID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room, pin, or comment id"})
+		return
+	}
+
+	var req DiscussionCommentMutationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+	userID := normalizeIdentifier(req.UserID)
+	content := strings.TrimSpace(req.Content)
+	createdAt := parseClientTimestamp(req.CreatedAt)
+	if userID == "" || content == "" || createdAt.IsZero() {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId, content, and createdAt are required"})
+		return
+	}
+	if len([]rune(content)) > maxDiscussionCommentContentRune {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Comment is too long"})
+		return
+	}
+
+	ctx := r.Context()
+	isMember, err := h.isRoomMember(ctx, roomID, userID)
+	if err != nil {
+		log.Printf("[pin-discussion] membership check failed room=%s user=%s err=%v", roomID, userID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify membership"})
+		return
+	}
+	if !isMember {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "User is not a member of this room"})
+		return
+	}
+
+	currentRow, err := h.lookupPinnedDiscussionCommentByPrimaryKey(ctx, roomID, pinMessageID, createdAt, commentID)
+	if err != nil {
+		if err == gocql.ErrNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+			return
+		}
+		log.Printf("[pin-discussion] lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
+		return
+	}
+	if normalizeIdentifier(currentRow.SenderID) != userID {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Only the comment author can edit this comment"})
+		return
+	}
+	if currentRow.IsDeleted {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Deleted comments cannot be edited"})
+		return
+	}
+
+	editedAt := time.Now().UTC()
+	encryptedContent, encryptErr := security.EncryptMessage(content)
+	if encryptErr != nil {
+		log.Printf("[pin-discussion] encrypt failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, encryptErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
+		return
+	}
+
+	commentsTable := h.scylla.Table("pin_discussion_comments")
+	updateQuery := fmt.Sprintf(
+		`UPDATE %s SET content = ?, is_edited = ?, edited_at = ?, is_deleted = ? WHERE room_id = ? AND pin_message_id = ? AND created_at = ? AND comment_id = ?`,
+		commentsTable,
+	)
+	if err := h.scylla.Session.Query(
+		updateQuery,
+		encryptedContent,
+		true,
+		editedAt,
+		false,
+		roomID,
+		pinMessageID,
+		createdAt,
+		commentID,
+	).WithContext(ctx).Exec(); err != nil {
+		log.Printf("[pin-discussion] update failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
+		return
+	}
+
+	currentRow.Content = content
+	currentRow.IsEdited = true
+	currentRow.EditedAt = editedAt
+	currentRow.IsDeleted = false
+	responseComment := discussionRowToModelMessage(roomID, currentRow)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RoomDiscussionCommentResponse{Comment: &responseComment})
+}
+
+func (h *RoomHandler) DeletePinnedDiscussionComment(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message storage unavailable"})
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	pinMessageID := normalizeMessageID(chi.URLParam(r, "pinMessageId"))
+	commentID := normalizeMessageID(chi.URLParam(r, "commentId"))
+	if roomID == "" || pinMessageID == "" || commentID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room, pin, or comment id"})
+		return
+	}
+
+	var req DiscussionCommentMutationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+	userID := normalizeIdentifier(req.UserID)
+	createdAt := parseClientTimestamp(req.CreatedAt)
+	if userID == "" || createdAt.IsZero() {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId and createdAt are required"})
+		return
+	}
+
+	ctx := r.Context()
+	isMember, err := h.isRoomMember(ctx, roomID, userID)
+	if err != nil {
+		log.Printf("[pin-discussion] membership check failed room=%s user=%s err=%v", roomID, userID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify membership"})
+		return
+	}
+	if !isMember {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "User is not a member of this room"})
+		return
+	}
+
+	currentRow, err := h.lookupPinnedDiscussionCommentByPrimaryKey(ctx, roomID, pinMessageID, createdAt, commentID)
+	if err != nil {
+		if err == gocql.ErrNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+			return
+		}
+		log.Printf("[pin-discussion] lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
+		return
+	}
+	if normalizeIdentifier(currentRow.SenderID) != userID {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Only the comment author can delete this comment"})
+		return
+	}
+
+	editedAt := time.Now().UTC()
+	encryptedContent, encryptErr := security.EncryptMessage(deletedDiscussionPlaceholder)
+	if encryptErr != nil {
+		log.Printf("[pin-discussion] encrypt delete placeholder failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, encryptErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
+		return
+	}
+
+	commentsTable := h.scylla.Table("pin_discussion_comments")
+	updateQuery := fmt.Sprintf(
+		`UPDATE %s SET content = ?, is_edited = ?, edited_at = ?, is_deleted = ? WHERE room_id = ? AND pin_message_id = ? AND created_at = ? AND comment_id = ?`,
+		commentsTable,
+	)
+	if err := h.scylla.Session.Query(
+		updateQuery,
+		encryptedContent,
+		false,
+		editedAt,
+		true,
+		roomID,
+		pinMessageID,
+		createdAt,
+		commentID,
+	).WithContext(ctx).Exec(); err != nil {
+		log.Printf("[pin-discussion] delete failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
+		return
+	}
+
+	currentRow.Content = deletedDiscussionPlaceholder
+	currentRow.IsEdited = false
+	currentRow.EditedAt = editedAt
+	currentRow.IsDeleted = true
+	responseComment := discussionRowToModelMessage(roomID, currentRow)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RoomDiscussionCommentResponse{Comment: &responseComment})
 }
 
 func (h *RoomHandler) queryRoomMessagesPage(
@@ -196,6 +663,124 @@ func (h *RoomHandler) queryRoomMessagesPage(
 	return messages, hasMore, nil
 }
 
+func (h *RoomHandler) lookupAdjacentPinnedMessage(
+	ctx context.Context,
+	roomID string,
+	beforeCursor, afterCursor time.Time,
+) (string, time.Time, error) {
+	roomPinsTable := h.scylla.Table("room_pins")
+	query := ""
+	args := []interface{}{roomID}
+	if !beforeCursor.IsZero() {
+		query = fmt.Sprintf(
+			`SELECT message_id, created_at FROM %s WHERE room_id = ? AND created_at < ? LIMIT 1`,
+			roomPinsTable,
+		)
+		args = append(args, beforeCursor)
+	} else {
+		query = fmt.Sprintf(
+			`SELECT message_id, created_at FROM %s WHERE room_id = ? AND created_at > ? ORDER BY created_at ASC LIMIT 1`,
+			roomPinsTable,
+		)
+		args = append(args, afterCursor)
+	}
+
+	var (
+		messageID string
+		createdAt time.Time
+	)
+	if err := h.scylla.Session.Query(query, args...).WithContext(ctx).Scan(&messageID, &createdAt); err != nil {
+		return "", time.Time{}, err
+	}
+	if strings.TrimSpace(messageID) == "" || createdAt.IsZero() {
+		return "", time.Time{}, gocql.ErrNotFound
+	}
+	return messageID, createdAt, nil
+}
+
+func (h *RoomHandler) lookupMessageByPrimaryKey(
+	ctx context.Context,
+	roomID string,
+	createdAt time.Time,
+	messageID string,
+) (models.Message, error) {
+	messagesTable := h.scylla.Table("messages")
+	query := fmt.Sprintf(
+		`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? AND created_at = ? AND message_id = ? LIMIT 1`,
+		messagesTable,
+	)
+	var (
+		dbRoomID       string
+		dbMessageID    string
+		senderID       string
+		senderName     string
+		content        string
+		msgType        string
+		mediaURL       string
+		mediaType      string
+		fileName       string
+		isEdited       bool
+		editedAt       time.Time
+		hasBreakRoom   bool
+		breakRoomID    string
+		breakJoinCount int
+		replyToID      string
+		replySnippet   string
+		dbCreatedAt    time.Time
+	)
+	if err := h.scylla.Session.Query(query, roomID, createdAt, messageID).WithContext(ctx).Scan(
+		&dbRoomID,
+		&dbMessageID,
+		&senderID,
+		&senderName,
+		&content,
+		&msgType,
+		&mediaURL,
+		&mediaType,
+		&fileName,
+		&isEdited,
+		&editedAt,
+		&hasBreakRoom,
+		&breakRoomID,
+		&breakJoinCount,
+		&replyToID,
+		&replySnippet,
+		&dbCreatedAt,
+	); err != nil {
+		return models.Message{}, err
+	}
+
+	if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
+		content = decrypted
+	}
+
+	var editedAtPtr *time.Time
+	if !editedAt.IsZero() {
+		editedCopy := editedAt
+		editedAtPtr = &editedCopy
+	}
+
+	return models.Message{
+		ID:               dbMessageID,
+		RoomID:           dbRoomID,
+		SenderID:         senderID,
+		SenderName:       senderName,
+		Content:          content,
+		Type:             msgType,
+		MediaURL:         mediaURL,
+		MediaType:        mediaType,
+		FileName:         fileName,
+		IsEdited:         isEdited,
+		EditedAt:         editedAtPtr,
+		HasBreakRoom:     hasBreakRoom,
+		BreakRoomID:      breakRoomID,
+		BreakJoinCount:   breakJoinCount,
+		ReplyToMessageID: replyToID,
+		ReplyToSnippet:   replySnippet,
+		CreatedAt:        dbCreatedAt,
+	}, nil
+}
+
 func (h *RoomHandler) lookupMessageCreatedAt(
 	ctx context.Context,
 	roomID, messageID string,
@@ -213,6 +798,203 @@ func (h *RoomHandler) lookupMessageCreatedAt(
 		return time.Time{}, gocql.ErrNotFound
 	}
 	return createdAt, nil
+}
+
+func (h *RoomHandler) ensurePinnedDiscussionSchema() {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return
+	}
+
+	commentsTable := h.scylla.Table("pin_discussion_comments")
+	createQuery := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text,
+			pin_message_id text,
+			created_at timestamp,
+			comment_id text,
+			parent_comment_id text,
+			sender_id text,
+			sender_name text,
+			content text,
+			is_edited boolean,
+			edited_at timestamp,
+			is_deleted boolean,
+			PRIMARY KEY ((room_id, pin_message_id), created_at, comment_id)
+		) WITH CLUSTERING ORDER BY (created_at ASC, comment_id ASC)`,
+		commentsTable,
+	)
+	if err := h.scylla.Session.Query(createQuery).Exec(); err != nil {
+		log.Printf("[pin-discussion] ensure schema failed: %v", err)
+	}
+}
+
+func (h *RoomHandler) isRoomMember(ctx context.Context, roomID, userID string) (bool, error) {
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return false, fmt.Errorf("membership storage unavailable")
+	}
+	isMember, err := h.redis.Client.SIsMember(ctx, roomMembersKey(roomID), userID).Result()
+	if err != nil && err != redis.Nil {
+		return false, err
+	}
+	return isMember, nil
+}
+
+func (h *RoomHandler) queryPinnedDiscussionComments(
+	ctx context.Context,
+	roomID, pinMessageID string,
+	limit int,
+) ([]models.Message, error) {
+	commentsTable := h.scylla.Table("pin_discussion_comments")
+	query := fmt.Sprintf(
+		`SELECT created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted FROM %s WHERE room_id = ? AND pin_message_id = ? LIMIT ?`,
+		commentsTable,
+	)
+	iter := h.scylla.Session.Query(query, roomID, pinMessageID, limit).WithContext(ctx).Iter()
+
+	comments := make([]models.Message, 0, limit)
+	var (
+		createdAt       time.Time
+		commentID       string
+		parentCommentID string
+		senderID        string
+		senderName      string
+		content         string
+		isEdited        bool
+		editedAt        time.Time
+		isDeleted       bool
+	)
+	for iter.Scan(
+		&createdAt,
+		&commentID,
+		&parentCommentID,
+		&senderID,
+		&senderName,
+		&content,
+		&isEdited,
+		&editedAt,
+		&isDeleted,
+	) {
+		if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
+			content = decrypted
+		}
+		row := discussionCommentRow{
+			CreatedAt:       createdAt,
+			CommentID:       commentID,
+			ParentCommentID: parentCommentID,
+			SenderID:        senderID,
+			SenderName:      senderName,
+			Content:         content,
+			IsEdited:        isEdited,
+			EditedAt:        editedAt,
+			IsDeleted:       isDeleted,
+		}
+		comments = append(comments, discussionRowToModelMessage(roomID, row))
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+
+	return comments, nil
+}
+
+func (h *RoomHandler) lookupPinnedDiscussionCommentByPrimaryKey(
+	ctx context.Context,
+	roomID, pinMessageID string,
+	createdAt time.Time,
+	commentID string,
+) (discussionCommentRow, error) {
+	commentsTable := h.scylla.Table("pin_discussion_comments")
+	query := fmt.Sprintf(
+		`SELECT created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted FROM %s WHERE room_id = ? AND pin_message_id = ? AND created_at = ? AND comment_id = ? LIMIT 1`,
+		commentsTable,
+	)
+
+	var row discussionCommentRow
+	if err := h.scylla.Session.Query(
+		query,
+		roomID,
+		pinMessageID,
+		createdAt,
+		commentID,
+	).WithContext(ctx).Scan(
+		&row.CreatedAt,
+		&row.CommentID,
+		&row.ParentCommentID,
+		&row.SenderID,
+		&row.SenderName,
+		&row.Content,
+		&row.IsEdited,
+		&row.EditedAt,
+		&row.IsDeleted,
+	); err != nil {
+		return discussionCommentRow{}, err
+	}
+
+	if decrypted, decryptErr := security.DecryptMessage(row.Content); decryptErr == nil {
+		row.Content = decrypted
+	}
+	return row, nil
+}
+
+func discussionRowToModelMessage(roomID string, row discussionCommentRow) models.Message {
+	content := strings.TrimSpace(row.Content)
+	messageType := "text"
+	isEdited := row.IsEdited
+	editedAt := row.EditedAt
+	if row.IsDeleted {
+		messageType = "deleted"
+		content = deletedDiscussionPlaceholder
+		isEdited = false
+	}
+	var editedAtPtr *time.Time
+	if !editedAt.IsZero() {
+		editedCopy := editedAt
+		editedAtPtr = &editedCopy
+	}
+
+	return models.Message{
+		ID:               strings.TrimSpace(row.CommentID),
+		RoomID:           roomID,
+		SenderID:         strings.TrimSpace(row.SenderID),
+		SenderName:       strings.TrimSpace(row.SenderName),
+		Content:          content,
+		Type:             messageType,
+		IsEdited:         isEdited,
+		EditedAt:         editedAtPtr,
+		ReplyToMessageID: strings.TrimSpace(row.ParentCommentID),
+		CreatedAt:        row.CreatedAt.UTC(),
+		HasBreakRoom:     false,
+		BreakJoinCount:   0,
+	}
+}
+
+func parseDiscussionCommentsLimit(raw string) int {
+	if strings.TrimSpace(raw) == "" {
+		return defaultDiscussionCommentsLimit
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return defaultDiscussionCommentsLimit
+	}
+	if value > maxDiscussionCommentsLimit {
+		return maxDiscussionCommentsLimit
+	}
+	return value
+}
+
+func parseClientTimestamp(raw int64) time.Time {
+	if raw <= 0 {
+		return time.Time{}
+	}
+	if raw < 1_000_000_000_000 {
+		raw *= 1000
+	}
+	return time.UnixMilli(raw).UTC()
+}
+
+func generateDiscussionCommentID(now time.Time) string {
+	nowUTC := now.UTC()
+	return fmt.Sprintf("dcm_%d_%09d", nowUTC.UnixMilli(), nowUTC.UnixNano()%1_000_000_000)
 }
 
 func parseMessagePageSize(raw string) int {

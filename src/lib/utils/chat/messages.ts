@@ -13,11 +13,23 @@ import {
 	toStringValue,
 	toTimestamp
 } from '$lib/utils/chat/core';
+import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 
 export const DELETED_MESSAGE_PLACEHOLDER = 'This message was deleted';
 
 export function getMessagePreviewText(message: ChatMessage) {
 	const content = (message.content || '').trim();
+	if (message.type === 'task') {
+		const taskPayload = parseTaskMessagePayload(content);
+		if (!taskPayload) {
+			return 'Task';
+		}
+		const taskCount = taskPayload.tasks.length;
+		if (taskCount <= 0) {
+			return `Task: ${taskPayload.title}`;
+		}
+		return `Task: ${taskPayload.title} (${taskCount})`;
+	}
 	if (message.type === 'image') {
 		if (content && !isLikelyMediaURL(content)) {
 			return content;
@@ -121,10 +133,13 @@ export function parseIncomingMessage(
 		replyToSnippet: toStringValue(source.replyToSnippet ?? source.reply_to_snippet).trim(),
 		totalReplies: toInt(source.totalReplies ?? source.total_replies),
 		branchesCreated: branchCount,
-		createdAt: toTimestamp(source.time ?? source.createdAt ?? source.created_at ?? source.timestamp),
+		createdAt: toTimestamp(
+			source.time ?? source.createdAt ?? source.created_at ?? source.timestamp
+		),
 		hasBreakRoom,
 		breakRoomId,
 		breakJoinCount: toInt(source.breakJoinCount ?? source.break_join_count),
+		isPinned: toBool(source.isPinned ?? source.is_pinned),
 		pending: false
 	};
 }
@@ -134,9 +149,12 @@ export function parseMember(value: unknown, fallbackIndex: number): OnlineMember
 		return null;
 	}
 	const source = value as Record<string, unknown>;
-	const memberId = toStringValue(source.id ?? source.userId ?? source.user_id ?? `member-${fallbackIndex}`);
+	const memberId = toStringValue(
+		source.id ?? source.userId ?? source.user_id ?? `member-${fallbackIndex}`
+	);
 	const memberName =
-		toStringValue(source.name ?? source.username ?? source.userName ?? source.user_name) || memberId;
+		toStringValue(source.name ?? source.username ?? source.userName ?? source.user_name) ||
+		memberId;
 	const joinedAt = toTimestamp(source.joinedAt ?? source.joined_at ?? Date.now());
 	if (!memberId) {
 		return null;

@@ -123,6 +123,25 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 	}
 	s.panicFailures.Store(0)
 
+	if strings.EqualFold(strings.TrimSpace(msg.Type), "task") {
+		pinsTable := s.Scylla.Table("room_pins")
+		pinQuery := fmt.Sprintf(
+			`INSERT INTO %s (room_id, created_at, message_id, type) VALUES (?, ?, ?, ?) USING TTL %d`,
+			pinsTable,
+			ttlSeconds,
+		)
+		if err := safeExecScyllaQuery(
+			s.Scylla.Session,
+			pinQuery,
+			msg.RoomID,
+			msg.CreatedAt,
+			msg.ID,
+			"task",
+		); err != nil {
+			return fmt.Errorf("save task pin index: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -232,6 +251,7 @@ func (s *MessageService) ensureSchema() {
 	}
 
 	messagesTable := s.Scylla.Table("messages")
+	roomPinsTable := s.Scylla.Table("room_pins")
 	query := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s (
 			room_id text,
@@ -255,6 +275,16 @@ func (s *MessageService) ensureSchema() {
 		) WITH CLUSTERING ORDER BY (created_at DESC, message_id DESC)`,
 		messagesTable,
 	)
+	roomPinsQuery := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text,
+			created_at timestamp,
+			message_id text,
+			type text,
+			PRIMARY KEY (room_id, created_at)
+		) WITH CLUSTERING ORDER BY (created_at DESC)`,
+		roomPinsTable,
+	)
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -268,6 +298,21 @@ func (s *MessageService) ensureSchema() {
 	}
 	if lastErr != nil {
 		log.Printf("[message-service] ensure messages schema failed: %v", lastErr)
+		return
+	}
+
+	lastErr = nil
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := safeExecScyllaQuery(s.Scylla.Session, roomPinsQuery); err == nil {
+			lastErr = nil
+			break
+		} else {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		}
+	}
+	if lastErr != nil {
+		log.Printf("[message-service] ensure room_pins schema failed: %v", lastErr)
 		return
 	}
 
@@ -524,12 +569,12 @@ func toTime(value interface{}) time.Time {
 	return time.Time{}
 }
 
-func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messageID, content string, editedAt time.Time) error {
+func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messageID, content string, editedAt time.Time) (string, error) {
 	roomID = normalizeRoomID(roomID)
 	messageID = normalizeMessageID(messageID)
 	content = strings.TrimSpace(content)
 	if roomID == "" || messageID == "" || content == "" {
-		return fmt.Errorf("invalid edit payload")
+		return "", fmt.Errorf("invalid edit payload")
 	}
 	if len(content) > maxTextChars {
 		content = content[:maxTextChars]
@@ -540,44 +585,74 @@ func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messa
 
 	createdAt, err := s.getMessageCreatedAt(ctx, roomID, messageID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if s.Scylla == nil || s.Scylla.Session == nil {
-		return fmt.Errorf("scylla session is not configured")
+		return "", fmt.Errorf("scylla session is not configured")
 	}
 	messagesTable := s.Scylla.Table("messages")
+
+	selectQuery := fmt.Sprintf(
+		`SELECT type, media_url, media_type, file_name FROM %s WHERE room_id = ? AND created_at = ? AND message_id = ? LIMIT 1`,
+		messagesTable,
+	)
+	var (
+		currentType      string
+		currentMediaURL  string
+		currentMediaType string
+		currentFileName  string
+	)
+	if err := s.Scylla.Session.Query(selectQuery, roomID, createdAt, messageID).WithContext(ctx).Scan(
+		&currentType,
+		&currentMediaURL,
+		&currentMediaType,
+		&currentFileName,
+	); err != nil {
+		return "", fmt.Errorf("lookup message metadata: %w", err)
+	}
+	updatedType := "text"
+	updatedMediaURL := ""
+	updatedMediaType := ""
+	updatedFileName := ""
+	if strings.EqualFold(strings.TrimSpace(currentType), "task") {
+		updatedType = "task"
+		updatedMediaURL = currentMediaURL
+		updatedMediaType = currentMediaType
+		updatedFileName = currentFileName
+	}
+
 	updateQuery := fmt.Sprintf(
 		`UPDATE %s SET content = ?, type = ?, media_url = ?, media_type = ?, file_name = ?, is_edited = ?, edited_at = ? WHERE room_id = ? AND created_at = ? AND message_id = ?`,
 		messagesTable,
 	)
 	encryptedContent, encryptErr := security.EncryptMessage(content)
 	if encryptErr != nil {
-		return fmt.Errorf("encrypt message content: %w", encryptErr)
+		return "", fmt.Errorf("encrypt message content: %w", encryptErr)
 	}
 	if err := safeExecScyllaQuery(
 		s.Scylla.Session,
 		updateQuery,
 		encryptedContent,
-		"text",
-		"",
-		"",
-		"",
+		updatedType,
+		updatedMediaURL,
+		updatedMediaType,
+		updatedFileName,
 		true,
 		editedAt,
 		roomID,
 		createdAt,
 		messageID,
 	); err != nil {
-		return fmt.Errorf("update message content: %w", err)
+		return "", fmt.Errorf("update message content: %w", err)
 	}
 
 	if cacheErr := s.upsertCachedMessage(ctx, roomID, messageID, func(msg *models.Message) {
 		msg.Content = content
-		msg.Type = "text"
-		msg.MediaURL = ""
-		msg.MediaType = ""
-		msg.FileName = ""
+		msg.Type = updatedType
+		msg.MediaURL = updatedMediaURL
+		msg.MediaType = updatedMediaType
+		msg.FileName = updatedFileName
 		msg.IsEdited = true
 		editedCopy := editedAt
 		msg.EditedAt = &editedCopy
@@ -585,7 +660,7 @@ func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messa
 		log.Printf("[message-service] cache edit sync failed room=%s message=%s err=%v", roomID, messageID, cacheErr)
 	}
 
-	return nil
+	return updatedType, nil
 }
 
 func (s *MessageService) MarkMessageDeleted(ctx context.Context, roomID, messageID string, editedAt time.Time) error {
@@ -671,6 +746,33 @@ func (s *MessageService) IsMessageOwnedBy(ctx context.Context, roomID, messageID
 	}
 
 	return strings.TrimSpace(senderID) == userID, nil
+}
+
+func (s *MessageService) GetMessageType(ctx context.Context, roomID, messageID string) (string, error) {
+	roomID = normalizeRoomID(roomID)
+	messageID = normalizeMessageID(messageID)
+	if roomID == "" || messageID == "" {
+		return "", fmt.Errorf("invalid message type lookup payload")
+	}
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return "", fmt.Errorf("scylla session is not configured")
+	}
+
+	createdAt, err := s.getMessageCreatedAt(ctx, roomID, messageID)
+	if err != nil {
+		return "", err
+	}
+
+	messagesTable := s.Scylla.Table("messages")
+	lookupQuery := fmt.Sprintf(
+		`SELECT type FROM %s WHERE room_id = ? AND created_at = ? AND message_id = ? LIMIT 1`,
+		messagesTable,
+	)
+	var messageType string
+	if err := s.Scylla.Session.Query(lookupQuery, roomID, createdAt, messageID).WithContext(ctx).Scan(&messageType); err != nil {
+		return "", fmt.Errorf("lookup message type: %w", err)
+	}
+	return strings.ToLower(strings.TrimSpace(messageType)), nil
 }
 
 func (s *MessageService) getMessageCreatedAt(ctx context.Context, roomID, messageID string) (time.Time, error) {

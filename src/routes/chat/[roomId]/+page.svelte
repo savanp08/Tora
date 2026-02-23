@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
+	import DiscussionDrawer from '$lib/components/chat/DiscussionDrawer.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
 	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
 	import ChatStatusBars from '$lib/components/chat/ChatStatusBars.svelte';
@@ -46,6 +47,12 @@
 		toStringValue,
 		toTimestamp
 	} from '$lib/utils/chat/core';
+	import {
+		addTaskItem,
+		parseTaskMessagePayload,
+		stringifyTaskMessagePayload,
+		toggleTaskItem
+	} from '$lib/utils/chat/task';
 	import {
 		buildReplySnippet,
 		DELETED_MESSAGE_PLACEHOLDER,
@@ -166,6 +173,13 @@
 	let isExtendingRoom = false;
 	let expandedMessages: Record<string, boolean> = {};
 	let activeReply: ReplyTarget | null = null;
+	let isDiscussionOpen = false;
+	let activeDiscussionTaskId = '';
+	let activeDiscussionTask: ChatMessage | null = null;
+	let discussionComments: ChatMessage[] = [];
+	let discussionBackgroundUnreadCount = 0;
+	let discussionOpenedAtMs = 0;
+	let discussionTaskTracker = '';
 	let identityReady = !browser;
 	let roomExpiryTickMs = Date.now();
 	let serverClockOffsetMs = 0;
@@ -198,6 +212,46 @@
 			roomMemberHint === '1' ? 'joined' : 'discoverable'
 		);
 	$: currentMessages = activeThread?.status === 'left' ? [] : (messagesByRoom[roomId] ?? []);
+	$: activeDiscussionTask =
+		(activeDiscussionTaskId &&
+			currentMessages.find(
+				(message) =>
+					normalizeMessageID(message.id) === normalizeMessageID(activeDiscussionTaskId) &&
+					message.type === 'task'
+			)) ||
+		null;
+	$: if (!isDiscussionOpen) {
+		discussionOpenedAtMs = 0;
+		discussionTaskTracker = '';
+	}
+	$: if (isDiscussionOpen) {
+		const normalizedTaskID = normalizeMessageID(activeDiscussionTaskId);
+		if (normalizedTaskID && normalizedTaskID !== discussionTaskTracker) {
+			discussionTaskTracker = normalizedTaskID;
+			discussionOpenedAtMs = Date.now();
+		}
+	}
+	$: discussionBackgroundUnreadCount =
+		isDiscussionOpen && discussionOpenedAtMs > 0
+			? currentMessages.filter((message) => {
+					const messageID = normalizeMessageID(message.id);
+					if (!messageID) {
+						return false;
+					}
+					if (
+						activeDiscussionTask &&
+						messageID === normalizeMessageID(activeDiscussionTask.id)
+					) {
+						return false;
+					}
+					if (
+						normalizeIdentifier(message.senderId) === normalizeIdentifier(currentUserId)
+					) {
+						return false;
+					}
+					return message.createdAt > discussionOpenedAtMs;
+				}).length
+			: 0;
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
@@ -277,9 +331,16 @@
 		focusConsumedForRoom = false;
 		focusMessageId = '';
 		activeReply = null;
+		isDiscussionOpen = false;
+		activeDiscussionTaskId = '';
+		discussionComments = [];
 		messageActionMode = 'none';
 		isSelectionMode = false;
 		selectedActionMessageId = '';
+	}
+	$: if (isDiscussionOpen && !activeDiscussionTask) {
+		isDiscussionOpen = false;
+		discussionComments = [];
 	}
 	$: if (!focusConsumedForRoom && focusMessageIdFromURL) {
 		focusMessageId = focusMessageIdFromURL;
@@ -648,7 +709,9 @@
 
 	async function requestAnonymousSession(requestedUsername: string) {
 		const normalizedRequested =
-			normalizeUsernameValue(requestedUsername) || normalizeUsernameValue(generateUsername()) || 'Guest';
+			normalizeUsernameValue(requestedUsername) ||
+			normalizeUsernameValue(generateUsername()) ||
+			'Guest';
 		try {
 			const res = await fetch(`${API_BASE}/api/auth/anonymous`, {
 				method: 'POST',
@@ -663,8 +726,7 @@
 
 			const user = (data.user as Record<string, unknown> | undefined) ?? {};
 			const token = toStringValue(data.token).trim();
-			const username =
-				normalizeUsernameValue(toStringValue(user.username)) || normalizedRequested;
+			const username = normalizeUsernameValue(toStringValue(user.username)) || normalizedRequested;
 			if (!token) {
 				return null;
 			}
@@ -677,11 +739,7 @@
 		}
 	}
 
-	async function silentlyJoinRoomAsMember(
-		targetRoomId: string,
-		userId: string,
-		username: string
-	) {
+	async function silentlyJoinRoomAsMember(targetRoomId: string, userId: string, username: string) {
 		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
 		const normalizedUserId = normalizeIdentifier(userId);
 		const normalizedUsername =
@@ -1848,10 +1906,15 @@
 		if (getUTF8ByteLength(text) > MESSAGE_TEXT_MAX_BYTES) {
 			return;
 		}
-		const mediaType = payload?.type;
-		const mediaContent = payload?.content?.trim() ?? '';
-		const isMediaMessage = Boolean(mediaType && mediaContent);
-		if (!text && !isMediaMessage) {
+		const payloadType = (payload?.type || '').trim().toLowerCase();
+		const payloadContent = payload?.content?.trim() ?? '';
+		const isTaskMessage = payloadType === 'task' && payloadContent !== '';
+		const isMediaMessage = payloadType !== '' && payloadType !== 'task' && payloadContent !== '';
+		if (!text && !isMediaMessage && !isTaskMessage) {
+			return;
+		}
+		if (isTaskMessage && getUTF8ByteLength(payloadContent) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Task payload is too large');
 			return;
 		}
 		const replyTarget = activeReply;
@@ -1861,16 +1924,32 @@
 			: '';
 
 		let outgoing: ChatMessage;
-		if (isMediaMessage) {
+		if (isTaskMessage) {
+			outgoing = {
+				id: createMessageId(roomId),
+				roomId,
+				senderId: currentUserId,
+				senderName: currentUsername,
+				content: payloadContent,
+				type: 'task',
+				mediaUrl: '',
+				mediaType: '',
+				fileName: '',
+				replyToMessageId,
+				replyToSnippet,
+				createdAt: Date.now(),
+				pending: true
+			};
+		} else if (isMediaMessage) {
 			outgoing = {
 				id: createMessageId(roomId),
 				roomId,
 				senderId: currentUserId,
 				senderName: currentUsername,
 				content: text,
-				type: mediaType || 'file',
-				mediaUrl: mediaContent,
-				mediaType: mediaType,
+				type: payloadType || 'file',
+				mediaUrl: payloadContent,
+				mediaType: payloadType,
 				fileName: payload?.fileName?.trim() ?? '',
 				replyToMessageId,
 				replyToSnippet,
@@ -1902,6 +1981,401 @@
 		draftMessage = '';
 		attachedFile = null;
 		activeReply = null;
+	}
+
+	function discussionCommentsEndpoint(taskMessageId: string) {
+		const normalizedTaskID = normalizeMessageID(taskMessageId);
+		return `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins/${encodeURIComponent(normalizedTaskID)}/discussion/comments`;
+	}
+
+	function upsertDiscussionCommentLocal(comment: ChatMessage) {
+		const normalizedID = normalizeMessageID(comment.id);
+		if (!normalizedID) {
+			return;
+		}
+		const next = [
+			...discussionComments.filter((entry) => normalizeMessageID(entry.id) !== normalizedID),
+			comment
+		].sort((left, right) => left.createdAt - right.createdAt);
+		discussionComments = next;
+	}
+
+	async function loadDiscussionComments(taskMessageId: string) {
+		if (!roomId || !isMember) {
+			discussionComments = [];
+			return;
+		}
+		const normalizedTaskID = normalizeMessageID(taskMessageId);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		if (!normalizedTaskID || !normalizedUserID) {
+			discussionComments = [];
+			return;
+		}
+
+		const requestURL = `${discussionCommentsEndpoint(normalizedTaskID)}?userId=${encodeURIComponent(normalizedUserID)}&limit=300`;
+		try {
+			const res = await fetch(requestURL);
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				throw new Error(toStringValue(data.error) || 'Failed to load discussion comments');
+			}
+			const parsedComments = (Array.isArray(data.comments) ? data.comments : [])
+				.map((entry) => parseIncomingMessage(entry, roomId, API_BASE))
+				.filter((entry): entry is ChatMessage => Boolean(entry))
+				.sort((left, right) => left.createdAt - right.createdAt);
+
+			if (normalizeMessageID(activeDiscussionTaskId) !== normalizedTaskID) {
+				return;
+			}
+			discussionComments = parsedComments;
+		} catch (error) {
+			if (normalizeMessageID(activeDiscussionTaskId) === normalizedTaskID) {
+				discussionComments = [];
+			}
+			showErrorToast(error instanceof Error ? error.message : 'Failed to load discussion comments');
+		}
+	}
+
+	function openDiscussionForTask(messageId: string) {
+		const normalizedMessageId = normalizeMessageID(messageId);
+		if (!roomId || !normalizedMessageId) {
+			return;
+		}
+		const match = (messagesByRoom[roomId] ?? []).find(
+			(entry) => normalizeMessageID(entry.id) === normalizedMessageId && entry.type === 'task'
+		);
+		if (!match) {
+			return;
+		}
+		activeDiscussionTaskId = match.id;
+		isDiscussionOpen = true;
+		discussionOpenedAtMs = Date.now();
+		discussionComments = [];
+		void loadDiscussionComments(match.id);
+	}
+
+	function closeDiscussion() {
+		isDiscussionOpen = false;
+		activeDiscussionTaskId = '';
+		discussionOpenedAtMs = 0;
+		discussionComments = [];
+	}
+
+	function onTaskDiscuss(event: CustomEvent<{ messageId: string }>) {
+		openDiscussionForTask(event.detail.messageId);
+	}
+
+	function commitTaskPayloadUpdate(messageId: string, nextContent: string) {
+		if (!roomId || !messageId || !nextContent) {
+			return;
+		}
+		applyMessageEdit(roomId, {
+			messageId,
+			content: nextContent,
+			editedAt: Date.now(),
+			messageType: 'task'
+		});
+		sendSocketPayload({
+			type: 'message_edit',
+			roomId,
+			messageId,
+			content: nextContent,
+			messageType: 'task'
+		});
+	}
+
+	async function onTaskToggle(event: CustomEvent<{ messageId: string; taskIndex: number }>) {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail.messageId);
+		const taskIndex = Number(event.detail.taskIndex);
+		if (!messageId || !Number.isInteger(taskIndex) || taskIndex < 0) {
+			return;
+		}
+
+		const message = (messagesByRoom[roomId] ?? []).find(
+			(entry) => normalizeMessageID(entry.id) === messageId && entry.type === 'task'
+		);
+		if (!message) {
+			return;
+		}
+
+		const parsedPayload = parseTaskMessagePayload(message.content);
+		if (!parsedPayload) {
+			showErrorToast('Task data is invalid');
+			return;
+		}
+		const nextPayload = toggleTaskItem(parsedPayload, taskIndex, currentUsername);
+		if (!nextPayload) {
+			return;
+		}
+		const nextContent = stringifyTaskMessagePayload(nextPayload);
+		if (getUTF8ByteLength(nextContent) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Task update is too large');
+			return;
+		}
+		commitTaskPayloadUpdate(messageId, nextContent);
+	}
+
+	async function onTaskAdd(event: CustomEvent<{ messageId: string; text: string }>) {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail.messageId);
+		const taskText = (event.detail.text || '').trim();
+		if (!messageId || !taskText) {
+			return;
+		}
+		const message = (messagesByRoom[roomId] ?? []).find(
+			(entry) => normalizeMessageID(entry.id) === messageId && entry.type === 'task'
+		);
+		if (!message) {
+			return;
+		}
+
+		const parsedPayload = parseTaskMessagePayload(message.content);
+		if (!parsedPayload) {
+			showErrorToast('Task data is invalid');
+			return;
+		}
+		const nextPayload = addTaskItem(parsedPayload, taskText, currentUsername, Date.now());
+		if (!nextPayload) {
+			showErrorToast('Unable to add task item');
+			return;
+		}
+		const nextContent = stringifyTaskMessagePayload(nextPayload);
+		if (getUTF8ByteLength(nextContent) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Task update is too large');
+			return;
+		}
+		commitTaskPayloadUpdate(messageId, nextContent);
+	}
+
+	async function onDiscussionCommentSubmit(
+		event: CustomEvent<{ content: string; replyToMessageId?: string }>
+	) {
+		if (!roomId || !isMember || !activeDiscussionTask) {
+			return;
+		}
+		const content = (event.detail.content || '').trim();
+		if (!content) {
+			return;
+		}
+		if (getUTF8ByteLength(content) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Comment is too long');
+			return;
+		}
+
+		const requestedReplyID = normalizeMessageID(event.detail.replyToMessageId || '');
+		const allowedReplyIDs = new Set<string>(discussionComments.map((entry) => normalizeMessageID(entry.id)));
+		const parentCommentId =
+			requestedReplyID && allowedReplyIDs.has(requestedReplyID) ? requestedReplyID : '';
+
+		const normalizedTaskID = normalizeMessageID(activeDiscussionTask.id);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		if (!normalizedTaskID || !normalizedUserID) {
+			return;
+		}
+
+		try {
+			const res = await fetch(discussionCommentsEndpoint(normalizedTaskID), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					userId: normalizedUserID,
+					username: currentUsername,
+					content,
+					parentCommentId
+				})
+			});
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				throw new Error(toStringValue(data.error) || 'Failed to post comment');
+			}
+			const parsed = parseIncomingMessage(data.comment, roomId, API_BASE);
+			if (!parsed) {
+				throw new Error('Comment payload is invalid');
+			}
+			upsertDiscussionCommentLocal(parsed);
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to post comment');
+		}
+	}
+
+	async function onDiscussionCommentEditRequest(
+		event: CustomEvent<{ messageId: string; content: string }>
+	) {
+		if (!roomId || !activeDiscussionTask || !isMember) {
+			return;
+		}
+		const commentId = normalizeMessageID(event.detail.messageId);
+		if (!commentId) {
+			return;
+		}
+		const currentComment = discussionComments.find(
+			(entry) => normalizeMessageID(entry.id) === commentId
+		);
+		if (!currentComment) {
+			return;
+		}
+		if (normalizeIdentifier(currentComment.senderId) !== normalizeIdentifier(currentUserId)) {
+			showErrorToast('You can only edit your own comments');
+			return;
+		}
+
+		const nextContentRaw = await openPromptDialog({
+			title: 'Edit Comment',
+			message: 'Update your discussion comment.',
+			initialValue: (event.detail.content || '').trim(),
+			placeholder: 'Comment',
+			maxLength: 2000,
+			confirmLabel: 'Save',
+			cancelLabel: 'Cancel',
+			multiline: true
+		});
+		if (nextContentRaw === null) {
+			return;
+		}
+		const nextContent = nextContentRaw.trim();
+		if (!nextContent || nextContent === (event.detail.content || '').trim()) {
+			return;
+		}
+		if (getUTF8ByteLength(nextContent) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Comment is too long');
+			return;
+		}
+
+		const normalizedTaskID = normalizeMessageID(activeDiscussionTask.id);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		if (!normalizedTaskID || !normalizedUserID) {
+			return;
+		}
+		try {
+			const res = await fetch(
+				`${discussionCommentsEndpoint(normalizedTaskID)}/${encodeURIComponent(commentId)}`,
+				{
+					method: 'PUT',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						userId: normalizedUserID,
+						content: nextContent,
+						createdAt: currentComment.createdAt
+					})
+				}
+			);
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				throw new Error(toStringValue(data.error) || 'Failed to edit comment');
+			}
+			const parsed = parseIncomingMessage(data.comment, roomId, API_BASE);
+			if (!parsed) {
+				throw new Error('Comment payload is invalid');
+			}
+			upsertDiscussionCommentLocal(parsed);
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to edit comment');
+		}
+	}
+
+	async function onDiscussionCommentDeleteRequest(event: CustomEvent<{ messageId: string }>) {
+		if (!roomId || !activeDiscussionTask || !isMember) {
+			return;
+		}
+		const commentId = normalizeMessageID(event.detail.messageId);
+		if (!commentId) {
+			return;
+		}
+		const currentComment = discussionComments.find(
+			(entry) => normalizeMessageID(entry.id) === commentId
+		);
+		if (!currentComment) {
+			return;
+		}
+		if (normalizeIdentifier(currentComment.senderId) !== normalizeIdentifier(currentUserId)) {
+			showErrorToast('You can only delete your own comments');
+			return;
+		}
+
+		const confirmed = await openConfirmDialog({
+			title: 'Delete Comment',
+			message: 'This action cannot be undone.',
+			confirmLabel: 'Delete',
+			cancelLabel: 'Cancel',
+			danger: true
+		});
+		if (!confirmed) {
+			return;
+		}
+
+		const normalizedTaskID = normalizeMessageID(activeDiscussionTask.id);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		if (!normalizedTaskID || !normalizedUserID) {
+			return;
+		}
+		try {
+			const res = await fetch(
+				`${discussionCommentsEndpoint(normalizedTaskID)}/${encodeURIComponent(commentId)}`,
+				{
+					method: 'DELETE',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						userId: normalizedUserID,
+						createdAt: currentComment.createdAt
+					})
+				}
+			);
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				throw new Error(toStringValue(data.error) || 'Failed to delete comment');
+			}
+			const parsed = parseIncomingMessage(data.comment, roomId, API_BASE);
+			if (!parsed) {
+				throw new Error('Comment payload is invalid');
+			}
+			upsertDiscussionCommentLocal(parsed);
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to delete comment');
+		}
+	}
+
+	async function navigateDiscussionPins(direction: 'previous' | 'next') {
+		if (!roomId || !activeDiscussionTask) {
+			return;
+		}
+		const anchorTimestamp = Number(activeDiscussionTask.createdAt);
+		if (!Number.isFinite(anchorTimestamp) || anchorTimestamp <= 0) {
+			return;
+		}
+		const queryParam = direction === 'previous' ? 'before' : 'after';
+		try {
+			const res = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins/navigate?${queryParam}=${encodeURIComponent(String(anchorTimestamp))}`
+			);
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				throw new Error(toStringValue(data.error) || 'Failed to navigate pinned discussions');
+			}
+			const rawMessage = data.message;
+			const parsed = parseIncomingMessage(rawMessage, roomId, API_BASE);
+			if (!parsed || parsed.type !== 'task') {
+				showErrorToast(
+					direction === 'previous'
+						? 'No previous pinned discussion in this room'
+						: 'No next pinned discussion in this room'
+				);
+				return;
+			}
+				mergeMessages(roomId, [parsed]);
+				activeDiscussionTaskId = parsed.id;
+				isDiscussionOpen = true;
+				discussionComments = [];
+				void loadDiscussionComments(parsed.id);
+			} catch (error) {
+				showErrorToast(
+					error instanceof Error ? error.message : 'Failed to navigate pinned discussions'
+			);
+		}
 	}
 
 	function onReplyRequest(event: CustomEvent<ReplyTarget>) {
@@ -2614,6 +3088,10 @@
 				return;
 			}
 			const loweredType = (message.type || '').toLowerCase();
+			if (messageActionMode === 'edit' && loweredType === 'task') {
+				showErrorToast('Use the checklist inside the task card to update tasks');
+				return;
+			}
 			if (
 				loweredType === 'deleted' ||
 				(message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER
@@ -2908,6 +3386,9 @@
 			on:requestOlder={onRequestOlderHistory}
 			on:focusHandled={onFocusHandled}
 			on:readProgress={onChatReadProgress}
+			on:toggleTask={onTaskToggle}
+			on:addTask={onTaskAdd}
+			on:discuss={onTaskDiscuss}
 		/>
 
 		{#if isMember}
@@ -2916,6 +3397,7 @@
 				bind:attachedFile
 				{activeReply}
 				{isDarkMode}
+				{currentUsername}
 				messageLimit={MESSAGE_TEXT_MAX_BYTES}
 				on:send={(event) => void sendMessage(event.detail)}
 				on:typing={onComposerTyping}
@@ -2931,10 +3413,28 @@
 	</div>
 </section>
 
+<DiscussionDrawer
+	open={isDiscussionOpen}
+	taskMessage={activeDiscussionTask}
+	comments={discussionComments}
+	{isDarkMode}
+	canEditTask={isMember}
+	{currentUserId}
+	backgroundUnreadCount={discussionBackgroundUnreadCount}
+	on:close={closeDiscussion}
+	on:navigatePrevious={() => void navigateDiscussionPins('previous')}
+	on:navigateNext={() => void navigateDiscussionPins('next')}
+	on:toggleTask={onTaskToggle}
+	on:addTask={onTaskAdd}
+	on:submitComment={onDiscussionCommentSubmit}
+	on:editComment={onDiscussionCommentEditRequest}
+	on:deleteComment={onDiscussionCommentDeleteRequest}
+/>
+
 <ChatRoomDetailsPanel
 	show={showRoomDetails}
 	{isMobileView}
-	roomId={roomId}
+	{roomId}
 	roomName={activeThread.name}
 	createdLabel={formatDateTime(getRoomCreatedAt(roomId))}
 	expiresLabel={formatDateTime(getRoomExpiry(roomId))}

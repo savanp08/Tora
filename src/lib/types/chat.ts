@@ -56,11 +56,26 @@ export type ChatMessage = {
 	hasBreakRoom?: boolean;
 	breakRoomId?: string;
 	breakJoinCount?: number;
+	isPinned?: boolean;
 	pending?: boolean;
 };
 
+export type TaskChecklistItem = {
+	text: string;
+	completed: boolean;
+	completedBy: string;
+	timestamp: number;
+	createdBy: string;
+	createdAt: number;
+};
+
+export type TaskMessagePayload = {
+	title: string;
+	tasks: TaskChecklistItem[];
+};
+
 export type ComposerMediaPayload = {
-	type: 'image' | 'video' | 'file' | 'audio';
+	type: 'image' | 'video' | 'file' | 'audio' | 'task';
 	content: string;
 	fileName?: string;
 	text?: string;

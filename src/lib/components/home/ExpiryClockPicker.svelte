@@ -6,6 +6,7 @@
 
 	const QUICK_OPTIONS: QuickOption[] = [
 		{ label: '1 Hour', hours: 1 },
+		{ label: '6 Hours', hours: 6 },
 		{ label: '12 Hours', hours: 12 },
 		{ label: '1 Day', hours: 24 },
 		{ label: '3 Days', hours: 72 },
