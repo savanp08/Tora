@@ -21,7 +21,7 @@
 	let roomName = '';
 	let roomCode = '';
 	let guestUsername = '';
-	let roomDurationHours = 6;
+	let roomDurationHours = 24;
 	let activeActionMode: JoinMode | '' = '';
 	let isJoining = false;
 	let joinError = '';
@@ -174,7 +174,12 @@
 
 				<div class="field-group">
 					<label for="username-input">Username (optional)</label>
-					<input id="username-input" type="text" placeholder="e.g. dizzy_panda" bind:value={guestUsername} />
+					<input
+						id="username-input"
+						type="text"
+						placeholder="e.g. dizzy_panda"
+						bind:value={guestUsername}
+					/>
 				</div>
 
 				<div class="action-row">
