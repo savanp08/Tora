@@ -141,7 +141,8 @@
 		background: white;
 		padding: 2rem;
 		border-radius: 8px;
-		width: 350px;
+		width: min(350px, calc(100vw - 2rem));
+		max-width: 100%;
 		box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 	}
 	.form-group {

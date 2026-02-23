@@ -89,6 +89,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.6rem;
+		flex-wrap: wrap;
 	}
 
 	.trusted-banner.theme-dark {
@@ -97,10 +98,17 @@
 		color: #d2def2;
 	}
 
+	.trusted-banner > span {
+		flex: 1 1 14rem;
+		min-width: 0;
+	}
+
 	.trusted-actions {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.35rem;
+		margin-left: auto;
+		flex-shrink: 0;
 	}
 
 	.trusted-actions button {

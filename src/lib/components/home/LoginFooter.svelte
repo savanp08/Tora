@@ -19,6 +19,7 @@
 		gap: 0.6rem 1rem;
 		align-items: center;
 		justify-content: space-between;
+		flex-wrap: wrap;
 		font-size: 0.82rem;
 		line-height: 1.2;
 	}

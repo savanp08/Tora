@@ -2812,6 +2812,8 @@
 		--panel-shadow: 0 10px 24px rgba(15, 23, 42, 0.1);
 		height: calc(98vh);
 		min-height: 620px;
+		width: 100%;
+		max-width: 100%;
 		display: grid;
 		grid-template-columns: 330px minmax(0, 1fr) 280px;
 		gap: 0.75rem;

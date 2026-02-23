@@ -2,10 +2,21 @@
 :global(body) {
 	margin: 0;
 	padding: 0;
+	width: 100%;
+	max-width: 100%;
+	overflow-x: hidden;
+	overflow-x: clip;
 }
 
 :global(*) {
 	box-sizing: border-box;
+}
+
+:global(img),
+:global(video),
+:global(canvas),
+:global(iframe) {
+	max-width: 100%;
 }
 
 :global(body) {
