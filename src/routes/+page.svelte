@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import ExpiryClockPicker from '$lib/components/home/ExpiryClockPicker.svelte';
 	import LoginFooter from '$lib/components/home/LoginFooter.svelte';
 	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
 	import { currentUser, authToken } from '$lib/store';
@@ -20,7 +21,8 @@
 	let roomName = '';
 	let roomCode = '';
 	let guestUsername = '';
-	let selectedMode: JoinMode = 'create';
+	let roomDurationHours = 6;
+	let activeActionMode: JoinMode | '' = '';
 	let isJoining = false;
 	let joinError = '';
 
@@ -44,23 +46,20 @@
 		input?.select();
 	}
 
-	function setMode(mode: JoinMode) {
-		selectedMode = mode;
-	}
-
-	async function handleRoomAction() {
+	async function handleRoomAction(mode: JoinMode) {
 		const normalizedRoomName = normalizeRoomNameInput(roomName);
 		const normalizedRoomCode = normalizeRoomCodeInput(roomCode);
-		if (selectedMode === 'create' && !normalizedRoomName) {
+		if (mode === 'create' && !normalizedRoomName) {
 			joinError = 'New rooms require a room name';
 			return;
 		}
-		if (selectedMode === 'join' && !normalizedRoomName && !normalizedRoomCode) {
+		if (mode === 'join' && !normalizedRoomName && !normalizedRoomCode) {
 			joinError = 'Enter a room name or a 6-digit room code';
 			return;
 		}
 
 		isJoining = true;
+		activeActionMode = mode;
 		joinError = '';
 		roomName = normalizedRoomName;
 		roomCode = normalizedRoomCode;
@@ -76,7 +75,8 @@
 				roomName: normalizedRoomName,
 				roomCode: normalizedRoomCode,
 				userToJoin,
-				mode: selectedMode
+				mode,
+				roomDurationHours
 			});
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
 				method: 'POST',
@@ -87,7 +87,8 @@
 					username: userToJoin,
 					userId: userIdentity.id,
 					type: 'ephemeral',
-					mode: selectedMode
+					mode,
+					roomDurationHours
 				})
 			});
 
@@ -123,13 +124,13 @@
 			joinError = e.message;
 		} finally {
 			isJoining = false;
+			activeActionMode = '';
 		}
 	}
 
-	$: canSubmit =
-		selectedMode === 'create'
-			? normalizeRoomNameInput(roomName) !== ''
-			: normalizeRoomNameInput(roomName) !== '' || normalizeRoomCodeInput(roomCode) !== '';
+	$: canCreate = normalizeRoomNameInput(roomName) !== '';
+	$: canJoinExisting =
+		normalizeRoomNameInput(roomName) !== '' || normalizeRoomCodeInput(roomCode) !== '';
 </script>
 
 <div class="container">
@@ -168,6 +169,10 @@
 				</div>
 
 				<div class="field-group">
+					<ExpiryClockPicker bind:valueHours={roomDurationHours} disabled={isJoining} />
+				</div>
+
+				<div class="field-group">
 					<label for="username-input">Username (optional)</label>
 					<input id="username-input" type="text" placeholder="e.g. dizzy_panda" bind:value={guestUsername} />
 				</div>
@@ -175,28 +180,19 @@
 				<div class="action-row">
 					<button
 						class="btn-primary-action"
-						class:selected={selectedMode === 'create'}
-						on:click={() => setMode('create')}
-						disabled={isJoining}
+						on:click={() => void handleRoomAction('create')}
+						disabled={isJoining || !canCreate}
 					>
-						New
+						{isJoining && activeActionMode === 'create' ? 'Creating...' : 'New'}
 					</button>
 					<button
 						class="btn-secondary-action"
-						class:selected={selectedMode === 'join'}
-						on:click={() => setMode('join')}
-						disabled={isJoining}
+						on:click={() => void handleRoomAction('join')}
+						disabled={isJoining || !canJoinExisting}
 					>
-						Existing
+						{isJoining && activeActionMode === 'join' ? 'Joining...' : 'Existing'}
 					</button>
 				</div>
-				<button
-					class="btn-submit-action"
-					on:click={handleRoomAction}
-					disabled={isJoining || !canSubmit}
-				>
-					{isJoining ? 'Working...' : 'Join'}
-				</button>
 			</div>
 
 			<p class="hint">No signup required for ephemeral rooms.</p>
@@ -213,19 +209,21 @@
 	}
 
 	.container {
-		max-width: 800px;
+		width: min(860px, 100%);
 		margin: 0 auto;
-		padding: 20px;
-		height: 100vh;
+		padding: 16px clamp(12px, 3vw, 24px) 20px;
+		min-height: 100dvh;
+		height: auto;
 		display: flex;
 		flex-direction: column;
+		overflow-y: auto;
 	}
 
 	header {
 		display: flex;
 		justify-content: flex-start;
 		align-items: center;
-		margin-bottom: 60px;
+		margin-bottom: 28px;
 	}
 
 	.logo {
@@ -237,6 +235,7 @@
 		display: flex;
 		justify-content: center;
 		align-items: center;
+		padding: 6px 0 14px;
 	}
 
 	.hero-box {
@@ -277,6 +276,7 @@
 		gap: 6px;
 		flex: 1;
 		text-align: left;
+		min-width: 0;
 	}
 
 	.field-group label {
@@ -303,18 +303,18 @@
 		gap: 10px;
 	}
 	input {
-		padding: 12px;
+		padding: 10px;
 		border: 1px solid #ddd;
 		border-radius: 6px;
-		font-size: 1rem;
+		font-size: 0.95rem;
 	}
 
 	button {
-		padding: 12px;
+		padding: 10px;
 		color: white;
 		border: none;
 		border-radius: 6px;
-		font-size: 1rem;
+		font-size: 0.95rem;
 		font-weight: bold;
 		cursor: pointer;
 		transition: background 0.2s;
@@ -342,19 +342,6 @@
 	.btn-secondary-action:hover:not(:disabled) {
 		background: #f1f5f9;
 	}
-	.btn-primary-action.selected,
-	.btn-secondary-action.selected {
-		border-color: #16a34a;
-		box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.18);
-		background: #ecfdf3;
-	}
-	.btn-submit-action {
-		background: #16a34a;
-	}
-	.btn-submit-action:hover:not(:disabled) {
-		background: #15803d;
-	}
-
 	.error-msg {
 		color: #d9534f;
 		background: #f9d6d5;
@@ -369,6 +356,18 @@
 	}
 
 	@media (max-width: 760px) {
+		.container {
+			min-height: 100svh;
+		}
+
+		main {
+			align-items: flex-start;
+		}
+
+		.hero-box {
+			padding: 26px 18px;
+		}
+
 		.room-inputs-row {
 			flex-wrap: wrap;
 		}

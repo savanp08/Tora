@@ -75,14 +75,27 @@
 
 	.online-list {
 		flex: 1;
-		overflow: auto;
+		min-height: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
 		padding: 0.65rem 0.6rem 0.8rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.38rem;
+		-webkit-overflow-scrolling: touch;
+		overscroll-behavior: contain;
+		scrollbar-width: none;
+		-ms-overflow-style: none;
+	}
+
+	.online-list::-webkit-scrollbar {
+		width: 0;
+		height: 0;
+		display: none;
 	}
 
 	.online-member {
+		flex: 0 0 auto;
 		display: flex;
 		align-items: center;
 		gap: 0.62rem;
@@ -105,7 +118,9 @@
 		height: 10px;
 		border-radius: 50%;
 		flex-shrink: 0;
-		box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.92), 0 0 0 3px rgba(17, 24, 39, 0.18);
+		box-shadow:
+			0 0 0 2px rgba(255, 255, 255, 0.92),
+			0 0 0 3px rgba(17, 24, 39, 0.18);
 		background: #22c55e;
 	}
 
@@ -125,6 +140,7 @@
 	}
 
 	.empty-label {
+		flex: 0 0 auto;
 		color: #6b7280;
 		font-size: 0.83rem;
 		padding: 1rem 0.9rem;

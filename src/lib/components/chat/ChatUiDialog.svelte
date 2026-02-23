@@ -15,9 +15,14 @@
 	}>();
 
 	let inputEl: HTMLInputElement | HTMLTextAreaElement | null = null;
+	let previousDialogKind: UiDialogState['kind'] = 'none';
 
-	$: if (dialog.kind !== 'none') {
-		void focusDialogInputSoon();
+	$: {
+		const nextDialogKind = dialog.kind;
+		if (nextDialogKind !== previousDialogKind && nextDialogKind !== 'none') {
+			void focusDialogInputSoon();
+		}
+		previousDialogKind = nextDialogKind;
 	}
 
 	function isConfirmDisabled() {

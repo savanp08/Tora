@@ -23,7 +23,9 @@
 	<div class="trusted-banner {isDarkMode ? 'theme-dark' : ''}" role="status" aria-live="polite">
 		<span>Trusted device? Enable encrypted history caching for faster loading.</span>
 		<div class="trusted-actions">
-			<button type="button" on:click={() => dispatch('trustedChoice', { choice: 'yes' })}>Yes</button>
+			<button type="button" on:click={() => dispatch('trustedChoice', { choice: 'yes' })}
+				>Yes</button
+			>
 			<button type="button" on:click={() => dispatch('trustedChoice', { choice: 'no' })}>No</button>
 		</div>
 	</div>
@@ -50,10 +52,10 @@
 <style>
 	.selection-banner {
 		padding: 0.45rem 0.9rem;
-		background: #f1f1f3;
-		border-bottom: 1px solid #dfdfe4;
+		background: #e8edf4;
+		border-bottom: 1px solid #d4dce7;
 		font-size: 0.8rem;
-		color: #3a3a42;
+		color: #3e4d63;
 	}
 
 	.selection-banner.theme-dark {
@@ -64,9 +66,9 @@
 
 	.typing-indicator {
 		padding: 0.35rem 0.9rem;
-		border-bottom: 1px solid #e4e4e8;
-		background: #fafafc;
-		color: #666873;
+		border-bottom: 1px solid #d9e0ea;
+		background: #f2f5f9;
+		color: #67758a;
 		font-size: 0.75rem;
 		line-height: 1.2;
 	}
@@ -79,9 +81,9 @@
 
 	.trusted-banner {
 		padding: 0.5rem 0.9rem;
-		border-bottom: 1px solid #e2e2e7;
-		background: #f8f8fb;
-		color: #383844;
+		border-bottom: 1px solid #d6dde8;
+		background: #ecf1f7;
+		color: #3b4a60;
 		font-size: 0.76rem;
 		display: flex;
 		align-items: center;
@@ -102,9 +104,9 @@
 	}
 
 	.trusted-actions button {
-		border: 1px solid #d3d3da;
-		background: #ffffff;
-		color: #2f2f37;
+		border: 1px solid #c6cfdc;
+		background: #f7f9fc;
+		color: #2f3d54;
 		border-radius: 999px;
 		font-size: 0.72rem;
 		padding: 0.18rem 0.54rem;
@@ -112,7 +114,7 @@
 	}
 
 	.trusted-actions button:hover {
-		background: #f2f2f6;
+		background: #e8edf4;
 	}
 
 	.trusted-banner.theme-dark .trusted-actions button {
@@ -123,8 +125,8 @@
 
 	.chat-search-row {
 		padding: 0.65rem 0.9rem;
-		background: #fcfcfd;
-		border-bottom: 1px solid #e3e3e8;
+		background: #f2f5f9;
+		border-bottom: 1px solid #d7dee8;
 	}
 
 	.chat-search-row.theme-dark {
@@ -134,12 +136,16 @@
 
 	.chat-search-row input {
 		width: 100%;
-		border: 1px solid #d6d6dc;
+		border: 1px solid #c7cfdb;
 		border-radius: 8px;
 		padding: 0.55rem 0.7rem;
 		font-size: 0.9rem;
-		background: #fafafb;
-		color: #2a2a31;
+		background: #edf2f8;
+		color: #2b394f;
+	}
+
+	.chat-search-row input::placeholder {
+		color: #6a7890;
 	}
 
 	.chat-search-row.theme-dark input {

@@ -60,10 +60,10 @@
 		filterThreadsByStatus,
 		sortThreads
 	} from '$lib/utils/chat/threadList';
-import {
-	applyMessageDeleteState,
-	applyMessageEditState,
-	createThread as createThreadState,
+	import {
+		applyMessageDeleteState,
+		applyMessageEditState,
+		createThread as createThreadState,
 		dedupeMembers as dedupeMembersState,
 		ensureOnlineSeed as ensureOnlineSeedState,
 		ensureRoomMeta as ensureRoomMetaState,
@@ -72,9 +72,9 @@ import {
 		mergeMessagesState,
 		removeOnlineMember as removeOnlineMemberState,
 		updateThreadPreview as updateThreadPreviewState,
-	upsertMessageState,
-	upsertOnlineMember as upsertOnlineMemberState
-} from '$lib/utils/chat/pageState';
+		upsertMessageState,
+		upsertOnlineMember as upsertOnlineMemberState
+	} from '$lib/utils/chat/pageState';
 	import {
 		buildConfirmDialog,
 		buildPromptDialog,
@@ -96,7 +96,13 @@ import {
 	} from '$lib/utils/offlineCache';
 	import { getOrInitIdentity } from '$lib/utils/identity';
 	import { clearSessionToken, getSessionToken } from '$lib/utils/sessionToken';
-	import { closeGlobalSocket, globalMessages, initGlobalSocket, sendSocketPayload, subscribeToRooms } from '$lib/ws';
+	import {
+		closeGlobalSocket,
+		globalMessages,
+		initGlobalSocket,
+		sendSocketPayload,
+		subscribeToRooms
+	} from '$lib/ws';
 	import { onDestroy, onMount, tick } from 'svelte';
 
 	const CLIENT_LOG_PREFIX = '[chat-client]';
@@ -113,7 +119,6 @@ import {
 	let removeSystemThemeListener: (() => void) | null = null;
 	let roomMembershipSynced: Record<string, boolean> = {};
 	let roomMembershipSyncing: Record<string, boolean> = {};
-	let unsubscribeGlobalMessages: (() => void) | null = null;
 	let typingStopTimer: ReturnType<typeof setTimeout> | null = null;
 	let typingLastPingAt = 0;
 	let typingIsActive = false;
@@ -142,6 +147,8 @@ import {
 	let focusMessageId = '';
 	let focusConsumedForRoom = false;
 	let focusRoomTracker = '';
+	let activeRoomId = '';
+	let activeFirstUnreadMessageId = '';
 
 	let roomThreads: ChatThread[] = [];
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
@@ -163,7 +170,6 @@ import {
 	let serverClockOffsetMs = 0;
 	let serverNowAnchorMs = 0;
 	let serverNowAnchorPerfMs = 0;
-	let activeRoomNearBottom = true;
 	let uiDialog: UiDialogState = { kind: 'none' };
 	let uiDialogResolver: ((value: unknown) => void) | null = null;
 	let chatWindowRef: {
@@ -172,6 +178,7 @@ import {
 	} | null = null;
 
 	$: roomId = normalizeRoomIDValue(decodeURIComponent($page.params.roomId ?? ''));
+	$: activeRoomId = roomId;
 	$: roomNameFromURL = normalizeRoomNameValue(
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
 	);
@@ -194,7 +201,8 @@ import {
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: activeUnreadCount = activeThread?.unread ?? 0;
-	$: activeUnreadStartMessageId = getUnreadStartMessageId(roomId);
+	$: activeFirstUnreadMessageId = getUnreadStartMessageId(roomId);
+	$: activeLastReadTimestamp = getLastReadTimestamp(roomId);
 	$: activeTypingUsers = getActiveTypingUsers(roomId);
 	$: typingIndicatorText = formatTypingIndicator(activeTypingUsers);
 	$: isLoadingOlderHistory = historyLoadingByRoom[roomId] ?? false;
@@ -228,6 +236,25 @@ import {
 	$: if (browser && identityReady) {
 		initGlobalSocket(currentUserId, currentUsername);
 	}
+	$: if (browser && identityReady && $globalMessages) {
+		const payload = $globalMessages.payload;
+		let handledDirectPayload = false;
+		if (payload && typeof payload === 'object') {
+			const source = payload as Record<string, unknown>;
+			const payloadType = toStringValue(source.type).toLowerCase();
+			const payloadRoomID = normalizeRoomIDValue(toStringValue(source.roomId ?? source.room_id));
+			if (payloadType === 'text' && payloadRoomID) {
+				const directMessage = parseIncomingMessage(source, payloadRoomID, API_BASE);
+				if (directMessage) {
+					addIncomingMessage(directMessage);
+				}
+				handledDirectPayload = true;
+			}
+		}
+		if (!handledDirectPayload) {
+			handleGlobalPayload(payload);
+		}
+	}
 	$: if (browser && identityReady) {
 		// Subscribe to all rooms visible in sidebar so discoverable rooms get read-only previews.
 		const readableRoomIDs = roomThreads
@@ -248,7 +275,6 @@ import {
 		focusRoomTracker = roomId;
 		focusConsumedForRoom = false;
 		focusMessageId = '';
-		activeRoomNearBottom = true;
 		activeReply = null;
 		messageActionMode = 'none';
 		isSelectionMode = false;
@@ -264,10 +290,6 @@ import {
 
 	onDestroy(() => {
 		clientLog('component-destroy', { roomId });
-		if (unsubscribeGlobalMessages) {
-			unsubscribeGlobalMessages();
-			unsubscribeGlobalMessages = null;
-		}
 		clearTypingStopTimer();
 		clearAllTypingSafetyTimers();
 		clearAllCachePersistTimers();
@@ -291,24 +313,15 @@ import {
 			void hydrateOfflineCache(roomId);
 		}
 		void initializeIdentity();
-		unsubscribeGlobalMessages = globalMessages.subscribe((event) => {
-			if (!event) {
-				return;
-			}
-			handleGlobalPayload(event.payload);
-		});
 		updateViewportMode();
 		window.addEventListener('resize', updateViewportMode);
 		clearRoomExpiryTicker();
 		roomExpiryTickMs = Date.now();
 		roomExpiryTicker = setInterval(() => {
 			roomExpiryTickMs = Date.now();
+			processKnownExpiredRooms();
 		}, 60000);
 		return () => {
-			if (unsubscribeGlobalMessages) {
-				unsubscribeGlobalMessages();
-				unsubscribeGlobalMessages = null;
-			}
 			window.removeEventListener('resize', updateViewportMode);
 			clearRoomExpiryTicker();
 			if (removeSystemThemeListener) {
@@ -407,7 +420,7 @@ import {
 			return;
 		}
 		const now = Date.now();
-		if (typingIsActive && now-typingLastPingAt < TYPING_PING_INTERVAL_MS) {
+		if (typingIsActive && now - typingLastPingAt < TYPING_PING_INTERVAL_MS) {
 			return;
 		}
 		typingIsActive = true;
@@ -603,7 +616,12 @@ import {
 	}
 
 	async function hydrateOfflineCache(targetRoomId: string) {
-		if (!browser || !trustedCachingEnabled || !targetRoomId || offlineHydratedByRoom[targetRoomId]) {
+		if (
+			!browser ||
+			!trustedCachingEnabled ||
+			!targetRoomId ||
+			offlineHydratedByRoom[targetRoomId]
+		) {
 			return;
 		}
 		offlineHydratedByRoom = {
@@ -757,7 +775,7 @@ import {
 					typeof value === 'object' &&
 					'mode' in value &&
 					'roomName' in value &&
-					(typeof (value as { mode?: unknown }).mode === 'string')
+					typeof (value as { mode?: unknown }).mode === 'string'
 				) {
 					const parsed = value as { mode: RoomMenuMode; roomName: string };
 					resolve(parsed);
@@ -909,14 +927,20 @@ import {
 				clientLog('api-room-sync-failed', { roomId: normalizedRoomId, status: res.status, data });
 				return;
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 
 			markRoomMembershipSynced(normalizedRoomId);
 			const joinedName =
 				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(normalizedRoomId);
 			const joinedCreatedAt = toTimestamp(data.createdAt);
 			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
-			const joinedIsAdmin = toBool((data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ?? (data as { isAdmin?: unknown; is_admin?: unknown }).is_admin);
+			const joinedIsAdmin = toBool(
+				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
+					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
+			);
 			ensureRoomThread(normalizedRoomId, joinedName, 'joined');
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
@@ -951,7 +975,10 @@ import {
 				clientLog('api-sidebar-failed', { status: res.status, data });
 				return;
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 			const incoming = Array.isArray(data.rooms) ? (data.rooms as SidebarRoom[]) : [];
 			const existing = new Map(roomThreads.map((thread) => [thread.id, thread]));
 			const nextThreads = incoming.reduce<ChatThread[]>((acc, room) => {
@@ -968,11 +995,7 @@ import {
 				}
 
 				const roomStatus: ThreadStatus =
-					room.status === 'joined'
-						? 'joined'
-						: room.status === 'left'
-							? 'left'
-							: 'discoverable';
+					room.status === 'joined' ? 'joined' : room.status === 'left' ? 'left' : 'discoverable';
 
 				const next: ChatThread = {
 					id: roomID,
@@ -986,7 +1009,8 @@ import {
 					status: roomStatus,
 					memberCount: typeof room.memberCount === 'number' ? room.memberCount : prev?.memberCount,
 					parentRoomId: toStringValue(room.parentRoomId) || prev?.parentRoomId || undefined,
-					originMessageId: toStringValue(room.originMessageId) || prev?.originMessageId || undefined,
+					originMessageId:
+						toStringValue(room.originMessageId) || prev?.originMessageId || undefined,
 					treeNumber: toInt(room.treeNumber ?? prev?.treeNumber ?? 0),
 					isAdmin: toBool(room.isAdmin ?? prev?.isAdmin ?? false)
 				};
@@ -1010,6 +1034,7 @@ import {
 			}
 
 			roomThreads = sortThreads([...merged.values()]);
+			processKnownExpiredRooms();
 		} catch (error) {
 			clientLog('api-sidebar-error', {
 				error: error instanceof Error ? error.message : String(error)
@@ -1017,7 +1042,9 @@ import {
 		}
 	}
 
-	function onSidebarSelect(event: CustomEvent<{ id: string; isMember: boolean; status: ThreadStatus }>) {
+	function onSidebarSelect(
+		event: CustomEvent<{ id: string; isMember: boolean; status: ThreadStatus }>
+	) {
 		const targetRoomId = normalizeRoomIDValue(event.detail.id);
 		if (!targetRoomId) {
 			return;
@@ -1219,6 +1246,23 @@ import {
 			return;
 		}
 
+		if (kind === 'room_expired') {
+			const payloadRoomId =
+				envelope.payload && typeof envelope.payload === 'object'
+					? normalizeRoomIDValue(
+							toStringValue(
+								(envelope.payload as Record<string, unknown>).roomId ??
+									(envelope.payload as Record<string, unknown>).room_id
+							)
+						)
+					: '';
+			const expiredRoomId = normalizeRoomIDValue(payloadRoomId || targetRoomId);
+			if (expiredRoomId) {
+				void handleRoomExpired([expiredRoomId], 'server');
+			}
+			return;
+		}
+
 		if (kind === 'online_list' && targetRoomId && Array.isArray(envelope.payload)) {
 			const members = envelope.payload
 				.map((entry, index) => parseMember(entry, index))
@@ -1269,13 +1313,121 @@ import {
 		}
 	}
 
-	function addIncomingMessage(message: ChatMessage) {
-		const isActiveRoom = message.roomId === roomId;
-		const shouldCountUnread = !isActiveRoom || !activeRoomNearBottom;
-		upsertMessage(message.roomId, message, shouldCountUnread);
-		if (isActiveRoom && activeRoomNearBottom) {
-			applyReadProgress(roomId, message.id, true);
+	function removeRoomsFromLocalState(roomIDs: string[]) {
+		const normalizedRoomIDs = Array.from(
+			new Set(roomIDs.map((entry) => normalizeRoomIDValue(entry)).filter((entry) => entry !== ''))
+		);
+		if (normalizedRoomIDs.length === 0) {
+			return { removedCurrentRoom: false, removedNames: [] as string[] };
 		}
+
+		const removeSet = new Set(normalizedRoomIDs);
+		const removedNames = roomThreads
+			.filter((thread) => removeSet.has(normalizeRoomIDValue(thread.id)))
+			.map((thread) => thread.name);
+		const removedCurrentRoom = removeSet.has(normalizeRoomIDValue(roomId));
+
+		roomThreads = roomThreads.filter((thread) => !removeSet.has(normalizeRoomIDValue(thread.id)));
+
+		const nextMessagesByRoom = { ...messagesByRoom };
+		const nextOnlineByRoom = { ...onlineByRoom };
+		const nextRoomMetaById = { ...roomMetaById };
+		const nextTypingUsersByRoom = { ...typingUsersByRoom };
+		const nextHistoryLoadingByRoom = { ...historyLoadingByRoom };
+		const nextHistoryHasMoreByRoom = { ...historyHasMoreByRoom };
+		const nextOfflineHydratedByRoom = { ...offlineHydratedByRoom };
+		const nextUnreadAnchorByRoom = { ...unreadAnchorByRoom };
+		const nextRoomMembershipSynced = { ...roomMembershipSynced };
+		const nextRoomMembershipSyncing = { ...roomMembershipSyncing };
+
+		for (const normalizedRoomID of normalizedRoomIDs) {
+			delete nextMessagesByRoom[normalizedRoomID];
+			delete nextOnlineByRoom[normalizedRoomID];
+			delete nextRoomMetaById[normalizedRoomID];
+			delete nextTypingUsersByRoom[normalizedRoomID];
+			delete nextHistoryLoadingByRoom[normalizedRoomID];
+			delete nextHistoryHasMoreByRoom[normalizedRoomID];
+			delete nextOfflineHydratedByRoom[normalizedRoomID];
+			delete nextUnreadAnchorByRoom[normalizedRoomID];
+			delete nextRoomMembershipSynced[normalizedRoomID];
+			delete nextRoomMembershipSyncing[normalizedRoomID];
+		}
+
+		messagesByRoom = nextMessagesByRoom;
+		onlineByRoom = nextOnlineByRoom;
+		roomMetaById = nextRoomMetaById;
+		typingUsersByRoom = nextTypingUsersByRoom;
+		historyLoadingByRoom = nextHistoryLoadingByRoom;
+		historyHasMoreByRoom = nextHistoryHasMoreByRoom;
+		offlineHydratedByRoom = nextOfflineHydratedByRoom;
+		unreadAnchorByRoom = nextUnreadAnchorByRoom;
+		roomMembershipSynced = nextRoomMembershipSynced;
+		roomMembershipSyncing = nextRoomMembershipSyncing;
+
+		return { removedCurrentRoom, removedNames };
+	}
+
+	async function handleRoomExpired(roomIDs: string[], source: 'server' | 'timer') {
+		const { removedCurrentRoom, removedNames } = removeRoomsFromLocalState(roomIDs);
+		if (removedNames.length === 0 && !removedCurrentRoom) {
+			return;
+		}
+
+		setMessageActionMode('none');
+		showRoomDetails = false;
+		showRoomSearch = false;
+		if (removedCurrentRoom) {
+			activeReply = null;
+		}
+
+		if (removedNames.length === 1) {
+			const contextLabel = source === 'server' ? '' : ' locally';
+			showErrorToast(`Room expired${contextLabel}: ${removedNames[0]}`);
+		} else if (removedCurrentRoom) {
+			const contextLabel = source === 'server' ? '' : ' locally';
+			showErrorToast(`Room expired${contextLabel}`);
+		} else {
+			showErrorToast(`${removedNames.length} rooms expired and were removed`);
+		}
+
+		await refreshSidebarRooms();
+
+		if (!removedCurrentRoom) {
+			return;
+		}
+		const fallbackJoined = roomThreads.find((thread) => thread.status === 'joined');
+		const fallbackThread = fallbackJoined ?? roomThreads.find((thread) => thread.status !== 'left');
+		if (fallbackThread) {
+			selectRoom(fallbackThread.id, fallbackThread.status === 'joined');
+			return;
+		}
+		await goto('/');
+	}
+
+	function processKnownExpiredRooms() {
+		if (roomThreads.length === 0) {
+			return;
+		}
+		const now = getApproxServerNowMs(roomExpiryTickMs);
+		const expiredRoomIDs = roomThreads
+			.map((thread) => normalizeRoomIDValue(thread.id))
+			.filter((entry) => entry !== '')
+			.filter((normalizedRoomID) => {
+				const expiresAt = getRoomExpiry(normalizedRoomID);
+				return expiresAt > 0 && expiresAt <= now;
+			});
+		if (expiredRoomIDs.length === 0) {
+			return;
+		}
+		void handleRoomExpired(expiredRoomIDs, 'timer');
+	}
+
+	function addIncomingMessage(message: ChatMessage) {
+		const isOwnMessage =
+			normalizeIdentifier(message.senderId) !== '' &&
+			normalizeIdentifier(message.senderId) === normalizeIdentifier(currentUserId);
+		const shouldCountUnread = !isOwnMessage;
+		upsertMessage(message.roomId, message, shouldCountUnread);
 	}
 
 	function upsertMessage(targetRoomId: string, message: ChatMessage, shouldCountUnread: boolean) {
@@ -1370,14 +1522,65 @@ import {
 		}
 	}
 
+	function getLastReadTimestamp(targetRoomId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return Date.now();
+		}
+		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
+		if (roomMessages.length === 0) {
+			return Date.now();
+		}
+		const unread = roomThreads.find((thread) => thread.id === normalizedRoomID)?.unread ?? 0;
+		if (unread <= 0) {
+			return roomMessages[roomMessages.length - 1]?.createdAt ?? Date.now();
+		}
+		const anchorMessageID = getUnreadStartMessageId(normalizedRoomID);
+		if (anchorMessageID) {
+			const anchorIndex = roomMessages.findIndex(
+				(message) => normalizeMessageID(message.id) === normalizeMessageID(anchorMessageID)
+			);
+			if (anchorIndex <= 0) {
+				return 0;
+			}
+			return roomMessages[anchorIndex - 1]?.createdAt ?? 0;
+		}
+		const firstUnreadIndex = Math.max(0, roomMessages.length - unread);
+		if (firstUnreadIndex <= 0) {
+			return 0;
+		}
+		return roomMessages[firstUnreadIndex - 1]?.createdAt ?? 0;
+	}
+
+	function findUnreadAnchorFromTail(
+		roomMessages: ChatMessage[],
+		unreadCount: number,
+		normalizedCurrentUserID: string
+	) {
+		if (!Array.isArray(roomMessages) || roomMessages.length === 0 || unreadCount <= 0) {
+			return '';
+		}
+		let remainingUnread = unreadCount;
+		for (let index = roomMessages.length - 1; index >= 0; index -= 1) {
+			const candidate = roomMessages[index];
+			const isOwnMessage =
+				normalizedCurrentUserID !== '' &&
+				normalizeIdentifier(candidate.senderId) === normalizedCurrentUserID;
+			if (isOwnMessage) {
+				continue;
+			}
+			remainingUnread -= 1;
+			if (remainingUnread <= 0) {
+				return candidate.id;
+			}
+		}
+		return roomMessages[0]?.id ?? '';
+	}
+
 	function getUnreadStartMessageId(targetRoomId: string) {
 		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
 		if (!normalizedRoomID) {
 			return '';
-		}
-		const explicitAnchor = unreadAnchorByRoom[normalizedRoomID];
-		if (explicitAnchor) {
-			return explicitAnchor;
 		}
 		const unread = roomThreads.find((thread) => thread.id === normalizedRoomID)?.unread ?? 0;
 		if (unread <= 0) {
@@ -1387,11 +1590,11 @@ import {
 		if (roomMessages.length === 0) {
 			return '';
 		}
-		const fallbackIndex = Math.max(0, roomMessages.length - unread);
-		return roomMessages[fallbackIndex]?.id ?? '';
+		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
+		return findUnreadAnchorFromTail(roomMessages, unread, normalizedCurrentUserID);
 	}
 
-	function applyReadProgress(targetRoomId: string, lastSeenMessageId: string, isNearBottom: boolean) {
+	function applyReadProgress(targetRoomId: string, lastSeenMessageId: string) {
 		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
 		if (!normalizedRoomID) {
 			return;
@@ -1415,29 +1618,32 @@ import {
 			(message) => normalizeMessageID(message.id) === normalizeMessageID(anchorMessageID)
 		);
 		if (anchorIndex < 0) {
-			if (isNearBottom) {
-				markRoomAsRead(normalizedRoomID);
-			}
 			return;
 		}
 
-		let seenCount = 0;
-		if (isNearBottom) {
-			seenCount = unread;
-		} else {
-			const seenIndex = roomMessages.findIndex(
-				(message) => normalizeMessageID(message.id) === normalizeMessageID(lastSeenMessageId)
-			);
-			if (seenIndex < anchorIndex) {
-				return;
-			}
-			seenCount = Math.min(unread, seenIndex-anchorIndex+1);
+		const seenIndex = roomMessages.findIndex(
+			(message) => normalizeMessageID(message.id) === normalizeMessageID(lastSeenMessageId)
+		);
+		if (seenIndex < anchorIndex) {
+			return;
 		}
+		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
+		let seenUnreadCount = 0;
+		for (let index = anchorIndex; index <= seenIndex; index += 1) {
+			const candidate = roomMessages[index];
+			const isOwnMessage =
+				normalizedCurrentUserID !== '' &&
+				normalizeIdentifier(candidate.senderId) === normalizedCurrentUserID;
+			if (!isOwnMessage) {
+				seenUnreadCount += 1;
+			}
+		}
+		const seenCount = Math.min(unread, seenUnreadCount);
 		if (seenCount <= 0) {
 			return;
 		}
 
-		const nextUnread = Math.max(0, unread-seenCount);
+		const nextUnread = Math.max(0, unread - seenCount);
 		roomThreads = sortThreads(
 			roomThreads.map((entry) =>
 				entry.id === normalizedRoomID ? { ...entry, unread: nextUnread } : entry
@@ -1451,11 +1657,15 @@ import {
 			return;
 		}
 
-		const nextAnchorMessage = roomMessages[Math.min(roomMessages.length - 1, anchorIndex + seenCount)];
-		if (nextAnchorMessage?.id) {
+		const nextAnchorMessageId = findUnreadAnchorFromTail(
+			roomMessages,
+			nextUnread,
+			normalizedCurrentUserID
+		);
+		if (nextAnchorMessageId) {
 			unreadAnchorByRoom = {
 				...unreadAnchorByRoom,
-				[normalizedRoomID]: nextAnchorMessage.id
+				[normalizedRoomID]: nextAnchorMessageId
 			};
 		}
 	}
@@ -1466,11 +1676,13 @@ import {
 		if (!roomId) {
 			return;
 		}
-		activeRoomNearBottom = Boolean(event.detail?.isNearBottom);
+		if (isMobileView && mobilePane !== 'chat') {
+			return;
+		}
 		if (roomMessageSearch.trim()) {
 			return;
 		}
-		applyReadProgress(roomId, event.detail?.lastSeenMessageId || '', activeRoomNearBottom);
+		applyReadProgress(roomId, event.detail?.lastSeenMessageId || '');
 	}
 
 	function upsertOnlineMember(targetRoomId: string, member: OnlineMember) {
@@ -1544,7 +1756,7 @@ import {
 
 		upsertMessage(roomId, outgoing, false);
 		sendSocketPayload(toWireMessage(outgoing));
-		applyReadProgress(roomId, outgoing.id, activeRoomNearBottom);
+		applyReadProgress(roomId, outgoing.id);
 		sendTypingStop();
 		draftMessage = '';
 		attachedFile = null;
@@ -1680,12 +1892,13 @@ import {
 			if (!res.ok) {
 				throw new Error(
 					data.error ||
-						(roomMode === 'join'
-							? 'Failed to join existing room'
-							: 'Failed to create room')
+						(roomMode === 'join' ? 'Failed to join existing room' : 'Failed to create room')
 				);
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 
 			const nextRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
 			if (!nextRoomId) {
@@ -1695,7 +1908,10 @@ import {
 				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(nextRoomId);
 			const nextCreatedAt = toTimestamp(data.createdAt);
 			const nextExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
-			const nextIsAdmin = toBool((data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ?? (data as { isAdmin?: unknown; is_admin?: unknown }).is_admin);
+			const nextIsAdmin = toBool(
+				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
+					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
+			);
 
 			ensureRoomThread(nextRoomId, nextRoomName, 'joined');
 			roomThreads = sortThreads(
@@ -1749,7 +1965,10 @@ import {
 			if (!res.ok) {
 				throw new Error(data.error || 'Unable to join room');
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 
 			const joinedName =
 				normalizeRoomNameValue(toStringValue(data.roomName)) ||
@@ -1757,7 +1976,10 @@ import {
 				formatRoomName(roomId);
 			const joinedCreatedAt = toTimestamp(data.createdAt);
 			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
-			const joinedIsAdmin = toBool((data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ?? (data as { isAdmin?: unknown; is_admin?: unknown }).is_admin);
+			const joinedIsAdmin = toBool(
+				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
+					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
+			);
 			ensureRoomThread(roomId, joinedName, 'joined');
 			markRoomMembershipSynced(roomId);
 			ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
@@ -1800,19 +2022,18 @@ import {
 				showErrorToast(data.error || 'Room has reached its 15-day limit');
 				return;
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 			const expiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 			const expiresInSeconds = toInt(data.expiresInSeconds ?? data.expires_in_seconds);
 			const createdAt = getRoomCreatedAt(targetRoomId);
-				if (expiresAt > 0) {
-					ensureRoomMeta(targetRoomId, createdAt, expiresAt);
-				} else if (expiresInSeconds > 0) {
-					ensureRoomMeta(
-						targetRoomId,
-						createdAt,
-						getApproxServerNowMs() + expiresInSeconds * 1000
-					);
-				}
+			if (expiresAt > 0) {
+				ensureRoomMeta(targetRoomId, createdAt, expiresAt);
+			} else if (expiresInSeconds > 0) {
+				ensureRoomMeta(targetRoomId, createdAt, getApproxServerNowMs() + expiresInSeconds * 1000);
+			}
 			showErrorToast(data.message || 'Room extended for 24 hours');
 		} catch {
 			showErrorToast('Failed to extend room');
@@ -1942,8 +2163,7 @@ import {
 				chatWindowRef?.restorePrependAnchor?.(anchor);
 			}
 
-			const hasMore =
-				typeof data.hasMore === 'boolean' ? data.hasMore : incoming.length >= 50;
+			const hasMore = typeof data.hasMore === 'boolean' ? data.hasMore : incoming.length >= 50;
 			historyHasMoreByRoom = {
 				...historyHasMoreByRoom,
 				[normalizedRoomID]: hasMore
@@ -2070,7 +2290,10 @@ import {
 			if (!res.ok) {
 				throw new Error(data.error || 'Failed to remove member');
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 			removeOnlineMember(roomId, normalizedTargetUserId);
 			showErrorToast(data.message || 'Member removed');
 			await refreshSidebarRooms();
@@ -2107,7 +2330,10 @@ import {
 			if (!res.ok) {
 				throw new Error(data.error || 'Failed to delete room');
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 			setMessageActionMode('none');
 			showRoomDetails = false;
 
@@ -2178,7 +2404,10 @@ import {
 			if (!res.ok) {
 				throw new Error(data.error || 'Failed to leave room');
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 			setMessageActionMode('none');
 			showRoomDetails = false;
 			showRoomSearch = false;
@@ -2244,7 +2473,10 @@ import {
 				return;
 			}
 			const loweredType = (message.type || '').toLowerCase();
-			if (loweredType === 'deleted' || (message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER) {
+			if (
+				loweredType === 'deleted' ||
+				(message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER
+			) {
 				showErrorToast('Deleted messages cannot be selected');
 				return;
 			}
@@ -2295,7 +2527,10 @@ import {
 			if (!res.ok) {
 				throw new Error(data.error || 'Failed to create break room');
 			}
-			syncServerClock((data as { serverNow?: unknown; server_now?: unknown }).serverNow ?? (data as { serverNow?: unknown; server_now?: unknown }).server_now);
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
 
 			const breakRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
 			if (!breakRoomId) {
@@ -2305,6 +2540,12 @@ import {
 				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(breakRoomId);
 			const breakCreatedAt = toTimestamp(data.createdAt);
 			const breakExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+			const breakParentRoomId =
+				normalizeRoomIDValue(toStringValue(data.parentRoomId ?? data.parent_room_id)) || roomId;
+			const breakOriginMessageId =
+				normalizeMessageID(toStringValue(data.originMessageId ?? data.origin_message_id)) ||
+				message.id;
+			const breakTreeNumber = toInt(data.treeNumber ?? data.tree_number);
 
 			messagesByRoom = {
 				...messagesByRoom,
@@ -2321,6 +2562,19 @@ import {
 				)
 			};
 			ensureRoomThread(breakRoomId, breakRoomName, 'joined');
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === breakRoomId
+						? {
+								...thread,
+								status: 'joined',
+								parentRoomId: breakParentRoomId || undefined,
+								originMessageId: breakOriginMessageId || undefined,
+								treeNumber: breakTreeNumber > 0 ? breakTreeNumber : (thread.treeNumber ?? 0)
+							}
+						: thread
+				)
+			);
 			markRoomMembershipSynced(breakRoomId);
 			ensureRoomMeta(breakRoomId, breakCreatedAt, breakExpiresAt);
 			await refreshSidebarRooms();
@@ -2401,7 +2655,6 @@ import {
 		const value = roundedDays.toFixed(1);
 		return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
 	}
-
 </script>
 
 {#if showToast}
@@ -2485,16 +2738,19 @@ import {
 
 		<ChatWindow
 			bind:this={chatWindowRef}
+			{roomId}
+			isVisible={!isMobileView || mobilePane === 'chat'}
 			messages={currentMessages}
 			{currentUserId}
-			unreadStartMessageId={activeUnreadStartMessageId}
 			unreadCount={activeUnreadCount}
+			firstUnreadMessageId={activeFirstUnreadMessageId}
+			lastReadTimestamp={activeLastReadTimestamp}
 			{roomMessageSearch}
 			{expandedMessages}
 			{isMember}
 			{isSelectionMode}
 			{isDarkMode}
-			messageActionMode={messageActionMode}
+			{messageActionMode}
 			selectedMessageId={selectedActionMessageId}
 			{focusMessageId}
 			isLoadingOlder={isLoadingOlderHistory}
@@ -2541,7 +2797,7 @@ import {
 	createdLabel={formatDateTime(getRoomCreatedAt(roomId))}
 	expiresLabel={formatDateTime(getRoomExpiry(roomId))}
 	{isExtendingRoom}
-	currentOnlineMembers={currentOnlineMembers}
+	{currentOnlineMembers}
 	{isActiveRoomAdmin}
 	{currentUserId}
 	{formatDateTime}
@@ -2552,8 +2808,8 @@ import {
 
 <style>
 	.chat-shell {
-		--panel-border: #d9dee8;
-		--panel-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+		--panel-border: #cbd4e1;
+		--panel-shadow: 0 10px 24px rgba(15, 23, 42, 0.1);
 		height: calc(98vh);
 		min-height: 620px;
 		display: grid;
@@ -2562,9 +2818,9 @@ import {
 		padding: 0.75rem;
 		box-sizing: border-box;
 		background:
-			radial-gradient(1400px 480px at -5% -30%, rgba(80, 116, 255, 0.09) 0%, transparent 58%),
-			radial-gradient(1200px 420px at 110% 0%, rgba(20, 184, 166, 0.09) 0%, transparent 55%),
-			#e9edf3;
+			radial-gradient(1400px 480px at -5% -30%, rgba(80, 116, 255, 0.06) 0%, transparent 58%),
+			radial-gradient(1200px 420px at 110% 0%, rgba(20, 184, 166, 0.06) 0%, transparent 55%),
+			#dde4ee;
 		overflow: hidden;
 	}
 
@@ -2577,7 +2833,7 @@ import {
 		border-radius: 16px;
 		box-shadow: var(--panel-shadow);
 		overflow: hidden;
-		background: #f8fafd;
+		background: #f1f5fa;
 	}
 
 	.sidebar-pane {
@@ -2590,14 +2846,14 @@ import {
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-		background: linear-gradient(180deg, #fcfdff 0%, #f4f6fa 100%);
+		background: linear-gradient(180deg, #f3f6fa 0%, #e9edf4 100%);
 	}
 
 	.online-pane {
 		display: flex;
 		align-self: center;
 		height: 85%;
-		background: linear-gradient(180deg, #fbfcff 0%, #f2f5fa 100%);
+		background: linear-gradient(180deg, #f1f5fa 0%, #e7ecf4 100%);
 	}
 
 	.chat-shell.theme-dark {
@@ -2616,10 +2872,10 @@ import {
 		border-color: var(--panel-border);
 	}
 
-		.toast {
-			position: fixed;
-			top: 0.8rem;
-			left: 50%;
+	.toast {
+		position: fixed;
+		top: 0.8rem;
+		left: 50%;
 		transform: translateX(-50%);
 		background: #111111;
 		color: #ffffff;
@@ -2628,9 +2884,9 @@ import {
 		font-size: 0.87rem;
 		font-weight: 600;
 		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
-			z-index: 500;
-			pointer-events: none;
-		}
+		z-index: 500;
+		pointer-events: none;
+	}
 
 	@media (max-width: 1199px) {
 		.chat-shell {
@@ -2659,18 +2915,18 @@ import {
 		}
 	}
 
-		@media (max-width: 900px) {
-			.chat-shell {
-				grid-template-columns: 1fr;
-				height: calc(98vh);
-				min-height: 0;
-				gap: 0.55rem;
-				padding: 0.55rem;
-			}
+	@media (max-width: 900px) {
+		.chat-shell {
+			grid-template-columns: 1fr;
+			height: calc(98vh);
+			min-height: 0;
+			gap: 0.55rem;
+			padding: 0.55rem;
+		}
 
-			.chat-shell.mobile-chat-only .sidebar-pane {
-				display: none;
-			}
+		.chat-shell.mobile-chat-only .sidebar-pane {
+			display: none;
+		}
 
 		.chat-shell.mobile-list-only .chat-window {
 			display: none;
@@ -2685,6 +2941,5 @@ import {
 			align-self: stretch;
 			height: 100%;
 		}
-
 	}
 </style>

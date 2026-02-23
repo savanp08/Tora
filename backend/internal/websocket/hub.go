@@ -265,6 +265,9 @@ func (h *Hub) persistenceWorker() {
 }
 
 func (h *Hub) Run() {
+	roomExpiryTicker := time.NewTicker(15 * time.Second)
+	defer roomExpiryTicker.Stop()
+
 	for {
 		select {
 		case client := <-h.register:
@@ -338,7 +341,54 @@ func (h *Hub) Run() {
 
 		case mutationEvent := <-h.mutationInbox:
 			h.broadcastMutationToLocal(mutationEvent)
+
+		case <-roomExpiryTicker.C:
+			h.broadcastExpiredRooms()
 		}
+	}
+}
+
+func (h *Hub) broadcastExpiredRooms() {
+	if h == nil || h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return
+	}
+
+	ctx := context.Background()
+	for roomID, clients := range h.rooms {
+		normalizedRoomID := normalizeRoomID(roomID)
+		if normalizedRoomID == "" {
+			continue
+		}
+
+		exists, err := h.msgService.Redis.Client.Exists(ctx, roomKeyPrefix+normalizedRoomID).Result()
+		if err != nil {
+			log.Printf("[ws] room expiry check failed room=%s err=%v", normalizedRoomID, err)
+			continue
+		}
+		if exists > 0 {
+			continue
+		}
+
+		expiredPayload := map[string]interface{}{
+			"type":   "room_expired",
+			"roomId": normalizedRoomID,
+			"payload": map[string]interface{}{
+				"roomId":    normalizedRoomID,
+				"expiredAt": time.Now().UTC().UnixMilli(),
+			},
+		}
+
+		for client := range clients {
+			client.unsubscribeFromRoom(normalizedRoomID)
+			select {
+			case client.Send <- expiredPayload:
+			default:
+				h.removeClientFromAllRooms(client, true)
+				client.closeSendChannel()
+			}
+		}
+
+		delete(h.rooms, normalizedRoomID)
 	}
 }
 

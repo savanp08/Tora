@@ -60,6 +60,7 @@
 	let isFullView = false;
 	let streamlinedParentRoomId = '';
 	let streamlinedManualRootList = false;
+	let previousActiveRoomId = '';
 	let relationsPanelEl: HTMLElement | null = null;
 	let relationsTriggerEl: HTMLButtonElement | null = null;
 	const treeNodeWidth = 170;
@@ -82,11 +83,17 @@
 	$: if (isFullView) {
 		streamlinedManualRootList = false;
 	}
-	$: if (!isFullView) {
-		const active = threadByID.get(activeRoomId);
-		// Keep sidebar and chat route in sync: child room routes always open the child tree view.
-		if (active?.parentRoomId) {
-			streamlinedManualRootList = false;
+	$: {
+		const nextActiveRoomId = activeRoomId || '';
+		const activeRoomChanged = nextActiveRoomId !== previousActiveRoomId;
+		if (activeRoomChanged) {
+			const active = threadByID.get(nextActiveRoomId);
+			// Auto-open the corresponding child tree only on actual room switch.
+			// This prevents background refreshes from overriding manual "Back to roots" browsing.
+			if (!isFullView && active?.parentRoomId) {
+				streamlinedManualRootList = false;
+			}
+			previousActiveRoomId = nextActiveRoomId;
 		}
 	}
 	$: if (!isFullView && !streamlinedManualRootList) {
@@ -97,7 +104,11 @@
 	}
 	$: activeStreamlinedParent = threadByID.get(streamlinedParentRoomId);
 	$: descendantThreads = streamlinedParentRoomId
-		? sortSidebarThreads(flattenTree(streamlinedParentRoomId).slice(1).map((row) => row.thread))
+		? sortSidebarThreads(
+				flattenTree(streamlinedParentRoomId)
+					.slice(1)
+					.map((row) => row.thread)
+			)
 		: [];
 	$: streamlinedThreads = (() => {
 		if (!streamlinedParentRoomId) {
@@ -198,7 +209,9 @@
 		for (const [parentID, children] of index) {
 			index.set(
 				parentID,
-				[...children].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+				[...children].sort((a, b) =>
+					a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+				)
 			);
 		}
 		return index;
@@ -307,8 +320,8 @@
 			edges.push({ id: `${parent.id}->${node.id}`, path });
 		}
 
-		const width = treePadX*2 + maxDepth*treeColumnGap + treeNodeWidth;
-		const height = treePadY*2 + (maxRowsInColumn-1)*treeRowGap + treeNodeHeight;
+		const width = treePadX * 2 + maxDepth * treeColumnGap + treeNodeWidth;
+		const height = treePadY * 2 + (maxRowsInColumn - 1) * treeRowGap + treeNodeHeight;
 		return { nodes, edges, width, height };
 	}
 
@@ -449,9 +462,9 @@
 		const parentRoom = thread.parentRoomId ? threadByID.get(thread.parentRoomId) : null;
 		return Boolean(
 			hasBreakOrigin(thread) &&
-				thread.parentRoomId &&
-				accessibleParents.has(thread.parentRoomId) &&
-				parentRoom?.status !== 'left'
+			thread.parentRoomId &&
+			accessibleParents.has(thread.parentRoomId) &&
+			parentRoom?.status !== 'left'
 		);
 	}
 
@@ -528,36 +541,36 @@
 			<h2>Chats</h2>
 			<span class="thread-count">{totalRooms}</span>
 		</div>
-			<div class="list-actions">
+		<div class="list-actions">
 			<button
-					type="button"
-					class="icon-button theme-icon-button {isDarkMode ? 'active' : ''}"
-					on:click={() => dispatch('toggleTheme')}
-					title={isDarkMode
-						? 'Switch to light mode'
-						: themePreference === 'system'
-							? 'Switch to dark mode (system mode active)'
-							: 'Switch to dark mode'}
-					aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-				>
-					<IconSet name="theme" size={14} />
-				</button>
-				<button
-					type="button"
-					class="icon-button map-icon-button"
-					on:click={openRelationsMap}
-					title="View room relations map"
-					aria-label="View room relations map"
-					bind:this={relationsTriggerEl}
-				>
-					<IconSet name="tree-map" size={14} />
-				</button>
-				
-				<button
-					type="button"
-					class="icon-button view-icon-button {isFullView ? 'active' : ''}"
-					on:click={toggleFullView}
-					title={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
+				type="button"
+				class="icon-button theme-icon-button {isDarkMode ? 'active' : ''}"
+				on:click={() => dispatch('toggleTheme')}
+				title={isDarkMode
+					? 'Switch to light mode'
+					: themePreference === 'system'
+						? 'Switch to dark mode (system mode active)'
+						: 'Switch to dark mode'}
+				aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+			>
+				<IconSet name="theme" size={14} />
+			</button>
+			<button
+				type="button"
+				class="icon-button map-icon-button"
+				on:click={openRelationsMap}
+				title="View room relations map"
+				aria-label="View room relations map"
+				bind:this={relationsTriggerEl}
+			>
+				<IconSet name="tree-map" size={14} />
+			</button>
+
+			<button
+				type="button"
+				class="icon-button view-icon-button {isFullView ? 'active' : ''}"
+				on:click={toggleFullView}
+				title={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
 				aria-label={isFullView ? 'Switch to streamlined view' : 'Switch to full view'}
 			>
 				<IconSet name="list-vertical" size={14} />
@@ -570,18 +583,20 @@
 			>
 				...
 			</button>
-				{#if showLeftMenu}
-					<div class="room-menu left-menu">
-						<button type="button" on:click={() => dispatch('createRoom')}>New room</button>
-						<button type="button" on:click={requestRenameRoom} disabled={!activeRoomId}>Rename room</button>
-						<button type="button" on:click={openRelationsMap}>Relations map</button>
-						<button type="button" on:click={toggleFullView}>
-							{isFullView ? 'Streamlined view' : 'Full view'}
-						</button>
-					</div>
-				{/if}
-			</div>
+			{#if showLeftMenu}
+				<div class="room-menu left-menu">
+					<button type="button" on:click={() => dispatch('createRoom')}>New room</button>
+					<button type="button" on:click={requestRenameRoom} disabled={!activeRoomId}
+						>Rename room</button
+					>
+					<button type="button" on:click={openRelationsMap}>Relations map</button>
+					<button type="button" on:click={toggleFullView}>
+						{isFullView ? 'Streamlined view' : 'Full view'}
+					</button>
+				</div>
+			{/if}
 		</div>
+	</div>
 	<div class="room-list-search">
 		<input type="text" bind:value={chatListSearch} placeholder="Search names or messages" />
 	</div>
@@ -593,14 +608,18 @@
 				{#if myRooms.length > 0}
 					<div class="section-label">Joined</div>
 					{#each myRooms as thread (thread.id)}
-						<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
+						<button
+							type="button"
+							class={getRoomItemClasses(thread)}
+							on:click={() => onThreadSelect(thread)}
+						>
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
 							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 							<span
-								class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
-									? 'jumpable'
-									: ''}"
+								class="avatar {isChildThread(thread)
+									? 'child-avatar'
+									: 'original-avatar'} {canJumpToOrigin(thread) ? 'jumpable' : ''}"
 								role={canJumpToOrigin(thread) ? 'button' : undefined}
 								tabindex={canJumpToOrigin(thread) ? 0 : undefined}
 								title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
@@ -631,14 +650,18 @@
 				{#if discoverableRooms.length > 0}
 					<div class="section-label">Discover</div>
 					{#each discoverableRooms as thread (thread.id)}
-						<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
+						<button
+							type="button"
+							class={getRoomItemClasses(thread)}
+							on:click={() => onThreadSelect(thread)}
+						>
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
 							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 							<span
-								class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
-									? 'jumpable'
-									: ''}"
+								class="avatar {isChildThread(thread)
+									? 'child-avatar'
+									: 'original-avatar'} {canJumpToOrigin(thread) ? 'jumpable' : ''}"
 								role={canJumpToOrigin(thread) ? 'button' : undefined}
 								tabindex={canJumpToOrigin(thread) ? 0 : undefined}
 								title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
@@ -669,14 +692,18 @@
 				{#if leftRooms.length > 0}
 					<div class="section-label">Left (Child Nav)</div>
 					{#each leftRooms as thread (thread.id)}
-						<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
+						<button
+							type="button"
+							class={getRoomItemClasses(thread)}
+							on:click={() => onThreadSelect(thread)}
+						>
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
 							<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 							<span
-								class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
-									? 'jumpable'
-									: ''}"
+								class="avatar {isChildThread(thread)
+									? 'child-avatar'
+									: 'original-avatar'} {canJumpToOrigin(thread) ? 'jumpable' : ''}"
 								role={canJumpToOrigin(thread) ? 'button' : undefined}
 								tabindex={canJumpToOrigin(thread) ? 0 : undefined}
 								title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
@@ -722,14 +749,18 @@
 				</div>
 			{:else}
 				{#each streamlinedThreads as thread (thread.id)}
-					<button type="button" class={getRoomItemClasses(thread)} on:click={() => onThreadSelect(thread)}>
+					<button
+						type="button"
+						class={getRoomItemClasses(thread)}
+						on:click={() => onThreadSelect(thread)}
+					>
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
 						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 						<span
-							class="avatar {isChildThread(thread) ? 'child-avatar' : 'original-avatar'} {canJumpToOrigin(thread)
-								? 'jumpable'
-								: ''}"
+							class="avatar {isChildThread(thread)
+								? 'child-avatar'
+								: 'original-avatar'} {canJumpToOrigin(thread) ? 'jumpable' : ''}"
 							role={canJumpToOrigin(thread) ? 'button' : undefined}
 							tabindex={canJumpToOrigin(thread) ? 0 : undefined}
 							title={canJumpToOrigin(thread) ? 'Open origin message context' : thread.name}
@@ -809,7 +840,8 @@
 					{#each treeNodes as node (node.id)}
 						<button
 							type="button"
-							class="tree-node {node.id === activeRoomId ? 'active' : ''} {node.id === activeParentRoomId
+							class="tree-node {node.id === activeRoomId ? 'active' : ''} {node.id ===
+							activeParentRoomId
 								? 'is-parent'
 								: ''} {node.thread.parentRoomId ? 'is-child' : 'is-root'}"
 							style="left: {node.x}px; top: {node.y}px;"
@@ -830,12 +862,12 @@
 		display: flex;
 		flex-direction: column;
 		border-right: none;
-		background: linear-gradient(180deg, #fbfcff 0%, #f3f6fb 100%);
+		background: linear-gradient(180deg, #eef3f9 0%, #e4eaf3 100%);
 		width: 100%;
 		max-width: 100%;
 		height: 100%;
 		min-height: 0;
-		overflow-x: hidden;
+		overflow: hidden;
 	}
 
 	.room-list.theme-dark {
@@ -851,7 +883,7 @@
 		gap: 0.5rem;
 		min-width: 0;
 		position: relative;
-		border-bottom: 1px solid #e3e3e8;
+		border-bottom: 1px solid #d4dce8;
 	}
 
 	.room-list.theme-dark .room-list-header {
@@ -883,7 +915,7 @@
 		font-size: 0.85rem;
 		font-weight: 700;
 		color: #ffffff;
-		background: #2f3138;
+		background: #556683;
 		padding: 0.2rem 0.5rem;
 		border-radius: 999px;
 	}
@@ -899,12 +931,12 @@
 
 	.room-list-search input {
 		width: 100%;
-		border: 1px solid #d6d6dc;
+		border: 1px solid #c8d1de;
 		border-radius: 8px;
 		padding: 0.55rem 0.7rem;
 		font-size: 0.92rem;
-		background: #fafafb;
-		color: #2b2b33;
+		background: #edf2f8;
+		color: #29374d;
 	}
 
 	.room-list.theme-dark .room-list-search input {
@@ -915,12 +947,23 @@
 
 	.room-items {
 		flex: 1;
-		overflow: auto;
+		min-height: 0;
+		overflow-y: auto;
 		overflow-x: hidden;
 		display: flex;
 		flex-direction: column;
 		gap: 0.36rem;
 		padding: 0.5rem 0.5rem;
+		-webkit-overflow-scrolling: touch;
+		overscroll-behavior: contain;
+		scrollbar-width: none;
+		-ms-overflow-style: none;
+	}
+
+	.room-items::-webkit-scrollbar {
+		width: 0;
+		height: 0;
+		display: none;
 	}
 
 	.section-label {
@@ -928,8 +971,9 @@
 		font-weight: 700;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: #666666;
+		color: #627186;
 		padding: 0.55rem 0.9rem 0.35rem;
+		flex: 0 0 auto;
 	}
 
 	.room-list.theme-dark .section-label {
@@ -941,14 +985,15 @@
 		max-width: 100%;
 		min-width: 0;
 		margin: 0;
+		flex: 0 0 auto;
 		display: flex;
 		gap: 0.75rem;
 		padding: 0.8rem 0.85rem;
-		border: 1px solid #e1e1e7;
+		border: 1px solid #ccd5e1;
 		border-radius: 12px;
 		text-align: left;
-		background: #fcfcfd;
-		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+		background: #f3f6fa;
+		box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
 		cursor: pointer;
 		transition:
 			background 140ms ease,
@@ -965,8 +1010,8 @@
 	}
 
 	.room-item:hover {
-		background: #f3f3f5;
-		border-color: #ccccd4;
+		background: #e7edf5;
+		border-color: #bdc8d7;
 	}
 
 	.room-list.theme-dark .room-item:hover {
@@ -979,14 +1024,28 @@
 		box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.28);
 	}
 
+	.room-list.theme-dark .room-item.related-child {
+		border-color: rgba(245, 158, 11, 0.95);
+		box-shadow:
+			0 0 0 1px rgba(245, 158, 11, 0.55),
+			0 6px 14px rgba(2, 8, 23, 0.4);
+	}
+
 	.room-item.related-parent {
 		border-color: rgba(34, 197, 94, 0.9);
 		box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.26);
 	}
 
+	.room-list.theme-dark .room-item.related-parent {
+		border-color: rgba(34, 197, 94, 0.95);
+		box-shadow:
+			0 0 0 1px rgba(34, 197, 94, 0.5),
+			0 6px 14px rgba(2, 8, 23, 0.4);
+	}
+
 	.room-item.selected {
-		background: #2f3138;
-		border-color: #2f3138;
+		background: #53627c;
+		border-color: #53627c;
 	}
 
 	.room-list.theme-dark .room-item.selected {
@@ -994,9 +1053,23 @@
 		border-color: #334155;
 	}
 
+	.room-list.theme-dark .room-item.related-child.selected {
+		border-color: rgba(245, 158, 11, 0.96);
+		box-shadow:
+			0 0 0 1px rgba(245, 158, 11, 0.62),
+			0 8px 16px rgba(2, 8, 23, 0.45);
+	}
+
+	.room-list.theme-dark .room-item.related-parent.selected {
+		border-color: rgba(34, 197, 94, 0.96);
+		box-shadow:
+			0 0 0 1px rgba(34, 197, 94, 0.58),
+			0 8px 16px rgba(2, 8, 23, 0.45);
+	}
+
 	.room-item.discoverable.selected {
-		background: #3a3d45;
-		border-color: #3a3d45;
+		background: #5d6b84;
+		border-color: #5d6b84;
 	}
 
 	.room-item.left {
@@ -1004,16 +1077,16 @@
 	}
 
 	.room-item.left.selected {
-		background: #3b3b40;
-		border-color: #3b3b40;
+		background: #646f84;
+		border-color: #646f84;
 	}
 
 	.avatar {
 		width: 38px;
 		height: 38px;
 		border-radius: 50%;
-		background: #ececef;
-		color: #2f3138;
+		background: #e2e8f1;
+		color: #334158;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -1025,14 +1098,14 @@
 	}
 
 	.original-avatar {
-		background: #c8cbd2;
-		color: #1f2228;
-		box-shadow: inset 0 0 0 2px rgba(47, 49, 56, 0.18);
+		background: #c6d0df;
+		color: #263449;
+		box-shadow: inset 0 0 0 2px rgba(80, 95, 120, 0.24);
 	}
 
 	.child-avatar {
-		background: #e7e9ee;
-		color: #2f3138;
+		background: #dfe7f2;
+		color: #334158;
 		box-shadow: inset 0 0 0 2px rgba(245, 158, 11, 0.58);
 	}
 
@@ -1096,7 +1169,7 @@
 	.room-name {
 		font-size: 0.92rem;
 		font-weight: 600;
-		color: #161616;
+		color: #1f2d42;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1108,7 +1181,7 @@
 
 	.room-time {
 		font-size: 0.78rem;
-		color: #72727c;
+		color: #627087;
 		white-space: nowrap;
 		flex-shrink: 0;
 		max-width: 4rem;
@@ -1122,7 +1195,7 @@
 
 	.room-preview {
 		font-size: 0.82rem;
-		color: #696974;
+		color: #5b697f;
 		flex: 1;
 		min-width: 0;
 		overflow: hidden;
@@ -1135,33 +1208,45 @@
 	}
 
 	.unread {
-		min-width: 20px;
-		height: 20px;
+		min-width: 22px;
+		height: 22px;
+		padding: 0 0.38rem;
 		border-radius: 999px;
-		background: #2f3138;
+		background: #ef4444;
 		color: #ffffff;
-		font-size: 0.75rem;
+		font-size: 0.72rem;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		font-weight: 700;
+		flex-shrink: 0;
 	}
 
 	.room-list.theme-dark .unread {
-		background: #2563eb;
-		color: #eff6ff;
+		background: #fb7185;
+		color: #220b11;
+	}
+
+	.room-item.selected .unread {
+		background: #f87171;
+		color: #240d12;
+	}
+
+	.room-list.theme-dark .room-item.selected .unread {
+		background: #fca5a5;
+		color: #1f0b10;
 	}
 
 	.icon-button {
-		border: 1px solid #d5d5dc;
-		background: #f8f8f9;
+		border: 1px solid #c7d0de;
+		background: #edf2f8;
 		border-radius: 6px;
 		width: 2rem;
 		height: 2rem;
 		padding: 0;
 		font-size: 0.78rem;
 		cursor: pointer;
-		color: #33333b;
+		color: #324057;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -1187,8 +1272,8 @@
 	}
 
 	.theme-icon-button.active {
-		background: #2f3138;
-		border-color: #2f3138;
+		background: #53627c;
+		border-color: #53627c;
 		color: #ffffff;
 	}
 
@@ -1203,9 +1288,15 @@
 	}
 
 	.view-icon-button.active {
-		background: #2f3138;
-		border-color: #2f3138;
+		background: #53627c;
+		border-color: #53627c;
 		color: #ffffff;
+	}
+
+	.room-list.theme-dark .view-icon-button.active {
+		background: #1f304c;
+		border-color: #35507d;
+		color: #dbeafe;
 	}
 
 	.menu-icon-button {
@@ -1219,12 +1310,13 @@
 		gap: 0.5rem;
 		padding: 0.2rem 0.35rem 0.35rem;
 		margin-bottom: 0.2rem;
-		border-bottom: 1px solid #e6e6ec;
+		border-bottom: 1px solid #d5dce7;
+		flex: 0 0 auto;
 	}
 
 	.streamlined-back {
-		border: 1px solid #d6d6dc;
-		background: #f8f8f9;
+		border: 1px solid #c7d0de;
+		background: #edf2f8;
 		border-radius: 999px;
 		padding: 0.18rem 0.55rem;
 		font-size: 0.74rem;
@@ -1233,14 +1325,14 @@
 		align-items: center;
 		gap: 0.25rem;
 		cursor: pointer;
-		color: #3a3a42;
+		color: #39485f;
 		flex-shrink: 0;
 	}
 
 	.streamlined-parent {
 		font-size: 0.76rem;
 		font-weight: 600;
-		color: #5d5d66;
+		color: #5c6b81;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -1251,8 +1343,8 @@
 		position: absolute;
 		top: calc(100% + 6px);
 		right: 0;
-		background: #fcfcfd;
-		border: 1px solid #dedee4;
+		background: #f4f7fb;
+		border: 1px solid #cad3df;
 		border-radius: 8px;
 		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
 		overflow: hidden;
@@ -1274,7 +1366,7 @@
 	.room-menu button {
 		width: 100%;
 		border: none;
-		background: #fcfcfd;
+		background: #f4f7fb;
 		padding: 0.55rem 0.75rem;
 		text-align: left;
 		font-size: 0.84rem;
@@ -1292,7 +1384,7 @@
 	}
 
 	.room-menu button:hover {
-		background: #f1f1f3;
+		background: #e7edf5;
 	}
 
 	.room-list.theme-dark .room-menu button:hover {
@@ -1300,11 +1392,11 @@
 	}
 
 	.room-menu button:disabled:hover {
-		background: #fcfcfd;
+		background: #f4f7fb;
 	}
 
 	.room-item.selected .avatar {
-		background: #2b2b2b;
+		background: #44546e;
 		color: #ffffff;
 	}
 
@@ -1319,9 +1411,10 @@
 	}
 
 	.empty-label {
-		color: #666666;
+		color: #607087;
 		font-size: 0.84rem;
 		padding: 1rem;
+		flex: 0 0 auto;
 	}
 
 	.room-list.theme-dark .empty-label {
@@ -1346,9 +1439,9 @@
 		overflow: hidden;
 		display: flex;
 		flex-direction: column;
-		border: 1px solid #dadadf;
+		border: 1px solid #ccd5e2;
 		border-radius: 14px;
-		background: #fcfcfd;
+		background: #f4f7fb;
 		box-shadow: 0 22px 52px rgba(0, 0, 0, 0.22);
 		z-index: 200;
 	}
@@ -1358,7 +1451,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.75rem 0.95rem;
-		border-bottom: 1px solid #e3e3e8;
+		border-bottom: 1px solid #d5dce7;
 	}
 
 	.relations-header h3 {
@@ -1367,9 +1460,9 @@
 	}
 
 	.close-map-button {
-		border: 1px solid #d6d6dc;
-		background: #f9f9fa;
-		color: #22242a;
+		border: 1px solid #c8d1de;
+		background: #edf2f8;
+		color: #2f3d54;
 		border-radius: 7px;
 		padding: 0.24rem 0.52rem;
 		cursor: pointer;
@@ -1381,12 +1474,12 @@
 		align-items: center;
 		gap: 0.5rem;
 		padding: 0.6rem 0.8rem;
-		border-bottom: 1px solid #ececf0;
+		border-bottom: 1px solid #dfe5ee;
 	}
 
 	.tree-nav-button {
-		border: 1px solid #d6d6dc;
-		background: #f9f9fa;
+		border: 1px solid #c8d1de;
+		background: #edf2f8;
 		border-radius: 8px;
 		height: 2rem;
 		cursor: pointer;
@@ -1394,7 +1487,7 @@
 
 	.tree-meta {
 		font-size: 0.82rem;
-		color: #5b5b62;
+		color: #5c6b81;
 		text-align: center;
 	}
 
@@ -1428,8 +1521,8 @@
 		position: absolute;
 		width: 170px;
 		height: 48px;
-		border: 1px solid #dedee4;
-		background: #f8f8f9;
+		border: 1px solid #ccd5e2;
+		background: #edf2f8;
 		border-radius: 10px;
 		padding: 0.58rem 0.65rem;
 		display: flex;
@@ -1438,12 +1531,15 @@
 		gap: 0.6rem;
 		text-align: left;
 		cursor: pointer;
-		transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+		transition:
+			border-color 120ms ease,
+			box-shadow 120ms ease,
+			background 120ms ease;
 	}
 
 	.tree-node:hover {
-		border-color: #c9cad2;
-		box-shadow: 0 1px 10px rgba(0, 0, 0, 0.08);
+		border-color: #b9c5d6;
+		box-shadow: 0 1px 10px rgba(15, 23, 42, 0.12);
 	}
 
 	.tree-node.is-root {
@@ -1459,8 +1555,8 @@
 	}
 
 	.tree-node.active {
-		background: #2f3138;
-		border-color: #2f3138;
+		background: #53627c;
+		border-color: #53627c;
 		color: #ffffff;
 	}
 

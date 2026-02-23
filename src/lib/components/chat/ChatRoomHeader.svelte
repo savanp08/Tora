@@ -47,17 +47,19 @@
 		};
 	});
 
-	function closeMenuThen(eventName:
-		| 'toggleRoomSearch'
-		| 'renameRoom'
-		| 'toggleBreakSelectionMode'
-		| 'toggleEditSelectionMode'
-		| 'toggleDeleteSelectionMode'
-		| 'markRead'
-		| 'clearLocal'
-		| 'leaveRoom'
-		| 'deleteRoom'
-		| 'disconnect') {
+	function closeMenuThen(
+		eventName:
+			| 'toggleRoomSearch'
+			| 'renameRoom'
+			| 'toggleBreakSelectionMode'
+			| 'toggleEditSelectionMode'
+			| 'toggleDeleteSelectionMode'
+			| 'markRead'
+			| 'clearLocal'
+			| 'leaveRoom'
+			| 'deleteRoom'
+			| 'disconnect'
+	) {
 		showRoomMenu = false;
 		dispatch(eventName);
 	}
@@ -117,13 +119,22 @@
 				<button type="button" on:click|stopPropagation={() => closeMenuThen('renameRoom')}>
 					Rename room
 				</button>
-				<button type="button" on:click|stopPropagation={() => closeMenuThen('toggleBreakSelectionMode')}>
+				<button
+					type="button"
+					on:click|stopPropagation={() => closeMenuThen('toggleBreakSelectionMode')}
+				>
 					{messageActionMode === 'break' ? 'Cancel Break Mode' : 'Start Break / New Topic'}
 				</button>
-				<button type="button" on:click|stopPropagation={() => closeMenuThen('toggleEditSelectionMode')}>
+				<button
+					type="button"
+					on:click|stopPropagation={() => closeMenuThen('toggleEditSelectionMode')}
+				>
 					{messageActionMode === 'edit' ? 'Cancel Edit Mode' : 'Edit Message (Select One)'}
 				</button>
-				<button type="button" on:click|stopPropagation={() => closeMenuThen('toggleDeleteSelectionMode')}>
+				<button
+					type="button"
+					on:click|stopPropagation={() => closeMenuThen('toggleDeleteSelectionMode')}
+				>
 					{messageActionMode === 'delete' ? 'Cancel Delete Mode' : 'Delete Message (Select One)'}
 				</button>
 				<button type="button" on:click|stopPropagation={() => closeMenuThen('markRead')}>
@@ -153,8 +164,8 @@
 <style>
 	.chat-header {
 		position: relative;
-		background: #fcfcfd;
-		border-bottom: 1px solid #e2e2e7;
+		background: #f1f5fa;
+		border-bottom: 1px solid #d4dce8;
 		padding: 0.8rem 1rem;
 		display: flex;
 		align-items: center;
@@ -169,9 +180,9 @@
 
 	.mobile-back-button {
 		display: none;
-		border: 1px solid #cdced4;
-		background: #f8f8f9;
-		color: #35353d;
+		border: 1px solid #c6cfdb;
+		background: #ebf1f8;
+		color: #3b4a60;
 		border-radius: 999px;
 		padding: 0.35rem 0.65rem;
 		font-size: 0.78rem;
@@ -190,7 +201,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.55rem;
-		color: #2e2e36;
+		color: #253246;
 		min-width: 0;
 		flex: 1;
 		border: none;
@@ -235,7 +246,7 @@
 
 	.title-sub {
 		font-size: 0.76rem;
-		color: #6d6d76;
+		color: #66758c;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -262,9 +273,9 @@
 		height: 1.85rem;
 		padding: 0 0.48rem;
 		border-radius: 999px;
-		border: 1px solid #d4d4da;
-		background: #f5f5f7;
-		color: #414149;
+		border: 1px solid #c7d0dc;
+		background: #e8edf4;
+		color: #3a4a62;
 		font-size: 0.76rem;
 		font-weight: 700;
 		letter-spacing: 0.01em;
@@ -278,7 +289,7 @@
 	}
 
 	.expiry-pill:hover {
-		background: #eeeef1;
+		background: #dce4ef;
 	}
 
 	.theme-dark .expiry-pill:hover {
@@ -291,13 +302,13 @@
 	}
 
 	.icon-button {
-		border: 1px solid #d2d2d8;
-		background: #f7f7f8;
+		border: 1px solid #c7d0dc;
+		background: #ebf1f8;
 		border-radius: 6px;
 		padding: 0.35rem 0.55rem;
 		font-size: 0.78rem;
 		cursor: pointer;
-		color: #33333b;
+		color: #314057;
 	}
 
 	.theme-dark .icon-button {
@@ -310,8 +321,8 @@
 		position: absolute;
 		top: calc(100% + 6px);
 		right: 0;
-		background: #fcfcfd;
-		border: 1px solid #dedee4;
+		background: #f3f7fc;
+		border: 1px solid #cad3df;
 		border-radius: 8px;
 		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
 		overflow: hidden;
@@ -328,7 +339,7 @@
 	.room-menu button {
 		width: 100%;
 		border: none;
-		background: #fcfcfd;
+		background: #f3f7fc;
 		padding: 0.55rem 0.75rem;
 		text-align: left;
 		font-size: 0.84rem;
@@ -341,7 +352,7 @@
 	}
 
 	.room-menu button:hover {
-		background: #f1f1f3;
+		background: #e6edf6;
 	}
 
 	.theme-dark .room-menu button:hover {

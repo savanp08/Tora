@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	mrand "math/rand"
 	"net/http"
 	"sort"
@@ -26,6 +27,8 @@ const (
 	roomExtendedTTL      = 24 * time.Hour
 	roomMaxExtendAge     = 15 * 24 * time.Hour
 	roomMaxDescendants   = 6
+	roomMinDurationHours = 0.1
+	roomMaxDurationHours = 15.0 * 24.0
 	roomHistoryTTL       = roomDefaultTTL
 	roomHistorySize      = 50
 	roomCodeDigits       = 6
@@ -74,13 +77,14 @@ func NewRoomHandler(redisStore *database.RedisStore, scyllaStore *database.Scyll
 }
 
 type JoinRoomRequest struct {
-	RoomID   string `json:"roomId"`
-	RoomName string `json:"roomName"`
-	RoomCode string `json:"roomCode"`
-	Username string `json:"username"`
-	UserID   string `json:"userId"`
-	Type     string `json:"type"`
-	Mode     string `json:"mode"`
+	RoomID            string  `json:"roomId"`
+	RoomName          string  `json:"roomName"`
+	RoomCode          string  `json:"roomCode"`
+	Username          string  `json:"username"`
+	UserID            string  `json:"userId"`
+	Type              string  `json:"type"`
+	Mode              string  `json:"mode"`
+	RoomDurationHours float64 `json:"roomDurationHours"`
 }
 
 type JoinRoomResponse struct {
@@ -197,7 +201,16 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
 		return
 	}
-	log.Printf("[room] join requested room_id=%q room_name=%q room_code=%q username=%q type=%q mode=%q", req.RoomID, req.RoomName, req.RoomCode, req.Username, req.Type, req.Mode)
+	log.Printf(
+		"[room] join requested room_id=%q room_name=%q room_code=%q username=%q type=%q mode=%q duration_hours=%.2f",
+		req.RoomID,
+		req.RoomName,
+		req.RoomCode,
+		req.Username,
+		req.Type,
+		req.Mode,
+		req.RoomDurationHours,
+	)
 
 	roomType := strings.TrimSpace(req.Type)
 	if roomType == "" {
@@ -211,6 +224,15 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "mode must be 'create' or 'join'"})
 		return
+	}
+	initialRoomTTL, ttlErr := resolveInitialRoomTTL(req.RoomDurationHours)
+	if ttlErr != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": ttlErr.Error()})
+		return
+	}
+	if mode != "create" {
+		initialRoomTTL = roomDefaultTTL
 	}
 
 	ctx := context.Background()
@@ -353,7 +375,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		finalRoomID = nextRoomID
-		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "")
+		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "", initialRoomTTL)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -520,6 +542,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		createdAt,
 		parentRoomID,
 		originMessageID,
+		roomDefaultTTL,
 	)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1368,6 +1391,32 @@ func normalizeRoomCode(raw string) string {
 	return code
 }
 
+func resolveInitialRoomTTL(requestedHours float64) (time.Duration, error) {
+	if requestedHours <= 0 {
+		return roomDefaultTTL, nil
+	}
+	safeHours := math.Round(requestedHours*10) / 10
+	if !isFinite(safeHours) {
+		return 0, fmt.Errorf("roomDurationHours is invalid")
+	}
+	if safeHours < roomMinDurationHours || safeHours > roomMaxDurationHours {
+		return 0, fmt.Errorf(
+			"roomDurationHours must be between %.1f and %.1f",
+			roomMinDurationHours,
+			roomMaxDurationHours,
+		)
+	}
+	minutes := math.Round(safeHours * 60)
+	if minutes < 1 {
+		minutes = 1
+	}
+	return time.Duration(minutes) * time.Minute, nil
+}
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
 func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomName string, rng *mrand.Rand) (string, error) {
 	candidate := normalizeRoomName(requestedRoomName)
 	if candidate == "" {
@@ -1877,6 +1926,7 @@ func (h *RoomHandler) tryCreateRoom(
 	createdAt int64,
 	parentRoomID string,
 	originMessageID string,
+	roomTTL time.Duration,
 ) (bool, error) {
 	exists, err := h.roomExists(ctx, roomID)
 	if err != nil {
@@ -1886,7 +1936,7 @@ func (h *RoomHandler) tryCreateRoom(
 		return false, nil
 	}
 
-	if err := h.createRoom(ctx, roomID, roomName, roomType, createdAt, parentRoomID, originMessageID); err != nil {
+	if err := h.createRoom(ctx, roomID, roomName, roomType, createdAt, parentRoomID, originMessageID, roomTTL); err != nil {
 		return false, err
 	}
 
@@ -2216,6 +2266,7 @@ func (h *RoomHandler) createRoom(
 	createdAt int64,
 	parentRoomID string,
 	originMessageID string,
+	roomTTL time.Duration,
 ) error {
 	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {
@@ -2246,7 +2297,11 @@ func (h *RoomHandler) createRoom(
 		return err
 	}
 
-	if err := h.redis.Client.Expire(ctx, roomKey(normalizedRoomID), roomDefaultTTL).Err(); err != nil {
+	if roomTTL <= 0 {
+		roomTTL = roomDefaultTTL
+	}
+
+	if err := h.redis.Client.Expire(ctx, roomKey(normalizedRoomID), roomTTL).Err(); err != nil {
 		return err
 	}
 

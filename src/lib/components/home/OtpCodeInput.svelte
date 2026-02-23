@@ -133,23 +133,27 @@
 
 <style>
 	.otp-row {
-		display: grid;
-		grid-template-columns: repeat(6, minmax(0, 1fr));
-		gap: 0.4rem;
+		display: flex;
+		flex-wrap: nowrap;
+		align-items: center;
+		gap: 0.35rem;
+		max-width: 100%;
 	}
 
 	.otp-digit {
-		height: 2.7rem;
+		width: 2.2rem;
+		height: 2.35rem;
 		padding: 0;
 		text-align: center;
 		border: 1px solid #d4d8e0;
-		border-radius: 10px;
-		font-size: 1.05rem;
+		border-radius: 8px;
+		font-size: 0.96rem;
 		font-weight: 700;
 		line-height: 1;
 		font-variant-numeric: tabular-nums;
 		background: #ffffff;
 		color: #111827;
+		flex: 0 0 auto;
 	}
 
 	.otp-digit:focus {
@@ -161,5 +165,17 @@
 	.otp-digit:disabled {
 		background: #f3f4f6;
 		color: #9ca3af;
+	}
+
+	@media (max-width: 420px) {
+		.otp-row {
+			display: grid;
+			grid-template-columns: repeat(6, minmax(0, 1fr));
+			gap: 0.32rem;
+		}
+
+		.otp-digit {
+			width: 100%;
+		}
 	}
 </style>

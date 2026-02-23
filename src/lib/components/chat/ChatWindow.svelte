@@ -2,6 +2,7 @@
 	import { afterUpdate, createEventDispatcher, onDestroy, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
 	import type { ChatMessage, MessageActionMode } from '$lib/types/chat';
+	import { normalizeIdentifier } from '$lib/utils/chat/core';
 
 	type ReplyPreview = {
 		messageId: string;
@@ -10,6 +11,8 @@
 	};
 
 	export let messages: ChatMessage[] = [];
+	export let roomId = '';
+	export let isVisible = true;
 	export let currentUserId = '';
 	export let roomMessageSearch = '';
 	export let expandedMessages: Record<string, boolean> = {};
@@ -21,8 +24,9 @@
 	export let focusMessageId = '';
 	export let isLoadingOlder = false;
 	export let hasMoreOlder = true;
-	export let unreadStartMessageId = '';
 	export let unreadCount = 0;
+	export let lastReadTimestamp = Date.now();
+	export let firstUnreadMessageId = '';
 
 	const dispatch = createEventDispatcher<{
 		toggleExpand: { messageId: string };
@@ -54,7 +58,11 @@
 	let topObserver: IntersectionObserver | null = null;
 	let olderRequestPending = false;
 	let openOwnerActionMessageId = '';
-	let autoStickToBottom = true;
+	let previousVisibleKey = '';
+	let previousRoomId = '';
+	let previousIsVisible = true;
+	let unreadDividerAnchorId = '';
+	let scrollTopByRoomId: Record<string, number> = {};
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -62,25 +70,75 @@
 
 	$: visibleMessages = getVisibleMessages(messages, roomMessageSearch);
 	$: replyCountByMessageID = buildReplyCountByMessageID(messages);
-	$: effectiveUnreadDividerMessageId = resolveUnreadDividerMessageId(
-		visibleMessages,
-		unreadStartMessageId,
-		unreadCount
+	$: firstUnreadCandidateId = resolveFirstUnreadId(
+		messages,
+		unreadCount,
+		currentUserId,
+		firstUnreadMessageId,
+		lastReadTimestamp
 	);
+	$: safeUnreadCount = Math.max(0, Math.trunc(Number.isFinite(unreadCount) ? unreadCount : 0));
+	$: unreadDividerLabel =
+		safeUnreadCount === 1 ? '1 unread message' : `${safeUnreadCount} unread messages`;
+	$: firstUnreadId = unreadDividerAnchorId;
 
 	afterUpdate(() => {
 		if (!viewport) {
 			return;
 		}
-		if (visibleMessages.length !== previousVisibleCount) {
-			const shouldStickToBottom = previousVisibleCount === 0 || autoStickToBottom;
+		const visibleKey = getVisibleMessageKey(visibleMessages);
+		const roomChanged = roomId !== previousRoomId;
+		const becameVisible = isVisible && !previousIsVisible;
+
+		if (roomChanged || becameVisible) {
+			syncUnreadDividerAnchor(true);
+		} else {
+			syncUnreadDividerAnchor(false);
+		}
+
+		if (!isVisible) {
 			previousVisibleCount = visibleMessages.length;
-			if (shouldStickToBottom) {
+			previousVisibleKey = visibleKey;
+			previousRoomId = roomId;
+			previousIsVisible = isVisible;
+			return;
+		}
+
+		if (visibleKey !== previousVisibleKey || roomChanged || becameVisible) {
+			const savedScrollTop = roomId ? scrollTopByRoomId[roomId] : undefined;
+			const hasSavedScrollTop = Number.isFinite(savedScrollTop);
+			const shouldRestoreSaved = hasSavedScrollTop && (roomChanged || becameVisible);
+			const shouldJumpToUnread =
+				!shouldRestoreSaved &&
+				Boolean(firstUnreadId) &&
+				!focusMessageId &&
+				!roomMessageSearch.trim() &&
+				(roomChanged || becameVisible);
+			const shouldInitializeToBottom =
+				!shouldRestoreSaved &&
+				!shouldJumpToUnread &&
+				previousVisibleCount === 0 &&
+				!roomMessageSearch.trim();
+			previousVisibleCount = visibleMessages.length;
+			previousVisibleKey = visibleKey;
+			if (shouldRestoreSaved) {
+				viewport.scrollTop = Math.max(0, Number(savedScrollTop));
+				updateScrollState(false);
+			} else if (shouldJumpToUnread) {
+				const target = findMessageNode(firstUnreadId);
+				if (target) {
+					target.scrollIntoView({ behavior: 'instant', block: 'start' });
+				}
+				updateScrollState(false);
+			} else if (shouldInitializeToBottom) {
 				scrollToBottom('instant');
 			} else {
 				updateScrollState(false);
 			}
 		}
+		persistCurrentRoomScrollTop();
+		previousRoomId = roomId;
+		previousIsVisible = isVisible;
 		tryFocusMessage();
 	});
 
@@ -171,6 +229,55 @@
 		}
 	}
 
+	function getVisibleMessageKey(entries: ChatMessage[]) {
+		if (entries.length === 0) {
+			return 'empty';
+		}
+		const firstId = entries[0]?.id || '';
+		const lastId = entries[entries.length - 1]?.id || '';
+		return `${entries.length}:${firstId}:${lastId}`;
+	}
+
+	function resolveFirstUnreadId(
+		entries: ChatMessage[],
+		nextUnreadCount: number,
+		userId: string,
+		anchorMessageId: string,
+		readTimestamp: number
+	) {
+		const unreadTarget = Math.max(
+			0,
+			Math.trunc(Number.isFinite(nextUnreadCount) ? nextUnreadCount : 0)
+		);
+		if (unreadTarget <= 0 || entries.length === 0) {
+			return '';
+		}
+		const normalizedUserId = normalizeIdentifier(userId || '');
+		let remaining = unreadTarget;
+		for (let index = entries.length - 1; index >= 0; index -= 1) {
+			const entry = entries[index];
+			const isOwnMessage =
+				normalizedUserId !== '' && normalizeIdentifier(entry.senderId || '') === normalizedUserId;
+			if (isOwnMessage) {
+				continue;
+			}
+			remaining -= 1;
+			if (remaining <= 0) {
+				return entry.id;
+			}
+		}
+		const normalizedAnchor = (anchorMessageId || '').trim();
+		if (normalizedAnchor && entries.some((entry) => entry.id === normalizedAnchor)) {
+			return normalizedAnchor;
+		}
+		return (
+			entries.find((message) => message.createdAt > readTimestamp && message.senderId !== userId)
+				?.id ??
+			entries[0]?.id ??
+			''
+		);
+	}
+
 	function getLastSeenMessageId() {
 		if (!viewport) {
 			return '';
@@ -194,14 +301,17 @@
 		}
 		const distanceFromBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
 		isNearBottom = distanceFromBottom < 48;
-		if (fromUserScroll) {
-			autoStickToBottom = distanceFromBottom <= 16;
-		}
 		showScrollToBottom = distanceFromBottom > Math.max(viewport.clientHeight, 300);
 		dispatch('readProgress', {
 			isNearBottom,
 			lastSeenMessageId: getLastSeenMessageId()
 		});
+		if (fromUserScroll && roomId) {
+			scrollTopByRoomId = {
+				...scrollTopByRoomId,
+				[roomId]: viewport.scrollTop
+			};
+		}
 	}
 
 	function onMessagesScroll() {
@@ -212,9 +322,44 @@
 		if (!viewport) {
 			return;
 		}
-		autoStickToBottom = true;
 		viewport.scrollTo({ top: viewport.scrollHeight, behavior });
 		updateScrollState(false);
+		persistCurrentRoomScrollTop();
+	}
+
+	function persistCurrentRoomScrollTop() {
+		if (!viewport || !roomId) {
+			return;
+		}
+		scrollTopByRoomId = {
+			...scrollTopByRoomId,
+			[roomId]: viewport.scrollTop
+		};
+	}
+
+	function syncUnreadDividerAnchor(forceRecompute: boolean) {
+		if (safeUnreadCount <= 0) {
+			if (unreadDividerAnchorId) {
+				unreadDividerAnchorId = '';
+			}
+			return;
+		}
+
+		if (forceRecompute) {
+			unreadDividerAnchorId = firstUnreadCandidateId;
+			return;
+		}
+
+		const hasAnchor = Boolean(unreadDividerAnchorId);
+		if (!hasAnchor) {
+			unreadDividerAnchorId = firstUnreadCandidateId;
+			return;
+		}
+
+		const anchorStillExists = messages.some((message) => message.id === unreadDividerAnchorId);
+		if (!anchorStillExists) {
+			unreadDividerAnchorId = firstUnreadCandidateId;
+		}
 	}
 
 	function setupTopObserver() {
@@ -275,26 +420,7 @@
 		const delta = nextScrollHeight - anchor.scrollHeight;
 		viewport.scrollTop = anchor.scrollTop + delta;
 		updateScrollState(false);
-	}
-
-	function messageIdMatch(left: string, right: string) {
-		return left.trim() !== '' && right.trim() !== '' && left.trim() === right.trim();
-	}
-
-	function resolveUnreadDividerMessageId(
-		input: ChatMessage[],
-		anchorMessageId: string,
-		nextUnreadCount: number
-	) {
-		if (!Array.isArray(input) || input.length === 0 || nextUnreadCount <= 0) {
-			return '';
-		}
-		const normalizedAnchor = anchorMessageId.trim();
-		if (normalizedAnchor && input.some((message) => messageIdMatch(message.id, normalizedAnchor))) {
-			return normalizedAnchor;
-		}
-		const fallbackIndex = Math.max(0, input.length - nextUnreadCount);
-		return input[Math.min(fallbackIndex, input.length - 1)]?.id ?? '';
+		persistCurrentRoomScrollTop();
 	}
 
 	function shouldShowDayStamp(input: ChatMessage[], index: number) {
@@ -357,9 +483,7 @@
 	}
 
 	function getBranchesCreated(message: ChatMessage) {
-		const reported = Number.isFinite(message.branchesCreated)
-			? Number(message.branchesCreated)
-			: 0;
+		const reported = Number.isFinite(message.branchesCreated) ? Number(message.branchesCreated) : 0;
 		if (reported > 0) {
 			return reported;
 		}
@@ -636,7 +760,9 @@
 	}
 </script>
 
-<div class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode ? 'theme-dark' : ''}">
+<div
+	class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode ? 'theme-dark' : ''}"
+>
 	<div class="messages" bind:this={viewport} on:scroll={onMessagesScroll}>
 		<div class="top-sentinel" bind:this={topSentinel} aria-hidden="true"></div>
 		{#if isLoadingOlder}
@@ -662,9 +788,9 @@
 					<span>{formatDayStamp(message.createdAt)}</span>
 				</div>
 			{/if}
-			{#if effectiveUnreadDividerMessageId && messageIdMatch(message.id, effectiveUnreadDividerMessageId)}
-				<div class="unread-divider" role="separator" aria-label="Unread messages">
-					<span>Unread</span>
+			{#if safeUnreadCount > 0 && message.id === firstUnreadId}
+				<div class="unread-divider" role="separator" aria-label={unreadDividerLabel}>
+					<span>{unreadDividerLabel}</span>
 				</div>
 			{/if}
 			{@const isMine = message.senderId === currentUserId}
@@ -714,7 +840,9 @@
 										<IconSet name="more-horizontal" size={12} className="gutter-action-icon" />
 									</button>
 									<div
-										class="gutter-action-menu {openOwnerActionMessageId === message.id ? 'open' : ''}"
+										class="gutter-action-menu {openOwnerActionMessageId === message.id
+											? 'open'
+											: ''}"
 									>
 										<button
 											type="button"
@@ -742,9 +870,9 @@
 				{/if}
 				<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 				<article
-					class="bubble {isMine ? 'mine' : 'theirs'} {message.pending ? 'pending' : ''} {isSelectionMode
-						? 'selectable'
-						: ''}"
+					class="bubble {isMine ? 'mine' : 'theirs'} {message.pending
+						? 'pending'
+						: ''} {isSelectionMode ? 'selectable' : ''}"
 					class:media-bubble={isMediaBubble(message)}
 					class:deleted={isDeletedMessage(message)}
 					class:selected-target={selectedMessageId === message.id}
@@ -786,7 +914,9 @@
 										dispatch('joinBreakRoom', { roomId: message.breakRoomId || '' })}
 								>
 									<IconSet name="break" size={12} className="break-indicator-icon" />
-									<span class="break-indicator-count">{formatBreakCount(message.breakJoinCount)}</span>
+									<span class="break-indicator-count"
+										>{formatBreakCount(message.breakJoinCount)}</span
+									>
 								</button>
 							{/if}
 						</div>
@@ -1011,7 +1141,15 @@
 		overflow-x: hidden;
 		width: 100%;
 		box-sizing: border-box;
-		background: linear-gradient(180deg, #f7f7f8 0%, #f1f1f3 100%);
+		background: linear-gradient(180deg, #edf2f8 0%, #e4eaf2 100%);
+		scrollbar-width: none;
+		-ms-overflow-style: none;
+	}
+
+	.messages::-webkit-scrollbar {
+		width: 0;
+		height: 0;
+		display: none;
 	}
 
 	.messages-shell.theme-dark .messages {
@@ -1035,12 +1173,12 @@
 		margin: 0.18rem 0 0.05rem;
 		padding: 0.15rem 0.52rem;
 		border-radius: 999px;
-		border: 1px solid #dadde4;
-		background: #f7f8fb;
+		border: 1px solid #cdd6e3;
+		background: #edf1f7;
 		font-size: 0.66rem;
 		font-weight: 600;
 		letter-spacing: 0.01em;
-		color: #667085;
+		color: #5f6e85;
 	}
 
 	.messages-shell.theme-dark .day-stamp {
@@ -1055,8 +1193,8 @@
 		align-items: center;
 		gap: 0.45rem;
 		margin: 0.1rem 0 0.1rem;
-		color: #c24141;
-		font-size: 0.7rem;
+		color: #ef4444;
+		font-size: 0.75rem;
 		font-weight: 700;
 		letter-spacing: 0.01em;
 	}
@@ -1065,17 +1203,16 @@
 	.unread-divider::after {
 		content: '';
 		flex: 1;
-		height: 1px;
-		background: rgba(194, 65, 65, 0.45);
+		border-bottom: 1px solid rgba(239, 68, 68, 0.5);
 	}
 
 	.messages-shell.theme-dark .unread-divider {
-		color: #f38a8a;
+		color: #f87171;
 	}
 
 	.messages-shell.theme-dark .unread-divider::before,
 	.messages-shell.theme-dark .unread-divider::after {
-		background: rgba(243, 138, 138, 0.5);
+		border-bottom-color: rgba(248, 113, 113, 0.55);
 	}
 
 	.messages-shell.theme-dark .older-history-indicator {
@@ -1086,9 +1223,9 @@
 		margin: 0 0 0.4rem;
 		padding: 0.45rem 0.65rem;
 		border-radius: 8px;
-		border: 1px solid #dadada;
-		background: #f3f3f3;
-		color: #202020;
+		border: 1px solid #c9d2df;
+		background: #e9eef6;
+		color: #33445d;
 		font-size: 0.78rem;
 	}
 
@@ -1099,16 +1236,16 @@
 	}
 
 	.join-footer {
-		border-top: 1px solid #dadada;
-		background: #ffffff;
+		border-top: 1px solid #cbd4e1;
+		background: #eef3f9;
 		padding: 0.7rem;
 		display: flex;
 		justify-content: center;
 	}
 
 	.join-room-btn {
-		border: 1px solid #111111;
-		background: #111111;
+		border: 1px solid #4b5e7b;
+		background: #4b5e7b;
 		color: #ffffff;
 		border-radius: 8px;
 		padding: 0.55rem 0.9rem;
@@ -1122,10 +1259,10 @@
 		bottom: 1rem;
 		width: 2.4rem;
 		height: 2.4rem;
-		border: 1px solid #d0d0d7;
+		border: 1px solid #c5cfdd;
 		border-radius: 999px;
-		background: rgba(250, 250, 251, 0.95);
-		color: #2f2f37;
+		background: rgba(236, 242, 250, 0.95);
+		color: #334158;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -1135,11 +1272,11 @@
 	}
 
 	.scroll-bottom-button:hover {
-		background: #efeff2;
+		background: #dde5f0;
 	}
 
 	.empty-thread {
-		color: #666666;
+		color: #5e6d84;
 		font-size: 0.84rem;
 		padding: 1rem;
 	}
@@ -1182,9 +1319,9 @@
 		width: 100%;
 		font-size: 0.66rem;
 		line-height: 1.2;
-		color: #7a7a82;
-		background: rgba(255, 255, 255, 0.62);
-		border: 1px solid #dfdfe5;
+		color: #667287;
+		background: rgba(244, 247, 252, 0.76);
+		border: 1px solid #cfd7e3;
 		border-radius: 999px;
 		padding: 0.16rem 0.22rem;
 	}
@@ -1196,9 +1333,9 @@
 	}
 
 	.message-row.mine .gutter-stat {
-		background: rgba(47, 49, 56, 0.92);
-		border-color: #4a4c55;
-		color: #d6d7dd;
+		background: rgba(79, 94, 118, 0.92);
+		border-color: rgba(94, 110, 136, 0.95);
+		color: #e6edf8;
 	}
 
 	.gutter-stat strong {
@@ -1272,10 +1409,10 @@
 		justify-content: center;
 		width: var(--action-hit-size);
 		height: var(--action-hit-size);
-		border: 1px solid #d5d5dc;
+		border: 1px solid #c8d1de;
 		border-radius: 999px;
-		background: #f8f8fb;
-		color: #44444f;
+		background: #edf2f8;
+		color: #3e4b61;
 		cursor: pointer;
 		padding: 0;
 		transition:
@@ -1284,9 +1421,9 @@
 	}
 
 	.message-row.mine .gutter-action-btn {
-		border-color: rgba(255, 255, 255, 0.28);
-		background: rgba(47, 49, 56, 0.94);
-		color: #e6e7ec;
+		border-color: rgba(105, 120, 145, 0.46);
+		background: rgba(79, 94, 118, 0.94);
+		color: #ecf2fb;
 	}
 
 	.gutter-action-btn.danger {
@@ -1312,9 +1449,9 @@
 		width: fit-content;
 		border-radius: 12px;
 		padding: 0.76rem 0.86rem;
-		background: #ffffff;
-		border: 1px solid #d9d9de;
-		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+		background: #f7f9fc;
+		border: 1px solid #ccd5e2;
+		box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
 		box-sizing: border-box;
 		overflow: visible;
 	}
@@ -1331,13 +1468,13 @@
 	}
 
 	.selection-mode .bubble.selectable:hover {
-		outline-color: #4a4a54;
+		outline-color: #5d6980;
 	}
 
 	.bubble.mine {
-		background: #2f3138;
-		border-color: #2f3138;
-		color: #f3f5f8;
+		background: #4f5f78;
+		border-color: #4f5f78;
+		color: #edf2fa;
 	}
 
 	.messages-shell.theme-dark .bubble.mine {
@@ -1405,15 +1542,15 @@
 	}
 
 	.bubble.deleted {
-		background: #f5f5f7;
-		border-color: #e1e1e7;
-		color: #6f6f79;
+		background: #e8edf4;
+		border-color: #d1dae6;
+		color: #67748a;
 	}
 
 	.bubble.mine.deleted {
-		background: #3a3c45;
-		border-color: #4a4d57;
-		color: #c6c8d1;
+		background: #5a6780;
+		border-color: #65738f;
+		color: #dde5f2;
 	}
 
 	.copy-btn {
@@ -1428,7 +1565,7 @@
 		height: var(--copy-hit-size);
 		border: none;
 		border-radius: 999px;
-		background: rgba(19, 19, 24, 0.85);
+		background: rgba(39, 50, 69, 0.8);
 		color: #ffffff;
 		opacity: 0;
 		pointer-events: none;
@@ -1468,12 +1605,12 @@
 		justify-content: space-between;
 		gap: 0.75rem;
 		font-size: 0.74rem;
-		color: #5e5e5e;
+		color: #5f6d83;
 		margin-bottom: 0.44rem;
 	}
 
 	.bubble.mine .bubble-meta {
-		color: #d8d8d8;
+		color: #dce5f2;
 	}
 
 	.messages-shell.theme-dark .bubble-meta {
@@ -1516,9 +1653,9 @@
 		margin-bottom: 0.4rem;
 		padding: 0.34rem 0.48rem;
 		border-radius: 8px;
-		border: 1px solid #dfdfe5;
-		background: #f2f2f4;
-		color: #4f4f58;
+		border: 1px solid #cfd7e3;
+		background: #e9eef6;
+		color: #526178;
 		font-size: 0.7rem;
 		line-height: 1.25;
 		word-break: break-word;
@@ -1533,13 +1670,13 @@
 	}
 
 	.bubble.mine .reply-snippet {
-		border-color: rgba(255, 255, 255, 0.22);
-		background: rgba(255, 255, 255, 0.12);
-		color: #d9d9df;
+		border-color: rgba(201, 214, 235, 0.4);
+		background: rgba(236, 243, 255, 0.14);
+		color: #e5edf9;
 	}
 
 	.reply-snippet:hover {
-		background: #ececf0;
+		background: #dde5f0;
 	}
 
 	.messages-shell.theme-dark .reply-snippet:hover {
@@ -1573,10 +1710,10 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.2rem;
-		border: 1px solid #cfcfcf;
+		border: 1px solid #c5cfdd;
 		border-radius: 999px;
-		background: #ffffff;
-		color: #111111;
+		background: #eef2f8;
+		color: #2e3d53;
 		padding: 0.08rem 0.33rem;
 		font-size: 0.68rem;
 		cursor: pointer;
@@ -1629,16 +1766,16 @@
 		height: auto;
 		max-height: 460px;
 		object-fit: contain;
-		background: #f0f0f0;
+		background: #dbe2ec;
 	}
 
 	.video-preview {
 		max-height: 360px;
-		background: #111111;
+		background: #222d3f;
 	}
 
 	.file-link {
-		color: #111111;
+		color: #2f3e56;
 		font-weight: 600;
 		text-decoration: none;
 		font-size: 0.8rem;
@@ -1656,9 +1793,9 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.45rem;
-		border: 1px solid #d1d1d1;
+		border: 1px solid #c7d0de;
 		border-radius: 10px;
-		background: #f4f4f4;
+		background: #e8edf4;
 		padding: 0.5rem 0.62rem;
 		width: 100%;
 		max-width: none;
@@ -1674,7 +1811,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		color: #141414;
+		color: #263246;
 	}
 
 	.messages-shell.theme-dark .file-meta {
@@ -1690,7 +1827,7 @@
 
 	.file-ext {
 		font-size: 0.68rem;
-		color: #666666;
+		color: #66758b;
 		margin-top: 0.1rem;
 	}
 
@@ -1707,9 +1844,9 @@
 	.pdf-preview {
 		width: 100%;
 		height: 260px;
-		border: 1px solid #d0d0d0;
+		border: 1px solid #c4cedd;
 		border-radius: 8px;
-		background: #ffffff;
+		background: #f4f7fc;
 		box-sizing: border-box;
 	}
 
@@ -1720,7 +1857,7 @@
 	.bubble-content {
 		font-size: 0.93rem;
 		line-height: 1.52;
-		color: #161616;
+		color: #1f2d42;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
@@ -1731,7 +1868,7 @@
 
 	.bubble-content.deleted-text {
 		font-style: italic;
-		color: #6d6d76;
+		color: #67758b;
 	}
 
 	.messages-shell.theme-dark .bubble-content.deleted-text {
@@ -1739,7 +1876,7 @@
 	}
 
 	.bubble.mine .bubble-content {
-		color: #f2f2f2;
+		color: #eef3fb;
 	}
 
 	.messages-shell.theme-dark .bubble.mine .bubble-content {
@@ -1747,7 +1884,7 @@
 	}
 
 	.bubble.mine .bubble-content.deleted-text {
-		color: #d3d4dc;
+		color: #dce4f1;
 	}
 
 	.messages-shell.theme-dark .bubble.mine .bubble-content.deleted-text {
@@ -1758,7 +1895,7 @@
 		margin-top: 0.48rem;
 		font-size: 0.9rem;
 		line-height: 1.45;
-		color: #181818;
+		color: #243146;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
@@ -1768,7 +1905,7 @@
 	}
 
 	.bubble.mine .media-caption {
-		color: #e6e6e6;
+		color: #e6edf8;
 	}
 
 	.messages-shell.theme-dark .bubble.mine .media-caption {
@@ -1786,8 +1923,8 @@
 		margin: 0;
 		padding: 0.65rem 0.72rem;
 		border-radius: 8px;
-		background: #0f0f0f;
-		color: #e9e9e9;
+		background: #1f2a3d;
+		color: #e6edf8;
 		font-family:
 			ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
 			monospace;
@@ -1802,7 +1939,7 @@
 		margin-top: 0.5rem;
 		border: none;
 		background: transparent;
-		color: #161616;
+		color: #2d3d56;
 		font-size: 0.78rem;
 		font-weight: 600;
 		padding: 0;
@@ -1814,7 +1951,7 @@
 	}
 
 	.bubble.mine .read-more-btn {
-		color: #f2f2f2;
+		color: #e9f0fb;
 	}
 
 	.messages-shell.theme-dark .bubble.mine .read-more-btn {
