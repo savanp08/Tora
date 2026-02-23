@@ -9,6 +9,7 @@
 	} from '$lib/utils/media';
 	import type { ReplyTarget } from '$lib/types/chat';
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
+	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;
@@ -27,14 +28,19 @@
 	let attachWrapEl: HTMLDivElement | null = null;
 	let normalizedDraftMessage = '';
 	let draftMessageBytes = 0;
+	let isRecording = false;
+	let mediaRecorder: MediaRecorder | null = null;
+	let audioChunks: Blob[] = [];
+	let recordingStream: MediaStream | null = null;
 
 	$: normalizedDraftMessage = draftMessage.trim();
 	$: draftMessageBytes = getUTF8ByteLength(normalizedDraftMessage);
 	$: isOverMessageLimit = draftMessageBytes > messageLimit;
 	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
+	$: showSendButton = !isRecording && (!!attachedFile || normalizedDraftMessage.length > 0);
 
 	const dispatch = createEventDispatcher<{
-		send: { type: MediaMessageType; content: string; fileName?: string } | undefined;
+		send: { type: MediaMessageType; content: string; fileName?: string; text?: string } | undefined;
 		attach: { file: File | null; type: 'media' | 'file'; error?: string };
 		removeAttachment: void;
 		cancelReply: void;
@@ -43,6 +49,10 @@
 
 	onDestroy(() => {
 		clearAttachmentPreview();
+		if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
+			mediaRecorder.stop();
+		}
+		stopRecordingStream();
 	});
 
 	onMount(() => {
@@ -86,6 +96,9 @@
 			}
 			if (file.type.startsWith('video/')) {
 				return 'video';
+			}
+			if (file.type.startsWith('audio/')) {
+				return 'audio';
 			}
 			return 'file';
 		}
@@ -165,7 +178,7 @@
 	}
 
 	function onSend() {
-		if (isProcessingAttachment || isOverMessageLimit) {
+		if (isProcessingAttachment || isOverMessageLimit || isRecording) {
 			return;
 		}
 		if (attachedFile) {
@@ -184,6 +197,126 @@
 
 	function onComposerInput() {
 		dispatch('typing', { value: draftMessage });
+	}
+
+	function stopRecordingStream() {
+		if (!recordingStream) {
+			return;
+		}
+		for (const track of recordingStream.getTracks()) {
+			track.stop();
+		}
+		recordingStream = null;
+	}
+
+	function toAbsoluteUploadURL(value: string) {
+		const trimmed = (value || '').trim();
+		if (!trimmed) {
+			return '';
+		}
+		if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('blob:') || trimmed.startsWith('data:')) {
+			return trimmed;
+		}
+		if (trimmed.startsWith('/')) {
+			return `${API_BASE}${trimmed}`;
+		}
+		return `${API_BASE}/${trimmed}`;
+	}
+
+	async function uploadRecordedAudio(audioBlob: Blob) {
+		const payload = new FormData();
+		const fileName = `voice-message-${Date.now()}.webm`;
+		payload.append('file', audioBlob, fileName);
+		const res = await fetch(`${API_BASE}/api/upload`, {
+			method: 'POST',
+			body: payload
+		});
+		const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+		const rawFileURL = typeof data.fileUrl === 'string' ? data.fileUrl : '';
+		const uploadedURL = toAbsoluteUploadURL(rawFileURL);
+		if (!res.ok || !uploadedURL) {
+			throw new Error(
+				typeof data.error === 'string' ? data.error : `Voice upload failed (${res.status})`
+			);
+		}
+		return { uploadedURL, fileName };
+	}
+
+	async function handleRecordingStop() {
+		const hasAudio = audioChunks.some((chunk) => chunk.size > 0);
+		if (!hasAudio) {
+			audioChunks = [];
+			mediaRecorder = null;
+			return;
+		}
+
+		isProcessingAttachment = true;
+		attachError = '';
+		try {
+			const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+			const { uploadedURL, fileName } = await uploadRecordedAudio(audioBlob);
+			dispatch('send', {
+				type: 'audio',
+				content: uploadedURL,
+				text: 'Voice message',
+				fileName
+			});
+			draftMessage = '';
+		} catch (error) {
+			attachError = error instanceof Error ? error.message : 'Voice recording failed';
+		} finally {
+			audioChunks = [];
+			mediaRecorder = null;
+			isProcessingAttachment = false;
+		}
+	}
+
+	async function toggleRecording() {
+		if (isProcessingAttachment || attachedFile) {
+			return;
+		}
+
+		if (!isRecording) {
+			if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+				attachError = 'Microphone is not available in this browser.';
+				return;
+			}
+			if (typeof MediaRecorder === 'undefined') {
+				attachError = 'Media recording is not supported in this browser.';
+				return;
+			}
+
+			try {
+				attachError = '';
+				audioChunks = [];
+				recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+				const recorder = new MediaRecorder(recordingStream);
+				recorder.ondataavailable = (event: BlobEvent) => {
+					if (event.data && event.data.size > 0) {
+						audioChunks = [...audioChunks, event.data];
+					}
+				};
+				recorder.onstop = () => {
+					void handleRecordingStop();
+				};
+				mediaRecorder = recorder;
+				recorder.start();
+				isRecording = true;
+			} catch (error) {
+				stopRecordingStream();
+				mediaRecorder = null;
+				isRecording = false;
+				attachError =
+					error instanceof Error ? error.message : 'Unable to access microphone for recording.';
+			}
+			return;
+		}
+
+		isRecording = false;
+		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+			mediaRecorder.stop();
+		}
+		stopRecordingStream();
 	}
 
 	function getAttachmentLabel(type: MediaMessageType | null) {
@@ -270,7 +403,7 @@
 				type="button"
 				class="attach-button"
 				on:click={toggleAttachMenu}
-				disabled={isProcessingAttachment}
+				disabled={isProcessingAttachment || isRecording}
 				aria-label="Attach"
 				title="Attach"
 			>
@@ -293,25 +426,57 @@
 		<textarea
 			bind:value={draftMessage}
 			rows="1"
-			placeholder={attachedFile ? 'Add a caption (optional)' : 'Type a message'}
+			placeholder={isRecording
+				? 'Recording... Click mic to send.'
+				: attachedFile
+					? 'Add a caption (optional)'
+					: 'Type a message'}
 			on:input={onComposerInput}
 			on:keydown={onComposerKeyDown}
-			disabled={isProcessingAttachment}
+			disabled={isProcessingAttachment || isRecording}
 		></textarea>
-		<button
-			type="button"
-			class="send-button"
-			on:click={onSend}
-			disabled={isProcessingAttachment || isOverMessageLimit}
-			aria-label={attachedFile ? 'Send attachment' : 'Send message'}
-			title={isOverMessageLimit
-				? `Message is too long (${draftMessageBytes}/${messageLimit})`
-				: attachedFile
-					? 'Send attachment'
-					: 'Send message'}
-		>
-			<IconSet name="send" size={15} />
-		</button>
+		{#if showSendButton}
+			<button
+				type="button"
+				class="send-button"
+				on:click={onSend}
+				disabled={isProcessingAttachment || isOverMessageLimit || isRecording}
+				aria-label={attachedFile ? 'Send attachment' : 'Send message'}
+				title={isOverMessageLimit
+					? `Message is too long (${draftMessageBytes}/${messageLimit})`
+					: attachedFile
+						? 'Send attachment'
+						: 'Send message'}
+			>
+				<IconSet name="send" size={15} />
+			</button>
+		{:else}
+			<button
+				type="button"
+				class="mic-button {isRecording ? 'recording' : ''}"
+				on:click={toggleRecording}
+				disabled={isProcessingAttachment || !!attachedFile}
+				aria-label={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
+				title={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
+			>
+				<svg
+					width="14"
+					height="14"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<rect x="9" y="2" width="6" height="12" rx="3"></rect>
+					<path d="M5 10a7 7 0 0 0 14 0"></path>
+					<line x1="12" y1="17" x2="12" y2="22"></line>
+					<line x1="8" y1="22" x2="16" y2="22"></line>
+				</svg>
+			</button>
+		{/if}
 	</div>
 	{#if isOverMessageLimit}
 		<div class="composer-limit-hint" role="status" aria-live="polite">
@@ -550,6 +715,7 @@
 	}
 
 	.attach-button,
+	.mic-button,
 	.send-button {
 		display: inline-flex;
 		align-items: center;
@@ -570,19 +736,41 @@
 		color: #d6e4fb;
 	}
 
+	.composer.theme-dark .mic-button {
+		border-color: #3a4c69;
+		background: #15223b;
+		color: #d6e4fb;
+	}
+
 	.attach-button:disabled,
+	.mic-button:disabled,
 	.send-button:disabled {
 		opacity: 0.7;
 		cursor: not-allowed;
 	}
 
 	.attach-button:hover:not(:disabled),
+	.mic-button:hover:not(:disabled),
 	.send-button:hover:not(:disabled) {
 		background: #d4ddeb;
 	}
 
-	.composer.theme-dark .attach-button:hover:not(:disabled) {
+	.composer.theme-dark .attach-button:hover:not(:disabled),
+	.composer.theme-dark .mic-button:hover:not(:disabled) {
 		background: #1b2c49;
+	}
+
+	.mic-button.recording {
+		border-color: #dc2626;
+		background: #dc2626;
+		color: #ffffff;
+		animation: mic-pulse 1.1s ease-in-out infinite;
+	}
+
+	.composer.theme-dark .mic-button.recording {
+		border-color: #ef4444;
+		background: #ef4444;
+		color: #ffffff;
 	}
 
 	.send-button {
@@ -691,6 +879,7 @@
 		}
 
 		.attach-button,
+		.mic-button,
 		.send-button {
 			width: 2rem;
 			height: 2rem;
@@ -698,6 +887,18 @@
 
 		textarea {
 			font-size: 0.86rem;
+		}
+	}
+
+	@keyframes mic-pulse {
+		0% {
+			box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45);
+		}
+		70% {
+			box-shadow: 0 0 0 9px rgba(220, 38, 38, 0);
+		}
+		100% {
+			box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
 		}
 	}
 </style>

@@ -95,7 +95,8 @@
 		type TrustedDevicePreference
 	} from '$lib/utils/offlineCache';
 	import { getOrInitIdentity } from '$lib/utils/identity';
-	import { clearSessionToken, getSessionToken } from '$lib/utils/sessionToken';
+	import { generateUsername } from '$lib/utils/usernameGenerator';
+	import { clearSessionToken, getSessionToken, setSessionToken } from '$lib/utils/sessionToken';
 	import {
 		closeGlobalSocket,
 		globalMessages,
@@ -645,15 +646,155 @@
 		mergeMessages(targetRoomId, hydrated);
 	}
 
+	async function requestAnonymousSession(requestedUsername: string) {
+		const normalizedRequested =
+			normalizeUsernameValue(requestedUsername) || normalizeUsernameValue(generateUsername()) || 'Guest';
+		try {
+			const res = await fetch(`${API_BASE}/api/auth/anonymous`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ username: normalizedRequested })
+			});
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				clientLog('api-auth-anonymous-failed', { status: res.status, data });
+				return null;
+			}
+
+			const user = (data.user as Record<string, unknown> | undefined) ?? {};
+			const token = toStringValue(data.token).trim();
+			const username =
+				normalizeUsernameValue(toStringValue(user.username)) || normalizedRequested;
+			if (!token) {
+				return null;
+			}
+			return { token, username };
+		} catch (error) {
+			clientLog('api-auth-anonymous-error', {
+				error: error instanceof Error ? error.message : String(error)
+			});
+			return null;
+		}
+	}
+
+	async function silentlyJoinRoomAsMember(
+		targetRoomId: string,
+		userId: string,
+		username: string
+	) {
+		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
+		const normalizedUserId = normalizeIdentifier(userId);
+		const normalizedUsername =
+			normalizeUsernameValue(username) || normalizeUsernameValue(generateUsername()) || 'Guest';
+		if (!normalizedRoomId || !normalizedUserId) {
+			return;
+		}
+
+		try {
+			const res = await fetch(`${API_BASE}/api/rooms/join`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					roomId: normalizedRoomId,
+					username: normalizedUsername,
+					userId: normalizedUserId,
+					mode: 'join'
+				})
+			});
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				clientLog('api-room-anonymous-join-failed', {
+					roomId: normalizedRoomId,
+					status: res.status,
+					data
+				});
+				return;
+			}
+
+			syncServerClock(data.serverNow ?? data.server_now);
+			const joinedRoomId = normalizeRoomIDValue(toStringValue(data.roomId)) || normalizedRoomId;
+			const joinedName =
+				normalizeRoomNameValue(toStringValue(data.roomName)) ||
+				roomNameFromURL ||
+				formatRoomName(joinedRoomId);
+			const joinedCreatedAt = toTimestamp(data.createdAt);
+			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+			const joinedIsAdmin = toBool(data.isAdmin ?? data.is_admin);
+
+			ensureRoomThread(joinedRoomId, joinedName, 'joined');
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === joinedRoomId
+						? { ...thread, status: 'joined', name: joinedName, isAdmin: joinedIsAdmin }
+						: thread
+				)
+			);
+			markRoomMembershipSynced(joinedRoomId);
+			ensureRoomMeta(joinedRoomId, joinedCreatedAt, joinedExpiresAt);
+			ensureOnlineSeed(joinedRoomId);
+
+			const params = new URLSearchParams($page.url.searchParams.toString());
+			params.set('member', '1');
+			params.set('name', joinedName);
+			if (joinedCreatedAt > 0) {
+				params.set('createdAt', String(joinedCreatedAt));
+			}
+			if (joinedExpiresAt > 0) {
+				params.set('expiresAt', String(joinedExpiresAt));
+			}
+			params.set('serverNow', String(getApproxServerNowMs()));
+			await goto(`/chat/${encodeURIComponent(joinedRoomId)}?${params.toString()}`, {
+				replaceState: true,
+				noScroll: true,
+				keepFocus: true
+			});
+		} catch (error) {
+			clientLog('api-room-anonymous-join-error', {
+				roomId: normalizedRoomId,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
+
 	async function initializeIdentity() {
 		const identity = getOrInitIdentity();
+		let resolvedUserId = normalizeIdentifier(identity.id) || identity.id;
+		let resolvedUsername =
+			normalizeUsernameValue(identity.username) ||
+			normalizeUsernameValue(generateUsername()) ||
+			'Guest';
+		let token = getSessionToken() || ($authToken ?? '');
+		let joinedFromAnonymousSession = false;
+
+		if (!token) {
+			const anonymousSession = await requestAnonymousSession(resolvedUsername);
+			if (anonymousSession) {
+				token = anonymousSession.token;
+				resolvedUsername = anonymousSession.username;
+				setSessionToken(token);
+				authToken.set(token);
+				joinedFromAnonymousSession = true;
+			}
+		} else if (!$authToken) {
+			authToken.set(token);
+		}
+
 		currentUser.set({
-			id: normalizeIdentifier(identity.id) || identity.id,
-			username: normalizeUsernameValue(identity.username) || identity.username
+			id: normalizeIdentifier(resolvedUserId) || resolvedUserId,
+			username: normalizeUsernameValue(resolvedUsername) || resolvedUsername
 		});
 		identityReady = true;
-		clientLog('identity-initialized', { id: identity.id, username: identity.username });
-		await refreshSidebarRooms(normalizeIdentifier(identity.id) || identity.id);
+		clientLog('identity-initialized', {
+			id: resolvedUserId,
+			username: resolvedUsername,
+			joinedFromAnonymousSession
+		});
+
+		if (joinedFromAnonymousSession && roomId) {
+			await silentlyJoinRoomAsMember(roomId, resolvedUserId, resolvedUsername);
+		}
+
+		await refreshSidebarRooms(normalizeIdentifier(resolvedUserId) || resolvedUserId);
 		clearSidebarRefreshTimer();
 		sidebarRefreshTimer = setInterval(() => {
 			void refreshSidebarRooms();
@@ -1703,7 +1844,7 @@
 			return;
 		}
 
-		const text = draftMessage.trim();
+		const text = (payload?.text ?? draftMessage).trim();
 		if (getUTF8ByteLength(text) > MESSAGE_TEXT_MAX_BYTES) {
 			return;
 		}
@@ -2793,6 +2934,7 @@
 <ChatRoomDetailsPanel
 	show={showRoomDetails}
 	{isMobileView}
+	roomId={roomId}
 	roomName={activeThread.name}
 	createdLabel={formatDateTime(getRoomCreatedAt(roomId))}
 	expiresLabel={formatDateTime(getRoomExpiry(roomId))}

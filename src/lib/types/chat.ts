@@ -60,9 +60,10 @@ export type ChatMessage = {
 };
 
 export type ComposerMediaPayload = {
-	type: 'image' | 'video' | 'file';
+	type: 'image' | 'video' | 'file' | 'audio';
 	content: string;
 	fileName?: string;
+	text?: string;
 };
 
 export type ChatThread = {

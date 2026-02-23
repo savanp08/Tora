@@ -60,6 +60,7 @@ func New(
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
+		r.Post("/auth/anonymous", authHandler.Anonymous)
 
 		r.Post("/rooms", roomHandler.CreateRoom)
 		r.Post("/rooms/join", roomHandler.JoinRoom)

@@ -2,7 +2,7 @@ const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http:
 const MB = 1024 * 1024;
 const VIDEO_LIMIT_BYTES = 50 * MB;
 
-export type MediaMessageType = 'image' | 'video' | 'file';
+export type MediaMessageType = 'image' | 'video' | 'file' | 'audio';
 
 type PresignedUploadResponse = {
 	uploadUrl: string;
@@ -96,6 +96,9 @@ export function inferMediaMessageType(file: File): MediaMessageType {
 	}
 	if (file.type.startsWith('video/')) {
 		return 'video';
+	}
+	if (file.type.startsWith('audio/')) {
+		return 'audio';
 	}
 	return 'file';
 }

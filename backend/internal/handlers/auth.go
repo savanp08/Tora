@@ -21,6 +21,10 @@ type AuthRequest struct {
 	Username string `json:"username"`
 }
 
+type AnonymousAuthRequest struct {
+	Username string `json:"username"`
+}
+
 type AuthResponse struct {
 	User  models.User `json:"user"`
 	Token string      `json:"token"`
@@ -89,6 +93,29 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	writeAuthJSON(w, http.StatusOK, response)
 	log.Printf("[auth] login success user_id=%s username=%q", response.User.ID, response.User.Username)
+}
+
+func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
+	var req AnonymousAuthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+
+	username := normalizeUsername(req.Username)
+	if username == "" {
+		username = fmt.Sprintf("Guest_%06d", time.Now().UTC().UnixNano()%1000000)
+	}
+	log.Printf("[auth] anonymous login requested username=%q", username)
+
+	response, err := buildAuthResponse("", username)
+	if err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "Failed to generate auth token")
+		return
+	}
+
+	writeAuthJSON(w, http.StatusOK, response)
+	log.Printf("[auth] anonymous login success user_id=%s username=%q", response.User.ID, response.User.Username)
 }
 
 func buildAuthResponse(email, username string) (AuthResponse, error) {

@@ -1,10 +1,11 @@
 <script lang="ts">
 	import type { OnlineMember } from '$lib/types/chat';
 	import { normalizeIdentifier } from '$lib/utils/chat/core';
-	import { createEventDispatcher } from 'svelte';
+	import { createEventDispatcher, onDestroy } from 'svelte';
 
 	export let show = false;
 	export let isMobileView = false;
+	export let roomId = '';
 	export let roomName = 'Room';
 	export let createdLabel = 'Unknown';
 	export let expiresLabel = 'Unknown';
@@ -20,6 +21,63 @@
 		extend: void;
 		removeMember: { memberId: string };
 	}>();
+
+	let copied = false;
+	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+	onDestroy(() => {
+		if (copiedTimer) {
+			clearTimeout(copiedTimer);
+		}
+	});
+
+	function resetCopiedStateSoon() {
+		if (copiedTimer) {
+			clearTimeout(copiedTimer);
+		}
+		copiedTimer = setTimeout(() => {
+			copied = false;
+		}, 2000);
+	}
+
+	function copyInviteLink() {
+		if (typeof window === 'undefined' || !roomId) {
+			return;
+		}
+		const inviteUrl = `${window.location.origin}/chat/${encodeURIComponent(roomId)}`;
+
+		const fallbackCopy = () => {
+			const textarea = document.createElement('textarea');
+			textarea.value = inviteUrl;
+			textarea.setAttribute('readonly', 'true');
+			textarea.style.position = 'fixed';
+			textarea.style.opacity = '0';
+			textarea.style.pointerEvents = 'none';
+			document.body.appendChild(textarea);
+			textarea.select();
+			document.execCommand('copy');
+			document.body.removeChild(textarea);
+		};
+
+		if (!navigator.clipboard?.writeText) {
+			fallbackCopy();
+			copied = true;
+			resetCopiedStateSoon();
+			return;
+		}
+
+		navigator.clipboard
+			.writeText(inviteUrl)
+			.then(() => {
+				copied = true;
+				resetCopiedStateSoon();
+			})
+			.catch(() => {
+				fallbackCopy();
+				copied = true;
+				resetCopiedStateSoon();
+			});
+	}
 </script>
 
 {#if show}
@@ -55,6 +113,13 @@
 			</div>
 
 			<div class="room-actions">
+				<button
+					type="button"
+					class="copy-invite-button {copied ? 'copied' : ''}"
+					on:click={copyInviteLink}
+				>
+					{copied ? 'Copied!' : 'Copy Invite Link'}
+				</button>
 				<button
 					type="button"
 					class="extend-room-button"
@@ -215,6 +280,25 @@
 		font-size: 0.84rem;
 		font-weight: 600;
 		cursor: pointer;
+	}
+
+	.copy-invite-button {
+		width: 100%;
+		border: 1px solid #c4cdd9;
+		background: #f5f8fc;
+		color: #324158;
+		border-radius: 8px;
+		padding: 0.48rem 0.65rem;
+		font-size: 0.84rem;
+		font-weight: 600;
+		cursor: pointer;
+		margin-bottom: 0.5rem;
+	}
+
+	.copy-invite-button.copied {
+		background: #22c55e;
+		border-color: #22c55e;
+		color: #ffffff;
 	}
 
 	.extend-room-button:disabled {

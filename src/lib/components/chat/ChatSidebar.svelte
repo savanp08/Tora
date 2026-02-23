@@ -93,13 +93,14 @@
 			if (!isFullView && active?.parentRoomId) {
 				streamlinedManualRootList = false;
 			}
+			if (!isFullView && !streamlinedManualRootList) {
+				streamlinedParentRoomId = getStreamlinedContextRoomID(
+					nextActiveRoomId,
+					threadByID,
+					childrenByParent
+				);
+			}
 			previousActiveRoomId = nextActiveRoomId;
-		}
-	}
-	$: if (!isFullView && !streamlinedManualRootList) {
-		const contextRoomID = getStreamlinedContextRoomID();
-		if (contextRoomID !== streamlinedParentRoomId) {
-			streamlinedParentRoomId = contextRoomID;
 		}
 	}
 	$: activeStreamlinedParent = threadByID.get(streamlinedParentRoomId);
@@ -325,7 +326,7 @@
 		return { nodes, edges, width, height };
 	}
 
-	function getTreeRootID(threadID: string) {
+	function getTreeRootID(threadID: string, threadIndex: Map<string, ChatThread> = threadByID) {
 		let cursor = threadID;
 		const seen = new Set<string>();
 		while (cursor) {
@@ -333,9 +334,9 @@
 				break;
 			}
 			seen.add(cursor);
-			const node = threadByID.get(cursor);
+			const node = threadIndex.get(cursor);
 			const parentID = node?.parentRoomId || '';
-			if (!parentID || !threadByID.has(parentID)) {
+			if (!parentID || !threadIndex.has(parentID)) {
 				break;
 			}
 			cursor = parentID;
@@ -407,6 +408,10 @@
 		return (childrenByParent.get(threadID) ?? []).length > 0;
 	}
 
+	function getChildCount(threadID: string) {
+		return (childrenByParent.get(threadID) ?? []).length;
+	}
+
 	function openRootRoomList() {
 		streamlinedManualRootList = true;
 		streamlinedParentRoomId = '';
@@ -430,21 +435,30 @@
 		}
 		streamlinedManualRootList = false;
 		selectRoom(thread);
-		if (!isFullView && hasChildren(thread.id)) {
-			streamlinedParentRoomId = thread.id;
+		if (!isFullView) {
+			streamlinedParentRoomId = getStreamlinedContextRoomID(
+				thread.id,
+				threadByID,
+				childrenByParent
+			);
 		}
 	}
 
-	function getStreamlinedContextRoomID() {
-		const active = threadByID.get(activeRoomId);
+	function getStreamlinedContextRoomID(
+		currentActiveID: string,
+		threadIndex: Map<string, ChatThread>,
+		childIndex: Map<string, ChatThread[]>
+	) {
+		const active = threadIndex.get(currentActiveID);
 		if (!active) {
 			return '';
 		}
-		const rootID = getTreeRootID(active.id);
-		if (rootID && hasChildren(rootID)) {
+		const rootID = getTreeRootID(active.id, threadIndex);
+		const hasChildThreads = (threadID: string) => (childIndex.get(threadID) ?? []).length > 0;
+		if (rootID && hasChildThreads(rootID)) {
 			return rootID;
 		}
-		if (hasChildren(active.id)) {
+		if (hasChildThreads(active.id)) {
 			return active.id;
 		}
 		return '';
@@ -638,9 +652,35 @@
 								</span>
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
-									{#if thread.unread > 0}
-										<span class="unread">{thread.unread}</span>
-									{/if}
+									<span class="badges">
+										{#if hasChildren(thread.id)}
+											<span
+												class="branch-badge"
+												title={`${getChildCount(thread.id)} breakaway room(s)`}
+											>
+												<svg
+													width="12"
+													height="12"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2.5"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													aria-hidden="true"
+												>
+													<line x1="6" y1="3" x2="6" y2="15"></line>
+													<circle cx="18" cy="6" r="3"></circle>
+													<circle cx="6" cy="18" r="3"></circle>
+													<path d="M18 9a9 9 0 0 1-9 9"></path>
+												</svg>
+												{getChildCount(thread.id)}
+											</span>
+										{/if}
+										{#if thread.unread > 0}
+											<span class="unread">{thread.unread}</span>
+										{/if}
+									</span>
 								</span>
 							</span>
 						</button>
@@ -680,9 +720,35 @@
 								</span>
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
-									{#if thread.unread > 0}
-										<span class="unread">{thread.unread}</span>
-									{/if}
+									<span class="badges">
+										{#if hasChildren(thread.id)}
+											<span
+												class="branch-badge"
+												title={`${getChildCount(thread.id)} breakaway room(s)`}
+											>
+												<svg
+													width="12"
+													height="12"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2.5"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													aria-hidden="true"
+												>
+													<line x1="6" y1="3" x2="6" y2="15"></line>
+													<circle cx="18" cy="6" r="3"></circle>
+													<circle cx="6" cy="18" r="3"></circle>
+													<path d="M18 9a9 9 0 0 1-9 9"></path>
+												</svg>
+												{getChildCount(thread.id)}
+											</span>
+										{/if}
+										{#if thread.unread > 0}
+											<span class="unread">{thread.unread}</span>
+										{/if}
+									</span>
 								</span>
 							</span>
 						</button>
@@ -722,9 +788,35 @@
 								</span>
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
-									{#if thread.unread > 0}
-										<span class="unread">{thread.unread}</span>
-									{/if}
+									<span class="badges">
+										{#if hasChildren(thread.id)}
+											<span
+												class="branch-badge"
+												title={`${getChildCount(thread.id)} breakaway room(s)`}
+											>
+												<svg
+													width="12"
+													height="12"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2.5"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+													aria-hidden="true"
+												>
+													<line x1="6" y1="3" x2="6" y2="15"></line>
+													<circle cx="18" cy="6" r="3"></circle>
+													<circle cx="6" cy="18" r="3"></circle>
+													<path d="M18 9a9 9 0 0 1-9 9"></path>
+												</svg>
+												{getChildCount(thread.id)}
+											</span>
+										{/if}
+										{#if thread.unread > 0}
+											<span class="unread">{thread.unread}</span>
+										{/if}
+									</span>
 								</span>
 							</span>
 						</button>
@@ -785,9 +877,32 @@
 							</span>
 							<span class="item-bottom">
 								<span class="room-preview">{getThreadPreview(thread)}</span>
-								{#if thread.unread > 0}
-									<span class="unread">{thread.unread}</span>
-								{/if}
+								<span class="badges">
+									{#if hasChildren(thread.id)}
+										<span class="branch-badge" title={`${getChildCount(thread.id)} breakaway room(s)`}>
+											<svg
+												width="12"
+												height="12"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="2.5"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+												aria-hidden="true"
+											>
+												<line x1="6" y1="3" x2="6" y2="15"></line>
+												<circle cx="18" cy="6" r="3"></circle>
+												<circle cx="6" cy="18" r="3"></circle>
+												<path d="M18 9a9 9 0 0 1-9 9"></path>
+											</svg>
+											{getChildCount(thread.id)}
+										</span>
+									{/if}
+									{#if thread.unread > 0}
+										<span class="unread">{thread.unread}</span>
+									{/if}
+								</span>
 							</span>
 						</span>
 					</button>
@@ -1205,6 +1320,40 @@
 
 	.room-list.theme-dark .room-preview {
 		color: #a9b8d4;
+	}
+
+	.badges {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		flex-shrink: 0;
+	}
+
+	.branch-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		padding: 0.15rem 0.45rem;
+		background: #e2e8f1;
+		color: #5b697f;
+		border-radius: 6px;
+		font-size: 0.72rem;
+		font-weight: 700;
+	}
+
+	.room-list.theme-dark .branch-badge {
+		background: #1e293b;
+		color: #94a3b8;
+	}
+
+	.room-item.selected .branch-badge {
+		background: #44546e;
+		color: #cbd5e1;
+	}
+
+	.room-list.theme-dark .room-item.selected .branch-badge {
+		background: #334155;
+		color: #cbd5e1;
 	}
 
 	.unread {

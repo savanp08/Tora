@@ -419,7 +419,9 @@ func isAllowedUploadType(fileType string) bool {
 	if fileType == "" {
 		return false
 	}
-	if strings.HasPrefix(fileType, "image/") || strings.HasPrefix(fileType, "video/") {
+	if strings.HasPrefix(fileType, "image/") ||
+		strings.HasPrefix(fileType, "video/") ||
+		strings.HasPrefix(fileType, "audio/") {
 		return true
 	}
 

@@ -37,6 +37,12 @@ export function getMessagePreviewText(message: ChatMessage) {
 		const fileName = (message.fileName || '').trim();
 		return fileName ? `File: ${fileName}` : 'Attachment';
 	}
+	if (message.type === 'audio') {
+		if (content && !isLikelyMediaURL(content)) {
+			return content;
+		}
+		return 'Voice message';
+	}
 	return content;
 }
 

@@ -188,7 +188,12 @@ export function toStringValue(value: unknown) {
 
 export function isMediaMessageType(value: string) {
 	const normalized = value.trim().toLowerCase();
-	return normalized === 'image' || normalized === 'video' || normalized === 'file';
+	return (
+		normalized === 'image' ||
+		normalized === 'video' ||
+		normalized === 'file' ||
+		normalized === 'audio'
+	);
 }
 
 export function isLikelyMediaURL(value: string) {

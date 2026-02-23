@@ -548,6 +548,9 @@
 		if (message.type === 'video') {
 			return 'Video';
 		}
+		if (message.type === 'audio') {
+			return 'Voice message';
+		}
 		if (message.type === 'file') {
 			return getFileName(message);
 		}
@@ -615,7 +618,12 @@
 	}
 
 	function isMediaBubble(message: ChatMessage) {
-		return message.type === 'image' || message.type === 'video' || message.type === 'file';
+		return (
+			message.type === 'image' ||
+			message.type === 'video' ||
+			message.type === 'audio' ||
+			message.type === 'file'
+		);
 	}
 
 	function isLikelyURL(value: string) {
@@ -962,6 +970,18 @@
 								preload="metadata"
 								on:error={() => onMediaError(message.id)}
 							></video>
+							{#if getMediaCaption(message)}
+								<div class="media-caption">{getMediaCaption(message)}</div>
+							{/if}
+						{:else if message.type === 'audio' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
+							<!-- svelte-ignore a11y_media_has_caption -->
+							<audio
+								src={getMediaURL(message)}
+								class="audio-preview"
+								controls
+								preload="metadata"
+								on:error={() => onMediaError(message.id)}
+							></audio>
 							{#if getMediaCaption(message)}
 								<div class="media-caption">{getMediaCaption(message)}</div>
 							{/if}
@@ -1772,6 +1792,12 @@
 	.video-preview {
 		max-height: 360px;
 		background: #222d3f;
+	}
+
+	.audio-preview {
+		display: block;
+		width: 100%;
+		max-width: none;
 	}
 
 	.file-link {

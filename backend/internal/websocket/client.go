@@ -610,7 +610,7 @@ func normalizeInboundMessage(msg *models.Message) bool {
 	case "", "text":
 		msg.Type = "text"
 		return msg.Content != "" && len(msg.Content) <= maxTextChars
-	case "image", "video", "file":
+	case "image", "video", "file", "audio":
 		if msg.Content == "" {
 			msg.Content = msg.MediaURL
 		}
