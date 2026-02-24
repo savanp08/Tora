@@ -45,7 +45,7 @@ func New(
 	}
 
 	authHandler := handlers.NewAuthHandler()
-	roomHandler := handlers.NewRoomHandler(redisStore, scyllaStore)
+	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, usageTracker)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

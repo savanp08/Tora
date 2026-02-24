@@ -16,6 +16,7 @@ const chatBroadcastChannel = "chat:broadcast"
 const chatTypingChannel = "chat:typing"
 const chatMutationChannel = "chat:message_mutation"
 const chatDiscussionChannel = "chat:discussion_comment"
+const chatRoomEventChannel = "chat:room_event"
 
 type Hub struct {
 	rooms                map[string]map[*Client]bool
@@ -28,6 +29,8 @@ type Hub struct {
 	discussionInbox      chan DiscussionCommentEvent
 	messageEdit          chan *ClientMessageEditEvent
 	messageDelete        chan *ClientMessageDeleteEvent
+	roomEvent            chan RoomEvent
+	roomEventInbox       chan RoomEvent
 	mutationInbox        chan MessageMutationEvent
 	register             chan *Client
 	unregister           chan *Client
@@ -97,6 +100,12 @@ type MessageMutationEvent struct {
 	EditedAt    int64  `json:"editedAt,omitempty"`
 }
 
+type RoomEvent struct {
+	Type    string                 `json:"type"`
+	RoomID  string                 `json:"roomId"`
+	Payload map[string]interface{} `json:"payload,omitempty"`
+}
+
 type ClientSubscription struct {
 	Client  *Client
 	RoomIDs []string
@@ -113,6 +122,8 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		discussionInbox:      make(chan DiscussionCommentEvent, 512),
 		messageEdit:          make(chan *ClientMessageEditEvent, 256),
 		messageDelete:        make(chan *ClientMessageDeleteEvent, 256),
+		roomEvent:            make(chan RoomEvent, 256),
+		roomEventInbox:       make(chan RoomEvent, 512),
 		mutationInbox:        make(chan MessageMutationEvent, 512),
 		register:             make(chan *Client),
 		unregister:           make(chan *Client),
@@ -130,6 +141,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		go hub.SubscribeTyping()
 		go hub.SubscribeDiscussionComments()
 		go hub.SubscribeMessageMutations()
+		go hub.SubscribeRoomEvents()
 	}
 
 	return hub
@@ -320,6 +332,51 @@ func (h *Hub) SubscribeMessageMutations() {
 	}
 }
 
+func (h *Hub) SubscribeRoomEvents() {
+	if h == nil || h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return
+	}
+
+	ctx := context.Background()
+	for {
+		pubsub := h.msgService.Redis.Client.Subscribe(ctx, chatRoomEventChannel)
+		if _, err := pubsub.Receive(ctx); err != nil {
+			log.Printf("redis room-event subscribe receive error: %v", err)
+			_ = pubsub.Close()
+			time.Sleep(time.Second)
+			continue
+		}
+
+		channel := pubsub.Channel()
+		for incoming := range channel {
+			if incoming == nil || strings.TrimSpace(incoming.Payload) == "" {
+				continue
+			}
+			var event RoomEvent
+			if err := json.Unmarshal([]byte(incoming.Payload), &event); err != nil {
+				log.Printf("redis room-event unmarshal error: %v", err)
+				continue
+			}
+			event.Type = strings.ToLower(strings.TrimSpace(event.Type))
+			event.RoomID = normalizeRoomID(event.RoomID)
+			if event.Type == "" || event.RoomID == "" {
+				continue
+			}
+			if event.Payload == nil {
+				event.Payload = map[string]interface{}{}
+			}
+			select {
+			case h.roomEventInbox <- event:
+			default:
+				log.Printf("redis room-event drop room=%s type=%s reason=inbox_full", event.RoomID, event.Type)
+			}
+		}
+
+		_ = pubsub.Close()
+		time.Sleep(time.Second)
+	}
+}
+
 func (h *Hub) persistenceWorker() {
 	ctx := context.Background()
 
@@ -394,6 +451,9 @@ func (h *Hub) Run() {
 		case deleteEvent := <-h.messageDelete:
 			h.handleClientMessageDeleteEvent(deleteEvent)
 
+		case roomEvent := <-h.roomEvent:
+			h.publishRoomEvent(roomEvent)
+
 		case msg := <-h.broadcast:
 			if msg.CreatedAt.IsZero() {
 				msg.CreatedAt = time.Now().UTC()
@@ -442,6 +502,9 @@ func (h *Hub) Run() {
 
 		case mutationEvent := <-h.mutationInbox:
 			h.broadcastMutationToLocal(mutationEvent)
+
+		case roomEvent := <-h.roomEventInbox:
+			h.broadcastRoomEventToLocal(roomEvent)
 
 		case <-roomExpiryTicker.C:
 			h.broadcastExpiredRooms()
@@ -865,6 +928,65 @@ func (h *Hub) publishDiscussionCommentEvent(event DiscussionCommentEvent) {
 	h.broadcastDiscussionCommentToLocal(event)
 }
 
+func (h *Hub) BroadcastToRoom(roomID string, payload map[string]interface{}) {
+	if h == nil {
+		return
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return
+	}
+	rawType, _ := payload["type"].(string)
+	eventType := strings.ToLower(strings.TrimSpace(rawType))
+	if eventType == "" {
+		return
+	}
+	body := map[string]interface{}{}
+	for key, value := range payload {
+		lowered := strings.ToLower(strings.TrimSpace(key))
+		if lowered == "type" || lowered == "roomid" || lowered == "room_id" {
+			continue
+		}
+		body[key] = value
+	}
+	event := RoomEvent{
+		Type:    eventType,
+		RoomID:  normalizedRoomID,
+		Payload: body,
+	}
+	select {
+	case h.roomEvent <- event:
+	case <-time.After(200 * time.Millisecond):
+		log.Printf("[ws] room event enqueue timeout room=%s type=%s", normalizedRoomID, eventType)
+	}
+}
+
+func (h *Hub) publishRoomEvent(event RoomEvent) {
+	event.Type = strings.ToLower(strings.TrimSpace(event.Type))
+	event.RoomID = normalizeRoomID(event.RoomID)
+	if event.Type == "" || event.RoomID == "" {
+		return
+	}
+	if event.Payload == nil {
+		event.Payload = map[string]interface{}{}
+	}
+
+	if h.msgService != nil && h.msgService.Redis != nil && h.msgService.Redis.Client != nil {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			log.Printf("redis room-event marshal error: %v", err)
+			h.broadcastRoomEventToLocal(event)
+			return
+		}
+		if err := h.msgService.Redis.Client.Publish(context.Background(), chatRoomEventChannel, payload).Err(); err != nil {
+			log.Printf("redis room-event publish error: %v", err)
+			h.broadcastRoomEventToLocal(event)
+		}
+		return
+	}
+	h.broadcastRoomEventToLocal(event)
+}
+
 func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 	roomID := normalizeRoomID(event.RoomID)
 	userID := strings.TrimSpace(event.UserID)
@@ -991,6 +1113,38 @@ func (h *Hub) broadcastMutationToLocal(event MessageMutationEvent) {
 			roomClient.subscribeToRoom(roomID, false)
 			continue
 		}
+		select {
+		case roomClient.Send <- payload:
+		default:
+			h.removeClientFromAllRooms(roomClient, true)
+			roomClient.closeSendChannel()
+		}
+	}
+}
+
+func (h *Hub) broadcastRoomEventToLocal(event RoomEvent) {
+	roomID := normalizeRoomID(event.RoomID)
+	eventType := strings.ToLower(strings.TrimSpace(event.Type))
+	if roomID == "" || eventType == "" {
+		return
+	}
+	clients, ok := h.rooms[roomID]
+	if !ok {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type":   eventType,
+		"roomId": roomID,
+		"payload": func() map[string]interface{} {
+			if event.Payload == nil {
+				return map[string]interface{}{}
+			}
+			return event.Payload
+		}(),
+	}
+
+	for roomClient := range clients {
 		select {
 		case roomClient.Send <- payload:
 		default:

@@ -180,6 +180,7 @@
 	let activeDiscussionTaskId = '';
 	let activeDiscussionTask: ChatMessage | null = null;
 	let discussionComments: ChatMessage[] = [];
+	let discussionCommentsCacheByTaskKey: Record<string, ChatMessage[]> = {};
 	let discussionBackgroundUnreadCount = 0;
 	let discussionOpenedAtMs = 0;
 	let discussionTaskTracker = '';
@@ -222,7 +223,6 @@
 		null;
 	$: if (!isDiscussionOpen) {
 		discussionOpenedAtMs = 0;
-		discussionTaskTracker = '';
 	}
 	$: if (isDiscussionOpen) {
 		const normalizedTaskID = normalizeMessageID(activeDiscussionTaskId);
@@ -1135,11 +1135,7 @@
 		if (!browser || !normalizedRoomId || !isMember) {
 			return;
 		}
-		const knownExpiry = roomMetaById[normalizedRoomId]?.expiresAt ?? 0;
-		if (
-			(roomMembershipSynced[normalizedRoomId] && knownExpiry > 0) ||
-			roomMembershipSyncing[normalizedRoomId]
-		) {
+		if (roomMembershipSynced[normalizedRoomId] || roomMembershipSyncing[normalizedRoomId]) {
 			return;
 		}
 
@@ -1453,6 +1449,26 @@
 		return '';
 	}
 
+	function resolveEnvelopePayloadRecord(envelope: SocketEnvelope): Record<string, unknown> {
+		if (!envelope.payload || typeof envelope.payload !== 'object' || Array.isArray(envelope.payload)) {
+			return {};
+		}
+		return envelope.payload as Record<string, unknown>;
+	}
+
+	function resolveEnvelopeTargetUserID(envelope: SocketEnvelope) {
+		const source = envelope as Record<string, unknown>;
+		const payload = resolveEnvelopePayloadRecord(envelope);
+		return normalizeIdentifier(
+			toStringValue(
+				source.targetUserId ??
+					source.target_user_id ??
+					payload.targetUserId ??
+					payload.target_user_id
+			)
+		);
+	}
+
 	function resolveDiscussionPinMessageID(envelope: SocketEnvelope) {
 		const source = envelope as Record<string, unknown>;
 		const directPinID = normalizeMessageID(
@@ -1493,12 +1509,13 @@
 		if (!comment) {
 			return;
 		}
-		upsertDiscussionCommentLocal(comment);
+		upsertDiscussionCommentLocal(comment, pinMessageID);
 	}
 
 	function handleEnvelope(envelope: SocketEnvelope) {
 		const targetRoomId = resolveEnvelopeRoomID(envelope);
-		const kind = envelope.type;
+		const kind = toStringValue(envelope.type).toLowerCase();
+		const payload = resolveEnvelopePayloadRecord(envelope);
 		if (kind === 'history' || kind === 'recent_messages' || kind === 'initial_messages') {
 			if (Array.isArray(envelope.payload)) {
 				const history = envelope.payload
@@ -1532,16 +1549,105 @@
 			return;
 		}
 
+		if (kind === 'room_renamed' && targetRoomId) {
+			const nextRoomName = normalizeRoomNameValue(
+				toStringValue(
+					payload.roomName ??
+						payload.room_name ??
+						(envelope as Record<string, unknown>).roomName ??
+						(envelope as Record<string, unknown>).room_name
+				)
+			);
+			if (!nextRoomName) {
+				return;
+			}
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === targetRoomId ? { ...thread, name: nextRoomName } : thread
+				)
+			);
+			return;
+		}
+
+		if (kind === 'room_extended' && targetRoomId) {
+			const nextExpiresAt = parseOptionalTimestamp(
+				payload.expiresAt ??
+					payload.expires_at ??
+					(envelope as Record<string, unknown>).expiresAt ??
+					(envelope as Record<string, unknown>).expires_at
+			);
+			if (nextExpiresAt > 0) {
+				ensureRoomMeta(targetRoomId, getRoomCreatedAt(targetRoomId), nextExpiresAt);
+			}
+			return;
+		}
+
+		if (kind === 'room_deleted' && targetRoomId) {
+			const { removedCurrentRoom, removedNames } = removeRoomsFromLocalState([targetRoomId]);
+			if (!removedCurrentRoom && removedNames.length === 0) {
+				return;
+			}
+			setMessageActionMode('none');
+			showRoomDetails = false;
+			showRoomSearch = false;
+			if (removedCurrentRoom) {
+				activeReply = null;
+				showErrorToast('Room deleted');
+				void goto('/');
+			} else if (removedNames.length > 0) {
+				showErrorToast(`Room deleted: ${removedNames[0]}`);
+			}
+			return;
+		}
+
+		if (kind === 'member_removed' && targetRoomId) {
+			const normalizedTargetUserID = resolveEnvelopeTargetUserID(envelope);
+			if (!normalizedTargetUserID) {
+				return;
+			}
+			removeOnlineMember(targetRoomId, normalizedTargetUserID);
+			if (normalizedTargetUserID === normalizeIdentifier(currentUserId)) {
+				setMessageActionMode('none');
+				showRoomDetails = false;
+				showRoomSearch = false;
+				activeReply = null;
+				showErrorToast('You were removed from this room');
+				void goto('/');
+				return;
+			}
+
+			const hasAuthoritativeMemberCount =
+				payload.memberCount !== undefined ||
+				payload.member_count !== undefined ||
+				(envelope as Record<string, unknown>).memberCount !== undefined ||
+				(envelope as Record<string, unknown>).member_count !== undefined;
+			const authoritativeMemberCount = hasAuthoritativeMemberCount
+				? toInt(
+						payload.memberCount ??
+							payload.member_count ??
+							(envelope as Record<string, unknown>).memberCount ??
+							(envelope as Record<string, unknown>).member_count
+					)
+				: -1;
+			roomThreads = sortThreads(
+				roomThreads.map((thread) => {
+					if (thread.id !== targetRoomId) {
+						return thread;
+					}
+					const fallbackCount =
+						typeof thread.memberCount === 'number' ? Math.max(0, thread.memberCount - 1) : undefined;
+					const nextCount =
+						authoritativeMemberCount >= 0 ? authoritativeMemberCount : fallbackCount;
+					return { ...thread, memberCount: nextCount };
+				})
+			);
+			return;
+		}
+
 		if (kind === 'room_expired') {
-			const payloadRoomId =
-				envelope.payload && typeof envelope.payload === 'object'
-					? normalizeRoomIDValue(
-							toStringValue(
-								(envelope.payload as Record<string, unknown>).roomId ??
-									(envelope.payload as Record<string, unknown>).room_id
-							)
-						)
-					: '';
+			const payloadRoomId = normalizeRoomIDValue(
+				toStringValue(payload.roomId ?? payload.room_id)
+			);
 			const expiredRoomId = normalizeRoomIDValue(payloadRoomId || targetRoomId);
 			if (expiredRoomId) {
 				void handleRoomExpired([expiredRoomId], 'server');
@@ -1625,6 +1731,7 @@
 		const nextUnreadAnchorByRoom = { ...unreadAnchorByRoom };
 		const nextRoomMembershipSynced = { ...roomMembershipSynced };
 		const nextRoomMembershipSyncing = { ...roomMembershipSyncing };
+		const nextDiscussionCommentsCacheByTaskKey = { ...discussionCommentsCacheByTaskKey };
 
 		for (const normalizedRoomID of normalizedRoomIDs) {
 			delete nextMessagesByRoom[normalizedRoomID];
@@ -1637,6 +1744,12 @@
 			delete nextUnreadAnchorByRoom[normalizedRoomID];
 			delete nextRoomMembershipSynced[normalizedRoomID];
 			delete nextRoomMembershipSyncing[normalizedRoomID];
+			const cachePrefix = `${normalizedRoomID}::`;
+			for (const cacheKey of Object.keys(nextDiscussionCommentsCacheByTaskKey)) {
+				if (cacheKey.startsWith(cachePrefix)) {
+					delete nextDiscussionCommentsCacheByTaskKey[cacheKey];
+				}
+			}
 		}
 
 		messagesByRoom = nextMessagesByRoom;
@@ -1649,6 +1762,7 @@
 		unreadAnchorByRoom = nextUnreadAnchorByRoom;
 		roomMembershipSynced = nextRoomMembershipSynced;
 		roomMembershipSyncing = nextRoomMembershipSyncing;
+		discussionCommentsCacheByTaskKey = nextDiscussionCommentsCacheByTaskKey;
 
 		return { removedCurrentRoom, removedNames };
 	}
@@ -2074,9 +2188,43 @@
 		return `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins`;
 	}
 
-	function discussionCommentsEndpoint(pinnedMessageId: string) {
+	function discussionCommentsEndpoint(targetRoomId: string, pinnedMessageId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
 		const normalizedPinnedMessageID = normalizeMessageID(pinnedMessageId);
-		return `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins/${encodeURIComponent(normalizedPinnedMessageID)}/discussion/comments`;
+		return `${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/pins/${encodeURIComponent(normalizedPinnedMessageID)}/discussion/comments`;
+	}
+
+	function getDiscussionCommentsCacheKey(targetRoomId: string, pinnedMessageId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		const normalizedPinnedMessageID = normalizeMessageID(pinnedMessageId);
+		if (!normalizedRoomID || !normalizedPinnedMessageID) {
+			return '';
+		}
+		return `${normalizedRoomID}::${normalizedPinnedMessageID}`;
+	}
+
+	function readDiscussionCommentsCache(targetRoomId: string, pinnedMessageId: string) {
+		const key = getDiscussionCommentsCacheKey(targetRoomId, pinnedMessageId);
+		if (!key || !Object.prototype.hasOwnProperty.call(discussionCommentsCacheByTaskKey, key)) {
+			return null;
+		}
+		const cached = discussionCommentsCacheByTaskKey[key] ?? [];
+		return [...cached];
+	}
+
+	function writeDiscussionCommentsCache(
+		targetRoomId: string,
+		pinnedMessageId: string,
+		comments: ChatMessage[]
+	) {
+		const key = getDiscussionCommentsCacheKey(targetRoomId, pinnedMessageId);
+		if (!key) {
+			return;
+		}
+		discussionCommentsCacheByTaskKey = {
+			...discussionCommentsCacheByTaskKey,
+			[key]: [...comments].sort((left, right) => left.createdAt - right.createdAt)
+		};
 	}
 
 	async function ensureMessagePinned(message: ChatMessage) {
@@ -2124,7 +2272,7 @@
 		}
 	}
 
-	function upsertDiscussionCommentLocal(comment: ChatMessage) {
+	function upsertDiscussionCommentLocal(comment: ChatMessage, pinnedMessageId = activeDiscussionTaskId) {
 		const normalizedID = normalizeMessageID(comment.id);
 		if (!normalizedID) {
 			return;
@@ -2134,10 +2282,14 @@
 			comment
 		].sort((left, right) => left.createdAt - right.createdAt);
 		discussionComments = next;
+		if (roomId && normalizeMessageID(pinnedMessageId)) {
+			writeDiscussionCommentsCache(roomId, pinnedMessageId, next);
+		}
 	}
 
 	async function loadDiscussionComments(pinnedMessageId: string) {
-		if (!roomId || !isMember) {
+		const targetRoomID = normalizeRoomIDValue(roomId);
+		if (!targetRoomID || !isMember) {
 			discussionComments = [];
 			return;
 		}
@@ -2148,7 +2300,7 @@
 			return;
 		}
 
-		const requestURL = `${discussionCommentsEndpoint(normalizedPinnedMessageID)}?userId=${encodeURIComponent(normalizedUserID)}&limit=50`;
+		const requestURL = `${discussionCommentsEndpoint(targetRoomID, normalizedPinnedMessageID)}?userId=${encodeURIComponent(normalizedUserID)}&limit=50`;
 		try {
 			const res = await fetch(requestURL);
 			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -2156,17 +2308,20 @@
 				throw new Error(toStringValue(data.error) || 'Failed to load discussion comments');
 			}
 			const parsedComments = (Array.isArray(data.comments) ? data.comments : [])
-				.map((entry) => parseIncomingMessage(entry, roomId, API_BASE))
+				.map((entry) => parseIncomingMessage(entry, targetRoomID, API_BASE))
 				.filter((entry): entry is ChatMessage => Boolean(entry))
 				.sort((left, right) => left.createdAt - right.createdAt);
+			writeDiscussionCommentsCache(targetRoomID, normalizedPinnedMessageID, parsedComments);
 
 			if (normalizeMessageID(activeDiscussionTaskId) !== normalizedPinnedMessageID) {
 				return;
 			}
-			discussionComments = parsedComments;
+			discussionComments =
+				readDiscussionCommentsCache(targetRoomID, normalizedPinnedMessageID) ?? parsedComments;
 		} catch (error) {
 			if (normalizeMessageID(activeDiscussionTaskId) === normalizedPinnedMessageID) {
-				discussionComments = [];
+				discussionComments =
+					readDiscussionCommentsCache(targetRoomID, normalizedPinnedMessageID) ?? [];
 			}
 			showErrorToast(error instanceof Error ? error.message : 'Failed to load discussion comments');
 		}
@@ -2186,8 +2341,21 @@
 		activeDiscussionTaskId = match.id;
 		isDiscussionOpen = true;
 		discussionOpenedAtMs = Date.now();
-		discussionComments = [];
-		void loadDiscussionComments(match.id);
+		const normalizedTaskID = normalizeMessageID(match.id);
+		if (!normalizedTaskID) {
+			return;
+		}
+		const cachedComments = readDiscussionCommentsCache(roomId, normalizedTaskID);
+		if (cachedComments) {
+			discussionTaskTracker = normalizedTaskID;
+			discussionComments = cachedComments;
+			return;
+		}
+		if (discussionTaskTracker !== normalizedTaskID || discussionComments.length === 0) {
+			discussionTaskTracker = normalizedTaskID;
+			discussionComments = [];
+			void loadDiscussionComments(match.id);
+		}
 	}
 
 	function closeDiscussion() {
@@ -2415,7 +2583,7 @@
 		}
 		try {
 			const res = await fetch(
-				`${discussionCommentsEndpoint(normalizedTaskID)}/${encodeURIComponent(commentId)}`,
+				`${discussionCommentsEndpoint(roomId, normalizedTaskID)}/${encodeURIComponent(commentId)}`,
 				{
 					method: 'PUT',
 					headers: { 'Content-Type': 'application/json' },
@@ -2433,7 +2601,7 @@
 			if (!parsed) {
 				throw new Error('Comment payload is invalid');
 			}
-			upsertDiscussionCommentLocal(parsed);
+			upsertDiscussionCommentLocal(parsed, normalizedTaskID);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to edit comment');
 		}
@@ -2477,7 +2645,7 @@
 		}
 		try {
 			const res = await fetch(
-				`${discussionCommentsEndpoint(normalizedTaskID)}/${encodeURIComponent(commentId)}`,
+				`${discussionCommentsEndpoint(roomId, normalizedTaskID)}/${encodeURIComponent(commentId)}`,
 				{
 					method: 'DELETE',
 					headers: { 'Content-Type': 'application/json' },
@@ -2494,7 +2662,7 @@
 			if (!parsed) {
 				throw new Error('Comment payload is invalid');
 			}
-			upsertDiscussionCommentLocal(parsed);
+			upsertDiscussionCommentLocal(parsed, normalizedTaskID);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to delete comment');
 		}
@@ -2567,10 +2735,7 @@
 				return;
 			}
 			mergeMessages(roomId, [parsed]);
-			activeDiscussionTaskId = parsed.id;
-			isDiscussionOpen = true;
-			discussionComments = [];
-			void loadDiscussionComments(parsed.id);
+			openDiscussionForMessage(parsed.id);
 		} catch (error) {
 			showErrorToast(
 				error instanceof Error ? error.message : 'Failed to navigate pinned discussions'
@@ -2736,7 +2901,6 @@
 			);
 			markRoomMembershipSynced(nextRoomId);
 			ensureRoomMeta(nextRoomId, nextCreatedAt, nextExpiresAt);
-			await refreshSidebarRooms();
 
 			const params = new URLSearchParams({
 				name: nextRoomName,
@@ -2804,7 +2968,6 @@
 						: thread
 				)
 			);
-			await refreshSidebarRooms();
 
 			const params = new URLSearchParams({ name: joinedName, member: '1' });
 			if (joinedCreatedAt > 0) {
@@ -3440,7 +3603,6 @@
 			);
 			markRoomMembershipSynced(breakRoomId);
 			ensureRoomMeta(breakRoomId, breakCreatedAt, breakExpiresAt);
-			await refreshSidebarRooms();
 			const params = new URLSearchParams({
 				name: breakRoomName,
 				member: '1'

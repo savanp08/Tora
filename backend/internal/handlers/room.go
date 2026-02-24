@@ -20,6 +20,7 @@ import (
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/security"
+	"github.com/savanp08/converse/internal/websocket"
 )
 
 const (
@@ -67,16 +68,36 @@ var (
 )
 
 type RoomHandler struct {
+	hub    *websocket.Hub
 	redis  *database.RedisStore
 	scylla *database.ScyllaStore
 }
 
-func NewRoomHandler(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *RoomHandler {
-	handler := &RoomHandler{redis: redisStore, scylla: scyllaStore}
+func NewRoomHandler(hub *websocket.Hub, redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *RoomHandler {
+	handler := &RoomHandler{hub: hub, redis: redisStore, scylla: scyllaStore}
 	handler.ensureRoomSchema()
 	handler.ensureRoomMessageSoftExpirySchema()
 	handler.ensurePinnedDiscussionSchema()
 	return handler
+}
+
+func (h *RoomHandler) broadcastRoomEvent(roomID string, eventType string, fields map[string]interface{}) {
+	if h == nil || h.hub == nil {
+		return
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedEventType := strings.ToLower(strings.TrimSpace(eventType))
+	if normalizedRoomID == "" || normalizedEventType == "" {
+		return
+	}
+
+	payload := map[string]interface{}{}
+	for key, value := range fields {
+		payload[key] = value
+	}
+	payload["type"] = normalizedEventType
+	payload["roomId"] = normalizedRoomID
+	h.hub.BroadcastToRoom(normalizedRoomID, payload)
 }
 
 type JoinRoomRequest struct {
@@ -961,6 +982,11 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		Message:          responseMessage,
 		ServerNow:        time.Now().Unix(),
 	}
+	h.broadcastRoomEvent(roomID, "room_extended", map[string]interface{}{
+		"expiresAt":        response.ExpiresAt,
+		"expiresInSeconds": response.ExpiresInSeconds,
+		"serverNow":        response.ServerNow,
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -1120,6 +1146,11 @@ func (h *RoomHandler) RemoveRoomMember(w http.ResponseWriter, r *http.Request) {
 		Message:       "Member removed",
 		ServerNow:     time.Now().Unix(),
 	})
+	h.broadcastRoomEvent(roomID, "member_removed", map[string]interface{}{
+		"targetUserId": targetUserID,
+		"memberCount":  memberCount,
+		"serverNow":    time.Now().Unix(),
+	})
 }
 
 func (h *RoomHandler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
@@ -1176,6 +1207,13 @@ func (h *RoomHandler) DeleteRoom(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete room"})
 			return
 		}
+	}
+	for _, deleteRoomID := range roomIDsToDelete {
+		h.broadcastRoomEvent(deleteRoomID, "room_deleted", map[string]interface{}{
+			"deletedRoomId": deleteRoomID,
+			"rootRoomId":    roomID,
+			"serverNow":     time.Now().Unix(),
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1247,6 +1285,10 @@ func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[room] rename name-index update failed room=%s err=%v", roomID, err)
 	}
 	h.upsertRoomRecord(ctx, roomID, nextName, "", "", "")
+	h.broadcastRoomEvent(roomID, "room_renamed", map[string]interface{}{
+		"roomName":  nextName,
+		"serverNow": time.Now().Unix(),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
