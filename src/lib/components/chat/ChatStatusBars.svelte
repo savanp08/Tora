@@ -9,9 +9,12 @@
 	export let showRoomSearch = false;
 	export let roomMessageSearch = '';
 	export let isDarkMode = false;
+	export let selectedDeleteCount = 0;
 
 	const dispatch = createEventDispatcher<{
 		trustedChoice: { choice: 'yes' | 'no' };
+		cancelSelection: void;
+		deleteSelected: void;
 	}>();
 </script>
 
@@ -33,15 +36,37 @@
 
 {#if isSelectionMode}
 	<div class="selection-banner {isDarkMode ? 'theme-dark' : ''}">
-		{#if messageActionMode === 'break'}
-			Break mode active: click a message to start a new topic room.
-		{:else if messageActionMode === 'pin'}
-			Pin mode active: click any message to pin it and open a discussion.
-		{:else if messageActionMode === 'edit'}
-			Edit mode active: click one of your messages, then use the edit/delete buttons beside it.
-		{:else if messageActionMode === 'delete'}
-			Delete mode active: click one of your messages, then use the edit/delete buttons beside it.
-		{/if}
+		<span class="selection-copy">
+			{#if messageActionMode === 'break'}
+				Break mode active: click a message to start a new topic room.
+			{:else if messageActionMode === 'pin'}
+				Pin mode active: click any message to pin it and open a discussion.
+			{:else if messageActionMode === 'edit'}
+				Edit mode active: click one of your messages, then use the action buttons.
+			{:else if messageActionMode === 'delete'}
+				Delete mode active: choose message(s) to delete.
+			{/if}
+		</span>
+		<div class="selection-controls">
+			{#if messageActionMode === 'delete'}
+				<span class="selected-count">{selectedDeleteCount} selected</span>
+				<button
+					type="button"
+					class="selection-cta danger"
+					disabled={selectedDeleteCount <= 0}
+					on:click={() => dispatch('deleteSelected')}
+				>
+					Delete selected
+				</button>
+			{/if}
+			<button
+				type="button"
+				class="selection-cta cancel"
+				on:click={() => dispatch('cancelSelection')}
+			>
+				Cancel
+			</button>
+		</div>
 	</div>
 {/if}
 
@@ -58,12 +83,75 @@
 		border-bottom: 1px solid #d4dce7;
 		font-size: 0.8rem;
 		color: #3e4d63;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem;
+		flex-wrap: wrap;
 	}
 
 	.selection-banner.theme-dark {
 		background: #111113;
 		border-bottom-color: #2c2c31;
 		color: #d1d1d8;
+	}
+
+	.selection-copy {
+		flex: 1 1 14rem;
+		min-width: 0;
+	}
+
+	.selection-controls {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		flex-wrap: wrap;
+	}
+
+	.selected-count {
+		font-size: 0.72rem;
+		opacity: 0.8;
+	}
+
+	.selection-cta {
+		border: 1px solid #c6cfdb;
+		background: #f7f9fc;
+		color: #2f3d54;
+		border-radius: 999px;
+		font-size: 0.72rem;
+		font-weight: 600;
+		padding: 0.18rem 0.56rem;
+		cursor: pointer;
+	}
+
+	.selection-cta:hover {
+		background: #e8edf4;
+	}
+
+	.selection-cta.danger {
+		border-color: rgba(220, 38, 38, 0.5);
+		color: #b91c1c;
+	}
+
+	.selection-cta:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.selection-cta.cancel {
+		font-size: 1.08rem;
+		padding: 0.27rem 0.84rem;
+	}
+
+	.selection-banner.theme-dark .selection-cta {
+		border-color: #3a3a40;
+		background: #1a1a1e;
+		color: #efeff4;
+	}
+
+	.selection-banner.theme-dark .selection-cta.danger {
+		border-color: rgba(248, 113, 113, 0.45);
+		color: #fca5a5;
 	}
 
 	.typing-indicator {

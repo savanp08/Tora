@@ -174,6 +174,8 @@
 	let isExtendingRoom = false;
 	let expandedMessages: Record<string, boolean> = {};
 	let activeReply: ReplyTarget | null = null;
+	let deleteMultiEnabled = false;
+	let selectedDeleteMessageIds: string[] = [];
 	let isDiscussionOpen = false;
 	let activeDiscussionTaskId = '';
 	let activeDiscussionTask: ChatMessage | null = null;
@@ -200,7 +202,6 @@
 	);
 	$: roomCreatedAtFromURL = parseTimestampParam($page.url.searchParams.get('createdAt'));
 	$: roomExpiresAtFromURL = parseTimestampParam($page.url.searchParams.get('expiresAt'));
-	$: serverNowFromURL = parseTimestampParam($page.url.searchParams.get('serverNow'));
 	$: focusMessageIdFromURL = normalizeMessageID($page.url.searchParams.get('focusMsg') ?? '');
 	$: roomMemberHint = $page.url.searchParams.get('member');
 	$: currentUserId = $currentUser?.id ?? 'guest';
@@ -270,9 +271,6 @@
 			ensureOnlineSeed(roomId);
 		}
 		ensureRoomMeta(roomId, roomCreatedAtFromURL, roomExpiresAtFromURL);
-	}
-	$: if (serverNowFromURL > 0 && serverNowAnchorMs <= 0) {
-		syncServerClock(serverNowFromURL);
 	}
 	$: if (browser && identityReady && roomId && isMember) {
 		void syncRoomMembership(roomId);
@@ -789,7 +787,6 @@
 			if (joinedExpiresAt > 0) {
 				params.set('expiresAt', String(joinedExpiresAt));
 			}
-			params.set('serverNow', String(getApproxServerNowMs()));
 			await goto(`/chat/${encodeURIComponent(joinedRoomId)}?${params.toString()}`, {
 				replaceState: true,
 				noScroll: true,
@@ -994,9 +991,62 @@
 	function setMessageActionMode(mode: MessageActionMode) {
 		messageActionMode = mode;
 		isSelectionMode = mode !== 'none';
+		deleteMultiEnabled = mode === 'delete';
+		selectedDeleteMessageIds = [];
 		if (mode === 'none') {
 			selectedActionMessageId = '';
 		}
+	}
+
+	function cancelSelectionMode() {
+		setMessageActionMode('none');
+		selectedActionMessageId = '';
+		selectedDeleteMessageIds = [];
+	}
+
+	async function deleteSelectedMessagesBatch() {
+		if (!roomId || selectedDeleteMessageIds.length === 0) {
+			return;
+		}
+		const uniqueMessageIds = Array.from(
+			new Set(
+				selectedDeleteMessageIds
+					.map((value) => normalizeMessageID(value))
+					.filter((value) => value !== '')
+			)
+		);
+		if (uniqueMessageIds.length === 0) {
+			selectedDeleteMessageIds = [];
+			return;
+		}
+
+		const confirmed = await openConfirmDialog({
+			title: 'Delete Selected Messages',
+			message: `Delete ${uniqueMessageIds.length} selected message${
+				uniqueMessageIds.length === 1 ? '' : 's'
+			}? This action cannot be undone.`,
+			confirmLabel: 'Delete',
+			cancelLabel: 'Cancel',
+			danger: true
+		});
+		if (!confirmed) {
+			return;
+		}
+
+		const editedAt = Date.now();
+		for (const messageId of uniqueMessageIds) {
+			applyMessageDelete(roomId, {
+				messageId,
+				editedAt
+			});
+			sendSocketPayload({
+				type: 'message_delete',
+				roomId,
+				messageId
+			});
+		}
+		selectedDeleteMessageIds = [];
+		selectedActionMessageId = '';
 	}
 
 	function syncServerClock(rawServerNow: unknown) {
@@ -1302,7 +1352,6 @@
 			focusMessageId = '';
 			focusConsumedForRoom = true;
 		}
-		params.set('serverNow', String(getApproxServerNowMs()));
 
 		const query = params.toString();
 		void goto(`/chat/${encodeURIComponent(normalizedTargetRoomId)}${query ? `?${query}` : ''}`);
@@ -2699,7 +2748,6 @@
 			if (nextExpiresAt > 0) {
 				params.set('expiresAt', String(nextExpiresAt));
 			}
-			params.set('serverNow', String(getApproxServerNowMs()));
 			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}`);
 		} catch (error) {
 			showErrorToast(
@@ -2765,7 +2813,6 @@
 			if (joinedExpiresAt > 0) {
 				params.set('expiresAt', String(joinedExpiresAt));
 			}
-			params.set('serverNow', String(getApproxServerNowMs()));
 			await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}`);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Unable to join room');
@@ -3015,6 +3062,7 @@
 			roomId,
 			messageId
 		});
+		selectedDeleteMessageIds = selectedDeleteMessageIds.filter((id) => id !== messageId);
 	}
 
 	function toggleMessageExpanded(messageId: string) {
@@ -3273,6 +3321,20 @@
 				showErrorToast('Deleted messages cannot be selected');
 				return;
 			}
+			if (messageActionMode === 'delete' && deleteMultiEnabled) {
+				const normalizedMessageID = normalizeMessageID(message.id);
+				if (!normalizedMessageID) {
+					return;
+				}
+				if (selectedDeleteMessageIds.includes(normalizedMessageID)) {
+					selectedDeleteMessageIds = selectedDeleteMessageIds.filter(
+						(id) => id !== normalizedMessageID
+					);
+				} else {
+					selectedDeleteMessageIds = [...selectedDeleteMessageIds, normalizedMessageID];
+				}
+				return;
+			}
 			selectedActionMessageId = message.id;
 			return;
 		}
@@ -3381,8 +3443,7 @@
 			await refreshSidebarRooms();
 			const params = new URLSearchParams({
 				name: breakRoomName,
-				member: '1',
-				serverNow: String(getApproxServerNowMs())
+				member: '1'
 			});
 			if (breakCreatedAt > 0) {
 				params.set('createdAt', String(breakCreatedAt));
@@ -3427,41 +3488,31 @@
 		return 0;
 	}
 
-	function getRemainingHoursLabel(targetRoomId: string) {
+	function getRemainingHoursLabel(targetRoomId: string, tickMs: number) {
 		const expiry = getRoomExpiry(targetRoomId);
 		if (!expiry) {
 			return '--';
 		}
-		const now = getApproxServerNowMs(roomExpiryTickMs);
-		const remainingMs = Math.max(0, expiry - now);
-		
+
+		const now = getApproxServerNowMs(tickMs);
+		const remainingMs = expiry - now;
 		if (remainingMs <= 0) {
-			return '0m';
+			return 'Expired';
 		}
 
-		const totalMinutes = remainingMs / (60 * 1000);
-
-		if (totalMinutes < 60) {
-			const minutes = Math.max(1, Math.round(totalMinutes));
-			console.log('Remaining minutes:', minutes);
-			return `${minutes}m`;
+		if (remainingMs < 60 * 60 * 1000) {
+			return `${Math.ceil(remainingMs / 60000)}m`;
 		}
 
-		const totalHours = remainingMs / (60 * 60 * 1000);
-		console.log('Remaining hours (raw):', totalHours);
-		if (totalHours < 24) {
-			const roundedHours = Math.round(totalHours * 10) / 10;
-			const value = roundedHours.toFixed(1);
-			console.log('Remaining hours:', value);
-			return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
+		if (remainingMs < 24 * 60 * 60 * 1000) {
+			const hours = Math.floor(remainingMs / 3600000);
+			const minutes = Math.floor((remainingMs % 3600000) / 60000);
+			return `${hours}h ${minutes}m`;
 		}
 
-		const totalDays = totalHours / 24;
-		const roundedDays = Math.round(totalDays * 10) / 10;
-		console.log('Remaining days:', roundedDays);
-		
-		const value = roundedDays.toFixed(1);
-		return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
+		const days = Math.floor(remainingMs / 86400000);
+		const hours = Math.floor((remainingMs % 86400000) / 3600000);
+		return `${days}d ${hours}h`;
 	}
 </script>
 
@@ -3518,7 +3569,7 @@
 			{isDarkMode}
 			{messageActionMode}
 			{showRoomSearch}
-			remainingLabel={getRemainingHoursLabel(roomId)}
+			remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
 			on:showMobileList={showMobileRoomList}
 			on:openRoomDetails={openRoomDetails}
 			on:toggleRoomSearch={toggleRoomSearch}
@@ -3539,10 +3590,13 @@
 			{showTrustedDevicePrompt}
 			{isSelectionMode}
 			{messageActionMode}
+			selectedDeleteCount={selectedDeleteMessageIds.length}
 			{showRoomSearch}
 			bind:roomMessageSearch
 			{isDarkMode}
 			on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
+			on:cancelSelection={cancelSelectionMode}
+			on:deleteSelected={deleteSelectedMessagesBatch}
 		/>
 
 			<ChatWindow
@@ -3561,6 +3615,8 @@
 				{isDarkMode}
 				{messageActionMode}
 				selectedMessageId={selectedActionMessageId}
+				{deleteMultiEnabled}
+				{selectedDeleteMessageIds}
 				{focusMessageId}
 				isLoadingOlder={isLoadingOlderHistory}
 				hasMoreOlder={hasMoreOlderHistory}

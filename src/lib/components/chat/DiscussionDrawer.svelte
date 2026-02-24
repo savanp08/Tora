@@ -4,11 +4,21 @@
 	import type { ChatMessage } from '$lib/types/chat';
 	import { normalizeIdentifier, normalizeMessageID } from '$lib/utils/chat/core';
 
-	type CommentRow = {
+	type CommentMessageRow = {
+		type: 'comment';
 		comment: ChatMessage;
 		depth: number;
 		parentId: string;
 	};
+
+	type CommentContinuationRow = {
+		type: 'continuation';
+		depth: number;
+		parentId: string;
+		hiddenCount: number;
+	};
+
+	type CommentRow = CommentMessageRow | CommentContinuationRow;
 
 	export let open = false;
 	export let taskMessage: ChatMessage | null = null;
@@ -20,7 +30,9 @@
 
 	let draftComment = '';
 	let replyTargetId = '';
+	let focusedThreadRootId = '';
 	let previousTaskId = '';
+	const maxInlineThreadDepth = 6;
 
 	const dispatch = createEventDispatcher<{
 		close: void;
@@ -36,15 +48,19 @@
 	$: taskId = normalizeMessageID(taskMessage?.id || '');
 	$: opSenderId = taskMessage?.senderId || '';
 	$: commentById = new Map(comments.map((entry) => [normalizeMessageID(entry.id), entry]));
-	$: commentRows = buildCommentRows(comments);
+	$: commentRows = buildCommentRows(comments, focusedThreadRootId);
 	$: replyTargetMessage = commentById.get(normalizeMessageID(replyTargetId)) || null;
+	$: focusedThreadMessage = commentById.get(normalizeMessageID(focusedThreadRootId)) || null;
 	$: if (taskId !== previousTaskId) {
 		draftComment = '';
 		replyTargetId = '';
+		focusedThreadRootId = '';
 		previousTaskId = taskId;
 	}
 
 	function closeDrawer() {
+		replyTargetId = '';
+		focusedThreadRootId = '';
 		dispatch('close');
 	}
 
@@ -108,12 +124,18 @@
 		return normalizeIdentifier(comment.senderId) === normalizeIdentifier(opSenderId);
 	}
 
-	function buildCommentRows(discussionComments: ChatMessage[]) {
+	function buildCommentRows(discussionComments: ChatMessage[], focusRootId: string) {
 		if (discussionComments.length === 0) {
 			return [] as CommentRow[];
 		}
+
 		const childrenByParent = new Map<string, ChatMessage[]>();
+		const commentsById = new Map<string, ChatMessage>();
 		for (const entry of discussionComments) {
+			const entryId = normalizeMessageID(entry.id);
+			if (entryId) {
+				commentsById.set(entryId, entry);
+			}
 			const parentId = normalizeMessageID(entry.replyToMessageId || '');
 			const bucket = childrenByParent.get(parentId) ?? [];
 			bucket.push(entry);
@@ -125,6 +147,21 @@
 
 		const rows: CommentRow[] = [];
 		const seen = new Set<string>();
+
+		const countHiddenDescendants = (parentId: string, localSeen = new Set<string>()) => {
+			const children = childrenByParent.get(parentId) ?? [];
+			let count = 0;
+			for (const child of children) {
+				const childId = normalizeMessageID(child.id);
+				if (!childId || localSeen.has(childId)) {
+					continue;
+				}
+				localSeen.add(childId);
+				count += 1 + countHiddenDescendants(childId, localSeen);
+			}
+			return count;
+		};
+
 		const walk = (parentId: string, depth: number) => {
 			const children = childrenByParent.get(parentId) ?? [];
 			for (const child of children) {
@@ -134,16 +171,58 @@
 				}
 				seen.add(childId);
 				rows.push({
+					type: 'comment',
 					comment: child,
-					depth: Math.min(depth, 6),
+					depth: Math.min(depth, maxInlineThreadDepth),
 					parentId
 				});
+				if (depth >= maxInlineThreadDepth) {
+					const hiddenCount = countHiddenDescendants(childId);
+					if (hiddenCount > 0) {
+						rows.push({
+							type: 'continuation',
+							depth: Math.min(depth + 1, maxInlineThreadDepth),
+							parentId: childId,
+							hiddenCount
+						});
+					}
+					continue;
+				}
 				walk(childId, depth + 1);
 			}
 		};
 
+		const normalizedFocusRootId = normalizeMessageID(focusRootId);
+		if (normalizedFocusRootId && commentsById.has(normalizedFocusRootId)) {
+			const focusedComment = commentsById.get(normalizedFocusRootId);
+			if (focusedComment) {
+				rows.push({
+					type: 'comment',
+					comment: focusedComment,
+					depth: 0,
+					parentId: normalizeMessageID(focusedComment.replyToMessageId || '')
+				});
+				seen.add(normalizedFocusRootId);
+				walk(normalizedFocusRootId, 1);
+			}
+			return rows;
+		}
+
 		walk('', 0);
 		return rows;
+	}
+
+	function focusDeeperReplies(parentId: string) {
+		const normalizedParentId = normalizeMessageID(parentId);
+		if (!normalizedParentId || !commentById.has(normalizedParentId)) {
+			return;
+		}
+		replyTargetId = '';
+		focusedThreadRootId = normalizedParentId;
+	}
+
+	function clearFocusedThread() {
+		focusedThreadRootId = '';
 	}
 
 	function startReply(comment: ChatMessage) {
@@ -268,41 +347,56 @@
 			{/if}
 
 			<section class="discussion-comments" aria-label="Threaded comments">
+				{#if focusedThreadMessage}
+					<div class="thread-focus-banner">
+						<span>Showing deeper replies for @{focusedThreadMessage.senderName}</span>
+						<button type="button" on:click={clearFocusedThread}>Back to full thread</button>
+					</div>
+				{/if}
 				{#if commentRows.length === 0}
 					<div class="discussion-empty">No comments yet. Start the first comment below.</div>
 				{:else}
-					{#each commentRows as row (row.comment.id)}
-						<article
-							class="comment-row {row.comment.isPinned ? 'pinned' : ''}"
-							style={`--depth:${Math.min(row.depth, 6)};`}
-						>
-							{#if row.comment.isPinned}
-								<div class="pinned-op-label">📌 Pinned by OP</div>
-							{/if}
-							<div class="comment-meta">
-								<strong>{row.comment.senderName}</strong>
-								{#if isOpComment(row.comment)}
-									<span class="op-badge">OP</span>
+					{#each commentRows as row (row.type === 'comment' ? row.comment.id : `continued-${row.parentId}`)}
+						{#if row.type === 'comment'}
+							<article
+								class="comment-row {row.comment.isPinned ? 'pinned' : ''}"
+								style={`--depth:${Math.min(row.depth, maxInlineThreadDepth)};`}
+							>
+								{#if row.comment.isPinned}
+									<div class="pinned-op-label">📌 Pinned by OP</div>
 								{/if}
-								<time>{formatCommentTime(row.comment.createdAt)}</time>
+								<div class="comment-meta">
+									<strong>{row.comment.senderName}</strong>
+									{#if isOpComment(row.comment)}
+										<span class="op-badge">OP</span>
+									{/if}
+									<time>{formatCommentTime(row.comment.createdAt)}</time>
+								</div>
+								{#if normalizeMessageID(row.parentId) !== ''}
+									{@const parentComment = commentById.get(normalizeMessageID(row.parentId))}
+									{#if parentComment}
+										<div class="reply-ref">↳ @{parentComment.senderName}</div>
+									{/if}
+								{/if}
+								<p>{getCommentPreview(row.comment)}</p>
+								<div class="comment-actions">
+									<button type="button" on:click={() => startReply(row.comment)}>Reply</button>
+									{#if isOwnComment(row.comment) && row.comment.type !== 'deleted' && !row.comment.isDeleted}
+										<button type="button" on:click={() => requestEdit(row.comment)}>Edit</button>
+										<button type="button" class="danger" on:click={() => requestDelete(row.comment)}>
+											Delete
+										</button>
+									{/if}
+								</div>
+							</article>
+						{:else}
+							<div class="thread-continued" style={`--depth:${Math.min(row.depth, maxInlineThreadDepth)};`}>
+								<span>Thread continued ({row.hiddenCount} more repl{row.hiddenCount === 1 ? 'y' : 'ies'})</span>
+								<button type="button" on:click={() => focusDeeperReplies(row.parentId)}>
+									View deeper replies
+								</button>
 							</div>
-							{#if normalizeMessageID(row.parentId) !== ''}
-								{@const parentComment = commentById.get(normalizeMessageID(row.parentId))}
-								{#if parentComment}
-									<div class="reply-ref">↳ @{parentComment.senderName}</div>
-								{/if}
-							{/if}
-							<p>{getCommentPreview(row.comment)}</p>
-							<div class="comment-actions">
-								<button type="button" on:click={() => startReply(row.comment)}>Reply</button>
-								{#if isOwnComment(row.comment) && row.comment.type !== 'deleted' && !row.comment.isDeleted}
-									<button type="button" on:click={() => requestEdit(row.comment)}>Edit</button>
-									<button type="button" class="danger" on:click={() => requestDelete(row.comment)}>
-										Delete
-									</button>
-								{/if}
-							</div>
-						</article>
+						{/if}
 					{/each}
 				{/if}
 			</section>
@@ -462,6 +556,30 @@
 		color: var(--drawer-muted);
 	}
 
+	.thread-focus-banner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.44rem 0.58rem;
+		border: 1px solid var(--comment-border);
+		border-radius: 10px;
+		background: rgba(113, 113, 122, 0.08);
+		font-size: 0.72rem;
+		color: var(--drawer-muted);
+	}
+
+	.thread-focus-banner button {
+		border: 1px solid var(--comment-border);
+		background: transparent;
+		color: var(--drawer-muted);
+		border-radius: 8px;
+		padding: 0.22rem 0.44rem;
+		font-size: 0.68rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
 	.comment-row {
 		margin-left: calc(var(--depth, 0) * 0.95rem);
 		border: 1px solid var(--comment-border);
@@ -547,6 +665,31 @@
 	.comment-actions button.danger {
 		border-color: rgba(239, 68, 68, 0.42);
 		color: #ef4444;
+	}
+
+	.thread-continued {
+		margin-left: calc(var(--depth, 0) * 0.95rem);
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		border: 1px dashed var(--comment-border);
+		border-radius: 11px;
+		padding: 0.42rem 0.58rem;
+		font-size: 0.72rem;
+		color: var(--drawer-muted);
+		background: rgba(113, 113, 122, 0.06);
+	}
+
+	.thread-continued button {
+		border: 1px solid var(--comment-border);
+		background: transparent;
+		color: var(--drawer-text);
+		border-radius: 8px;
+		padding: 0.2rem 0.48rem;
+		font-size: 0.68rem;
+		font-weight: 600;
+		cursor: pointer;
 	}
 
 	.discussion-composer {
@@ -692,6 +835,10 @@
 
 	@media (max-width: 700px) {
 		.comment-row {
+			margin-left: calc(var(--depth, 0) * 0.58rem);
+		}
+
+		.thread-continued {
 			margin-left: calc(var(--depth, 0) * 0.58rem);
 		}
 

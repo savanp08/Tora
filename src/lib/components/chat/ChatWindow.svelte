@@ -23,6 +23,8 @@
 	export let isSelectionMode = false;
 	export let messageActionMode: MessageActionMode = 'none';
 	export let selectedMessageId = '';
+	export let deleteMultiEnabled = false;
+	export let selectedDeleteMessageIds: string[] = [];
 	export let focusMessageId = '';
 	export let isLoadingOlder = false;
 	export let hasMoreOlder = true;
@@ -854,6 +856,14 @@
 		dispatch('messageSelect', { messageId: message.id });
 	}
 
+	function onDeleteCheckboxToggle(event: Event, message: ChatMessage) {
+		event.stopPropagation();
+		if (!isMember || !isSelectionMode) {
+			return;
+		}
+		dispatch('messageSelect', { messageId: message.id });
+	}
+
 	function onMessageKeyDown(event: KeyboardEvent, message: ChatMessage) {
 		if (!isMember || !isSelectionMode) {
 			return;
@@ -921,6 +931,10 @@
 			{@const totalReplies = getTotalReplies(message)}
 			{@const branchesCreated = getBranchesCreated(message)}
 			{@const replyPreview = getReplyPreview(message)}
+			{@const isMultiDeleteSelected =
+				messageActionMode === 'delete' &&
+				deleteMultiEnabled &&
+				selectedDeleteMessageIds.includes(message.id)}
 				<div
 					class="message-row {isMine ? 'mine' : 'theirs'} {compactMineActionsByMessageID[message.id]
 						? 'compact-gutter'
@@ -1008,6 +1022,15 @@
 							{/if}
 					</aside>
 				{/if}
+				{#if isSelectionMode && messageActionMode === 'delete' && deleteMultiEnabled && isMine && !isDeletedMessage(message)}
+					<label class="delete-select-toggle mine" title="Select message for deletion">
+						<input
+							type="checkbox"
+							checked={isMultiDeleteSelected}
+							on:change={(event) => onDeleteCheckboxToggle(event, message)}
+						/>
+					</label>
+				{/if}
 				<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 				<article
 					class="bubble {isMine ? 'mine' : 'theirs'} {message.pending
@@ -1015,7 +1038,7 @@
 						: ''} {isSelectionMode ? 'selectable' : ''}"
 					class:media-bubble={isMediaBubble(message)}
 					class:deleted={isDeletedMessage(message)}
-					class:selected-target={selectedMessageId === message.id}
+					class:selected-target={selectedMessageId === message.id || isMultiDeleteSelected}
 					class:focused={focusedMessageId === message.id}
 					role={isSelectionMode ? 'button' : undefined}
 					tabindex={isSelectionMode ? 0 : undefined}
@@ -1194,15 +1217,19 @@
 						</button>
 					{/if}
 				</article>
-				{#if selectedMessageId === message.id && (messageActionMode === 'edit' || messageActionMode === 'delete')}
+				{#if selectedMessageId === message.id &&
+					(messageActionMode === 'edit' ||
+						(messageActionMode === 'delete' && !deleteMultiEnabled))}
 					<div class="selected-message-actions {isMine ? 'mine' : 'theirs'}">
-						<button
-							type="button"
-							class="selected-action-button"
-							on:click|stopPropagation={() => dispatch('editSelected', { messageId: message.id })}
-						>
-							Edit
-						</button>
+						{#if messageActionMode === 'edit'}
+							<button
+								type="button"
+								class="selected-action-button"
+								on:click|stopPropagation={() => dispatch('editSelected', { messageId: message.id })}
+							>
+								Edit
+							</button>
+						{/if}
 						<button
 							type="button"
 							class="selected-action-button danger"
@@ -1470,6 +1497,22 @@
 
 	.message-row.theirs {
 		justify-content: flex-start;
+	}
+
+	.delete-select-toggle {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.25rem;
+		min-width: 1.25rem;
+		padding-top: 0.18rem;
+	}
+
+	.delete-select-toggle input {
+		width: 1rem;
+		height: 1rem;
+		cursor: pointer;
+		accent-color: #22c55e;
 	}
 
 	.message-gutter {

@@ -36,7 +36,19 @@ var (
 
 	globalWSConnections    atomic.Int32
 	activeConnectionsPerIP sync.Map
+
+	trustedProxiesMu     sync.RWMutex
+	trustedProxyMatchers []trustedProxyMatcher
 )
+
+type trustedProxyMatcher struct {
+	ipNet *net.IPNet
+	ip    net.IP
+}
+
+type originalRemoteAddrContextKey struct{}
+
+var originalRemoteAddrKey = originalRemoteAddrContextKey{}
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:    1024,
@@ -44,6 +56,46 @@ var upgrader = websocket.Upgrader{
 	EnableCompression: true,
 	// dev only
 	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func CaptureOriginalRemoteAddr(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rawRemoteAddr := strings.TrimSpace(r.RemoteAddr)
+		if rawRemoteAddr == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx := context.WithValue(r.Context(), originalRemoteAddrKey, rawRemoteAddr)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func SetTrustedProxies(entries []string) {
+	nextMatchers := make([]trustedProxyMatcher, 0, len(entries))
+	for _, entry := range entries {
+		candidate := strings.TrimSpace(entry)
+		if candidate == "" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(candidate); err == nil && network != nil {
+			nextMatchers = append(nextMatchers, trustedProxyMatcher{ipNet: network})
+			continue
+		}
+		if ip := net.ParseIP(candidate); ip != nil {
+			nextMatchers = append(nextMatchers, trustedProxyMatcher{ip: ip})
+			continue
+		}
+		log.Printf("[ws] ignoring invalid trusted proxy entry=%q", candidate)
+	}
+
+	trustedProxiesMu.Lock()
+	trustedProxyMatchers = nextMatchers
+	trustedProxiesMu.Unlock()
+	log.Printf("[ws] trusted proxies configured count=%d", len(nextMatchers))
 }
 
 type Client struct {
@@ -863,28 +915,89 @@ func extractClientIP(r *http.Request) string {
 		return "unknown"
 	}
 
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		if len(parts) > 0 {
-			first := strings.TrimSpace(parts[0])
-			if first != "" {
-				return first
-			}
+	sourceIP := parseIPFromAddr(originalRemoteAddrFromRequest(r))
+	if sourceIP != nil && isTrustedProxy(sourceIP) {
+		if forwardedIP := parseFirstForwardedIP(r.Header.Get("X-Forwarded-For")); forwardedIP != nil {
+			return forwardedIP.String()
+		}
+		if realIP := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); realIP != nil {
+			return realIP.String()
 		}
 	}
 
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
+	if sourceIP != nil {
+		return sourceIP.String()
 	}
 
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err == nil && host != "" {
-		return host
+	if fallbackIP := parseIPFromAddr(strings.TrimSpace(r.RemoteAddr)); fallbackIP != nil {
+		return fallbackIP.String()
 	}
-	if strings.TrimSpace(r.RemoteAddr) != "" {
-		return strings.TrimSpace(r.RemoteAddr)
-	}
+
 	return "unknown"
+}
+
+func originalRemoteAddrFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if raw, ok := r.Context().Value(originalRemoteAddrKey).(string); ok {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			return trimmed
+		}
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func parseIPFromAddr(rawAddr string) net.IP {
+	trimmed := strings.TrimSpace(rawAddr)
+	if trimmed == "" {
+		return nil
+	}
+	if host, _, err := net.SplitHostPort(trimmed); err == nil && host != "" {
+		trimmed = host
+	}
+	trimmed = strings.TrimPrefix(trimmed, "[")
+	trimmed = strings.TrimSuffix(trimmed, "]")
+	ip := net.ParseIP(trimmed)
+	if ip == nil {
+		return nil
+	}
+	return ip
+}
+
+func parseFirstForwardedIP(rawHeader string) net.IP {
+	trimmed := strings.TrimSpace(rawHeader)
+	if trimmed == "" {
+		return nil
+	}
+	parts := strings.Split(trimmed, ",")
+	for _, part := range parts {
+		candidate := strings.TrimSpace(part)
+		if candidate == "" {
+			continue
+		}
+		if ip := net.ParseIP(candidate); ip != nil {
+			return ip
+		}
+	}
+	return nil
+}
+
+func isTrustedProxy(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	trustedProxiesMu.RLock()
+	defer trustedProxiesMu.RUnlock()
+	for _, matcher := range trustedProxyMatchers {
+		if matcher.ipNet != nil && matcher.ipNet.Contains(ip) {
+			return true
+		}
+		if matcher.ip != nil && matcher.ip.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func estimateMessageBytes(msg models.Message) int {

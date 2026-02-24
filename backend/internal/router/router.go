@@ -1,6 +1,8 @@
 package router
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -25,6 +27,7 @@ func New(
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
+	r.Use(websocket.CaptureOriginalRemoteAddr)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
@@ -46,8 +49,51 @@ func New(
 	uploadHandler := handlers.NewUploadHandler(r2Client, usageTracker)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		type dependencyStatus struct {
+			Status string `json:"status"`
+			Error  string `json:"error,omitempty"`
+		}
+		type healthResponse struct {
+			Status       string                      `json:"status"`
+			Dependencies map[string]dependencyStatus `json:"dependencies"`
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		dependencies := map[string]dependencyStatus{
+			"redis":  {Status: "up"},
+			"scylla": {Status: "up"},
+		}
+		overallStatus := "ok"
+		statusCode := http.StatusOK
+
+		if redisStore == nil {
+			dependencies["redis"] = dependencyStatus{Status: "down", Error: "redis store not configured"}
+			overallStatus = "degraded"
+			statusCode = http.StatusServiceUnavailable
+		} else if err := redisStore.Ping(ctx); err != nil {
+			dependencies["redis"] = dependencyStatus{Status: "down", Error: err.Error()}
+			overallStatus = "degraded"
+			statusCode = http.StatusServiceUnavailable
+		}
+
+		if scyllaStore == nil {
+			dependencies["scylla"] = dependencyStatus{Status: "down", Error: "scylla store not configured"}
+			overallStatus = "degraded"
+			statusCode = http.StatusServiceUnavailable
+		} else if err := scyllaStore.Ping(ctx); err != nil {
+			dependencies["scylla"] = dependencyStatus{Status: "down", Error: err.Error()}
+			overallStatus = "degraded"
+			statusCode = http.StatusServiceUnavailable
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		_ = json.NewEncoder(w).Encode(healthResponse{
+			Status:       overallStatus,
+			Dependencies: dependencies,
+		})
 	})
 	if usageTracker != nil {
 		r.Get("/api/usage", usageTracker.HandleUsage)

@@ -15,6 +15,7 @@ import (
 func main() {
 	cfg := config.LoadConfig()
 	log.Println("🚀 Starting Converse Backend...")
+	websocket.SetTrustedProxies(cfg.TrustedProxies)
 
 	redisStore, err := database.NewRedisStore(cfg.RedisAddr, cfg.RedisPass)
 	if err != nil {

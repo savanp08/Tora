@@ -15,6 +15,7 @@ type Config struct {
 	RedisAddr              string
 	RedisPass              string
 	AppSecretKey           string
+	TrustedProxies         []string
 	ScyllaHosts            []string
 	ScyllaKeyspace         string
 	AstraBundlePath        string
@@ -66,6 +67,7 @@ func LoadConfig() *Config {
 		RedisAddr:              getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPass:              getEnv("REDIS_PASS", ""),
 		AppSecretKey:           appSecretKey,
+		TrustedProxies:         parseCSVEnvOptional("TRUSTED_PROXIES"),
 		ScyllaHosts:            parseCSVEnv("SCYLLA_HOSTS", "127.0.0.1"),
 		ScyllaKeyspace:         getAnyEnv("converse", "SCYLLA_KEYSPACE", "KEYSPACE_NAME"),
 		AstraBundlePath:        getAnyEnv("", "ASTRA_BUNDLE_PATH"),
@@ -146,6 +148,26 @@ func parseCSVEnv(key, fallback string) []string {
 		return []string{"127.0.0.1"}
 	}
 	return hosts
+}
+
+func parseCSVEnvOptional(key string) []string {
+	rawValue, exists := os.LookupEnv(key)
+	if !exists {
+		return []string{}
+	}
+	value := strings.TrimSpace(rawValue)
+	if value == "" {
+		return []string{}
+	}
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }
 
 func accountIDFromEndpoint(endpoint string) string {

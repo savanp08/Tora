@@ -137,20 +137,16 @@
 					type="button"
 					on:click|stopPropagation={() => closeMenuThen('toggleEditSelectionMode')}
 				>
-					{messageActionMode === 'edit' ? 'Cancel Edit Mode' : 'Edit Message (Select One)'}
+					{messageActionMode === 'edit' ? 'Cancel Edit Mode' : 'Edit Message'}
 				</button>
 				<button
 					type="button"
 					on:click|stopPropagation={() => closeMenuThen('toggleDeleteSelectionMode')}
 				>
-					{messageActionMode === 'delete' ? 'Cancel Delete Mode' : 'Delete Message (Select One)'}
+					{messageActionMode === 'delete' ? 'Cancel Delete Mode' : 'Delete Messages'}
 				</button>
-				<button type="button" on:click|stopPropagation={() => closeMenuThen('markRead')}>
-					Mark read
-				</button>
-				<button type="button" on:click|stopPropagation={() => closeMenuThen('clearLocal')}>
-					Clear local
-				</button>
+				
+				
 				{#if isMember}
 					<button type="button" on:click|stopPropagation={() => closeMenuThen('leaveRoom')}>
 						Leave Room
@@ -161,9 +157,7 @@
 						Delete Room
 					</button>
 				{/if}
-				<button type="button" on:click|stopPropagation={() => closeMenuThen('disconnect')}>
-					Disconnect
-				</button>
+				
 			</div>
 		{/if}
 	</div>

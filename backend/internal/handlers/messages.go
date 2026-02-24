@@ -761,26 +761,31 @@ func (h *RoomHandler) queryRoomMessagesPage(
 	beforeCreatedAt time.Time,
 	limit int,
 ) ([]models.Message, bool, error) {
+	softCutoff, err := h.resolveRoomMessageSoftCutoff(ctx, roomID)
+	if err != nil {
+		return nil, false, err
+	}
+
 	messagesTable := h.scylla.Table("messages")
 	fetchLimit := limit + 1
 
 	baseSelect := `SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s`
-	query := fmt.Sprintf(baseSelect+` WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
-	args := []interface{}{roomID, fetchLimit}
+	query := fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
+	args := []interface{}{roomID, softCutoff, fetchLimit}
 
 	if !beforeCreatedAt.IsZero() {
-		query = fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
-		args = []interface{}{roomID, beforeCreatedAt, fetchLimit}
+		query = fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at < ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
+		args = []interface{}{roomID, beforeCreatedAt, softCutoff, fetchLimit}
 	} else if beforeMessageID != "" {
-		resolvedBeforeCreatedAt, err := h.lookupMessageCreatedAt(ctx, roomID, beforeMessageID)
-		if err != nil {
-			if err == gocql.ErrNotFound {
+		resolvedBeforeCreatedAt, lookupErr := h.lookupMessageCreatedAt(ctx, roomID, beforeMessageID)
+		if lookupErr != nil {
+			if lookupErr == gocql.ErrNotFound {
 				return []models.Message{}, false, nil
 			}
-			return nil, false, err
+			return nil, false, lookupErr
 		}
-		query = fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
-		args = []interface{}{roomID, resolvedBeforeCreatedAt, fetchLimit}
+		query = fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at < ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
+		args = []interface{}{roomID, resolvedBeforeCreatedAt, softCutoff, fetchLimit}
 	}
 
 	iter := h.scylla.Session.Query(query, args...).WithContext(ctx).Iter()
@@ -825,6 +830,9 @@ func (h *RoomHandler) queryRoomMessagesPage(
 		&replySnippet,
 		&createdAt,
 	) {
+		if createdAt.Before(softCutoff) {
+			continue
+		}
 		if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
 			content = decrypted
 		}
@@ -871,23 +879,69 @@ func (h *RoomHandler) queryRoomMessagesPage(
 	return messages, hasMore, nil
 }
 
+func (h *RoomHandler) resolveRoomMessageSoftCutoff(ctx context.Context, roomID string) (time.Time, error) {
+	defaultCutoff := time.Now().UTC().Add(-roomDefaultTTL)
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return defaultCutoff, nil
+	}
+
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return defaultCutoff, nil
+	}
+
+	if h.redis != nil && h.redis.Client != nil {
+		createdAtRaw, err := h.redis.Client.HGet(ctx, roomKey(roomID), "created_at").Result()
+		if err == nil {
+			if createdAtUnix, parseErr := strconv.ParseInt(strings.TrimSpace(createdAtRaw), 10, 64); parseErr == nil && createdAtUnix > 0 {
+				createdAtCutoff := time.Unix(createdAtUnix, 0).UTC()
+				if !createdAtCutoff.IsZero() && createdAtCutoff.Before(defaultCutoff) {
+					defaultCutoff = createdAtCutoff
+				}
+			}
+		}
+	}
+
+	softExpiryTable := h.scylla.Table(roomSoftExpiryTable)
+	query := fmt.Sprintf(
+		`SELECT extended_expiry_time FROM %s WHERE room_id = ? LIMIT 1`,
+		softExpiryTable,
+	)
+	var softCutoff time.Time
+	if err := h.scylla.Session.Query(query, roomID).WithContext(ctx).Scan(&softCutoff); err != nil {
+		if err == gocql.ErrNotFound {
+			return defaultCutoff, nil
+		}
+		return time.Time{}, err
+	}
+	if softCutoff.IsZero() {
+		return defaultCutoff, nil
+	}
+	return softCutoff.UTC(), nil
+}
+
 func (h *RoomHandler) lookupAdjacentPinnedMessage(
 	ctx context.Context,
 	roomID string,
 	beforeCursor, afterCursor time.Time,
 ) (string, time.Time, error) {
+	softCutoff, err := h.resolveRoomMessageSoftCutoff(ctx, roomID)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
 	roomPinsTable := h.scylla.Table("room_pins")
 	query := ""
-	args := []interface{}{roomID}
+	args := []interface{}{roomID, softCutoff}
 	if !beforeCursor.IsZero() {
 		query = fmt.Sprintf(
-			`SELECT message_id, created_at FROM %s WHERE room_id = ? AND created_at < ? LIMIT 1`,
+			`SELECT message_id, created_at FROM %s WHERE room_id = ? AND created_at >= ? AND created_at < ? LIMIT 1`,
 			roomPinsTable,
 		)
 		args = append(args, beforeCursor)
 	} else {
 		query = fmt.Sprintf(
-			`SELECT message_id, created_at FROM %s WHERE room_id = ? AND created_at > ? ORDER BY created_at ASC LIMIT 1`,
+			`SELECT message_id, created_at FROM %s WHERE room_id = ? AND created_at >= ? AND created_at > ? ORDER BY created_at ASC LIMIT 1`,
 			roomPinsTable,
 		)
 		args = append(args, afterCursor)
@@ -912,6 +966,14 @@ func (h *RoomHandler) lookupMessageByPrimaryKey(
 	createdAt time.Time,
 	messageID string,
 ) (models.Message, error) {
+	softCutoff, err := h.resolveRoomMessageSoftCutoff(ctx, roomID)
+	if err != nil {
+		return models.Message{}, err
+	}
+	if createdAt.Before(softCutoff) {
+		return models.Message{}, gocql.ErrNotFound
+	}
+
 	messagesTable := h.scylla.Table("messages")
 	query := fmt.Sprintf(
 		`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? AND created_at = ? AND message_id = ? LIMIT 1`,
@@ -956,6 +1018,9 @@ func (h *RoomHandler) lookupMessageByPrimaryKey(
 		&dbCreatedAt,
 	); err != nil {
 		return models.Message{}, err
+	}
+	if dbCreatedAt.Before(softCutoff) {
+		return models.Message{}, gocql.ErrNotFound
 	}
 
 	if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
@@ -1005,6 +1070,11 @@ func (h *RoomHandler) lookupMessageCreatedAt(
 	ctx context.Context,
 	roomID, messageID string,
 ) (time.Time, error) {
+	softCutoff, err := h.resolveRoomMessageSoftCutoff(ctx, roomID)
+	if err != nil {
+		return time.Time{}, err
+	}
+
 	messagesTable := h.scylla.Table("messages")
 	query := fmt.Sprintf(
 		`SELECT created_at FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`,
@@ -1014,7 +1084,7 @@ func (h *RoomHandler) lookupMessageCreatedAt(
 	if err := h.scylla.Session.Query(query, roomID, messageID).WithContext(ctx).Scan(&createdAt); err != nil {
 		return time.Time{}, err
 	}
-	if createdAt.IsZero() {
+	if createdAt.IsZero() || createdAt.Before(softCutoff) {
 		return time.Time{}, gocql.ErrNotFound
 	}
 	return createdAt, nil

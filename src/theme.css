@@ -1,173 +1,131 @@
-/**
- * Converse Theme System
- * 
- * Modern, eye-friendly color palette for light and dark modes
- * Designed for long reading sessions with minimal eye strain
- */
-
 :root {
-	/* ========================================
-	   LIGHT MODE (Default)
-	   ======================================== */
-	
-	/* Background colors - Warm neutrals to reduce eye strain */
-	--bg-primary: #fafafa;
-	--bg-secondary: #f5f5f5;
-	--bg-tertiary: #efefef;
+	--bg-primary: #f7f7f7;
+	--bg-secondary: #f1f1f1;
+	--bg-tertiary: #e9e9e9;
 	--bg-elevated: #ffffff;
-	--bg-overlay: rgba(0, 0, 0, 0.5);
-	
-	/* Surface colors - For cards, messages, etc */
+	--bg-overlay: rgba(0, 0, 0, 0.46);
 	--surface-primary: #ffffff;
-	--surface-secondary: #f8f8f8;
-	--surface-hover: #f3f3f3;
-	--surface-active: #eeeeee;
-	
-	/* Border colors - Subtle divisions */
-	--border-subtle: #e5e5e5;
-	--border-default: #d4d4d4;
-	--border-strong: #a3a3a3;
-	--border-focus: #3b82f6;
-	
-	/* Text colors - Optimized contrast */
-	--text-primary: #171717;
-	--text-secondary: #525252;
-	--text-tertiary: #737373;
-	--text-main: #171717;
-	--text-muted: #525252;
-	--text-placeholder: #a3a3a3;
+	--surface-secondary: #f6f6f6;
+	--surface-hover: #efefef;
+	--surface-active: #e8e8e8;
+	--border-subtle: #e1e1e1;
+	--border-default: #cccccc;
+	--border-strong: #a9a9a9;
+	--border-focus: #6d6d73;
+	--text-primary: #141414;
+	--text-secondary: #4f4f4f;
+	--text-tertiary: #747474;
+	--text-main: #141414;
+	--text-muted: #4f4f4f;
+	--text-placeholder: #9a9a9a;
 	--text-inverse: #ffffff;
-	--text-link: #2563eb;
-	
-	/* Message bubble colors */
+	--text-link: #2f2f33;
 	--bubble-other: #ffffff;
-	--bubble-other-border: #e5e5e5;
-	--bubble-mine: #f5f5f5;
-	--bubble-mine-border: #d4d4d4;
-	
-	/* Accent colors */
-	--accent-primary: #3b82f6;
-	--accent-primary-hover: #2563eb;
-	--accent-secondary: #8b5cf6;
-	--accent-blue: #3b82f6;
-	--accent-purple: #8b5cf6;
-	--gemini-gradient: linear-gradient(90deg, #3b82f6, #8b5cf6, #ef4444);
+	--bubble-other-border: #dfdfdf;
+	--bubble-mine: #f1f1f1;
+	--bubble-mine-border: #d2d2d2;
+	--accent-primary: #262628;
+	--accent-primary-hover: #1b1b1d;
+	--accent-secondary: #5a5a5f;
+	--accent-blue: #262628;
+	--accent-purple: #5a5a5f;
+	--gemini-gradient: linear-gradient(90deg, #f5f5f5 0%, #d6d6d6 52%, #b8b8b8 100%);
 	--accent-danger: #ef4444;
 	--accent-danger-hover: #dc2626;
 	--accent-success: #10b981;
 	--accent-warning: #f59e0b;
-	
-	/* Status colors */
 	--status-online: #10b981;
-	--status-offline: #9ca3af;
+	--status-offline: #9a9a9a;
 	--status-away: #f59e0b;
-	
-	/* Interactive states */
-	--interactive-hover: rgba(0, 0, 0, 0.05);
+	--interactive-hover: rgba(0, 0, 0, 0.055);
 	--interactive-active: rgba(0, 0, 0, 0.1);
-	--interactive-focus: rgba(59, 130, 246, 0.1);
-	
-	/* Shadows - Subtle depth */
+	--interactive-focus: rgba(109, 109, 115, 0.18);
+	--overlay-soft: rgba(0, 0, 0, 0.26);
+	--overlay-strong: rgba(0, 0, 0, 0.46);
+	--state-danger-bg: rgba(239, 68, 68, 0.12);
+	--state-danger-border: rgba(239, 68, 68, 0.3);
+	--state-info-bg: rgba(38, 38, 40, 0.08);
+	--state-info-border: rgba(38, 38, 40, 0.22);
+	--state-success-bg: rgba(16, 185, 129, 0.12);
+	--state-success-border: rgba(16, 185, 129, 0.32);
+	--state-warning-bg: rgba(245, 158, 11, 0.14);
+	--state-warning-border: rgba(245, 158, 11, 0.34);
 	--shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
 	--shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
 	--shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-	
-	/* Special elements */
-	--divider: #e5e5e5;
-	--scrollbar-track: #f5f5f5;
-	--scrollbar-thumb: #d4d4d4;
-	--scrollbar-thumb-hover: #a3a3a3;
-	
-	/* Unread indicator */
-	--unread-badge: #ef4444;
+	--divider: #e2e2e2;
+	--scrollbar-track: #f1f1f1;
+	--scrollbar-thumb: #cfcfcf;
+	--scrollbar-thumb-hover: #ababab;
+	--unread-badge: #2a2a2d;
 	--unread-text: #ffffff;
-	--unread-divider: #f87171;
+	--unread-divider: #5b5b62;
 }
-
-/* ========================================
-   DARK MODE
-   ======================================== */
 
 :root[data-theme='dark'],
 .theme-dark {
-	/* Background colors - Gemini-inspired dark neutrals */
-	--bg-primary: #131314;
-	--bg-secondary: #1e1f20;
-	--bg-tertiary: #282a2d;
-	--bg-elevated: #1e1f20;
+	--bg-primary: #111111;
+	--bg-secondary: #1a1a1a;
+	--bg-tertiary: #222222;
+	--bg-elevated: #1a1a1a;
 	--bg-overlay: rgba(0, 0, 0, 0.7);
-	
-	/* Surface colors */
-	--surface-primary: #1e1f20;
-	--surface-secondary: #282a2d;
-	--surface-hover: #303235;
-	--surface-active: #3a3d41;
-	
-	/* Border colors - Subtle in dark mode */
-	--border-subtle: #444746;
-	--border-default: #555a5c;
-	--border-strong: #6b7073;
-	--border-focus: #4285f4;
-	
-	/* Text colors */
-	--text-primary: #e3e3e3;
-	--text-secondary: #b4b4b4;
-	--text-tertiary: #8f8f8f;
-	--text-main: #e3e3e3;
-	--text-muted: #b4b4b4;
-	--text-placeholder: #525252;
-	--text-inverse: #131314;
-	--text-link: #8ab4f8;
-	
-	/* Message bubble colors */
-	--bubble-other: #1e1f20;
-	--bubble-other-border: #444746;
-	--bubble-mine: #282a2d;
-	--bubble-mine-border: #555a5c;
-	
-	/* Accent colors */
-	--accent-primary: #4285f4;
-	--accent-primary-hover: #5a95f5;
-	--accent-secondary: #9b72cb;
-	--accent-blue: #4285f4;
-	--accent-purple: #9b72cb;
-	--gemini-gradient: linear-gradient(90deg, #4285f4, #9b72cb, #d96570);
+	--surface-primary: #1a1a1a;
+	--surface-secondary: #242424;
+	--surface-hover: #2e2e2e;
+	--surface-active: #333333;
+	--border-subtle: #333333;
+	--border-default: #444444;
+	--border-strong: #666666;
+	--border-focus: #888888;
+	--text-primary: #ededed;
+	--text-secondary: #b0b0b0;
+	--text-tertiary: #888888;
+	--text-main: #ededed;
+	--text-muted: #b0b0b0;
+	--text-placeholder: #666666;
+	--text-inverse: #111111;
+	--text-link: #dcdcdc;
+	--bubble-other: #1c1c1c;
+	--bubble-other-border: #333333;
+	--bubble-mine: #262626;
+	--bubble-mine-border: #444444;
+	--accent-primary: #d0d0d4;
+	--accent-primary-hover: #e2e2e5;
+	--accent-secondary: #8c8c93;
+	--accent-blue: #d0d0d4;
+	--accent-purple: #8c8c93;
+	--gemini-gradient: linear-gradient(90deg, #44474a 0%, #70747a 55%, #9b9fa5 100%);
 	--accent-danger: #ef4444;
 	--accent-danger-hover: #f87171;
-	/* Functional colors: keep green/orange unchanged */
 	--accent-success: #10b981;
 	--accent-warning: #f59e0b;
-	
-	/* Status colors */
 	--status-online: #10b981;
-	--status-offline: #525252;
+	--status-offline: #7a7d80;
 	--status-away: #f59e0b;
-	
-	/* Interactive states */
 	--interactive-hover: rgba(255, 255, 255, 0.05);
-	--interactive-active: rgba(255, 255, 255, 0.1);
-	--interactive-focus: rgba(66, 133, 244, 0.15);
-	
-	/* Shadows - Less prominent in dark mode */
+	--interactive-active: rgba(255, 255, 255, 0.11);
+	--interactive-focus: rgba(190, 190, 196, 0.18);
+	--overlay-soft: rgba(0, 0, 0, 0.48);
+	--overlay-strong: rgba(0, 0, 0, 0.72);
+	--state-danger-bg: rgba(248, 113, 113, 0.16);
+	--state-danger-border: rgba(248, 113, 113, 0.34);
+	--state-info-bg: rgba(212, 212, 217, 0.12);
+	--state-info-border: rgba(212, 212, 217, 0.28);
+	--state-success-bg: rgba(16, 185, 129, 0.16);
+	--state-success-border: rgba(16, 185, 129, 0.36);
+	--state-warning-bg: rgba(245, 158, 11, 0.2);
+	--state-warning-border: rgba(245, 158, 11, 0.38);
 	--shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
 	--shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
 	--shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
-	
-	/* Special elements */
-	--divider: #262626;
-	--scrollbar-track: #1a1a1a;
+	--divider: #222222;
+	--scrollbar-track: #141414;
 	--scrollbar-thumb: #333333;
-	--scrollbar-thumb-hover: #525252;
-	
-	/* Unread indicator */
-	--unread-badge: #ef4444;
-	--unread-text: #ffffff;
-	--unread-divider: #f87171;
+	--scrollbar-thumb-hover: #444444;
+	--unread-badge: #f1f1f4;
+	--unread-text: #161618;
+	--unread-divider: #b6b6bc;
 }
-
-/* ========================================
-   GLOBAL STYLES
-   ======================================== */
 
 html,
 body {
@@ -176,19 +134,16 @@ body {
 	transition: background-color 0.2s ease, color 0.2s ease;
 }
 
-/* Smooth transitions for theme changes */
 * {
 	transition-property: background-color, border-color, color;
 	transition-duration: 0.2s;
 	transition-timing-function: ease;
 }
 
-/* Disable transitions for initial page load */
 .preload * {
 	transition: none !important;
 }
 
-/* Custom scrollbar */
 ::-webkit-scrollbar {
 	width: 12px;
 	height: 12px;
@@ -208,13 +163,11 @@ body {
 	background: var(--scrollbar-thumb-hover);
 }
 
-/* Firefox scrollbar */
 * {
 	scrollbar-width: thin;
 	scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
-/* Selection colors */
 ::selection {
 	background: var(--accent-primary);
 	color: var(--text-inverse);
@@ -225,29 +178,21 @@ body {
 	color: var(--text-inverse);
 }
 
-/* Focus styles */
 :focus-visible {
 	outline: 2px solid var(--border-focus);
 	outline-offset: 2px;
 }
 
-/* ========================================
-   UTILITY CLASSES
-   ======================================== */
-
 .text-primary { color: var(--text-primary); }
 .text-secondary { color: var(--text-secondary); }
 .text-tertiary { color: var(--text-tertiary); }
-
 .bg-primary { background: var(--bg-primary); }
 .bg-secondary { background: var(--bg-secondary); }
 .bg-surface { background: var(--surface-primary); }
-
 .border-subtle { border-color: var(--border-subtle); }
 .border-default { border-color: var(--border-default); }
 .border-strong { border-color: var(--border-strong); }
 
-/* Interactive elements */
 .interactive {
 	transition: all 0.15s ease;
 }
@@ -260,7 +205,6 @@ body {
 	background: var(--interactive-active);
 }
 
-/* Card/Surface component */
 .card {
 	background: var(--surface-primary);
 	border: 1px solid var(--border-subtle);
@@ -268,7 +212,6 @@ body {
 	padding: 16px;
 }
 
-/* Button styles */
 .btn {
 	background: var(--surface-primary);
 	color: var(--text-primary);
@@ -315,11 +258,6 @@ body {
 	border-color: var(--accent-danger-hover);
 }
 
-/* ========================================
-   COMPONENT-SPECIFIC OVERRIDES
-   ======================================== */
-
-/* Message bubbles */
 .message-bubble {
 	background: var(--bubble-other);
 	border: 1px solid var(--bubble-other-border);
@@ -334,7 +272,6 @@ body {
 	border-color: var(--bubble-mine-border);
 }
 
-/* Input fields */
 input,
 textarea,
 select {
@@ -358,7 +295,6 @@ select:focus {
 	box-shadow: 0 0 0 3px var(--interactive-focus);
 }
 
-/* Links */
 a {
 	color: var(--text-link);
 	text-decoration: none;
@@ -368,7 +304,6 @@ a:hover {
 	text-decoration: underline;
 }
 
-/* Dividers */
 hr {
 	border: none;
 	border-top: 1px solid var(--divider);

@@ -590,7 +590,12 @@
 
 {#if open}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="discussion-overlay {isDarkMode ? 'theme-dark' : ''}" role="presentation" on:click={onBackdropClick}>
+	<div
+		class="discussion-overlay"
+		data-mode={isDarkMode ? 'dark' : 'light'}
+		role="presentation"
+		on:click={onBackdropClick}
+	>
 		<button
 			type="button"
 			class="nav-arrow left"
@@ -847,7 +852,7 @@
 		z-index: 1000;
 		backdrop-filter: blur(12px);
 		-webkit-backdrop-filter: blur(12px);
-		background: rgba(0, 0, 0, 0.6);
+		background: var(--overlay-strong);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -858,14 +863,15 @@
 		max-width: 1200px;
 		width: 100%;
 		height: 90vh;
-		background: #0f172a;
-		border: 1px solid #1e293b;
+		background: var(--surface-primary);
+		border: 1px solid var(--border-default);
 		border-radius: 16px;
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;
-		color: #e2e8f0;
+		color: var(--text-primary);
 		position: relative;
+		box-shadow: var(--shadow-lg);
 	}
 
 	.modal-header-grid {
@@ -873,8 +879,8 @@
 		grid-template-columns: 1fr 1fr;
 		gap: 1.5rem;
 		padding: 1.5rem;
-		border-bottom: 1px solid #1e293b;
-		background: #0b1120;
+		border-bottom: 1px solid var(--border-default);
+		background: var(--surface-secondary);
 	}
 
 	.context-column,
@@ -901,17 +907,17 @@
 	.chat-unread-pill {
 		padding: 0.22rem 0.56rem;
 		border-radius: 999px;
-		background: rgba(248, 113, 113, 0.15);
-		color: #fda4af;
+		background: var(--state-danger-bg);
+		color: var(--accent-danger);
 		font-size: 0.68rem;
 		font-weight: 700;
 		white-space: nowrap;
 	}
 
 	.close-button {
-		border: 1px solid #334155;
-		background: rgba(15, 23, 42, 0.75);
-		color: #cbd5e1;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-secondary);
 		border-radius: 8px;
 		padding: 0.32rem 0.62rem;
 		font-size: 0.76rem;
@@ -920,14 +926,14 @@
 	}
 
 	.close-button:hover {
-		background: rgba(51, 65, 85, 0.5);
+		background: var(--surface-hover);
 	}
 
 	.pinned-message-block {
-		border: 1px solid #334155;
+		border: 1px solid var(--border-default);
 		border-radius: 12px;
 		padding: 0.8rem;
-		background: rgba(15, 23, 42, 0.74);
+		background: var(--surface-primary);
 		display: flex;
 		flex-direction: column;
 		gap: 0.42rem;
@@ -938,11 +944,11 @@
 		align-items: center;
 		gap: 0.5rem;
 		font-size: 0.74rem;
-		color: #94a3b8;
+		color: var(--text-secondary);
 	}
 
 	.pinned-meta strong {
-		color: #e2e8f0;
+		color: var(--text-primary);
 		font-size: 0.78rem;
 	}
 
@@ -951,30 +957,31 @@
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
-		color: #38bdf8;
+		color: var(--text-secondary);
 	}
 
 	.pinned-message-block p {
 		margin: 0;
 		font-size: 0.85rem;
 		line-height: 1.45;
-		color: #e2e8f0;
+		color: var(--text-primary);
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
 
 	.pinned-message-block a {
 		font-size: 0.75rem;
-		color: #38bdf8;
+		color: var(--text-link);
 	}
 
 	.empty-pinned-message,
 	.empty-notes {
-		border: 1px dashed #334155;
+		border: 1px dashed var(--border-default);
 		border-radius: 10px;
 		padding: 0.72rem;
 		font-size: 0.8rem;
-		color: #94a3b8;
+		color: var(--text-secondary);
+		background: var(--surface-secondary);
 	}
 
 	.notes-list {
@@ -988,9 +995,9 @@
 	}
 
 	.note-item {
-		border: 1px solid rgba(253, 224, 71, 0.36);
-		background: rgba(254, 249, 195, 0.16);
-		color: #fde68a;
+		border: 1px solid var(--state-warning-border);
+		background: var(--state-warning-bg);
+		color: var(--accent-warning);
 		border-radius: 10px;
 		padding: 0.5rem 0.62rem;
 		font-size: 0.8rem;
@@ -1006,9 +1013,9 @@
 	}
 
 	.notes-input-wrap input {
-		border: 1px solid #334155;
-		background: rgba(15, 23, 42, 0.75);
-		color: #e2e8f0;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-primary);
 		border-radius: 8px;
 		padding: 0.42rem 0.52rem;
 		font-size: 0.78rem;
@@ -1016,9 +1023,9 @@
 	}
 
 	.notes-input-wrap button {
-		border: 1px solid #334155;
-		background: rgba(15, 23, 42, 0.75);
-		color: #cbd5e1;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-secondary);
 		border-radius: 8px;
 		padding: 0.34rem 0.58rem;
 		font-size: 0.72rem;
@@ -1035,7 +1042,7 @@
 	.notes-limit {
 		grid-column: 1 / -1;
 		font-size: 0.72rem;
-		color: #fca5a5;
+		color: var(--accent-danger);
 	}
 
 	.discussion-comments {
@@ -1046,20 +1053,22 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.72rem;
+		background: var(--bg-secondary);
 	}
 
 	.discussion-empty {
-		border: 1px dashed #334155;
+		border: 1px dashed var(--border-default);
 		border-radius: 10px;
 		padding: 0.82rem;
 		font-size: 0.82rem;
-		color: #94a3b8;
+		color: var(--text-secondary);
+		background: var(--surface-secondary);
 	}
 
 	.comment-card {
-		border: 1px solid #334155;
+		border: 1px solid var(--border-default);
 		border-radius: 12px;
-		background: rgba(15, 23, 42, 0.72);
+		background: var(--surface-primary);
 		padding: 0.62rem 0.72rem;
 		display: flex;
 		flex-direction: column;
@@ -1069,7 +1078,7 @@
 	}
 
 	.comment-card.child {
-		border-left: 2px solid #334155;
+		border-left: 2px solid var(--border-strong);
 		margin-left: calc(var(--depth, 1) * 1.25rem);
 		padding-left: 1rem;
 	}
@@ -1085,8 +1094,8 @@
 		width: 32px;
 		height: 32px;
 		border-radius: 999px;
-		background: #1e293b;
-		color: #cbd5e1;
+		background: var(--bg-tertiary);
+		color: var(--text-primary);
 		font-size: 0.78rem;
 		font-weight: 700;
 		display: inline-flex;
@@ -1119,24 +1128,28 @@
 	.identity-row strong {
 		font-size: 0.8rem;
 		font-weight: 700;
-		color: #e2e8f0;
+		color: var(--text-primary);
 	}
 
 	.identity-row time {
 		font-size: 0.71rem;
-		color: #94a3b8;
+		color: var(--text-tertiary);
 	}
 
 	.pin-action {
-		border: 1px solid #334155;
-		background: rgba(15, 23, 42, 0.8);
-		color: #94a3b8;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-secondary);
 		border-radius: 8px;
 		padding: 0.16rem 0.38rem;
 		font-size: 0.75rem;
 		cursor: pointer;
 		opacity: 0;
 		transition: opacity 0.2s ease;
+	}
+
+	.pin-action:hover {
+		background: var(--surface-hover);
 	}
 
 	.comment-card:hover .pin-action {
@@ -1147,7 +1160,7 @@
 		margin: 0;
 		font-size: 0.82rem;
 		line-height: 1.42;
-		color: #e2e8f0;
+		color: var(--text-primary);
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
@@ -1161,14 +1174,15 @@
 	}
 
 	.pin-badge.op {
-		background: rgba(245, 158, 11, 0.18);
-		color: var(--accent-warning, #f59e0b);
-		box-shadow: 0 0 12px rgba(245, 158, 11, 0.2);
+		background: var(--state-warning-bg);
+		color: var(--accent-warning);
+		border: 1px solid var(--state-warning-border);
 	}
 
 	.pin-badge.user {
-		background: rgba(148, 163, 184, 0.2);
-		color: #cbd5e1;
+		background: var(--state-info-bg);
+		border: 1px solid var(--state-info-border);
+		color: var(--text-secondary);
 	}
 
 	.comment-actions {
@@ -1180,9 +1194,9 @@
 	}
 
 	.comment-actions button {
-		border: 1px solid #334155;
+		border: 1px solid var(--border-default);
 		background: transparent;
-		color: #94a3b8;
+		color: var(--text-secondary);
 		border-radius: 8px;
 		padding: 0.2rem 0.5rem;
 		font-size: 0.68rem;
@@ -1191,12 +1205,12 @@
 	}
 
 	.comment-actions button:hover {
-		background: rgba(51, 65, 85, 0.45);
+		background: var(--surface-hover);
 	}
 
 	.comment-actions button.danger {
-		border-color: rgba(239, 68, 68, 0.42);
-		color: #f87171;
+		border-color: var(--state-danger-border);
+		color: var(--accent-danger);
 	}
 
 	.show-replies {
@@ -1204,7 +1218,7 @@
 		margin: 0.08rem 0 0.15rem 0.25rem;
 		border: none;
 		background: transparent;
-		color: #93c5fd;
+		color: var(--text-link);
 		font-size: 0.74rem;
 		font-weight: 600;
 		cursor: pointer;
@@ -1223,7 +1237,7 @@
 		margin: 0.02rem 0 0.15rem 0.25rem;
 		border: none;
 		background: transparent;
-		color: #7dd3fc;
+		color: var(--text-secondary);
 		font-size: 0.72rem;
 		font-weight: 600;
 		cursor: pointer;
@@ -1233,12 +1247,12 @@
 	}
 
 	.discussion-composer {
-		border-top: 1px solid #1e293b;
+		border-top: 1px solid var(--border-default);
 		padding: 0.85rem 1.5rem 1rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.48rem;
-		background: #0b1120;
+		background: var(--surface-secondary);
 	}
 
 	.reply-target {
@@ -1246,15 +1260,15 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
-		border: 1px solid #334155;
+		border: 1px solid var(--border-default);
 		border-radius: 9px;
 		padding: 0.3rem 0.48rem;
 		font-size: 0.72rem;
-		color: #94a3b8;
+		color: var(--text-secondary);
 	}
 
 	.reply-target button {
-		border: 1px solid #334155;
+		border: 1px solid var(--border-default);
 		background: transparent;
 		color: inherit;
 		border-radius: 7px;
@@ -1269,15 +1283,21 @@
 		min-height: 74px;
 		max-height: 180px;
 		resize: vertical;
-		border: 1px solid #334155;
-		background: rgba(15, 23, 42, 0.75);
-		color: #e2e8f0;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-primary);
 		border-radius: 10px;
 		padding: 0.48rem 0.58rem;
 		font-size: 0.84rem;
 		line-height: 1.35;
 		box-sizing: border-box;
 		font-family: inherit;
+	}
+
+	.discussion-composer textarea:focus {
+		outline: none;
+		border-color: var(--border-focus);
+		box-shadow: 0 0 0 2px var(--interactive-focus);
 	}
 
 	.discussion-composer textarea:disabled {
@@ -1291,14 +1311,19 @@
 	}
 
 	.send-comment {
-		border: 1px solid #334155;
+		border: 1px solid var(--accent-primary);
 		border-radius: 9px;
 		padding: 0.36rem 0.78rem;
 		font-size: 0.74rem;
 		font-weight: 700;
 		cursor: pointer;
-		background: rgba(14, 165, 233, 0.16);
-		color: #7dd3fc;
+		background: var(--accent-primary);
+		color: var(--text-inverse);
+	}
+
+	.send-comment:hover:not(:disabled) {
+		background: var(--accent-primary-hover);
+		border-color: var(--accent-primary-hover);
 	}
 
 	.send-comment:disabled {
@@ -1313,11 +1338,11 @@
 		width: 48px;
 		height: 48px;
 		border-radius: 50%;
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		background: rgba(255, 255, 255, 0.1);
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
 		backdrop-filter: blur(4px);
 		-webkit-backdrop-filter: blur(4px);
-		color: #f8fafc;
+		color: var(--text-primary);
 		font-size: 1.2rem;
 		font-weight: 700;
 		display: inline-flex;
@@ -1325,6 +1350,7 @@
 		justify-content: center;
 		cursor: pointer;
 		z-index: 1001;
+		opacity: 0.94;
 	}
 
 	.nav-arrow.left {

@@ -8,21 +8,36 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 )
 
-const appSecretKeyEnv = "APP_SECRET_KEY"
-
-var (
-	cachedCryptoKey     []byte
-	cachedCryptoKeyErr  error
-	cachedCryptoKeyOnce sync.Once
+const (
+	appSecretKeyEnv         = "APP_SECRET_KEY"
+	appSecretKeysEnv        = "APP_SECRET_KEYS"
+	appSecretKeyVersionEnv  = "APP_SECRET_KEY_VERSION"
+	defaultCryptoKeyVersion = "v1"
 )
 
+var (
+	cachedCryptoKeyRing     cryptoKeyRing
+	cachedCryptoKeyRingErr  error
+	cachedCryptoKeyRingOnce sync.Once
+)
+
+type cryptoKeyRing struct {
+	activeVersion string
+	keys          map[string][]byte
+}
+
 func EncryptMessage(plainText string) (string, error) {
-	key, err := loadCryptoKey()
+	keyRing, err := loadCryptoKeyRing()
 	if err != nil {
 		return "", err
+	}
+	key, ok := keyRing.keys[keyRing.activeVersion]
+	if !ok || len(key) == 0 {
+		return "", fmt.Errorf("active crypto key version %q not configured", keyRing.activeVersion)
 	}
 
 	block, err := aes.NewCipher(key)
@@ -41,16 +56,42 @@ func EncryptMessage(plainText string) (string, error) {
 
 	ciphertext := gcm.Seal(nil, nonce, []byte(plainText), nil)
 	payload := append(nonce, ciphertext...)
-	return base64.StdEncoding.EncodeToString(payload), nil
+	return fmt.Sprintf("%s:%s", keyRing.activeVersion, base64.StdEncoding.EncodeToString(payload)), nil
 }
 
 func DecryptMessage(encryptedBase64 string) (string, error) {
-	key, err := loadCryptoKey()
+	keyRing, err := loadCryptoKeyRing()
 	if err != nil {
 		return "", err
 	}
 
-	payload, err := base64.StdEncoding.DecodeString(encryptedBase64)
+	version, payloadBase64, hasVersion := strings.Cut(strings.TrimSpace(encryptedBase64), ":")
+	if hasVersion {
+		key, ok := keyRing.keys[strings.TrimSpace(version)]
+		if !ok || len(key) == 0 {
+			return "", fmt.Errorf("unknown crypto key version %q", strings.TrimSpace(version))
+		}
+		return decryptMessagePayload(payloadBase64, key)
+	}
+
+	if activeKey, ok := keyRing.keys[keyRing.activeVersion]; ok && len(activeKey) > 0 {
+		if plaintext, decryptErr := decryptMessagePayload(encryptedBase64, activeKey); decryptErr == nil {
+			return plaintext, nil
+		}
+	}
+	for versionID, key := range keyRing.keys {
+		if versionID == keyRing.activeVersion || len(key) == 0 {
+			continue
+		}
+		if plaintext, decryptErr := decryptMessagePayload(encryptedBase64, key); decryptErr == nil {
+			return plaintext, nil
+		}
+	}
+	return "", fmt.Errorf("decrypt payload: no configured key could decrypt payload")
+}
+
+func decryptMessagePayload(payloadBase64 string, key []byte) (string, error) {
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payloadBase64))
 	if err != nil {
 		return "", fmt.Errorf("decode encrypted payload: %w", err)
 	}
@@ -78,18 +119,68 @@ func DecryptMessage(encryptedBase64 string) (string, error) {
 	return string(plaintext), nil
 }
 
-func loadCryptoKey() ([]byte, error) {
-	cachedCryptoKeyOnce.Do(func() {
+func loadCryptoKeyRing() (cryptoKeyRing, error) {
+	cachedCryptoKeyRingOnce.Do(func() {
 		rawKey := os.Getenv(appSecretKeyEnv)
 		if len(rawKey) != 32 {
-			cachedCryptoKeyErr = fmt.Errorf("%s must be exactly 32 bytes", appSecretKeyEnv)
+			cachedCryptoKeyRingErr = fmt.Errorf("%s must be exactly 32 bytes", appSecretKeyEnv)
 			return
 		}
-		cachedCryptoKey = []byte(rawKey)
+		keys := map[string][]byte{
+			defaultCryptoKeyVersion: []byte(rawKey),
+		}
+
+		rawVersionedKeys := strings.TrimSpace(os.Getenv(appSecretKeysEnv))
+		if rawVersionedKeys != "" {
+			entries := strings.Split(rawVersionedKeys, ",")
+			for _, entry := range entries {
+				versionedKey := strings.TrimSpace(entry)
+				if versionedKey == "" {
+					continue
+				}
+				parts := strings.SplitN(versionedKey, ":", 2)
+				if len(parts) != 2 {
+					cachedCryptoKeyRingErr = fmt.Errorf("invalid %s entry %q", appSecretKeysEnv, versionedKey)
+					return
+				}
+				versionID := strings.TrimSpace(parts[0])
+				keyValue := strings.TrimSpace(parts[1])
+				if versionID == "" {
+					cachedCryptoKeyRingErr = fmt.Errorf("empty key version in %s entry %q", appSecretKeysEnv, versionedKey)
+					return
+				}
+				if len(keyValue) != 32 {
+					cachedCryptoKeyRingErr = fmt.Errorf(
+						"%s key for version %q must be exactly 32 bytes",
+						appSecretKeysEnv,
+						versionID,
+					)
+					return
+				}
+				keys[versionID] = []byte(keyValue)
+			}
+		}
+
+		activeVersion := strings.TrimSpace(os.Getenv(appSecretKeyVersionEnv))
+		if activeVersion == "" {
+			activeVersion = defaultCryptoKeyVersion
+		}
+		if _, exists := keys[activeVersion]; !exists {
+			cachedCryptoKeyRingErr = fmt.Errorf(
+				"active key version %q not found in configured keys",
+				activeVersion,
+			)
+			return
+		}
+
+		cachedCryptoKeyRing = cryptoKeyRing{
+			activeVersion: activeVersion,
+			keys:          keys,
+		}
 	})
 
-	if cachedCryptoKeyErr != nil {
-		return nil, cachedCryptoKeyErr
+	if cachedCryptoKeyRingErr != nil {
+		return cryptoKeyRing{}, cachedCryptoKeyRingErr
 	}
-	return cachedCryptoKey, nil
+	return cachedCryptoKeyRing, nil
 }

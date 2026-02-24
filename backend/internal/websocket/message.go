@@ -18,14 +18,15 @@ import (
 )
 
 const (
-	messageQueueKey           = "msg_queue"
-	roomHistoryPrefix         = "room:history:"
-	roomHistoryTTL            = 21600
-	roomHistorySize           = 50
-	scyllaMessageTTL          = 21600
-	messageBreakMeta          = "message:break:"
-	roomKeyPrefix             = "room:"
-	DeletedMessagePlaceholder = "This message was deleted"
+	messageQueueKey            = "msg_queue"
+	roomHistoryPrefix          = "room:history:"
+	roomHistoryTTL             = 21600
+	roomHistorySize            = 50
+	scyllaMessageTTL           = 15 * 24 * 60 * 60
+	messageBreakMeta           = "message:break:"
+	roomKeyPrefix              = "room:"
+	roomMessageSoftExpiryTable = "room_message_soft_expiry"
+	DeletedMessagePlaceholder  = "This message was deleted"
 )
 
 type MessageService struct {
@@ -258,6 +259,7 @@ func (s *MessageService) ensureSchema() {
 
 	messagesTable := s.Scylla.Table("messages")
 	roomPinsTable := s.Scylla.Table("room_pins")
+	roomSoftExpiryTable := s.Scylla.Table(roomMessageSoftExpiryTable)
 	pinDiscussionCommentsTable := s.Scylla.Table("pin_discussion_comments")
 	query := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s (
@@ -313,6 +315,14 @@ func (s *MessageService) ensureSchema() {
 		) WITH CLUSTERING ORDER BY (created_at ASC, comment_id ASC)`,
 		pinDiscussionCommentsTable,
 	)
+	roomSoftExpiryQuery := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text PRIMARY KEY,
+			extended_expiry_time timestamp,
+			updated_at timestamp
+		)`,
+		roomSoftExpiryTable,
+	)
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -356,6 +366,20 @@ func (s *MessageService) ensureSchema() {
 	}
 	if lastErr != nil {
 		log.Printf("[message-service] ensure pin_discussion_comments schema failed: %v", lastErr)
+		return
+	}
+	lastErr = nil
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := safeExecScyllaQuery(s.Scylla.Session, roomSoftExpiryQuery); err == nil {
+			lastErr = nil
+			break
+		} else {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		}
+	}
+	if lastErr != nil {
+		log.Printf("[message-service] ensure room message soft-expiry schema failed: %v", lastErr)
 		return
 	}
 
@@ -545,21 +569,27 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 		return []models.Message{}, nil
 	}
 
-	messagesTable := s.Scylla.Table("messages")
-	query := fmt.Sprintf(
-		`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`,
-		messagesTable,
-	)
-	args := []interface{}{roomID, limit}
-	if before != nil {
-		query = fmt.Sprintf(
-			`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?`,
-			messagesTable,
-		)
-		args = []interface{}{roomID, *before, limit}
+	ctx := context.Background()
+	softCutoff, cutoffErr := s.resolveSoftMessageCutoff(ctx, roomID)
+	if cutoffErr != nil {
+		return nil, cutoffErr
 	}
 
-	iter := s.Scylla.Session.Query(query, args...).Iter()
+	messagesTable := s.Scylla.Table("messages")
+	query := fmt.Sprintf(
+		`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`,
+		messagesTable,
+	)
+	args := []interface{}{roomID, softCutoff, limit}
+	if before != nil {
+		query = fmt.Sprintf(
+			`SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s WHERE room_id = ? AND created_at < ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`,
+			messagesTable,
+		)
+		args = []interface{}{roomID, *before, softCutoff, limit}
+	}
+
+	iter := s.Scylla.Session.Query(query, args...).WithContext(ctx).Iter()
 
 	messages = make([]models.Message, 0, limit)
 	var dbRoomID string
@@ -581,6 +611,9 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 	var createdAt time.Time
 
 	for iter.Scan(&dbRoomID, &messageID, &senderID, &senderName, &content, &msgType, &mediaURL, &mediaType, &fileName, &isEdited, &editedAt, &hasBreakRoom, &breakRoomID, &breakJoinCount, &replyToMessageID, &replyToSnippet, &createdAt) {
+		if createdAt.Before(softCutoff) {
+			continue
+		}
 		if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
 			content = decrypted
 		}
@@ -615,6 +648,43 @@ func (s *MessageService) queryScyllaMessages(roomID string, limit int, before *t
 	}
 
 	return messages, nil
+}
+
+func (s *MessageService) resolveSoftMessageCutoff(ctx context.Context, roomID string) (time.Time, error) {
+	defaultCutoff := time.Now().UTC().Add(-time.Duration(roomHistoryTTL) * time.Second)
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil || roomID == "" {
+		return defaultCutoff, nil
+	}
+
+	if s.Redis != nil && s.Redis.Client != nil {
+		createdAtRaw, err := s.Redis.Client.HGet(ctx, roomKeyPrefix+roomID, "created_at").Result()
+		if err == nil {
+			if createdAtUnix, parseErr := strconv.ParseInt(strings.TrimSpace(createdAtRaw), 10, 64); parseErr == nil && createdAtUnix > 0 {
+				createdAtCutoff := time.Unix(createdAtUnix, 0).UTC()
+				if !createdAtCutoff.IsZero() && createdAtCutoff.Before(defaultCutoff) {
+					defaultCutoff = createdAtCutoff
+				}
+			}
+		}
+	}
+
+	softExpiryTable := s.Scylla.Table(roomMessageSoftExpiryTable)
+	query := fmt.Sprintf(
+		`SELECT extended_expiry_time FROM %s WHERE room_id = ? LIMIT 1`,
+		softExpiryTable,
+	)
+
+	var softCutoff time.Time
+	if err := s.Scylla.Session.Query(query, roomID).WithContext(ctx).Scan(&softCutoff); err != nil {
+		if err == gocql.ErrNotFound {
+			return defaultCutoff, nil
+		}
+		return time.Time{}, fmt.Errorf("resolve room soft-expiry cutoff: %w", err)
+	}
+	if softCutoff.IsZero() {
+		return defaultCutoff, nil
+	}
+	return softCutoff.UTC(), nil
 }
 
 func safeExecScyllaQuery(session *gocql.Session, query string, args ...interface{}) (err error) {

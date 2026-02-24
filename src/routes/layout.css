@@ -8,7 +8,7 @@
 	overflow-x: hidden;
 	overflow-x: clip;
 	background: var(--bg-primary);
-color: var(--text-primary);
+	color: var(--text-primary);
 }
 
 :global(*) {
@@ -31,11 +31,9 @@ color: var(--text-primary);
 		Helvetica,
 		Arial,
 		sans-serif;
-	background: #ececef;
-	color: #111111;
+	background: var(--bg-primary);
+	color: var(--text-primary);
 }
-
-
 
 
 

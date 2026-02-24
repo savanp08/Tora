@@ -39,6 +39,7 @@ const (
 	roomNameIndexPrefix  = "room:name:"
 	messageBreakPrefix   = "message:break:"
 	roomNameRetryLimit   = 3
+	roomSoftExpiryTable  = "room_message_soft_expiry"
 )
 
 var (
@@ -73,6 +74,7 @@ type RoomHandler struct {
 func NewRoomHandler(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *RoomHandler {
 	handler := &RoomHandler{redis: redisStore, scylla: scyllaStore}
 	handler.ensureRoomSchema()
+	handler.ensureRoomMessageSoftExpirySchema()
 	handler.ensurePinnedDiscussionSchema()
 	return handler
 }
@@ -1847,6 +1849,22 @@ func (h *RoomHandler) ensureRoomSchema() {
 	}
 }
 
+func (h *RoomHandler) ensureRoomMessageSoftExpirySchema() {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return
+	}
+
+	softExpiryTable := h.scylla.Table(roomSoftExpiryTable)
+	createQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		room_id text PRIMARY KEY,
+		extended_expiry_time timestamp,
+		updated_at timestamp
+	)`, softExpiryTable)
+	if err := h.scylla.Session.Query(createQuery).Exec(); err != nil {
+		log.Printf("[room] ensure message soft-expiry schema failed: %v", err)
+	}
+}
+
 func isSchemaAlreadyAppliedError(err error) bool {
 	if err == nil {
 		return false
@@ -2628,75 +2646,33 @@ func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string, 
 		return nil
 	}
 
-	messagesTable := h.scylla.Table("messages")
-	selectQuery := fmt.Sprintf(
-		`SELECT created_at, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet FROM %s WHERE room_id = ?`,
-		messagesTable,
-	)
-	upsertQuery := fmt.Sprintf(
-		`INSERT INTO %s (room_id, created_at, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL ?`,
-		messagesTable,
-	)
-	ttlSeconds := int(ttl / time.Second)
-
-	iter := h.scylla.Session.Query(selectQuery, roomID).WithContext(ctx).Iter()
-	var (
-		createdAt  time.Time
-		messageID  string
-		senderID   string
-		senderName string
-		content    string
-		msgType    string
-		mediaURL   string
-		mediaType  string
-		fileName   string
-		isEdited   bool
-		editedAt   time.Time
-		hasBreak   bool
-		breakID    string
-		breakCount int
-		replyToID  string
-		replySnip  string
-	)
-
-	refreshedCount := 0
-	for iter.Scan(&createdAt, &messageID, &senderID, &senderName, &content, &msgType, &mediaURL, &mediaType, &fileName, &isEdited, &editedAt, &hasBreak, &breakID, &breakCount, &replyToID, &replySnip) {
-		var editedAtArg interface{}
-		if !editedAt.IsZero() {
-			editedAtArg = editedAt
-		}
-		if err := h.scylla.Session.Query(
-			upsertQuery,
-			roomID,
-			createdAt,
-			messageID,
-			senderID,
-			senderName,
-			content,
-			msgType,
-			mediaURL,
-			mediaType,
-			fileName,
-			isEdited,
-			editedAtArg,
-			hasBreak,
-			breakID,
-			breakCount,
-			replyToID,
-			replySnip,
-			ttlSeconds,
-		).WithContext(ctx).Exec(); err != nil {
-			_ = iter.Close()
-			return err
-		}
-		refreshedCount++
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return nil
 	}
-	if err := iter.Close(); err != nil {
+
+	// Soft-expiry cutoff: only messages newer than this timestamp are visible.
+	softCutoff := time.Now().UTC().Add(-ttl)
+	softExpiryTable := h.scylla.Table(roomSoftExpiryTable)
+	upsertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, extended_expiry_time, updated_at) VALUES (?, ?, ?)`,
+		softExpiryTable,
+	)
+	if err := h.scylla.Session.Query(
+		upsertQuery,
+		roomID,
+		softCutoff,
+		time.Now().UTC(),
+	).WithContext(ctx).Exec(); err != nil {
 		return err
 	}
-	if refreshedCount > 0 {
-		log.Printf("[room] message ttl refreshed room_id=%s count=%d ttl_seconds=%d", roomID, refreshedCount, ttlSeconds)
-	}
+
+	log.Printf(
+		"[room] message soft-expiry refreshed room_id=%s cutoff=%s ttl_seconds=%d",
+		roomID,
+		softCutoff.UTC().Format(time.RFC3339Nano),
+		int64(ttl.Seconds()),
+	)
 	return nil
 }
 

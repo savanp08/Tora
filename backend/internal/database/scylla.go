@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -20,7 +21,7 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 	var (
 		cluster *gocql.ClusterConfig
 		session *gocql.Session
-		err     error  
+		err     error
 	)
 
 	keyspace := strings.TrimSpace(cfg.ScyllaKeyspace)
@@ -31,7 +32,7 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 	// --- MODE 1: ASTRA CLOUD (via ID & Token) ---
 	if cfg.AstraDatabaseID != "" && cfg.AstraToken != "" {
 		log.Printf("☁️  Astra: Connecting via API (ID: %s)...", cfg.AstraDatabaseID)
-		
+
 		// This uses the official NewClusterFromURL method you requested
 		cluster, err = gocqlastra.NewClusterFromURL(
 			"https://api.astra.datastax.com",
@@ -42,11 +43,11 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("astra config failed: %w", err)
 		}
-		
+
 		cluster.Keyspace = keyspace
 		cluster.Consistency = gocql.LocalQuorum
 
-	// --- MODE 2: LOCAL SCYLLA/DOCKER ---
+		// --- MODE 2: LOCAL SCYLLA/DOCKER ---
 	} else {
 		log.Println("🏠 Scylla: Connecting to Local Cluster...")
 		if len(cfg.ScyllaHosts) == 0 {
@@ -60,7 +61,7 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 	// Global Settings
 	cluster.ConnectTimeout = 30 * time.Second
 	cluster.Timeout = 30 * time.Second
-	
+
 	// --- CREATE SESSION ---
 	session, err = cluster.CreateSession()
 
@@ -68,14 +69,14 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 	// If local connection fails because keyspace is missing, create it
 	if err != nil && cfg.AstraDatabaseID == "" && (strings.Contains(err.Error(), "keyspace") || strings.Contains(err.Error(), "does not exist")) {
 		log.Println("⚠️  Local Keyspace missing. Creating it...")
-		
+
 		cluster.Keyspace = "" // Connect to system
 		sysSession, sysErr := cluster.CreateSession()
 		if sysErr == nil {
 			q := fmt.Sprintf("CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}", keyspace)
 			sysSession.Query(q).Exec()
 			sysSession.Close()
-			
+
 			// Retry original connection
 			cluster.Keyspace = keyspace
 			session, err = cluster.CreateSession()
@@ -107,4 +108,13 @@ func (s *ScyllaStore) Table(name string) string {
 		return name
 	}
 	return s.Keyspace + "." + name
+}
+
+func (s *ScyllaStore) Ping(ctx context.Context) error {
+	if s == nil || s.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	var releaseVersion string
+	query := `SELECT release_version FROM system.local LIMIT 1`
+	return s.Session.Query(query).WithContext(ctx).Scan(&releaseVersion)
 }

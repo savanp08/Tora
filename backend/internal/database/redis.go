@@ -47,6 +47,13 @@ func (r *RedisStore) Publish(ctx context.Context, channel string, payload []byte
 	return r.Client.Publish(ctx, channel, payload).Err()
 }
 
+func (r *RedisStore) Ping(ctx context.Context) error {
+	if r == nil || r.Client == nil {
+		return fmt.Errorf("redis client is not configured")
+	}
+	return r.Client.Ping(ctx).Err()
+}
+
 func (r *RedisStore) Close() error {
 	return r.Client.Close()
 }
