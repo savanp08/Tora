@@ -18,6 +18,8 @@
 	export let isDarkMode = false;
 	export let messageLimit = MESSAGE_TEXT_MAX_BYTES;
 	export let currentUsername = 'You';
+	export let roomId = '';
+	export let disabled = false;
 
 	let mediaInput: HTMLInputElement | null = null;
 	let fileInput: HTMLInputElement | null = null;
@@ -48,6 +50,16 @@
 	$: taskDraftReady = taskDraftOpen && taskDraftTitle.trim() !== '' && taskDraftItems.length > 0;
 	$: showSendButton =
 		!isRecording && !taskDraftOpen && (!!attachedFile || normalizedDraftMessage.length > 0);
+	$: composerDisabled = disabled || isProcessingAttachment || isRecording || taskDraftOpen;
+	$: composerPlaceholder = disabled
+		? 'This room has expired. Extend time to continue chatting.'
+		: isRecording
+			? 'Recording... Click mic to send.'
+			: taskDraftOpen
+				? 'Task mode active. Press send when ready.'
+				: attachedFile
+					? 'Add a caption (optional)'
+					: 'Type a message';
 
 	const dispatch = createEventDispatcher<{
 		send:
@@ -88,10 +100,16 @@
 	});
 
 	function toggleAttachMenu() {
+		if (disabled) {
+			return;
+		}
 		showAttachMenu = !showAttachMenu;
 	}
 
 	function chooseAttachmentType(type: 'media' | 'file' | 'task') {
+		if (disabled) {
+			return;
+		}
 		showAttachMenu = false;
 		attachError = '';
 		taskDraftError = '';
@@ -147,6 +165,9 @@
 	}
 
 	async function onFilePicked(event: Event, pickerType: 'media' | 'file') {
+		if (disabled) {
+			return;
+		}
 		const target = event.currentTarget as HTMLInputElement;
 		const selected = target.files?.[0] ?? null;
 		target.value = '';
@@ -173,7 +194,7 @@
 		attachError = '';
 		try {
 			const compressed = await compressMedia(attachedFile);
-			const uploaded = await uploadToR2(compressed);
+			const uploaded = await uploadToR2(compressed, roomId);
 			dispatch('send', {
 				type: attachedMessageType,
 				content: uploaded.fileUrl,
@@ -205,7 +226,7 @@
 	}
 
 	function onSend() {
-		if (isProcessingAttachment || isOverMessageLimit || isRecording) {
+		if (disabled || isProcessingAttachment || isOverMessageLimit || isRecording) {
 			return;
 		}
 		if (taskDraftOpen) {
@@ -220,6 +241,9 @@
 	}
 
 	function onComposerKeyDown(event: KeyboardEvent) {
+		if (disabled) {
+			return;
+		}
 		if (event.key === 'Enter' && !event.shiftKey) {
 			event.preventDefault();
 			onSend();
@@ -227,6 +251,9 @@
 	}
 
 	function onComposerInput() {
+		if (disabled) {
+			return;
+		}
 		dispatch('typing', { value: draftMessage });
 	}
 
@@ -262,7 +289,8 @@
 		const payload = new FormData();
 		const fileName = `voice-message-${Date.now()}.webm`;
 		payload.append('file', audioBlob, fileName);
-		const res = await fetch(`${API_BASE}/api/upload`, {
+		const roomIdParam = roomId ? `?roomId=${encodeURIComponent(roomId)}` : '';
+		const res = await fetch(`${API_BASE}/api/upload${roomIdParam}`, {
 			method: 'POST',
 			body: payload
 		});
@@ -307,7 +335,7 @@
 	}
 
 	async function toggleRecording() {
-		if (isProcessingAttachment || attachedFile || taskDraftOpen) {
+		if (disabled || isProcessingAttachment || attachedFile || taskDraftOpen) {
 			return;
 		}
 
@@ -624,7 +652,7 @@
 				type="button"
 				class="attach-button"
 				on:click={toggleAttachMenu}
-				disabled={isProcessingAttachment || isRecording}
+				disabled={disabled || isProcessingAttachment || isRecording}
 				aria-label="Attach"
 				title="Attach"
 			>
@@ -651,23 +679,18 @@
 		<textarea
 			bind:value={draftMessage}
 			rows="1"
-			placeholder={isRecording
-				? 'Recording... Click mic to send.'
-				: taskDraftOpen
-					? 'Task mode active. Press send when ready.'
-					: attachedFile
-						? 'Add a caption (optional)'
-						: 'Type a message'}
+			placeholder={composerPlaceholder}
 			on:input={onComposerInput}
 			on:keydown={onComposerKeyDown}
-			disabled={isProcessingAttachment || isRecording || taskDraftOpen}
+			disabled={composerDisabled}
 		></textarea>
 		{#if showSendButton}
 			<button
 				type="button"
 				class="send-button"
 				on:click={onSend}
-				disabled={isProcessingAttachment ||
+				disabled={disabled ||
+					isProcessingAttachment ||
 					isOverMessageLimit ||
 					isRecording ||
 					(taskDraftOpen && !taskDraftReady)}
@@ -687,7 +710,7 @@
 				type="button"
 				class="mic-button {isRecording ? 'recording' : ''}"
 				on:click={toggleRecording}
-				disabled={isProcessingAttachment || !!attachedFile || taskDraftOpen}
+				disabled={disabled || isProcessingAttachment || !!attachedFile || taskDraftOpen}
 				aria-label={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 				title={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 			>

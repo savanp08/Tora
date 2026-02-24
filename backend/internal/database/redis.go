@@ -24,6 +24,9 @@ func InitRedis(addr, password string) *redis.Client {
 	if _, err := rdb.Ping(Ctx).Result(); err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
+	if err := enableKeyspaceExpiryEvents(Ctx, rdb); err != nil {
+		log.Printf("⚠️  Redis keyspace notification setup failed: %v", err)
+	}
 
 	log.Println("✅ Connected to Redis")
 	return rdb
@@ -39,8 +42,18 @@ func NewRedisStore(addr, password string) (*RedisStore, error) {
 	if _, err := client.Ping(Ctx).Result(); err != nil {
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
 	}
+	if err := enableKeyspaceExpiryEvents(Ctx, client); err != nil {
+		log.Printf("⚠️  Redis keyspace notification setup failed: %v", err)
+	}
 
 	return &RedisStore{Client: client}, nil
+}
+
+func enableKeyspaceExpiryEvents(ctx context.Context, client *redis.Client) error {
+	if client == nil {
+		return fmt.Errorf("redis client is not configured")
+	}
+	return client.ConfigSet(ctx, "notify-keyspace-events", "Ex").Err()
 }
 
 func (r *RedisStore) Publish(ctx context.Context, channel string, payload []byte) error {

@@ -76,7 +76,7 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 		return fmt.Errorf("scylla persistence disabled after repeated panics")
 	}
 
-	ttlSeconds := s.resolveRoomTTLSeconds(context.Background(), msg.RoomID)
+	ttlSeconds := scyllaMessageTTL
 	messagesTable := s.Scylla.Table("messages")
 	query := fmt.Sprintf(
 		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
@@ -998,7 +998,7 @@ func (s *MessageService) CreatePinnedDiscussionComment(
 		return models.Message{}, fmt.Errorf("scylla session is not configured")
 	}
 	commentID := generateDiscussionCommentID(createdAt)
-	ttlSeconds := s.resolveRoomTTLSeconds(ctx, roomID)
+	ttlSeconds := scyllaMessageTTL
 	commentsTable := s.Scylla.Table("pin_discussion_comments")
 	insertQuery := fmt.Sprintf(
 		`INSERT INTO %s (room_id, pin_message_id, created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,

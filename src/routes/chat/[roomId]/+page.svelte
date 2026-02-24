@@ -186,6 +186,8 @@
 	let discussionTaskTracker = '';
 	let identityReady = !browser;
 	let roomExpiryTickMs = Date.now();
+	let activeRoomRemainingMs = 0;
+	let isRoomExpired = false;
 	let serverClockOffsetMs = 0;
 	let serverNowAnchorMs = 0;
 	let serverNowAnchorPerfMs = 0;
@@ -250,6 +252,8 @@
 	$: activeLastReadTimestamp = getLastReadTimestamp(roomId);
 	$: activeTypingUsers = getActiveTypingUsers(roomId);
 	$: typingIndicatorText = formatTypingIndicator(activeTypingUsers);
+	$: activeRoomRemainingMs = roomId ? getRoomRemainingMs(roomId, roomExpiryTickMs) : 0;
+	$: isRoomExpired = roomId ? getRoomExpiry(roomId) > 0 && activeRoomRemainingMs <= 0 : false;
 	$: isLoadingOlderHistory = historyLoadingByRoom[roomId] ?? false;
 	$: hasMoreOlderHistory = historyHasMoreByRoom[roomId] ?? true;
 	$: myRooms = filterThreadsByStatus(roomThreads, 'joined');
@@ -3651,13 +3655,10 @@
 	}
 
 	function getRemainingHoursLabel(targetRoomId: string, tickMs: number) {
-		const expiry = getRoomExpiry(targetRoomId);
-		if (!expiry) {
+		const remainingMs = getRoomRemainingMs(targetRoomId, tickMs);
+		if (!Number.isFinite(remainingMs) || remainingMs === Number.POSITIVE_INFINITY) {
 			return '--';
 		}
-
-		const now = getApproxServerNowMs(tickMs);
-		const remainingMs = expiry - now;
 		if (remainingMs <= 0) {
 			return 'Expired';
 		}
@@ -3675,6 +3676,15 @@
 		const days = Math.floor(remainingMs / 86400000);
 		const hours = Math.floor((remainingMs % 86400000) / 3600000);
 		return `${days}d ${hours}h`;
+	}
+
+	function getRoomRemainingMs(targetRoomId: string, tickMs: number) {
+		const expiry = getRoomExpiry(targetRoomId);
+		if (!expiry) {
+			return Number.POSITIVE_INFINITY;
+		}
+		const now = getApproxServerNowMs(tickMs);
+		return expiry - now;
 	}
 </script>
 
@@ -3761,6 +3771,7 @@
 			on:deleteSelected={deleteSelectedMessagesBatch}
 		/>
 
+		<div class="chat-window-shell" class:is-expired={isRoomExpired}>
 			<ChatWindow
 				bind:this={chatWindowRef}
 				{roomId}
@@ -3797,12 +3808,15 @@
 				on:readProgress={onChatReadProgress}
 				on:toggleTask={onTaskToggle}
 				on:addTask={onTaskAdd}
-		/>
+			/>
+		</div>
 
 		{#if isMember}
 			<ChatComposer
 				bind:draftMessage
 				bind:attachedFile
+				{roomId}
+				disabled={isRoomExpired}
 				{activeReply}
 				{isDarkMode}
 				{currentUsername}
@@ -3902,6 +3916,17 @@
 		flex-direction: column;
 		overflow: hidden;
 		background: linear-gradient(180deg, #f3f6fa 0%, #e9edf4 100%);
+	}
+
+	.chat-window-shell {
+		display: flex;
+		flex: 1;
+		min-height: 0;
+	}
+
+	.chat-window-shell.is-expired {
+		opacity: 0.5;
+		pointer-events: none;
 	}
 
 	.online-pane {

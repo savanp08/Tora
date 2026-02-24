@@ -46,7 +46,7 @@ func New(
 
 	authHandler := handlers.NewAuthHandler()
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
-	uploadHandler := handlers.NewUploadHandler(r2Client, usageTracker)
+	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		type dependencyStatus struct {

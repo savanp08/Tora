@@ -24,6 +24,7 @@ const (
 	maxDiscussionCommentsLimit      = 500
 	maxDiscussionCommentContentRune = 2000
 	deletedDiscussionPlaceholder    = "This message was deleted"
+	hardScyllaTTLSeconds            = 15 * 24 * 60 * 60
 )
 
 type RoomMessagesResponse struct {
@@ -102,6 +103,21 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 		),
 	)
 	ctx := r.Context()
+	roomAlive, aliveErr := h.isRoomAliveInRedis(ctx, roomID)
+	if aliveErr != nil {
+		log.Printf("[room-messages] redis gatekeeper failed room=%s err=%v", roomID, aliveErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room status"})
+		return
+	}
+	if !roomAlive {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RoomMessagesResponse{
+			Messages: []models.Message{},
+			HasMore:  false,
+		})
+		return
+	}
 
 	messages, hasMore, err := h.queryRoomMessagesPage(
 		ctx,
@@ -218,8 +234,9 @@ func (h *RoomHandler) UpsertRoomPin(w http.ResponseWriter, r *http.Request) {
 
 	roomPinsTable := h.scylla.Table("room_pins")
 	insertQuery := fmt.Sprintf(
-		`INSERT INTO %s (room_id, created_at, message_id, type) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO %s (room_id, created_at, message_id, type) VALUES (?, ?, ?, ?) USING TTL %d`,
 		roomPinsTable,
+		hardScyllaTTLSeconds,
 	)
 	if err := h.scylla.Session.Query(
 		insertQuery,
@@ -327,6 +344,19 @@ func (h *RoomHandler) GetPinnedDiscussionComments(w http.ResponseWriter, r *http
 	}
 
 	ctx := r.Context()
+	roomAlive, aliveErr := h.isRoomAliveInRedis(ctx, roomID)
+	if aliveErr != nil {
+		log.Printf("[pin-discussion] redis gatekeeper failed room=%s err=%v", roomID, aliveErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room status"})
+		return
+	}
+	if !roomAlive {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RoomDiscussionCommentsResponse{Comments: []models.Message{}})
+		return
+	}
+
 	isMember, err := h.isRoomMember(ctx, roomID, userID)
 	if err != nil {
 		log.Printf("[pin-discussion] membership check failed room=%s user=%s err=%v", roomID, userID, err)
@@ -419,8 +449,9 @@ func (h *RoomHandler) CreatePinnedDiscussionComment(w http.ResponseWriter, r *ht
 
 	commentsTable := h.scylla.Table("pin_discussion_comments")
 	insertQuery := fmt.Sprintf(
-		`INSERT INTO %s (room_id, pin_message_id, created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO %s (room_id, pin_message_id, created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		commentsTable,
+		hardScyllaTTLSeconds,
 	)
 	if err := h.scylla.Session.Query(
 		insertQuery,
@@ -877,6 +908,21 @@ func (h *RoomHandler) queryRoomMessagesPage(
 	}
 
 	return messages, hasMore, nil
+}
+
+func (h *RoomHandler) isRoomAliveInRedis(ctx context.Context, roomID string) (bool, error) {
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return true, nil
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return false, nil
+	}
+	exists, err := h.redis.Client.Exists(ctx, roomKey(normalizedRoomID)).Result()
+	if err != nil {
+		return false, err
+	}
+	return exists > 0, nil
 }
 
 func (h *RoomHandler) resolveRoomMessageSoftCutoff(ctx context.Context, roomID string) (time.Time, error) {

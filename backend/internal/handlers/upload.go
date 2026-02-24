@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
+	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/monitor"
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
@@ -38,6 +39,7 @@ var (
 
 type UploadHandler struct {
 	r2      *storage.R2Client
+	redis   *database.RedisStore
 	tracker *monitor.UsageTracker
 }
 
@@ -45,6 +47,7 @@ type GenerateUploadURLRequest struct {
 	Filename string `json:"filename"`
 	FileType string `json:"filetype"`
 	FileSize int64  `json:"filesize"`
+	RoomID   string `json:"roomId,omitempty"`
 }
 
 type GenerateUploadURLResponse struct {
@@ -53,8 +56,12 @@ type GenerateUploadURLResponse struct {
 	FileID    string `json:"fileId"`
 }
 
-func NewUploadHandler(r2Client *storage.R2Client, tracker *monitor.UsageTracker) *UploadHandler {
-	return &UploadHandler{r2: r2Client, tracker: tracker}
+func NewUploadHandler(
+	r2Client *storage.R2Client,
+	redisStore *database.RedisStore,
+	tracker *monitor.UsageTracker,
+) *UploadHandler {
+	return &UploadHandler{r2: r2Client, redis: redisStore, tracker: tracker}
 }
 
 func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +153,12 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 		FileURL:   fileURL,
 		FileID:    fileID,
 	})
+
+	normalizedRoomID := normalizeRoomID(req.RoomID)
+	if normalizedRoomID != "" {
+		objectKey := h.resolveObjectKeyFromFileURL(fileURL)
+		h.trackUploadedFile(r.Context(), normalizedRoomID, objectKey)
+	}
 
 	if h.tracker != nil {
 		h.tracker.RecordUpload(req.FileSize)
@@ -278,6 +291,12 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 		FileURL:   fileURL,
 		FileID:    fileID,
 	})
+
+	normalizedRoomID := normalizeRoomID(firstNonEmpty(r.URL.Query().Get("roomId"), r.FormValue("roomId")))
+	if normalizedRoomID != "" {
+		objectKey := h.resolveObjectKeyFromFileURL(fileURL)
+		h.trackUploadedFile(r.Context(), normalizedRoomID, objectKey)
+	}
 }
 
 func (h *UploadHandler) ServeObject(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +473,85 @@ func sanitizeHeaderFilename(raw string) string {
 		return "file"
 	}
 	return replaced
+}
+
+func (h *UploadHandler) resolveObjectKeyFromFileURL(fileURL string) string {
+	if h == nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(fileURL)
+	if trimmed == "" {
+		return ""
+	}
+
+	const localPrefix = "/api/upload/object/"
+	extractLocal := func(value string) string {
+		escaped := strings.TrimPrefix(value, localPrefix)
+		escaped = strings.TrimPrefix(escaped, "/")
+		if escaped == "" {
+			return ""
+		}
+		if decoded, err := neturl.PathUnescape(escaped); err == nil {
+			return strings.TrimPrefix(strings.TrimSpace(decoded), "/")
+		}
+		return strings.TrimPrefix(strings.TrimSpace(escaped), "/")
+	}
+
+	if strings.HasPrefix(trimmed, localPrefix) {
+		return extractLocal(trimmed)
+	}
+
+	parsed, err := neturl.Parse(trimmed)
+	if err != nil {
+		return ""
+	}
+	pathValue := strings.TrimSpace(parsed.Path)
+	if pathValue == "" {
+		return ""
+	}
+	if strings.HasPrefix(pathValue, localPrefix) {
+		return extractLocal(pathValue)
+	}
+
+	key := strings.TrimPrefix(pathValue, "/")
+	if h.r2 != nil && strings.TrimSpace(h.r2.Bucket) != "" {
+		bucketPrefix := strings.TrimSpace(h.r2.Bucket) + "/"
+		key = strings.TrimPrefix(key, bucketPrefix)
+	}
+	return strings.TrimSpace(key)
+}
+
+func (h *UploadHandler) trackUploadedFile(ctx context.Context, roomID, objectKey string) {
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedObjectKey := strings.TrimSpace(objectKey)
+	if normalizedRoomID == "" || normalizedObjectKey == "" {
+		return
+	}
+
+	roomRedisKey := roomKey(normalizedRoomID)
+	exists, err := h.redis.Client.Exists(ctx, roomRedisKey).Result()
+	if err != nil || exists == 0 {
+		return
+	}
+
+	filesKey := roomFilesKey(normalizedRoomID)
+	if err := h.redis.Client.SAdd(ctx, filesKey, normalizedObjectKey).Err(); err != nil {
+		log.Printf("[upload] failed to index room file room=%s key=%s err=%v", normalizedRoomID, normalizedObjectKey, err)
+		return
+	}
+
+	const roomFilesGraceTTL = 5 * time.Minute
+	roomTTL, ttlErr := h.redis.Client.TTL(ctx, roomRedisKey).Result()
+	nextTTL := roomFilesGraceTTL
+	if ttlErr == nil && roomTTL > 0 {
+		nextTTL = roomTTL + roomFilesGraceTTL
+	}
+	if err := h.redis.Client.Expire(ctx, filesKey, nextTTL).Err(); err != nil {
+		log.Printf("[upload] failed to set room file index ttl room=%s key=%s err=%v", normalizedRoomID, filesKey, err)
+	}
 }
 
 func extractClientIP(r *http.Request) string {

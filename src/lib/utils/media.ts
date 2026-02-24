@@ -29,7 +29,10 @@ export async function compressMedia(file: File): Promise<File> {
 	return file;
 }
 
-export async function uploadToR2(file: File): Promise<{ fileUrl: string; fileId: string }> {
+export async function uploadToR2(
+	file: File,
+	roomId = ''
+): Promise<{ fileUrl: string; fileId: string }> {
 	let presignedData:
 		| (Partial<PresignedUploadResponse> & Record<string, unknown>)
 		| null = null;
@@ -42,7 +45,8 @@ export async function uploadToR2(file: File): Promise<{ fileUrl: string; fileId:
 			body: JSON.stringify({
 				filename: file.name,
 				filetype: file.type || 'application/octet-stream',
-				filesize: file.size
+				filesize: file.size,
+				roomId
 			})
 		});
 		presignedData = (await presignedRes
@@ -76,12 +80,12 @@ export async function uploadToR2(file: File): Promise<{ fileUrl: string; fileId:
 				fileId: String(presignedData.fileId)
 			};
 		} catch {
-			return uploadViaProxy(file, true);
+			return uploadViaProxy(file, roomId, true);
 		}
 	}
 
 	try {
-		return await uploadViaProxy(file, false);
+		return await uploadViaProxy(file, roomId, false);
 	} catch (proxyError) {
 		if (presignedError) {
 			throw new Error(`${presignedError}. Proxy upload failed.`);
@@ -131,11 +135,19 @@ function toAbsoluteAPIURL(value: string): string {
 
 async function uploadViaProxy(
 	file: File,
+	roomId: string,
 	alreadyCountedByPresigned: boolean
 ): Promise<{ fileUrl: string; fileId: string }> {
 	const payload = new FormData();
 	payload.append('file', file, file.name);
-	const endpoint = `${API_BASE}/api/upload${alreadyCountedByPresigned ? '?counted=1' : ''}`;
+	const queryParams = new URLSearchParams();
+	if (alreadyCountedByPresigned) {
+		queryParams.set('counted', '1');
+	}
+	if (roomId) {
+		queryParams.set('roomId', roomId);
+	}
+	const endpoint = `${API_BASE}/api/upload${queryParams.toString() ? `?${queryParams.toString()}` : ''}`;
 
 	const res = await fetch(endpoint, {
 		method: 'POST',

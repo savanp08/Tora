@@ -159,3 +159,35 @@ func (r *R2Client) GetObject(ctx context.Context, objectKey string) (*minio.Obje
 
 	return obj, info, nil
 }
+
+func (r *R2Client) DeleteObjects(ctx context.Context, objectKeys []string) error {
+	if r == nil || r.Client == nil {
+		return fmt.Errorf("r2 client is not configured")
+	}
+	if len(objectKeys) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(objectKeys))
+	objectsCh := make(chan minio.ObjectInfo, len(objectKeys))
+	for _, rawKey := range objectKeys {
+		key := strings.TrimPrefix(strings.TrimSpace(rawKey), "/")
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		objectsCh <- minio.ObjectInfo{Key: key}
+	}
+	close(objectsCh)
+
+	var firstErr error
+	for removeErr := range r.Client.RemoveObjects(ctx, r.Bucket, objectsCh, minio.RemoveObjectsOptions{}) {
+		if removeErr.Err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("remove object %s: %w", removeErr.ObjectName, removeErr.Err)
+		}
+	}
+	return firstErr
+}

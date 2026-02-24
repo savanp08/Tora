@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
@@ -60,9 +64,128 @@ func main() {
 	}
 
 	mainRouter := router.New(hub, redisStore, scyllaStore, r2Client, usageTracker)
+	go startRoomExpiryCleanupWorker(redisStore, scyllaStore, r2Client)
 
 	log.Printf("📡 Server listening on port %s", cfg.Port)
 	if err := http.ListenAndServe(":"+cfg.Port, mainRouter); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+func startRoomExpiryCleanupWorker(
+	redisStore *database.RedisStore,
+	scyllaStore *database.ScyllaStore,
+	r2Client *storage.R2Client,
+) {
+	if redisStore == nil || redisStore.Client == nil {
+		log.Printf("[expiry-worker] skipped: redis is unavailable")
+		return
+	}
+
+	ctx := context.Background()
+	const keyEventChannel = "__keyevent@0__:expired"
+	for {
+		pubsub := redisStore.Client.Subscribe(ctx, keyEventChannel)
+		if _, err := pubsub.Receive(ctx); err != nil {
+			log.Printf("[expiry-worker] subscribe failed: %v", err)
+			_ = pubsub.Close()
+			time.Sleep(time.Second)
+			continue
+		}
+		log.Printf("[expiry-worker] listening on redis keyspace notifications channel=%s", keyEventChannel)
+
+		channel := pubsub.Channel()
+		for message := range channel {
+			if message == nil {
+				continue
+			}
+			roomID := extractRoomIDFromExpiredKey(message.Payload)
+			if roomID == "" {
+				continue
+			}
+			go cleanupExpiredRoom(context.Background(), redisStore, scyllaStore, r2Client, roomID)
+		}
+
+		_ = pubsub.Close()
+		time.Sleep(time.Second)
+	}
+}
+
+func cleanupExpiredRoom(
+	ctx context.Context,
+	redisStore *database.RedisStore,
+	scyllaStore *database.ScyllaStore,
+	r2Client *storage.R2Client,
+	roomID string,
+) {
+	normalizedRoomID := normalizeRoomIDForCleanup(roomID)
+	if normalizedRoomID == "" {
+		return
+	}
+
+	filesKey := fmt.Sprintf("room:%s:files", normalizedRoomID)
+	var objectKeys []string
+	if redisStore != nil && redisStore.Client != nil {
+		keys, err := redisStore.Client.SMembers(ctx, filesKey).Result()
+		if err != nil {
+			log.Printf("[expiry-worker] room file index lookup failed room=%s err=%v", normalizedRoomID, err)
+		} else {
+			objectKeys = keys
+		}
+	}
+
+	if r2Client != nil && len(objectKeys) > 0 {
+		deleteCtx, cancelDelete := context.WithTimeout(ctx, 45*time.Second)
+		if err := r2Client.DeleteObjects(deleteCtx, objectKeys); err != nil {
+			log.Printf("[expiry-worker] r2 cleanup failed room=%s files=%d err=%v", normalizedRoomID, len(objectKeys), err)
+		} else {
+			log.Printf("[expiry-worker] r2 cleanup complete room=%s files=%d", normalizedRoomID, len(objectKeys))
+		}
+		cancelDelete()
+	}
+
+	if redisStore != nil && redisStore.Client != nil {
+		if err := redisStore.Client.Del(ctx, filesKey).Err(); err != nil {
+			log.Printf("[expiry-worker] failed to clear room file index room=%s err=%v", normalizedRoomID, err)
+		}
+	}
+
+	if scyllaStore != nil && scyllaStore.Session != nil {
+		deleteCtx, cancelDelete := context.WithTimeout(ctx, 30*time.Second)
+		messagesTable := scyllaStore.Table("messages")
+		deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ?`, messagesTable)
+		if err := scyllaStore.Session.Query(deleteQuery, normalizedRoomID).WithContext(deleteCtx).Exec(); err != nil {
+			log.Printf("[expiry-worker] scylla partition delete failed room=%s err=%v", normalizedRoomID, err)
+		} else {
+			log.Printf("[expiry-worker] scylla partition deleted room=%s", normalizedRoomID)
+		}
+		cancelDelete()
+	}
+}
+
+func extractRoomIDFromExpiredKey(key string) string {
+	trimmed := strings.TrimSpace(key)
+	if !strings.HasPrefix(trimmed, "room:") {
+		return ""
+	}
+	withoutPrefix := strings.TrimPrefix(trimmed, "room:")
+	if withoutPrefix == "" || strings.Contains(withoutPrefix, ":") {
+		return ""
+	}
+	return normalizeRoomIDForCleanup(withoutPrefix)
+}
+
+func normalizeRoomIDForCleanup(raw string) string {
+	candidate := strings.ToLower(strings.TrimSpace(raw))
+	if candidate == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	for _, ch := range candidate {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+			builder.WriteRune(ch)
+		}
+	}
+	return builder.String()
 }

@@ -1964,7 +1964,11 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 	updatedAt := time.Now().UTC()
 
 	roomsTable := h.scylla.Table("rooms")
-	query := fmt.Sprintf(`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, roomsTable)
+	query := fmt.Sprintf(
+		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		roomsTable,
+		hardScyllaTTLSeconds,
+	)
 	if err := h.scylla.Session.Query(
 		query,
 		roomID,
@@ -2856,6 +2860,10 @@ func messageBreakKey(messageID string) string {
 
 func roomHistoryKey(roomID string) string {
 	return "room:history:" + roomID
+}
+
+func roomFilesKey(roomID string) string {
+	return "room:" + roomID + ":files"
 }
 
 func roomCodeKey(roomCode string) string {
