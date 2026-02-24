@@ -35,6 +35,7 @@
 		joinBreakRoom: { roomId: string };
 		joinRoom: void;
 		messageSelect: { messageId: string };
+		openPinnedDiscussion: { messageId: string };
 		focusHandled: { messageId: string };
 		reply: { messageId: string; senderName: string; content: string };
 		editMessage: { messageId: string; content: string };
@@ -45,7 +46,6 @@
 		readProgress: { isNearBottom: boolean; lastSeenMessageId: string };
 		toggleTask: { messageId: string; taskIndex: number };
 		addTask: { messageId: string; text: string };
-		discuss: { messageId: string };
 	}>();
 
 	const COLLAPSED_MESSAGE_LENGTH = 500;
@@ -69,6 +69,9 @@
 	let unreadDividerAnchorId = '';
 	let unreadDividerCount = 0;
 	let scrollTopByRoomId: Record<string, number> = {};
+	let compactMineActionsByMessageID: Record<string, boolean> = {};
+	let gutterMeasureFrame: number | null = null;
+	let resizeMeasureHandler: (() => void) | null = null;
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -139,6 +142,7 @@
 		previousRoomId = roomId;
 		previousIsVisible = isVisible;
 		tryFocusMessage();
+		scheduleCompactMineActionMeasure();
 	});
 
 	onDestroy(() => {
@@ -153,14 +157,35 @@
 			topObserver.disconnect();
 			topObserver = null;
 		}
+		if (typeof window !== 'undefined' && resizeMeasureHandler) {
+			window.removeEventListener('resize', resizeMeasureHandler);
+			resizeMeasureHandler = null;
+		}
+		if (typeof window !== 'undefined' && gutterMeasureFrame !== null) {
+			window.cancelAnimationFrame(gutterMeasureFrame);
+			gutterMeasureFrame = null;
+		}
 	});
 
 	onMount(() => {
 		setupTopObserver();
+		if (typeof window !== 'undefined') {
+			resizeMeasureHandler = () => scheduleCompactMineActionMeasure();
+			window.addEventListener('resize', resizeMeasureHandler);
+			scheduleCompactMineActionMeasure();
+		}
 		return () => {
 			if (topObserver) {
 				topObserver.disconnect();
 				topObserver = null;
+			}
+			if (typeof window !== 'undefined' && resizeMeasureHandler) {
+				window.removeEventListener('resize', resizeMeasureHandler);
+				resizeMeasureHandler = null;
+			}
+			if (typeof window !== 'undefined' && gutterMeasureFrame !== null) {
+				window.cancelAnimationFrame(gutterMeasureFrame);
+				gutterMeasureFrame = null;
 			}
 		};
 	});
@@ -226,6 +251,68 @@
 			window.removeEventListener('pointerdown', clearFocusOnPointerDown, true);
 			clearFocusOnPointerDown = null;
 		}
+	}
+
+	function scheduleCompactMineActionMeasure() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		if (gutterMeasureFrame !== null) {
+			return;
+		}
+		gutterMeasureFrame = window.requestAnimationFrame(() => {
+			gutterMeasureFrame = null;
+			measureCompactMineActions();
+		});
+	}
+
+	function measureCompactMineActions() {
+		if (!viewport || !isVisible) {
+			if (Object.keys(compactMineActionsByMessageID).length > 0) {
+				compactMineActionsByMessageID = {};
+			}
+			return;
+		}
+		const next: Record<string, boolean> = {};
+		const rows = viewport.querySelectorAll<HTMLElement>('.message-row.mine');
+		for (const row of rows) {
+			const bubble = row.querySelector<HTMLElement>('.bubble.mine[data-message-id]');
+			const messageID = bubble?.dataset.messageId || '';
+			if (!bubble || !messageID) {
+				continue;
+			}
+			const pinButton = row.querySelector<HTMLElement>('.message-gutter.mine .gutter-pin-btn');
+			const actionsWrap = row.querySelector<HTMLElement>('.message-gutter.mine .gutter-actions.mine-actions');
+			if (!pinButton || !actionsWrap) {
+				continue;
+			}
+			const actionButton = actionsWrap.querySelector<HTMLElement>('.gutter-action-btn');
+			const pinHeight = pinButton.getBoundingClientRect().height;
+			const actionHeight = actionButton?.getBoundingClientRect().height ?? 28;
+			const bubbleHeight = bubble.getBoundingClientRect().height;
+			const verticalGap = 10;
+			const requiredVerticalHeight = pinHeight + actionHeight + actionHeight + verticalGap;
+			if (bubbleHeight < requiredVerticalHeight) {
+				next[messageID] = true;
+			}
+		}
+		if (!equalBooleanMap(compactMineActionsByMessageID, next)) {
+			compactMineActionsByMessageID = next;
+		}
+	}
+
+	function equalBooleanMap(left: Record<string, boolean>, right: Record<string, boolean>) {
+		const leftKeys = Object.keys(left);
+		const rightKeys = Object.keys(right);
+		if (leftKeys.length !== rightKeys.length) {
+			return false;
+		}
+		for (const key of leftKeys) {
+			if (left[key] !== right[key]) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	function getVisibleMessageKey(entries: ChatMessage[]) {
@@ -834,12 +921,28 @@
 			{@const totalReplies = getTotalReplies(message)}
 			{@const branchesCreated = getBranchesCreated(message)}
 			{@const replyPreview = getReplyPreview(message)}
-			<div class="message-row {isMine ? 'mine' : 'theirs'}">
-				{#if isMine}
-					<aside class="message-gutter mine">
-						{#if totalReplies > 1}
-							<div class="gutter-stat" title={`${totalReplies} replies`}>
-								<IconSet name="reply" size={10} className="gutter-icon" />
+				<div
+					class="message-row {isMine ? 'mine' : 'theirs'} {compactMineActionsByMessageID[message.id]
+						? 'compact-gutter'
+						: ''}"
+				>
+					{#if isMine}
+						<aside class="message-gutter mine">
+							{#if message.isPinned}
+								<button
+									type="button"
+									class="gutter-pin-btn"
+									title="Open pinned discussion"
+									aria-label="Open pinned discussion"
+									on:click|stopPropagation={() =>
+										dispatch('openPinnedDiscussion', { messageId: message.id })}
+								>
+									<span class="gutter-pin-emoji" aria-hidden="true">📌</span>
+								</button>
+							{/if}
+							{#if totalReplies > 1}
+								<div class="gutter-stat" title={`${totalReplies} replies`}>
+									<IconSet name="reply" size={10} className="gutter-icon" />
 								<strong>{totalReplies}</strong>
 							</div>
 						{/if}
@@ -849,38 +952,23 @@
 								<strong>{branchesCreated}</strong>
 							</div>
 						{/if}
-						{#if !isDeletedMessage(message)}
-							<div class="gutter-actions mine-actions">
-								<button
-									type="button"
-									class="gutter-action-btn"
-									title="Reply"
-									aria-label="Reply"
-									on:click|stopPropagation={() =>
-										dispatch('reply', {
-											messageId: message.id,
-											senderName: message.senderName,
-											content: getReplyDispatchContent(message)
-										})}
-								>
-									<IconSet name="reply" size={12} className="gutter-action-icon" />
-								</button>
-								<div class="gutter-owner-menu-wrap">
+							{#if !isDeletedMessage(message)}
+								<div class="gutter-actions mine-actions">
 									<button
 										type="button"
 										class="gutter-action-btn"
-										title="More actions"
-										aria-label="More actions"
-										aria-expanded={openOwnerActionMessageId === message.id}
-										on:click|stopPropagation={() => toggleOwnerMessageActions(message.id)}
+										title="Reply"
+										aria-label="Reply"
+										on:click|stopPropagation={() =>
+											dispatch('reply', {
+												messageId: message.id,
+												senderName: message.senderName,
+												content: getReplyDispatchContent(message)
+											})}
 									>
-										<IconSet name="more-horizontal" size={12} className="gutter-action-icon" />
+										<IconSet name="reply" size={12} className="gutter-action-icon" />
 									</button>
-									<div
-										class="gutter-action-menu {openOwnerActionMessageId === message.id
-											? 'open'
-											: ''}"
-									>
+									{#if compactMineActionsByMessageID[message.id]}
 										<button
 											type="button"
 											class="gutter-action-btn"
@@ -890,19 +978,46 @@
 										>
 											<IconSet name="edit" size={12} className="gutter-action-icon" />
 										</button>
-										<button
-											type="button"
-											class="gutter-action-btn danger"
-											title="Delete message"
-											aria-label="Delete message"
-											on:click|stopPropagation={() => onDeleteMessage(message)}
-										>
-											<IconSet name="trash" size={12} className="gutter-action-icon" />
-										</button>
-									</div>
+									{:else}
+										<div class="gutter-owner-menu-wrap">
+											<button
+												type="button"
+												class="gutter-action-btn"
+												title="More actions"
+												aria-label="More actions"
+												aria-expanded={openOwnerActionMessageId === message.id}
+												on:click|stopPropagation={() => toggleOwnerMessageActions(message.id)}
+											>
+												<IconSet name="more-horizontal" size={12} className="gutter-action-icon" />
+											</button>
+											<div
+												class="gutter-action-menu {openOwnerActionMessageId === message.id
+													? 'open'
+													: ''}"
+											>
+												<button
+													type="button"
+													class="gutter-action-btn"
+													title="Edit message"
+													aria-label="Edit message"
+													on:click|stopPropagation={() => onEditMessage(message)}
+												>
+													<IconSet name="edit" size={12} className="gutter-action-icon" />
+												</button>
+												<button
+													type="button"
+													class="gutter-action-btn danger"
+													title="Delete message"
+													aria-label="Delete message"
+													on:click|stopPropagation={() => onDeleteMessage(message)}
+												>
+													<IconSet name="trash" size={12} className="gutter-action-icon" />
+												</button>
+											</div>
+										</div>
+									{/if}
 								</div>
-							</div>
-						{/if}
+							{/if}
 					</aside>
 				{/if}
 				<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -919,47 +1034,45 @@
 					data-message-id={message.id}
 					on:click={() => onMessageClick(message)}
 					on:keydown={(event) => onMessageKeyDown(event, message)}
-				>
-					<div class="bubble-meta">
-						<span>{message.senderName}</span>
-						<div class="meta-right">
-							<span class="time-meta">
-								<time>{formatClock(message.createdAt)}</time>
-								{#if message.isEdited && !isDeletedMessage(message)}
-									<span class="edited-meta">(edited at {formatEditedClock(message.editedAt)})</span>
-								{/if}
-								{#if copiedMessageId === message.id}
-									<span class="copied-tip">Copied</span>
-								{/if}
-								{#if message.type !== 'task'}
+					>
+						<div class="bubble-meta">
+							<span>{message.senderName}</span>
+							<div class="meta-right">
+								<span class="time-meta">
+									<time>{formatClock(message.createdAt)}</time>
+									{#if message.isEdited && !isDeletedMessage(message)}
+										<span class="edited-meta">edited {formatEditedClock(message.editedAt)}</span>
+									{/if}
+									{#if copiedMessageId === message.id}
+										<span class="copied-tip">Copied</span>
+									{/if}
+									{#if message.type !== 'task'}
+										<button
+											type="button"
+											class="copy-btn"
+											title="Copy message"
+											aria-label="Copy message"
+											on:click|stopPropagation={() => void copyMessage(message)}
+										>
+											<IconSet name="copy" size={12} className="copy-icon" />
+										</button>
+									{/if}
+								</span>
+								{#if message.hasBreakRoom && message.breakRoomId}
 									<button
 										type="button"
-										class="copy-btn"
-										title="Copy message"
-										aria-label="Copy message"
-										on:click|stopPropagation={() => void copyMessage(message)}
+										class="break-indicator"
+										title={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
+										aria-label={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
+										on:click|stopPropagation={() =>
+											dispatch('joinBreakRoom', { roomId: message.breakRoomId || '' })}
 									>
-										<IconSet name="copy" size={12} className="copy-icon" />
+										<IconSet name="break" size={12} className="break-indicator-icon" />
+										<span class="break-indicator-count">{formatBreakCount(message.breakJoinCount)}</span>
 									</button>
 								{/if}
-							</span>
-							{#if message.hasBreakRoom && message.breakRoomId}
-								<button
-									type="button"
-									class="break-indicator"
-									title={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
-									aria-label={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
-									on:click|stopPropagation={() =>
-										dispatch('joinBreakRoom', { roomId: message.breakRoomId || '' })}
-								>
-									<IconSet name="break" size={12} className="break-indicator-icon" />
-									<span class="break-indicator-count"
-										>{formatBreakCount(message.breakJoinCount)}</span
-									>
-								</button>
-							{/if}
+							</div>
 						</div>
-					</div>
 					{#if replyPreview}
 						<button
 							type="button"
@@ -1076,7 +1189,6 @@
 								canEditTasks={isMember}
 								on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
 								on:addTask={(event) => dispatch('addTask', event.detail)}
-								on:discuss={(event) => dispatch('discuss', event.detail)}
 							/>
 						{:else if isCodeBlock(message.content)}
 							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
@@ -1112,11 +1224,23 @@
 						</button>
 					</div>
 				{/if}
-				{#if !isMine}
-					<aside class="message-gutter theirs">
-						{#if totalReplies > 1}
-							<div class="gutter-stat" title={`${totalReplies} replies`}>
-								<IconSet name="reply" size={10} className="gutter-icon" />
+					{#if !isMine}
+						<aside class="message-gutter theirs">
+							{#if message.isPinned}
+								<button
+									type="button"
+									class="gutter-pin-btn"
+									title="Open pinned discussion"
+									aria-label="Open pinned discussion"
+									on:click|stopPropagation={() =>
+										dispatch('openPinnedDiscussion', { messageId: message.id })}
+								>
+									<span class="gutter-pin-emoji" aria-hidden="true">📌</span>
+								</button>
+							{/if}
+							{#if totalReplies > 1}
+								<div class="gutter-stat" title={`${totalReplies} replies`}>
+									<IconSet name="reply" size={10} className="gutter-icon" />
 								<strong>{totalReplies}</strong>
 							</div>
 						{/if}
@@ -1398,6 +1522,51 @@
 		color: #e6edf8;
 	}
 
+	.gutter-pin-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--action-hit-size);
+		height: var(--action-hit-size);
+		padding: 0;
+		border-radius: 8px;
+		border: 1px solid #e6ccd2;
+		background: rgba(255, 255, 255, 0.75);
+		color: #dc2626;
+		cursor: pointer;
+		transition:
+			transform 120ms ease,
+			background 140ms ease,
+			border-color 140ms ease;
+	}
+
+	.gutter-pin-btn:hover {
+		background: rgba(220, 38, 38, 0.1);
+		transform: translateY(-1px);
+	}
+
+	.gutter-pin-btn:focus-visible {
+		outline: 2px solid rgba(220, 38, 38, 0.38);
+		outline-offset: 1px;
+	}
+
+	.messages-shell.theme-dark .gutter-pin-btn {
+		background: rgba(15, 23, 42, 0.84);
+		border-color: #475569;
+		color: #fda4af;
+	}
+
+	.message-row.mine .gutter-pin-btn {
+		background: rgba(79, 94, 118, 0.94);
+		border-color: rgba(105, 120, 145, 0.46);
+		color: #fca5a5;
+	}
+
+	.gutter-pin-emoji {
+		font-size: 0.86rem;
+		line-height: 1;
+	}
+
 	.gutter-stat strong {
 		font-size: 0.66rem;
 		font-weight: 600;
@@ -1430,6 +1599,15 @@
 		justify-content: center;
 		width: 100%;
 		overflow: visible;
+	}
+
+	.message-row.compact-gutter .gutter-actions.mine-actions {
+		flex-direction: row;
+		width: auto;
+	}
+
+	.message-row.compact-gutter .gutter-owner-menu-wrap {
+		width: auto;
 	}
 
 	.gutter-action-menu {
@@ -1634,14 +1812,14 @@
 		padding: 0;
 	}
 
-	.time-meta:hover .copy-btn,
-	.time-meta:focus-within .copy-btn {
+	.message-row:hover .copy-btn,
+	.message-row:focus-within .copy-btn {
 		opacity: 0.9;
 		pointer-events: auto;
 	}
 
-	.time-meta:hover time,
-	.time-meta:focus-within time {
+	.message-row:hover .time-meta time,
+	.message-row:focus-within .time-meta time {
 		opacity: 0.16;
 	}
 
@@ -2022,6 +2200,162 @@
 
 	.messages-shell.theme-dark .bubble.mine .read-more-btn {
 		color: #d5dff0;
+	}
+
+	.messages-shell.theme-dark {
+		background: linear-gradient(180deg, #070707 0%, #0d0d0e 100%);
+	}
+
+	.messages-shell.theme-dark .messages {
+		background: linear-gradient(180deg, #0a0a0b 0%, #101011 100%);
+	}
+
+	.messages-shell.theme-dark .day-stamp {
+		border-color: #2f2f32;
+		background: #151517;
+		color: #c8c8cd;
+	}
+
+	.messages-shell.theme-dark .unread-divider {
+		color: #c4c4c9;
+	}
+
+	.messages-shell.theme-dark .unread-divider::before,
+	.messages-shell.theme-dark .unread-divider::after {
+		border-bottom-color: rgba(190, 190, 196, 0.45);
+	}
+
+	.messages-shell.theme-dark .older-history-indicator {
+		color: #9f9fa8;
+	}
+
+	.messages-shell.theme-dark .readonly-banner {
+		border-color: #2c2c2f;
+		background: #151517;
+		color: #d2d2d8;
+	}
+
+	.messages-shell.theme-dark .empty-thread {
+		color: #b0b0b8;
+	}
+
+	.messages-shell.theme-dark .gutter-stat {
+		background: rgba(24, 24, 26, 0.9);
+		border-color: #333336;
+		color: #d0d0d7;
+	}
+
+	.messages-shell.theme-dark .gutter-pin-btn {
+		background: rgba(22, 22, 24, 0.9);
+		border-color: #3a3a3f;
+		color: #f0f0f4;
+	}
+
+	.message-row.mine .gutter-pin-btn {
+		background: rgba(34, 34, 37, 0.95);
+		border-color: #444449;
+		color: #f2f2f6;
+	}
+
+	.message-row.mine .gutter-stat {
+		background: rgba(31, 31, 34, 0.95);
+		border-color: #3e3e43;
+		color: #e6e6eb;
+	}
+
+	.messages-shell.theme-dark .bubble {
+		background: #171719;
+		border-color: #303034;
+		color: #ededf2;
+	}
+
+	.messages-shell.theme-dark .bubble.mine {
+		background: #1f1f22;
+		border-color: #38383d;
+		color: #f2f2f6;
+	}
+
+	.messages-shell.theme-dark .bubble-meta {
+		color: #bbbbc4;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .bubble-meta {
+		color: #d0d0d8;
+	}
+
+	.messages-shell.theme-dark .reply-snippet {
+		border-color: #333338;
+		background: #1a1a1d;
+		color: #d5d5dc;
+	}
+
+	.messages-shell.theme-dark .reply-snippet:hover {
+		background: #202024;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .reply-snippet {
+		border-color: #3c3c41;
+		background: #242428;
+		color: #ececf1;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .reply-snippet:hover {
+		background: #2b2b30;
+	}
+
+	.messages-shell.theme-dark .break-indicator {
+		border-color: #3a3a3f;
+		background: #1a1a1d;
+		color: #d8d8df;
+	}
+
+	.messages-shell.theme-dark .file-link {
+		color: #e1e1e8;
+	}
+
+	.messages-shell.theme-dark .file-card {
+		border-color: #343439;
+		background: #1a1a1d;
+	}
+
+	.messages-shell.theme-dark .file-meta {
+		color: #e2e2ea;
+	}
+
+	.messages-shell.theme-dark .file-ext {
+		color: #acacb6;
+	}
+
+	.messages-shell.theme-dark .bubble-content {
+		color: #e6e6ec;
+	}
+
+	.messages-shell.theme-dark .bubble-content.deleted-text {
+		color: #adadb6;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .bubble-content {
+		color: #f0f0f5;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .bubble-content.deleted-text {
+		color: #c8c8d0;
+	}
+
+	.messages-shell.theme-dark .media-caption {
+		color: #d6d6de;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .media-caption {
+		color: #ececf2;
+	}
+
+	.messages-shell.theme-dark .read-more-btn {
+		color: #d0d0d9;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .read-more-btn {
+		color: #e8e8ef;
 	}
 
 	@media (max-width: 900px) {

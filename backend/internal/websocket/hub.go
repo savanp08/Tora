@@ -15,19 +15,23 @@ import (
 const chatBroadcastChannel = "chat:broadcast"
 const chatTypingChannel = "chat:typing"
 const chatMutationChannel = "chat:message_mutation"
+const chatDiscussionChannel = "chat:discussion_comment"
 
 type Hub struct {
-	rooms         map[string]map[*Client]bool
-	broadcast     chan models.Message
-	redisInbox    chan models.Message
-	typing        chan *ClientTypingEvent
-	typingInbox   chan TypingRedisEvent
-	messageEdit   chan *ClientMessageEditEvent
-	messageDelete chan *ClientMessageDeleteEvent
-	mutationInbox chan MessageMutationEvent
-	register      chan *Client
-	unregister    chan *Client
-	subscribe     chan *ClientSubscription
+	rooms                map[string]map[*Client]bool
+	broadcast            chan models.Message
+	redisInbox           chan models.Message
+	typing               chan *ClientTypingEvent
+	typingInbox          chan TypingRedisEvent
+	discussionComment    chan *ClientDiscussionCommentEvent
+	discussionCommentPin chan *ClientDiscussionCommentPinEvent
+	discussionInbox      chan DiscussionCommentEvent
+	messageEdit          chan *ClientMessageEditEvent
+	messageDelete        chan *ClientMessageDeleteEvent
+	mutationInbox        chan MessageMutationEvent
+	register             chan *Client
+	unregister           chan *Client
+	subscribe            chan *ClientSubscription
 
 	msgService *MessageService
 	tracker    *monitor.UsageTracker
@@ -45,6 +49,29 @@ type TypingRedisEvent struct {
 	UserName  string `json:"userName"`
 	IsTyping  bool   `json:"isTyping"`
 	UpdatedAt int64  `json:"updatedAt"`
+}
+
+type ClientDiscussionCommentEvent struct {
+	Client          *Client
+	RoomID          string
+	PinMessageID    string
+	ParentCommentID string
+	Content         string
+}
+
+type ClientDiscussionCommentPinEvent struct {
+	Client       *Client
+	RoomID       string
+	PinMessageID string
+	CommentID    string
+	IsPinned     bool
+}
+
+type DiscussionCommentEvent struct {
+	Type         string         `json:"type"`
+	RoomID       string         `json:"roomId"`
+	PinMessageID string         `json:"pinMessageId"`
+	Payload      models.Message `json:"payload"`
 }
 
 type ClientMessageEditEvent struct {
@@ -77,19 +104,22 @@ type ClientSubscription struct {
 
 func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	hub := &Hub{
-		broadcast:     make(chan models.Message),
-		redisInbox:    make(chan models.Message, 256),
-		typing:        make(chan *ClientTypingEvent, 256),
-		typingInbox:   make(chan TypingRedisEvent, 512),
-		messageEdit:   make(chan *ClientMessageEditEvent, 256),
-		messageDelete: make(chan *ClientMessageDeleteEvent, 256),
-		mutationInbox: make(chan MessageMutationEvent, 512),
-		register:      make(chan *Client),
-		unregister:    make(chan *Client),
-		subscribe:     make(chan *ClientSubscription, 256),
-		rooms:         make(map[string]map[*Client]bool),
-		msgService:    service,
-		tracker:       tracker,
+		broadcast:            make(chan models.Message),
+		redisInbox:           make(chan models.Message, 256),
+		typing:               make(chan *ClientTypingEvent, 256),
+		typingInbox:          make(chan TypingRedisEvent, 512),
+		discussionComment:    make(chan *ClientDiscussionCommentEvent, 256),
+		discussionCommentPin: make(chan *ClientDiscussionCommentPinEvent, 256),
+		discussionInbox:      make(chan DiscussionCommentEvent, 512),
+		messageEdit:          make(chan *ClientMessageEditEvent, 256),
+		messageDelete:        make(chan *ClientMessageDeleteEvent, 256),
+		mutationInbox:        make(chan MessageMutationEvent, 512),
+		register:             make(chan *Client),
+		unregister:           make(chan *Client),
+		subscribe:            make(chan *ClientSubscription, 256),
+		rooms:                make(map[string]map[*Client]bool),
+		msgService:           service,
+		tracker:              tracker,
 	}
 
 	if service != nil && service.CanPersistToDisk() {
@@ -98,6 +128,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	if service != nil && service.Redis != nil && service.Redis.Client != nil {
 		go hub.Subscribe()
 		go hub.SubscribeTyping()
+		go hub.SubscribeDiscussionComments()
 		go hub.SubscribeMessageMutations()
 	}
 
@@ -178,6 +209,66 @@ func (h *Hub) SubscribeTyping() {
 			case h.typingInbox <- event:
 			default:
 				log.Printf("redis typing drop room=%s user=%s reason=inbox_full", event.RoomID, event.UserID)
+			}
+		}
+
+		_ = pubsub.Close()
+		time.Sleep(time.Second)
+	}
+}
+
+func (h *Hub) SubscribeDiscussionComments() {
+	if h == nil || h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return
+	}
+
+	ctx := context.Background()
+	for {
+		pubsub := h.msgService.Redis.Client.Subscribe(ctx, chatDiscussionChannel)
+		if _, err := pubsub.Receive(ctx); err != nil {
+			log.Printf("redis discussion subscribe receive error: %v", err)
+			_ = pubsub.Close()
+			time.Sleep(time.Second)
+			continue
+		}
+
+		channel := pubsub.Channel()
+		for incoming := range channel {
+			if incoming == nil || strings.TrimSpace(incoming.Payload) == "" {
+				continue
+			}
+			var event DiscussionCommentEvent
+			if err := json.Unmarshal([]byte(incoming.Payload), &event); err != nil {
+				log.Printf("redis discussion unmarshal error: %v", err)
+				continue
+			}
+			event.Type = strings.ToLower(strings.TrimSpace(event.Type))
+			event.RoomID = normalizeRoomID(event.RoomID)
+			event.PinMessageID = normalizeMessageID(event.PinMessageID)
+			event.Payload.RoomID = normalizeRoomID(event.Payload.RoomID)
+			event.Payload.ID = normalizeMessageID(event.Payload.ID)
+			event.Payload.ReplyToMessageID = normalizeMessageID(event.Payload.ReplyToMessageID)
+			if event.Type == "" {
+				event.Type = "discussion_comment"
+			}
+			if event.Type != "discussion_comment" ||
+				event.RoomID == "" ||
+				event.PinMessageID == "" ||
+				event.Payload.ID == "" {
+				continue
+			}
+			if event.Payload.CreatedAt.IsZero() {
+				event.Payload.CreatedAt = time.Now().UTC()
+			}
+			select {
+			case h.discussionInbox <- event:
+			default:
+				log.Printf(
+					"redis discussion drop room=%s pin=%s comment=%s reason=inbox_full",
+					event.RoomID,
+					event.PinMessageID,
+					event.Payload.ID,
+				)
 			}
 		}
 
@@ -291,6 +382,12 @@ func (h *Hub) Run() {
 		case typingEvent := <-h.typing:
 			h.handleClientTypingEvent(typingEvent)
 
+		case discussionEvent := <-h.discussionComment:
+			h.handleClientDiscussionCommentEvent(discussionEvent)
+
+		case discussionPinEvent := <-h.discussionCommentPin:
+			h.handleClientDiscussionCommentPinEvent(discussionPinEvent)
+
 		case editEvent := <-h.messageEdit:
 			h.handleClientMessageEditEvent(editEvent)
 
@@ -339,6 +436,9 @@ func (h *Hub) Run() {
 
 		case typingEvent := <-h.typingInbox:
 			h.broadcastTypingToLocal(typingEvent)
+
+		case discussionEvent := <-h.discussionInbox:
+			h.broadcastDiscussionCommentToLocal(discussionEvent)
 
 		case mutationEvent := <-h.mutationInbox:
 			h.broadcastMutationToLocal(mutationEvent)
@@ -530,6 +630,107 @@ func (h *Hub) handleClientTypingEvent(event *ClientTypingEvent) {
 	h.broadcastTypingToLocal(typingEvent)
 }
 
+func (h *Hub) handleClientDiscussionCommentEvent(event *ClientDiscussionCommentEvent) {
+	if event == nil || event.Client == nil || h.msgService == nil {
+		return
+	}
+
+	client := event.Client
+	roomID := normalizeRoomID(event.RoomID)
+	pinMessageID := normalizeMessageID(event.PinMessageID)
+	parentCommentID := normalizeMessageID(event.ParentCommentID)
+	content := strings.TrimSpace(event.Content)
+	if roomID == "" || pinMessageID == "" || content == "" {
+		return
+	}
+	if !client.isSubscribedToRoom(roomID) || !client.canWriteToRoom(roomID) {
+		return
+	}
+	if !h.isClientRoomMember(client.UserID, roomID) {
+		client.subscribeToRoom(roomID, false)
+		return
+	}
+
+	comment, err := h.msgService.CreatePinnedDiscussionComment(
+		context.Background(),
+		roomID,
+		pinMessageID,
+		parentCommentID,
+		client.UserID,
+		client.Username,
+		content,
+		time.Now().UTC(),
+	)
+	if err != nil {
+		log.Printf(
+			"[ws] discussion comment create failed room=%s pin=%s user=%s err=%v",
+			roomID,
+			pinMessageID,
+			client.UserID,
+			err,
+		)
+		return
+	}
+
+	discussionEvent := DiscussionCommentEvent{
+		Type:         "discussion_comment",
+		RoomID:       roomID,
+		PinMessageID: pinMessageID,
+		Payload:      comment,
+	}
+	h.publishDiscussionCommentEvent(discussionEvent)
+}
+
+func (h *Hub) handleClientDiscussionCommentPinEvent(event *ClientDiscussionCommentPinEvent) {
+	if event == nil || event.Client == nil || h.msgService == nil {
+		return
+	}
+
+	client := event.Client
+	roomID := normalizeRoomID(event.RoomID)
+	pinMessageID := normalizeMessageID(event.PinMessageID)
+	commentID := normalizeMessageID(event.CommentID)
+	if roomID == "" || pinMessageID == "" || commentID == "" {
+		return
+	}
+	if !client.isSubscribedToRoom(roomID) || !client.canWriteToRoom(roomID) {
+		return
+	}
+	if !h.isClientRoomMember(client.UserID, roomID) {
+		client.subscribeToRoom(roomID, false)
+		return
+	}
+
+	updatedComment, err := h.msgService.SetPinnedDiscussionComment(
+		context.Background(),
+		roomID,
+		pinMessageID,
+		commentID,
+		client.UserID,
+		client.Username,
+		event.IsPinned,
+	)
+	if err != nil {
+		log.Printf(
+			"[ws] discussion comment pin failed room=%s pin=%s comment=%s user=%s err=%v",
+			roomID,
+			pinMessageID,
+			commentID,
+			client.UserID,
+			err,
+		)
+		return
+	}
+
+	discussionEvent := DiscussionCommentEvent{
+		Type:         "discussion_comment",
+		RoomID:       roomID,
+		PinMessageID: pinMessageID,
+		Payload:      updatedComment,
+	}
+	h.publishDiscussionCommentEvent(discussionEvent)
+}
+
 func (h *Hub) handleClientMessageEditEvent(event *ClientMessageEditEvent) {
 	if event == nil || event.Client == nil || h.msgService == nil {
 		return
@@ -647,6 +848,23 @@ func (h *Hub) publishMutationEvent(event MessageMutationEvent) {
 	h.broadcastMutationToLocal(event)
 }
 
+func (h *Hub) publishDiscussionCommentEvent(event DiscussionCommentEvent) {
+	if h.msgService != nil && h.msgService.Redis != nil && h.msgService.Redis.Client != nil {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			log.Printf("redis discussion marshal error: %v", err)
+			h.broadcastDiscussionCommentToLocal(event)
+			return
+		}
+		if err := h.msgService.Redis.Client.Publish(context.Background(), chatDiscussionChannel, payload).Err(); err != nil {
+			log.Printf("redis discussion publish error: %v", err)
+			h.broadcastDiscussionCommentToLocal(event)
+		}
+		return
+	}
+	h.broadcastDiscussionCommentToLocal(event)
+}
+
 func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 	roomID := normalizeRoomID(event.RoomID)
 	userID := strings.TrimSpace(event.UserID)
@@ -678,6 +896,48 @@ func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 			continue
 		}
 		if roomClient.UserID == userID {
+			continue
+		}
+		select {
+		case roomClient.Send <- payload:
+		default:
+			h.removeClientFromAllRooms(roomClient, true)
+			roomClient.closeSendChannel()
+		}
+	}
+}
+
+func (h *Hub) broadcastDiscussionCommentToLocal(event DiscussionCommentEvent) {
+	roomID := normalizeRoomID(event.RoomID)
+	pinMessageID := normalizeMessageID(event.PinMessageID)
+	commentID := normalizeMessageID(event.Payload.ID)
+	if roomID == "" || pinMessageID == "" || commentID == "" {
+		return
+	}
+	clients, ok := h.rooms[roomID]
+	if !ok {
+		return
+	}
+	if event.Payload.CreatedAt.IsZero() {
+		event.Payload.CreatedAt = time.Now().UTC()
+	}
+	event.Payload.RoomID = roomID
+	event.Payload.ID = commentID
+	event.Payload.ReplyToMessageID = normalizeMessageID(event.Payload.ReplyToMessageID)
+
+	payload := map[string]interface{}{
+		"type":         "discussion_comment",
+		"roomId":       roomID,
+		"pinMessageId": pinMessageID,
+		"payload":      event.Payload,
+	}
+
+	for roomClient := range clients {
+		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
+			roomClient.subscribeToRoom(roomID, false)
+			continue
+		}
+		if !roomClient.canWriteToRoom(roomID) {
 			continue
 		}
 		select {

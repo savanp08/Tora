@@ -172,7 +172,7 @@
 		inset: 0;
 		border: none;
 		background: rgba(12, 12, 16, 0.5);
-		z-index: 520;
+		z-index: 1200;
 	}
 
 	.ui-dialog {
@@ -185,7 +185,7 @@
 		border: 1px solid #d9d9e0;
 		border-radius: 14px;
 		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.22);
-		z-index: 530;
+		z-index: 1210;
 		display: flex;
 		flex-direction: column;
 		overflow: hidden;

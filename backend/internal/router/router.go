@@ -72,6 +72,7 @@ func New(
 		r.Post("/rooms/delete", roomHandler.DeleteRoom)
 		r.Get("/rooms/sidebar", roomHandler.GetSidebarRooms)
 		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
+		r.Post("/rooms/{roomId}/pins", roomHandler.UpsertRoomPin)
 		r.Get("/rooms/{roomId}/pins/navigate", roomHandler.NavigateRoomPins)
 		r.Get("/rooms/{roomId}/pins/{pinMessageId}/discussion/comments", roomHandler.GetPinnedDiscussionComments)
 		r.Post("/rooms/{roomId}/pins/{pinMessageId}/discussion/comments", roomHandler.CreatePinnedDiscussionComment)

@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
-	import DiscussionDrawer from '$lib/components/chat/DiscussionDrawer.svelte';
+	import DiscussionModal from '$lib/components/chat/DiscussionModal.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
 	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
 	import ChatStatusBars from '$lib/components/chat/ChatStatusBars.svelte';
@@ -119,6 +119,7 @@
 	const TYPING_PING_INTERVAL_MS = 5000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
+	const DISCUSSION_MAX_REPLY_DEPTH = 4;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -215,9 +216,7 @@
 	$: activeDiscussionTask =
 		(activeDiscussionTaskId &&
 			currentMessages.find(
-				(message) =>
-					normalizeMessageID(message.id) === normalizeMessageID(activeDiscussionTaskId) &&
-					message.type === 'task'
+				(message) => normalizeMessageID(message.id) === normalizeMessageID(activeDiscussionTaskId)
 			)) ||
 		null;
 	$: if (!isDiscussionOpen) {
@@ -233,23 +232,13 @@
 	}
 	$: discussionBackgroundUnreadCount =
 		isDiscussionOpen && discussionOpenedAtMs > 0
-			? currentMessages.filter((message) => {
-					const messageID = normalizeMessageID(message.id);
-					if (!messageID) {
-						return false;
-					}
+			? discussionComments.filter((comment) => {
 					if (
-						activeDiscussionTask &&
-						messageID === normalizeMessageID(activeDiscussionTask.id)
+						normalizeIdentifier(comment.senderId) === normalizeIdentifier(currentUserId)
 					) {
 						return false;
 					}
-					if (
-						normalizeIdentifier(message.senderId) === normalizeIdentifier(currentUserId)
-					) {
-						return false;
-					}
-					return message.createdAt > discussionOpenedAtMs;
+					return comment.createdAt > discussionOpenedAtMs;
 				}).length
 			: 0;
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
@@ -854,9 +843,10 @@
 
 		await refreshSidebarRooms(normalizeIdentifier(resolvedUserId) || resolvedUserId);
 		clearSidebarRefreshTimer();
-		sidebarRefreshTimer = setInterval(() => {
-			void refreshSidebarRooms();
-		}, 15000);
+		// sidebarRefreshTimer = setInterval(() => {
+		// 	void refreshSidebarRooms();
+		// }, 15000); 
+		 // increases server load and can cause jank, so leaving out for now
 	}
 
 	function clientLog(event: string, payload?: unknown) {
@@ -1414,6 +1404,49 @@
 		return '';
 	}
 
+	function resolveDiscussionPinMessageID(envelope: SocketEnvelope) {
+		const source = envelope as Record<string, unknown>;
+		const directPinID = normalizeMessageID(
+			toStringValue(source.pinMessageId ?? source.pin_message_id)
+		);
+		if (directPinID) {
+			return directPinID;
+		}
+		if (envelope.payload && typeof envelope.payload === 'object') {
+			const payload = envelope.payload as Record<string, unknown>;
+			const payloadPinID = normalizeMessageID(
+				toStringValue(
+					payload.pinMessageId ??
+						payload.pin_message_id ??
+						payload.replyToMessageId ??
+						payload.reply_to_message_id
+				)
+			);
+			if (payloadPinID) {
+				return payloadPinID;
+			}
+		}
+		return '';
+	}
+
+	function handleDiscussionCommentEnvelope(envelope: SocketEnvelope, targetRoomId: string) {
+		const targetRoomID = normalizeRoomIDValue(targetRoomId);
+		const activeRoomID = normalizeRoomIDValue(roomId);
+		if (!targetRoomID || targetRoomID !== activeRoomID) {
+			return;
+		}
+		const pinMessageID = resolveDiscussionPinMessageID(envelope);
+		const activeTaskID = normalizeMessageID(activeDiscussionTaskId);
+		if (!pinMessageID || !activeTaskID || pinMessageID !== activeTaskID) {
+			return;
+		}
+		const comment = parseIncomingMessage(envelope.payload, targetRoomID, API_BASE);
+		if (!comment) {
+			return;
+		}
+		upsertDiscussionCommentLocal(comment);
+	}
+
 	function handleEnvelope(envelope: SocketEnvelope) {
 		const targetRoomId = resolveEnvelopeRoomID(envelope);
 		const kind = envelope.type;
@@ -1442,6 +1475,11 @@
 			if (message) {
 				addIncomingMessage(message);
 			}
+			return;
+		}
+
+		if (kind === 'discussion_comment' && targetRoomId) {
+			handleDiscussionCommentEnvelope(envelope, targetRoomId);
 			return;
 		}
 
@@ -1983,9 +2021,58 @@
 		activeReply = null;
 	}
 
-	function discussionCommentsEndpoint(taskMessageId: string) {
-		const normalizedTaskID = normalizeMessageID(taskMessageId);
-		return `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins/${encodeURIComponent(normalizedTaskID)}/discussion/comments`;
+	function roomPinsEndpoint() {
+		return `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins`;
+	}
+
+	function discussionCommentsEndpoint(pinnedMessageId: string) {
+		const normalizedPinnedMessageID = normalizeMessageID(pinnedMessageId);
+		return `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins/${encodeURIComponent(normalizedPinnedMessageID)}/discussion/comments`;
+	}
+
+	async function ensureMessagePinned(message: ChatMessage) {
+		if (!roomId || !isMember) {
+			return false;
+		}
+		const normalizedMessageID = normalizeMessageID(message.id);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		if (!normalizedMessageID || !normalizedUserID) {
+			return false;
+		}
+		try {
+			const res = await fetch(roomPinsEndpoint(), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					userId: normalizedUserID,
+					messageId: normalizedMessageID
+				})
+			});
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				throw new Error(toStringValue(data.error) || 'Failed to pin message');
+			}
+			const normalizedTargetID = normalizeMessageID(message.id);
+			if (normalizedTargetID) {
+				const nextMessages = (messagesByRoom[roomId] ?? []).map((entry) => {
+					if (normalizeMessageID(entry.id) !== normalizedTargetID) {
+						return entry;
+					}
+					return {
+						...entry,
+						isPinned: true
+					};
+				});
+				messagesByRoom = {
+					...messagesByRoom,
+					[roomId]: nextMessages
+				};
+			}
+			return true;
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to pin message');
+			return false;
+		}
 	}
 
 	function upsertDiscussionCommentLocal(comment: ChatMessage) {
@@ -2000,19 +2087,19 @@
 		discussionComments = next;
 	}
 
-	async function loadDiscussionComments(taskMessageId: string) {
+	async function loadDiscussionComments(pinnedMessageId: string) {
 		if (!roomId || !isMember) {
 			discussionComments = [];
 			return;
 		}
-		const normalizedTaskID = normalizeMessageID(taskMessageId);
+		const normalizedPinnedMessageID = normalizeMessageID(pinnedMessageId);
 		const normalizedUserID = normalizeIdentifier(currentUserId);
-		if (!normalizedTaskID || !normalizedUserID) {
+		if (!normalizedPinnedMessageID || !normalizedUserID) {
 			discussionComments = [];
 			return;
 		}
 
-		const requestURL = `${discussionCommentsEndpoint(normalizedTaskID)}?userId=${encodeURIComponent(normalizedUserID)}&limit=300`;
+		const requestURL = `${discussionCommentsEndpoint(normalizedPinnedMessageID)}?userId=${encodeURIComponent(normalizedUserID)}&limit=50`;
 		try {
 			const res = await fetch(requestURL);
 			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -2024,25 +2111,25 @@
 				.filter((entry): entry is ChatMessage => Boolean(entry))
 				.sort((left, right) => left.createdAt - right.createdAt);
 
-			if (normalizeMessageID(activeDiscussionTaskId) !== normalizedTaskID) {
+			if (normalizeMessageID(activeDiscussionTaskId) !== normalizedPinnedMessageID) {
 				return;
 			}
 			discussionComments = parsedComments;
 		} catch (error) {
-			if (normalizeMessageID(activeDiscussionTaskId) === normalizedTaskID) {
+			if (normalizeMessageID(activeDiscussionTaskId) === normalizedPinnedMessageID) {
 				discussionComments = [];
 			}
 			showErrorToast(error instanceof Error ? error.message : 'Failed to load discussion comments');
 		}
 	}
 
-	function openDiscussionForTask(messageId: string) {
+	function openDiscussionForMessage(messageId: string) {
 		const normalizedMessageId = normalizeMessageID(messageId);
 		if (!roomId || !normalizedMessageId) {
 			return;
 		}
 		const match = (messagesByRoom[roomId] ?? []).find(
-			(entry) => normalizeMessageID(entry.id) === normalizedMessageId && entry.type === 'task'
+			(entry) => normalizeMessageID(entry.id) === normalizedMessageId
 		);
 		if (!match) {
 			return;
@@ -2059,10 +2146,6 @@
 		activeDiscussionTaskId = '';
 		discussionOpenedAtMs = 0;
 		discussionComments = [];
-	}
-
-	function onTaskDiscuss(event: CustomEvent<{ messageId: string }>) {
-		openDiscussionForTask(event.detail.messageId);
 	}
 
 	function commitTaskPayloadUpdate(messageId: string, nextContent: string) {
@@ -2152,10 +2235,45 @@
 		commitTaskPayloadUpdate(messageId, nextContent);
 	}
 
+	function buildDiscussionCommentMap(items: ChatMessage[]) {
+		const map = new Map<string, ChatMessage>();
+		for (const item of items) {
+			const normalizedId = normalizeMessageID(item.id);
+			if (!normalizedId) {
+				continue;
+			}
+			map.set(normalizedId, item);
+		}
+		return map;
+	}
+
+	function resolveDiscussionCommentDepth(commentId: string, commentMap: Map<string, ChatMessage>) {
+		let depth = 1;
+		let currentId = normalizeMessageID(commentId);
+		const seen = new Set<string>();
+		while (currentId && commentMap.has(currentId) && depth <= DISCUSSION_MAX_REPLY_DEPTH + 2) {
+			if (seen.has(currentId)) {
+				break;
+			}
+			seen.add(currentId);
+			const parentId = normalizeMessageID(commentMap.get(currentId)?.replyToMessageId || '');
+			if (!parentId || !commentMap.has(parentId)) {
+				break;
+			}
+			depth += 1;
+			currentId = parentId;
+		}
+		return depth;
+	}
+
 	async function onDiscussionCommentSubmit(
 		event: CustomEvent<{ content: string; replyToMessageId?: string }>
 	) {
 		if (!roomId || !isMember || !activeDiscussionTask) {
+			return;
+		}
+		if (discussionComments.length >= 50) {
+			showErrorToast('Discussion limit reached (50/50)');
 			return;
 		}
 		const content = (event.detail.content || '').trim();
@@ -2171,35 +2289,29 @@
 		const allowedReplyIDs = new Set<string>(discussionComments.map((entry) => normalizeMessageID(entry.id)));
 		const parentCommentId =
 			requestedReplyID && allowedReplyIDs.has(requestedReplyID) ? requestedReplyID : '';
+		if (parentCommentId) {
+			const discussionCommentMap = buildDiscussionCommentMap(discussionComments);
+			const parentDepth = resolveDiscussionCommentDepth(parentCommentId, discussionCommentMap);
+			if (parentDepth >= DISCUSSION_MAX_REPLY_DEPTH) {
+				showErrorToast('Reply nesting limit reached (max 4 levels)');
+				return;
+			}
+		}
 
 		const normalizedTaskID = normalizeMessageID(activeDiscussionTask.id);
-		const normalizedUserID = normalizeIdentifier(currentUserId);
-		if (!normalizedTaskID || !normalizedUserID) {
+		if (!normalizedTaskID) {
 			return;
 		}
 
-		try {
-			const res = await fetch(discussionCommentsEndpoint(normalizedTaskID), {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					userId: normalizedUserID,
-					username: currentUsername,
-					content,
-					parentCommentId
-				})
-			});
-			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-			if (!res.ok) {
-				throw new Error(toStringValue(data.error) || 'Failed to post comment');
-			}
-			const parsed = parseIncomingMessage(data.comment, roomId, API_BASE);
-			if (!parsed) {
-				throw new Error('Comment payload is invalid');
-			}
-			upsertDiscussionCommentLocal(parsed);
-		} catch (error) {
-			showErrorToast(error instanceof Error ? error.message : 'Failed to post comment');
+		const queued = sendSocketPayload({
+			type: 'discussion_comment',
+			roomId,
+			pinMessageId: normalizedTaskID,
+			parentCommentId,
+			content
+		});
+		if (!queued) {
+			showErrorToast('Socket reconnecting. Comment queued.');
 		}
 	}
 
@@ -2217,6 +2329,7 @@
 			(entry) => normalizeMessageID(entry.id) === commentId
 		);
 		if (!currentComment) {
+			showErrorToast('Comment not found in current discussion');
 			return;
 		}
 		if (normalizeIdentifier(currentComment.senderId) !== normalizeIdentifier(currentUserId)) {
@@ -2259,8 +2372,7 @@
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
 						userId: normalizedUserID,
-						content: nextContent,
-						createdAt: currentComment.createdAt
+						content: nextContent
 					})
 				}
 			);
@@ -2290,6 +2402,7 @@
 			(entry) => normalizeMessageID(entry.id) === commentId
 		);
 		if (!currentComment) {
+			showErrorToast('Comment not found in current discussion');
 			return;
 		}
 		if (normalizeIdentifier(currentComment.senderId) !== normalizeIdentifier(currentUserId)) {
@@ -2320,8 +2433,7 @@
 					method: 'DELETE',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
-						userId: normalizedUserID,
-						createdAt: currentComment.createdAt
+						userId: normalizedUserID
 					})
 				}
 			);
@@ -2336,6 +2448,45 @@
 			upsertDiscussionCommentLocal(parsed);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to delete comment');
+		}
+	}
+
+	function onDiscussionCommentPinToggle(
+		event: CustomEvent<{ messageId: string; isPinned: boolean }>
+	) {
+		if (!roomId || !activeDiscussionTask || !isMember) {
+			return;
+		}
+		const commentId = normalizeMessageID(event.detail.messageId);
+		const pinMessageId = normalizeMessageID(activeDiscussionTask.id);
+		if (!commentId || !pinMessageId) {
+			return;
+		}
+
+		const nextPinned = Boolean(event.detail.isPinned);
+		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
+		const normalizedCurrentUsername = normalizeUsernameValue(currentUsername) || 'User';
+		const existingComment = discussionComments.find(
+			(entry) => normalizeMessageID(entry.id) === commentId
+		);
+		if (existingComment) {
+			upsertDiscussionCommentLocal({
+				...existingComment,
+				isPinned: nextPinned,
+				pinnedBy: nextPinned ? normalizedCurrentUserID : '',
+				pinnedByName: nextPinned ? normalizedCurrentUsername : ''
+			});
+		}
+
+		const queued = sendSocketPayload({
+			type: 'discussion_comment_pin',
+			roomId,
+			pinMessageId,
+			commentId,
+			isPinned: nextPinned
+		});
+		if (!queued) {
+			showErrorToast('Socket reconnecting. Pin action queued.');
 		}
 	}
 
@@ -2358,7 +2509,7 @@
 			}
 			const rawMessage = data.message;
 			const parsed = parseIncomingMessage(rawMessage, roomId, API_BASE);
-			if (!parsed || parsed.type !== 'task') {
+			if (!parsed) {
 				showErrorToast(
 					direction === 'previous'
 						? 'No previous pinned discussion in this room'
@@ -2366,14 +2517,14 @@
 				);
 				return;
 			}
-				mergeMessages(roomId, [parsed]);
-				activeDiscussionTaskId = parsed.id;
-				isDiscussionOpen = true;
-				discussionComments = [];
-				void loadDiscussionComments(parsed.id);
-			} catch (error) {
-				showErrorToast(
-					error instanceof Error ? error.message : 'Failed to navigate pinned discussions'
+			mergeMessages(roomId, [parsed]);
+			activeDiscussionTaskId = parsed.id;
+			isDiscussionOpen = true;
+			discussionComments = [];
+			void loadDiscussionComments(parsed.id);
+		} catch (error) {
+			showErrorToast(
+				error instanceof Error ? error.message : 'Failed to navigate pinned discussions'
 			);
 		}
 	}
@@ -2666,6 +2817,11 @@
 
 	function toggleBreakSelectionMode() {
 		const nextMode: MessageActionMode = messageActionMode === 'break' ? 'none' : 'break';
+		setMessageActionMode(nextMode);
+	}
+
+	function togglePinSelectionMode() {
+		const nextMode: MessageActionMode = messageActionMode === 'pin' ? 'none' : 'pin';
 		setMessageActionMode(nextMode);
 	}
 
@@ -3082,6 +3238,24 @@
 			return;
 		}
 
+		if (messageActionMode === 'pin') {
+			const loweredType = (message.type || '').toLowerCase();
+			if (
+				loweredType === 'deleted' ||
+				(message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER
+			) {
+				showErrorToast('Deleted messages cannot be pinned');
+				return;
+			}
+			const pinned = await ensureMessagePinned(message);
+			if (!pinned) {
+				return;
+			}
+			openDiscussionForMessage(message.id);
+			setMessageActionMode('none');
+			return;
+		}
+
 		if (messageActionMode === 'edit' || messageActionMode === 'delete') {
 			if (normalizeIdentifier(message.senderId) !== normalizeIdentifier(currentUserId)) {
 				showErrorToast('You can only edit/delete your own messages');
@@ -3102,6 +3276,14 @@
 			selectedActionMessageId = message.id;
 			return;
 		}
+	}
+
+	function onPinnedDiscussionOpen(event: CustomEvent<{ messageId: string }>) {
+		const messageId = normalizeMessageID(event.detail.messageId);
+		if (!messageId) {
+			return;
+		}
+		openDiscussionForMessage(messageId);
 	}
 
 	async function onSelectedMessageEdit(event: CustomEvent<{ messageId: string }>) {
@@ -3252,25 +3434,32 @@
 		}
 		const now = getApproxServerNowMs(roomExpiryTickMs);
 		const remainingMs = Math.max(0, expiry - now);
+		
 		if (remainingMs <= 0) {
 			return '0m';
 		}
 
 		const totalMinutes = remainingMs / (60 * 1000);
+
 		if (totalMinutes < 60) {
 			const minutes = Math.max(1, Math.round(totalMinutes));
+			console.log('Remaining minutes:', minutes);
 			return `${minutes}m`;
 		}
 
 		const totalHours = remainingMs / (60 * 60 * 1000);
+		console.log('Remaining hours (raw):', totalHours);
 		if (totalHours < 24) {
 			const roundedHours = Math.round(totalHours * 10) / 10;
 			const value = roundedHours.toFixed(1);
+			console.log('Remaining hours:', value);
 			return `${value}${roundedHours === 1 ? 'hr' : 'hrs'}`;
 		}
 
 		const totalDays = totalHours / 24;
 		const roundedDays = Math.round(totalDays * 10) / 10;
+		console.log('Remaining days:', roundedDays);
+		
 		const value = roundedDays.toFixed(1);
 		return `${value}${roundedDays === 1 ? 'day' : 'days'}`;
 	}
@@ -3335,6 +3524,7 @@
 			on:toggleRoomSearch={toggleRoomSearch}
 			on:renameRoom={() => void renameRoom(roomId)}
 			on:toggleBreakSelectionMode={toggleBreakSelectionMode}
+			on:togglePinSelectionMode={togglePinSelectionMode}
 			on:toggleEditSelectionMode={toggleEditSelectionMode}
 			on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
 			on:markRead={() => markRoomAsRead(roomId)}
@@ -3355,40 +3545,40 @@
 			on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
 		/>
 
-		<ChatWindow
-			bind:this={chatWindowRef}
-			{roomId}
-			isVisible={!isMobileView || mobilePane === 'chat'}
-			messages={currentMessages}
-			{currentUserId}
-			unreadCount={activeUnreadCount}
-			firstUnreadMessageId={activeFirstUnreadMessageId}
-			lastReadTimestamp={activeLastReadTimestamp}
-			{roomMessageSearch}
-			{expandedMessages}
-			{isMember}
-			{isSelectionMode}
-			{isDarkMode}
-			{messageActionMode}
-			selectedMessageId={selectedActionMessageId}
-			{focusMessageId}
-			isLoadingOlder={isLoadingOlderHistory}
-			hasMoreOlder={hasMoreOlderHistory}
-			on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
-			on:joinBreakRoom={onJoinBreakRoom}
-			on:joinRoom={() => void joinCurrentRoom()}
-			on:messageSelect={onMessageSelected}
-			on:reply={onReplyRequest}
-			on:editMessage={onEditMessageRequest}
-			on:deleteMessage={onDeleteMessageRequest}
-			on:editSelected={onSelectedMessageEdit}
-			on:deleteSelected={onSelectedMessageDelete}
-			on:requestOlder={onRequestOlderHistory}
-			on:focusHandled={onFocusHandled}
-			on:readProgress={onChatReadProgress}
-			on:toggleTask={onTaskToggle}
-			on:addTask={onTaskAdd}
-			on:discuss={onTaskDiscuss}
+			<ChatWindow
+				bind:this={chatWindowRef}
+				{roomId}
+				isVisible={!isMobileView || mobilePane === 'chat'}
+				messages={currentMessages}
+				{currentUserId}
+				unreadCount={activeUnreadCount}
+				firstUnreadMessageId={activeFirstUnreadMessageId}
+				lastReadTimestamp={activeLastReadTimestamp}
+				{roomMessageSearch}
+				{expandedMessages}
+				{isMember}
+				{isSelectionMode}
+				{isDarkMode}
+				{messageActionMode}
+				selectedMessageId={selectedActionMessageId}
+				{focusMessageId}
+				isLoadingOlder={isLoadingOlderHistory}
+				hasMoreOlder={hasMoreOlderHistory}
+				on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+				on:joinBreakRoom={onJoinBreakRoom}
+				on:joinRoom={() => void joinCurrentRoom()}
+				on:messageSelect={onMessageSelected}
+				on:openPinnedDiscussion={onPinnedDiscussionOpen}
+				on:reply={onReplyRequest}
+				on:editMessage={onEditMessageRequest}
+				on:deleteMessage={onDeleteMessageRequest}
+				on:editSelected={onSelectedMessageEdit}
+				on:deleteSelected={onSelectedMessageDelete}
+				on:requestOlder={onRequestOlderHistory}
+				on:focusHandled={onFocusHandled}
+				on:readProgress={onChatReadProgress}
+				on:toggleTask={onTaskToggle}
+				on:addTask={onTaskAdd}
 		/>
 
 		{#if isMember}
@@ -3413,13 +3603,15 @@
 	</div>
 </section>
 
-<DiscussionDrawer
+<DiscussionModal
 	open={isDiscussionOpen}
-	taskMessage={activeDiscussionTask}
+	pinnedMessage={activeDiscussionTask}
 	comments={discussionComments}
+	{roomId}
 	{isDarkMode}
 	canEditTask={isMember}
 	{currentUserId}
+	opUserId={activeDiscussionTask?.senderId || ''}
 	backgroundUnreadCount={discussionBackgroundUnreadCount}
 	on:close={closeDiscussion}
 	on:navigatePrevious={() => void navigateDiscussionPins('previous')}
@@ -3429,6 +3621,7 @@
 	on:submitComment={onDiscussionCommentSubmit}
 	on:editComment={onDiscussionCommentEditRequest}
 	on:deleteComment={onDiscussionCommentDeleteRequest}
+	on:toggleCommentPin={onDiscussionCommentPinToggle}
 />
 
 <ChatRoomDetailsPanel
@@ -3501,18 +3694,18 @@
 	}
 
 	.chat-shell.theme-dark {
-		--panel-border: #2a364d;
-		--panel-shadow: 0 12px 28px rgba(2, 8, 23, 0.45);
+		--panel-border: #2b2b2f;
+		--panel-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
 		background:
-			radial-gradient(1300px 460px at -10% -35%, rgba(59, 130, 246, 0.18) 0%, transparent 58%),
-			radial-gradient(1100px 400px at 110% 0%, rgba(45, 212, 191, 0.14) 0%, transparent 55%),
-			#060b14;
+			radial-gradient(1300px 460px at -10% -35%, rgba(255, 255, 255, 0.07) 0%, transparent 58%),
+			radial-gradient(1100px 400px at 110% 0%, rgba(255, 255, 255, 0.05) 0%, transparent 55%),
+			#070708;
 	}
 
 	.chat-shell.theme-dark .sidebar-pane,
 	.chat-shell.theme-dark .chat-window,
 	.chat-shell.theme-dark .online-pane {
-		background: #0b1324;
+		background: #101012;
 		border-color: var(--panel-border);
 	}
 

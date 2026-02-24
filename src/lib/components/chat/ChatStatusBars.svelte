@@ -35,6 +35,8 @@
 	<div class="selection-banner {isDarkMode ? 'theme-dark' : ''}">
 		{#if messageActionMode === 'break'}
 			Break mode active: click a message to start a new topic room.
+		{:else if messageActionMode === 'pin'}
+			Pin mode active: click any message to pin it and open a discussion.
 		{:else if messageActionMode === 'edit'}
 			Edit mode active: click one of your messages, then use the edit/delete buttons beside it.
 		{:else if messageActionMode === 'delete'}
@@ -59,9 +61,9 @@
 	}
 
 	.selection-banner.theme-dark {
-		background: #101a2e;
-		border-bottom-color: #2f3f5b;
-		color: #c5d3ec;
+		background: #111113;
+		border-bottom-color: #2c2c31;
+		color: #d1d1d8;
 	}
 
 	.typing-indicator {
@@ -74,9 +76,9 @@
 	}
 
 	.typing-indicator.theme-dark {
-		background: #0f1a2e;
-		border-bottom-color: #2e3d58;
-		color: #9fb1d0;
+		background: #0f0f11;
+		border-bottom-color: #2a2a2f;
+		color: #adadb6;
 	}
 
 	.trusted-banner {
@@ -93,9 +95,9 @@
 	}
 
 	.trusted-banner.theme-dark {
-		background: #0f1a2e;
-		border-bottom-color: #2e3d58;
-		color: #d2def2;
+		background: #101012;
+		border-bottom-color: #2b2b30;
+		color: #d6d6dd;
 	}
 
 	.trusted-banner > span {
@@ -126,9 +128,9 @@
 	}
 
 	.trusted-banner.theme-dark .trusted-actions button {
-		border-color: #34445f;
-		background: #13203a;
-		color: #d9e6ff;
+		border-color: #3a3a40;
+		background: #1a1a1e;
+		color: #efeff4;
 	}
 
 	.chat-search-row {
@@ -138,8 +140,8 @@
 	}
 
 	.chat-search-row.theme-dark {
-		background: #0f1a2e;
-		border-bottom-color: #2f3f5b;
+		background: #101012;
+		border-bottom-color: #2b2b30;
 	}
 
 	.chat-search-row input {
@@ -157,12 +159,12 @@
 	}
 
 	.chat-search-row.theme-dark input {
-		border-color: #314059;
-		background: #111d33;
-		color: #dbe7ff;
+		border-color: #38383d;
+		background: #18181b;
+		color: #efeff4;
 	}
 
 	.chat-search-row.theme-dark input::placeholder {
-		color: #8ea2c3;
+		color: #9898a1;
 	}
 </style>

@@ -1,5 +1,5 @@
 export type ThreadStatus = 'joined' | 'discoverable' | 'left';
-export type MessageActionMode = 'none' | 'break' | 'edit' | 'delete';
+export type MessageActionMode = 'none' | 'break' | 'edit' | 'delete' | 'pin';
 export type RoomMenuMode = 'create' | 'join';
 export type ThemePreference = 'system' | 'light' | 'dark';
 
@@ -57,6 +57,8 @@ export type ChatMessage = {
 	breakRoomId?: string;
 	breakJoinCount?: number;
 	isPinned?: boolean;
+	pinnedBy?: string;
+	pinnedByName?: string;
 	pending?: boolean;
 };
 

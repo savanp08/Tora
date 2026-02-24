@@ -105,7 +105,16 @@ export function parseIncomingMessage(
 	);
 
 	return {
-		id: toStringValue(source.id) || createMessageId(nextRoomId),
+		id:
+			toStringValue(
+				source.id ??
+					source.commentId ??
+					source.commentID ??
+					source.comment_id ??
+					source.messageId ??
+					source.messageID ??
+					source.message_id
+			) || createMessageId(nextRoomId),
 		roomId: nextRoomId,
 		senderId: toStringValue(source.userId ?? source.senderId ?? source.sender_id ?? 'unknown'),
 		senderName:
@@ -128,7 +137,14 @@ export function parseIncomingMessage(
 			toBool(source.isDeleted ?? source.is_deleted) ||
 			toStringValue(source.content).trim() === deletedPlaceholder,
 		replyToMessageId: normalizeMessageID(
-			toStringValue(source.replyToMessageId ?? source.reply_to_message_id)
+			toStringValue(
+				source.replyToMessageId ??
+					source.replyToMessageID ??
+					source.reply_to_message_id ??
+					source.parentCommentId ??
+					source.parentCommentID ??
+					source.parent_comment_id
+			)
 		),
 		replyToSnippet: toStringValue(source.replyToSnippet ?? source.reply_to_snippet).trim(),
 		totalReplies: toInt(source.totalReplies ?? source.total_replies),
@@ -140,6 +156,8 @@ export function parseIncomingMessage(
 		breakRoomId,
 		breakJoinCount: toInt(source.breakJoinCount ?? source.break_join_count),
 		isPinned: toBool(source.isPinned ?? source.is_pinned),
+		pinnedBy: toStringValue(source.pinnedBy ?? source.pinned_by),
+		pinnedByName: toStringValue(source.pinnedByName ?? source.pinned_by_name),
 		pending: false
 	};
 }

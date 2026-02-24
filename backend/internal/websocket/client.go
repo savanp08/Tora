@@ -199,6 +199,30 @@ func (c *Client) readPump() {
 			}
 			continue
 		}
+		if discussionComment, isDiscussionComment := parseDiscussionCommentPayload(raw); isDiscussionComment {
+			if c.Hub != nil {
+				c.Hub.discussionComment <- &ClientDiscussionCommentEvent{
+					Client:          c,
+					RoomID:          discussionComment.RoomID,
+					PinMessageID:    discussionComment.PinMessageID,
+					ParentCommentID: discussionComment.ParentCommentID,
+					Content:         discussionComment.Content,
+				}
+			}
+			continue
+		}
+		if discussionCommentPin, isDiscussionCommentPin := parseDiscussionCommentPinPayload(raw); isDiscussionCommentPin {
+			if c.Hub != nil {
+				c.Hub.discussionCommentPin <- &ClientDiscussionCommentPinEvent{
+					Client:       c,
+					RoomID:       discussionCommentPin.RoomID,
+					PinMessageID: discussionCommentPin.PinMessageID,
+					CommentID:    discussionCommentPin.CommentID,
+					IsPinned:     discussionCommentPin.IsPinned,
+				}
+			}
+			continue
+		}
 		if edit, isEdit := parseMessageEditPayload(raw); isEdit {
 			if c.Hub != nil {
 				c.Hub.messageEdit <- &ClientMessageEditEvent{
@@ -382,6 +406,32 @@ type messageDeleteEnvelope struct {
 	Payload    json.RawMessage `json:"payload"`
 }
 
+type discussionCommentEnvelope struct {
+	Type              string          `json:"type"`
+	RoomID            string          `json:"roomId"`
+	RoomID2           string          `json:"room_id"`
+	PinMessageID      string          `json:"pinMessageId"`
+	PinMessageID2     string          `json:"pin_message_id"`
+	ParentCommentID   string          `json:"parentCommentId"`
+	ParentCommentID2  string          `json:"parent_comment_id"`
+	ReplyToMessageID  string          `json:"replyToMessageId"`
+	ReplyToMessageID2 string          `json:"reply_to_message_id"`
+	Content           string          `json:"content"`
+	Payload           json.RawMessage `json:"payload"`
+}
+
+type discussionCommentPinEnvelope struct {
+	Type          string          `json:"type"`
+	RoomID        string          `json:"roomId"`
+	RoomID2       string          `json:"room_id"`
+	PinMessageID  string          `json:"pinMessageId"`
+	PinMessageID2 string          `json:"pin_message_id"`
+	CommentID     string          `json:"commentId"`
+	CommentID2    string          `json:"comment_id"`
+	IsPinned      bool            `json:"isPinned"`
+	Payload       json.RawMessage `json:"payload"`
+}
+
 type clientTypingPayload struct {
 	RoomID   string
 	IsTyping bool
@@ -396,6 +446,20 @@ type clientMessageEditPayload struct {
 type clientMessageDeletePayload struct {
 	RoomID    string
 	MessageID string
+}
+
+type clientDiscussionCommentPayload struct {
+	RoomID          string
+	PinMessageID    string
+	ParentCommentID string
+	Content         string
+}
+
+type clientDiscussionCommentPinPayload struct {
+	RoomID       string
+	PinMessageID string
+	CommentID    string
+	IsPinned     bool
 }
 
 func parseSubscribeRoomIDs(raw []byte) ([]string, bool) {
@@ -584,6 +648,151 @@ func parseMessageDeletePayload(raw []byte) (clientMessageDeletePayload, bool) {
 	return clientMessageDeletePayload{
 		RoomID:    roomID,
 		MessageID: messageID,
+	}, true
+}
+
+func parseDiscussionCommentPayload(raw []byte) (clientDiscussionCommentPayload, bool) {
+	if len(raw) == 0 {
+		return clientDiscussionCommentPayload{}, false
+	}
+
+	var envelope discussionCommentEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientDiscussionCommentPayload{}, false
+	}
+	if strings.ToLower(strings.TrimSpace(envelope.Type)) != "discussion_comment" {
+		return clientDiscussionCommentPayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	pinMessageID := normalizeMessageID(envelope.PinMessageID)
+	if pinMessageID == "" {
+		pinMessageID = normalizeMessageID(envelope.PinMessageID2)
+	}
+	parentCommentID := normalizeMessageID(envelope.ParentCommentID)
+	if parentCommentID == "" {
+		parentCommentID = normalizeMessageID(envelope.ParentCommentID2)
+	}
+	content := strings.TrimSpace(envelope.Content)
+
+	if len(envelope.Payload) > 0 {
+		var payload discussionCommentEnvelope
+		if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+			if roomID == "" {
+				roomID = normalizeRoomID(payload.RoomID)
+				if roomID == "" {
+					roomID = normalizeRoomID(payload.RoomID2)
+				}
+			}
+			if pinMessageID == "" {
+				pinMessageID = normalizeMessageID(payload.PinMessageID)
+				if pinMessageID == "" {
+					pinMessageID = normalizeMessageID(payload.PinMessageID2)
+				}
+			}
+			if parentCommentID == "" {
+				parentCommentID = normalizeMessageID(payload.ParentCommentID)
+				if parentCommentID == "" {
+					parentCommentID = normalizeMessageID(payload.ParentCommentID2)
+				}
+			}
+			if content == "" {
+				content = strings.TrimSpace(payload.Content)
+			}
+			if pinMessageID == "" {
+				pinMessageID = normalizeMessageID(payload.ReplyToMessageID)
+				if pinMessageID == "" {
+					pinMessageID = normalizeMessageID(payload.ReplyToMessageID2)
+				}
+			}
+		}
+	}
+
+	if pinMessageID == "" {
+		pinMessageID = normalizeMessageID(envelope.ReplyToMessageID)
+		if pinMessageID == "" {
+			pinMessageID = normalizeMessageID(envelope.ReplyToMessageID2)
+		}
+	}
+	if roomID == "" || pinMessageID == "" || content == "" {
+		return clientDiscussionCommentPayload{}, false
+	}
+	if len(content) > maxTextChars {
+		content = content[:maxTextChars]
+	}
+
+	return clientDiscussionCommentPayload{
+		RoomID:          roomID,
+		PinMessageID:    pinMessageID,
+		ParentCommentID: parentCommentID,
+		Content:         content,
+	}, true
+}
+
+func parseDiscussionCommentPinPayload(raw []byte) (clientDiscussionCommentPinPayload, bool) {
+	if len(raw) == 0 {
+		return clientDiscussionCommentPinPayload{}, false
+	}
+
+	var envelope discussionCommentPinEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientDiscussionCommentPinPayload{}, false
+	}
+	if strings.ToLower(strings.TrimSpace(envelope.Type)) != "discussion_comment_pin" {
+		return clientDiscussionCommentPinPayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	pinMessageID := normalizeMessageID(envelope.PinMessageID)
+	if pinMessageID == "" {
+		pinMessageID = normalizeMessageID(envelope.PinMessageID2)
+	}
+	commentID := normalizeMessageID(envelope.CommentID)
+	if commentID == "" {
+		commentID = normalizeMessageID(envelope.CommentID2)
+	}
+	isPinned := envelope.IsPinned
+
+	if len(envelope.Payload) > 0 {
+		var payload discussionCommentPinEnvelope
+		if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+			if roomID == "" {
+				roomID = normalizeRoomID(payload.RoomID)
+				if roomID == "" {
+					roomID = normalizeRoomID(payload.RoomID2)
+				}
+			}
+			if pinMessageID == "" {
+				pinMessageID = normalizeMessageID(payload.PinMessageID)
+				if pinMessageID == "" {
+					pinMessageID = normalizeMessageID(payload.PinMessageID2)
+				}
+			}
+			if commentID == "" {
+				commentID = normalizeMessageID(payload.CommentID)
+				if commentID == "" {
+					commentID = normalizeMessageID(payload.CommentID2)
+				}
+			}
+			isPinned = payload.IsPinned
+		}
+	}
+
+	if roomID == "" || pinMessageID == "" || commentID == "" {
+		return clientDiscussionCommentPinPayload{}, false
+	}
+
+	return clientDiscussionCommentPinPayload{
+		RoomID:       roomID,
+		PinMessageID: pinMessageID,
+		CommentID:    commentID,
+		IsPinned:     isPinned,
 	}, true
 }
 

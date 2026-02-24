@@ -31,6 +31,18 @@ type RoomMessagesResponse struct {
 	HasMore  bool             `json:"hasMore"`
 }
 
+type RoomPinUpsertRequest struct {
+	UserID    string `json:"userId"`
+	MessageID string `json:"messageId"`
+}
+
+type RoomPinUpsertResponse struct {
+	RoomID    string `json:"roomId"`
+	MessageID string `json:"messageId"`
+	CreatedAt int64  `json:"createdAt"`
+	Type      string `json:"type"`
+}
+
 type RoomPinNavigateResponse struct {
 	Message *models.Message `json:"message"`
 }
@@ -61,6 +73,10 @@ type discussionCommentRow struct {
 	IsEdited        bool
 	EditedAt        time.Time
 	IsDeleted       bool
+	IsPinned        bool
+	PinnedBy        string
+	PinnedByName    string
+	PinnedAt        time.Time
 }
 
 func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +135,112 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *RoomHandler) UpsertRoomPin(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message storage unavailable"})
+		return
+	}
+	if h.redis == nil || h.redis.Client == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Membership storage unavailable"})
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	if roomID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
+		return
+	}
+
+	var req RoomPinUpsertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	userID := normalizeIdentifier(req.UserID)
+	messageID := normalizeMessageID(req.MessageID)
+	if userID == "" || messageID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId and messageId are required"})
+		return
+	}
+
+	ctx := r.Context()
+	isMember, err := h.isRoomMember(ctx, roomID, userID)
+	if err != nil {
+		log.Printf("[room-pins] membership check failed room=%s user=%s err=%v", roomID, userID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify membership"})
+		return
+	}
+	if !isMember {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "User is not a member of this room"})
+		return
+	}
+
+	createdAt, err := h.lookupMessageCreatedAt(ctx, roomID, messageID)
+	if err != nil {
+		if err == gocql.ErrNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message not found"})
+			return
+		}
+		log.Printf("[room-pins] lookup message failed room=%s message=%s err=%v", roomID, messageID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load message"})
+		return
+	}
+
+	lookupMessage, err := h.lookupMessageByPrimaryKey(ctx, roomID, createdAt, messageID)
+	if err != nil {
+		if err == gocql.ErrNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Message not found"})
+			return
+		}
+		log.Printf("[room-pins] lookup primary message failed room=%s message=%s err=%v", roomID, messageID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load message"})
+		return
+	}
+
+	messageType := strings.ToLower(strings.TrimSpace(lookupMessage.Type))
+	if messageType == "" {
+		messageType = "message"
+	}
+
+	roomPinsTable := h.scylla.Table("room_pins")
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, created_at, message_id, type) VALUES (?, ?, ?, ?)`,
+		roomPinsTable,
+	)
+	if err := h.scylla.Session.Query(
+		insertQuery,
+		roomID,
+		createdAt,
+		messageID,
+		messageType,
+	).WithContext(ctx).Exec(); err != nil {
+		log.Printf("[room-pins] upsert failed room=%s message=%s err=%v", roomID, messageID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to pin message"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(RoomPinUpsertResponse{
+		RoomID:    roomID,
+		MessageID: messageID,
+		CreatedAt: createdAt.UTC().UnixMilli(),
+		Type:      messageType,
+	})
 }
 
 func (h *RoomHandler) NavigateRoomPins(w http.ResponseWriter, r *http.Request) {
@@ -297,7 +419,7 @@ func (h *RoomHandler) CreatePinnedDiscussionComment(w http.ResponseWriter, r *ht
 
 	commentsTable := h.scylla.Table("pin_discussion_comments")
 	insertQuery := fmt.Sprintf(
-		`INSERT INTO %s (room_id, pin_message_id, created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO %s (room_id, pin_message_id, created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		commentsTable,
 	)
 	if err := h.scylla.Session.Query(
@@ -313,6 +435,10 @@ func (h *RoomHandler) CreatePinnedDiscussionComment(w http.ResponseWriter, r *ht
 		false,
 		nil,
 		false,
+		false,
+		"",
+		"",
+		nil,
 	).WithContext(ctx).Exec(); err != nil {
 		log.Printf("[pin-discussion] insert failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -361,9 +487,9 @@ func (h *RoomHandler) EditPinnedDiscussionComment(w http.ResponseWriter, r *http
 	userID := normalizeIdentifier(req.UserID)
 	content := strings.TrimSpace(req.Content)
 	createdAt := parseClientTimestamp(req.CreatedAt)
-	if userID == "" || content == "" || createdAt.IsZero() {
+	if userID == "" || content == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId, content, and createdAt are required"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId and content are required"})
 		return
 	}
 	if len([]rune(content)) > maxDiscussionCommentContentRune {
@@ -386,17 +512,56 @@ func (h *RoomHandler) EditPinnedDiscussionComment(w http.ResponseWriter, r *http
 		return
 	}
 
+	if createdAt.IsZero() {
+		resolvedCreatedAt, resolveErr := h.lookupPinnedDiscussionCommentCreatedAt(ctx, roomID, pinMessageID, commentID)
+		if resolveErr != nil {
+			if resolveErr == gocql.ErrNotFound {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+				return
+			}
+			log.Printf("[pin-discussion] lookup created_at failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, resolveErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
+			return
+		}
+		createdAt = resolvedCreatedAt
+	}
+
 	currentRow, err := h.lookupPinnedDiscussionCommentByPrimaryKey(ctx, roomID, pinMessageID, createdAt, commentID)
 	if err != nil {
 		if err == gocql.ErrNotFound {
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+			resolvedCreatedAt, resolveErr := h.lookupPinnedDiscussionCommentCreatedAt(ctx, roomID, pinMessageID, commentID)
+			if resolveErr != nil {
+				if resolveErr == gocql.ErrNotFound {
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+					return
+				}
+				log.Printf("[pin-discussion] fallback lookup created_at failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, resolveErr)
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
+				return
+			}
+			createdAt = resolvedCreatedAt
+			currentRow, err = h.lookupPinnedDiscussionCommentByPrimaryKey(ctx, roomID, pinMessageID, createdAt, commentID)
+			if err == gocql.ErrNotFound {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+				return
+			}
+			if err != nil {
+				log.Printf("[pin-discussion] fallback lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
+				return
+			}
+		} else {
+			log.Printf("[pin-discussion] lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
 			return
 		}
-		log.Printf("[pin-discussion] lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to edit discussion comment"})
-		return
 	}
 	if normalizeIdentifier(currentRow.SenderID) != userID {
 		w.WriteHeader(http.StatusForbidden)
@@ -473,9 +638,9 @@ func (h *RoomHandler) DeletePinnedDiscussionComment(w http.ResponseWriter, r *ht
 	}
 	userID := normalizeIdentifier(req.UserID)
 	createdAt := parseClientTimestamp(req.CreatedAt)
-	if userID == "" || createdAt.IsZero() {
+	if userID == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId and createdAt are required"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId is required"})
 		return
 	}
 
@@ -493,17 +658,56 @@ func (h *RoomHandler) DeletePinnedDiscussionComment(w http.ResponseWriter, r *ht
 		return
 	}
 
+	if createdAt.IsZero() {
+		resolvedCreatedAt, resolveErr := h.lookupPinnedDiscussionCommentCreatedAt(ctx, roomID, pinMessageID, commentID)
+		if resolveErr != nil {
+			if resolveErr == gocql.ErrNotFound {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+				return
+			}
+			log.Printf("[pin-discussion] lookup created_at failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, resolveErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
+			return
+		}
+		createdAt = resolvedCreatedAt
+	}
+
 	currentRow, err := h.lookupPinnedDiscussionCommentByPrimaryKey(ctx, roomID, pinMessageID, createdAt, commentID)
 	if err != nil {
 		if err == gocql.ErrNotFound {
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+			resolvedCreatedAt, resolveErr := h.lookupPinnedDiscussionCommentCreatedAt(ctx, roomID, pinMessageID, commentID)
+			if resolveErr != nil {
+				if resolveErr == gocql.ErrNotFound {
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+					return
+				}
+				log.Printf("[pin-discussion] fallback lookup created_at failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, resolveErr)
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
+				return
+			}
+			createdAt = resolvedCreatedAt
+			currentRow, err = h.lookupPinnedDiscussionCommentByPrimaryKey(ctx, roomID, pinMessageID, createdAt, commentID)
+			if err == gocql.ErrNotFound {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Discussion comment not found"})
+				return
+			}
+			if err != nil {
+				log.Printf("[pin-discussion] fallback lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
+				return
+			}
+		} else {
+			log.Printf("[pin-discussion] lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
 			return
 		}
-		log.Printf("[pin-discussion] lookup failed room=%s pin=%s comment=%s err=%v", roomID, pinMessageID, commentID, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete discussion comment"})
-		return
 	}
 	if normalizeIdentifier(currentRow.SenderID) != userID {
 		w.WriteHeader(http.StatusForbidden)
@@ -654,6 +858,10 @@ func (h *RoomHandler) queryRoomMessagesPage(
 		return nil, false, err
 	}
 
+	if err := h.applyPinnedState(ctx, roomID, messages); err != nil {
+		log.Printf("[room-messages] pin-state enrich failed room=%s err=%v", roomID, err)
+	}
+
 	hasMore := false
 	if len(messages) > limit {
 		hasMore = true
@@ -760,6 +968,17 @@ func (h *RoomHandler) lookupMessageByPrimaryKey(
 		editedAtPtr = &editedCopy
 	}
 
+	isPinned, err := h.isPinnedMessage(ctx, roomID, dbMessageID, dbCreatedAt)
+	if err != nil {
+		log.Printf(
+			"[room-pins] lookup pinned state failed room=%s message=%s created_at=%s err=%v",
+			roomID,
+			dbMessageID,
+			dbCreatedAt.UTC().Format(time.RFC3339Nano),
+			err,
+		)
+	}
+
 	return models.Message{
 		ID:               dbMessageID,
 		RoomID:           dbRoomID,
@@ -777,6 +996,7 @@ func (h *RoomHandler) lookupMessageByPrimaryKey(
 		BreakJoinCount:   breakJoinCount,
 		ReplyToMessageID: replyToID,
 		ReplyToSnippet:   replySnippet,
+		IsPinned:         isPinned,
 		CreatedAt:        dbCreatedAt,
 	}, nil
 }
@@ -800,6 +1020,79 @@ func (h *RoomHandler) lookupMessageCreatedAt(
 	return createdAt, nil
 }
 
+func (h *RoomHandler) applyPinnedState(ctx context.Context, roomID string, messages []models.Message) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil || len(messages) == 0 {
+		return nil
+	}
+
+	first := messages[0].CreatedAt
+	last := messages[0].CreatedAt
+	for _, message := range messages {
+		if message.CreatedAt.Before(first) {
+			first = message.CreatedAt
+		}
+		if message.CreatedAt.After(last) {
+			last = message.CreatedAt
+		}
+	}
+	if first.IsZero() || last.IsZero() {
+		return nil
+	}
+
+	roomPinsTable := h.scylla.Table("room_pins")
+	query := fmt.Sprintf(
+		`SELECT message_id FROM %s WHERE room_id = ? AND created_at >= ? AND created_at <= ?`,
+		roomPinsTable,
+	)
+	iter := h.scylla.Session.Query(query, roomID, first, last).WithContext(ctx).Iter()
+	pinnedByMessageID := make(map[string]bool)
+	var pinnedMessageID string
+	for iter.Scan(&pinnedMessageID) {
+		normalizedPinnedID := normalizeMessageID(pinnedMessageID)
+		if normalizedPinnedID == "" {
+			continue
+		}
+		pinnedByMessageID[normalizedPinnedID] = true
+	}
+	if err := iter.Close(); err != nil {
+		return err
+	}
+	if len(pinnedByMessageID) == 0 {
+		return nil
+	}
+
+	for index, message := range messages {
+		if pinnedByMessageID[normalizeMessageID(message.ID)] {
+			messages[index].IsPinned = true
+		}
+	}
+	return nil
+}
+
+func (h *RoomHandler) isPinnedMessage(
+	ctx context.Context,
+	roomID, messageID string,
+	createdAt time.Time,
+) (bool, error) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil || createdAt.IsZero() {
+		return false, nil
+	}
+
+	roomPinsTable := h.scylla.Table("room_pins")
+	query := fmt.Sprintf(
+		`SELECT message_id FROM %s WHERE room_id = ? AND created_at = ? LIMIT 1`,
+		roomPinsTable,
+	)
+	var pinnedMessageID string
+	if err := h.scylla.Session.Query(query, roomID, createdAt).WithContext(ctx).Scan(&pinnedMessageID); err != nil {
+		if err == gocql.ErrNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return normalizeMessageID(pinnedMessageID) == normalizeMessageID(messageID), nil
+}
+
 func (h *RoomHandler) ensurePinnedDiscussionSchema() {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return
@@ -819,12 +1112,28 @@ func (h *RoomHandler) ensurePinnedDiscussionSchema() {
 			is_edited boolean,
 			edited_at timestamp,
 			is_deleted boolean,
+			is_pinned boolean,
+			pinned_by text,
+			pinned_by_name text,
+			pinned_at timestamp,
 			PRIMARY KEY ((room_id, pin_message_id), created_at, comment_id)
 		) WITH CLUSTERING ORDER BY (created_at ASC, comment_id ASC)`,
 		commentsTable,
 	)
 	if err := h.scylla.Session.Query(createQuery).Exec(); err != nil {
 		log.Printf("[pin-discussion] ensure schema failed: %v", err)
+	}
+
+	alterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD is_pinned boolean`, commentsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD pinned_by text`, commentsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD pinned_by_name text`, commentsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD pinned_at timestamp`, commentsTable),
+	}
+	for _, alterQuery := range alterQueries {
+		if err := h.scylla.Session.Query(alterQuery).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
+			log.Printf("[pin-discussion] ensure schema alter failed: %v", err)
+		}
 	}
 }
 
@@ -846,7 +1155,7 @@ func (h *RoomHandler) queryPinnedDiscussionComments(
 ) ([]models.Message, error) {
 	commentsTable := h.scylla.Table("pin_discussion_comments")
 	query := fmt.Sprintf(
-		`SELECT created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted FROM %s WHERE room_id = ? AND pin_message_id = ? LIMIT ?`,
+		`SELECT created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at FROM %s WHERE room_id = ? AND pin_message_id = ? LIMIT ?`,
 		commentsTable,
 	)
 	iter := h.scylla.Session.Query(query, roomID, pinMessageID, limit).WithContext(ctx).Iter()
@@ -862,6 +1171,10 @@ func (h *RoomHandler) queryPinnedDiscussionComments(
 		isEdited        bool
 		editedAt        time.Time
 		isDeleted       bool
+		isPinned        bool
+		pinnedBy        string
+		pinnedByName    string
+		pinnedAt        time.Time
 	)
 	for iter.Scan(
 		&createdAt,
@@ -873,6 +1186,10 @@ func (h *RoomHandler) queryPinnedDiscussionComments(
 		&isEdited,
 		&editedAt,
 		&isDeleted,
+		&isPinned,
+		&pinnedBy,
+		&pinnedByName,
+		&pinnedAt,
 	) {
 		if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
 			content = decrypted
@@ -887,6 +1204,10 @@ func (h *RoomHandler) queryPinnedDiscussionComments(
 			IsEdited:        isEdited,
 			EditedAt:        editedAt,
 			IsDeleted:       isDeleted,
+			IsPinned:        isPinned,
+			PinnedBy:        pinnedBy,
+			PinnedByName:    pinnedByName,
+			PinnedAt:        pinnedAt,
 		}
 		comments = append(comments, discussionRowToModelMessage(roomID, row))
 	}
@@ -905,7 +1226,7 @@ func (h *RoomHandler) lookupPinnedDiscussionCommentByPrimaryKey(
 ) (discussionCommentRow, error) {
 	commentsTable := h.scylla.Table("pin_discussion_comments")
 	query := fmt.Sprintf(
-		`SELECT created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted FROM %s WHERE room_id = ? AND pin_message_id = ? AND created_at = ? AND comment_id = ? LIMIT 1`,
+		`SELECT created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at FROM %s WHERE room_id = ? AND pin_message_id = ? AND created_at = ? AND comment_id = ? LIMIT 1`,
 		commentsTable,
 	)
 
@@ -926,6 +1247,10 @@ func (h *RoomHandler) lookupPinnedDiscussionCommentByPrimaryKey(
 		&row.IsEdited,
 		&row.EditedAt,
 		&row.IsDeleted,
+		&row.IsPinned,
+		&row.PinnedBy,
+		&row.PinnedByName,
+		&row.PinnedAt,
 	); err != nil {
 		return discussionCommentRow{}, err
 	}
@@ -934,6 +1259,25 @@ func (h *RoomHandler) lookupPinnedDiscussionCommentByPrimaryKey(
 		row.Content = decrypted
 	}
 	return row, nil
+}
+
+func (h *RoomHandler) lookupPinnedDiscussionCommentCreatedAt(
+	ctx context.Context,
+	roomID, pinMessageID, commentID string,
+) (time.Time, error) {
+	commentsTable := h.scylla.Table("pin_discussion_comments")
+	query := fmt.Sprintf(
+		`SELECT created_at FROM %s WHERE room_id = ? AND pin_message_id = ? AND comment_id = ? LIMIT 1 ALLOW FILTERING`,
+		commentsTable,
+	)
+	var createdAt time.Time
+	if err := h.scylla.Session.Query(query, roomID, pinMessageID, commentID).WithContext(ctx).Scan(&createdAt); err != nil {
+		return time.Time{}, err
+	}
+	if createdAt.IsZero() {
+		return time.Time{}, gocql.ErrNotFound
+	}
+	return createdAt, nil
 }
 
 func discussionRowToModelMessage(roomID string, row discussionCommentRow) models.Message {
@@ -962,6 +1306,9 @@ func discussionRowToModelMessage(roomID string, row discussionCommentRow) models
 		IsEdited:         isEdited,
 		EditedAt:         editedAtPtr,
 		ReplyToMessageID: strings.TrimSpace(row.ParentCommentID),
+		IsPinned:         row.IsPinned,
+		PinnedBy:         strings.TrimSpace(row.PinnedBy),
+		PinnedByName:     strings.TrimSpace(row.PinnedByName),
 		CreatedAt:        row.CreatedAt.UTC(),
 		HasBreakRoom:     false,
 		BreakJoinCount:   0,

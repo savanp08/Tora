@@ -19,6 +19,7 @@
 		toggleRoomSearch: void;
 		renameRoom: void;
 		toggleBreakSelectionMode: void;
+		togglePinSelectionMode: void;
 		toggleEditSelectionMode: void;
 		toggleDeleteSelectionMode: void;
 		markRead: void;
@@ -52,6 +53,7 @@
 			| 'toggleRoomSearch'
 			| 'renameRoom'
 			| 'toggleBreakSelectionMode'
+			| 'togglePinSelectionMode'
 			| 'toggleEditSelectionMode'
 			| 'toggleDeleteSelectionMode'
 			| 'markRead'
@@ -127,6 +129,12 @@
 				</button>
 				<button
 					type="button"
+					on:click|stopPropagation={() => closeMenuThen('togglePinSelectionMode')}
+				>
+					{messageActionMode === 'pin' ? 'Cancel Pin Mode' : '📌 Pin Message'}
+				</button>
+				<button
+					type="button"
 					on:click|stopPropagation={() => closeMenuThen('toggleEditSelectionMode')}
 				>
 					{messageActionMode === 'edit' ? 'Cancel Edit Mode' : 'Edit Message (Select One)'}
@@ -174,8 +182,8 @@
 	}
 
 	.chat-header.theme-dark {
-		background: #0f1a2e;
-		border-bottom-color: #2b3a53;
+		background: #101012;
+		border-bottom-color: #2b2b30;
 	}
 
 	.mobile-back-button {
@@ -192,9 +200,9 @@
 	}
 
 	.theme-dark .mobile-back-button {
-		border-color: #314059;
-		background: #101a2e;
-		color: #d8e3fa;
+		border-color: #3a3a40;
+		background: #18181b;
+		color: #ececf2;
 	}
 
 	.room-title-button {
@@ -213,7 +221,7 @@
 	}
 
 	.theme-dark .room-title-button {
-		color: #e2ebfb;
+		color: #f1f1f6;
 	}
 
 	.room-title-button:focus-visible {
@@ -227,6 +235,10 @@
 		height: 10px;
 		border-radius: 50%;
 		background: #22c55e;
+	}
+
+	.theme-dark .presence-dot {
+		background: #d8d8df;
 	}
 
 	.title-text {
@@ -253,7 +265,7 @@
 	}
 
 	.theme-dark .title-sub {
-		color: #9fb2d2;
+		color: #ababb4;
 	}
 
 	.header-actions {
@@ -283,9 +295,9 @@
 	}
 
 	.theme-dark .expiry-pill {
-		border-color: #314059;
-		background: #101a2e;
-		color: #d8e3fa;
+		border-color: #3a3a40;
+		background: #18181b;
+		color: #eeeef4;
 	}
 
 	.expiry-pill:hover {
@@ -293,7 +305,7 @@
 	}
 
 	.theme-dark .expiry-pill:hover {
-		background: #16233c;
+		background: #222227;
 	}
 
 	.expiry-pill:focus-visible {
@@ -312,9 +324,9 @@
 	}
 
 	.theme-dark .icon-button {
-		border-color: #314059;
-		background: #101a2e;
-		color: #d8e3fa;
+		border-color: #3a3a40;
+		background: #18181b;
+		color: #eeeef4;
 	}
 
 	.room-menu {
@@ -331,9 +343,9 @@
 	}
 
 	.theme-dark .room-menu {
-		background: #111d33;
-		border-color: #2f3f5b;
-		box-shadow: 0 14px 28px rgba(2, 8, 23, 0.5);
+		background: #161619;
+		border-color: #34343a;
+		box-shadow: 0 14px 28px rgba(0, 0, 0, 0.5);
 	}
 
 	.room-menu button {
@@ -347,8 +359,8 @@
 	}
 
 	.theme-dark .room-menu button {
-		background: #111d33;
-		color: #dbe8ff;
+		background: #161619;
+		color: #e9e9ef;
 	}
 
 	.room-menu button:hover {
@@ -356,7 +368,7 @@
 	}
 
 	.theme-dark .room-menu button:hover {
-		background: #1b2a45;
+		background: #222226;
 	}
 
 	@media (max-width: 900px) {

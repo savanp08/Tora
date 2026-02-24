@@ -34,7 +34,7 @@
 	}
 
 	.online-panel.theme-dark {
-		background: linear-gradient(180deg, #0f1729 0%, #0b1323 100%);
+		background: linear-gradient(180deg, #0b0b0d 0%, #121214 100%);
 	}
 
 	.online-header {
@@ -46,7 +46,7 @@
 	}
 
 	.online-panel.theme-dark .online-header {
-		border-bottom-color: #253049;
+		border-bottom-color: #2b2b30;
 	}
 
 	.online-header h3 {
@@ -56,7 +56,7 @@
 	}
 
 	.online-panel.theme-dark .online-header h3 {
-		color: #dbe8ff;
+		color: #f0f0f5;
 	}
 
 	.online-header span {
@@ -69,8 +69,8 @@
 	}
 
 	.online-panel.theme-dark .online-header span {
-		background: #1f2c43;
-		color: #d9e6ff;
+		background: #222226;
+		color: #ececf2;
 	}
 
 	.online-list {
@@ -108,9 +108,9 @@
 	}
 
 	.online-panel.theme-dark .online-member {
-		border-color: #2c3853;
-		background: #111d33;
-		box-shadow: 0 3px 10px rgba(2, 8, 23, 0.36);
+		border-color: #333338;
+		background: #18181b;
+		box-shadow: 0 3px 10px rgba(0, 0, 0, 0.36);
 	}
 
 	.member-dot {
@@ -122,6 +122,10 @@
 			0 0 0 2px rgba(255, 255, 255, 0.92),
 			0 0 0 3px rgba(17, 24, 39, 0.18);
 		background: #22c55e;
+	}
+
+	.online-panel.theme-dark .member-dot {
+		background: #d6d6de;
 	}
 
 	.member-name {
@@ -136,7 +140,7 @@
 	}
 
 	.online-panel.theme-dark .member-name {
-		color: #e4eeff;
+		color: #f0f0f5;
 	}
 
 	.empty-label {
@@ -150,9 +154,9 @@
 	}
 
 	.online-panel.theme-dark .empty-label {
-		color: #9fb0ce;
-		border-color: #30405e;
-		background: #111d33;
+		color: #aeaeb7;
+		border-color: #35353a;
+		background: #18181b;
 	}
 
 	@media (max-width: 1199px) {

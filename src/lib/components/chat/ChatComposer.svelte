@@ -47,7 +47,7 @@
 	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
 	$: taskDraftReady = taskDraftOpen && taskDraftTitle.trim() !== '' && taskDraftItems.length > 0;
 	$: showSendButton =
-		!isRecording && (!!attachedFile || normalizedDraftMessage.length > 0 || taskDraftOpen);
+		!isRecording && !taskDraftOpen && (!!attachedFile || normalizedDraftMessage.length > 0);
 
 	const dispatch = createEventDispatcher<{
 		send:
@@ -477,6 +477,93 @@
 	}
 </script>
 
+{#if taskDraftOpen}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<div
+		class="task-draft-shell {isDarkMode ? 'theme-dark' : ''}"
+		role="presentation"
+		on:click={onTaskDraftBackdropClick}
+	>
+		<section class="task-draft-card" role="group" aria-label="Task preview card">
+			<div class="task-draft-header">
+				<div class="task-draft-kicker">Task Preview</div>
+				<button type="button" class="task-draft-close" on:click={clearTaskDraft}>Cancel</button>
+			</div>
+			<input
+				type="text"
+				class="task-draft-title"
+				bind:value={taskDraftTitle}
+				placeholder="Title"
+			/>
+			<div class="task-draft-list">
+				{#if taskDraftItems.length === 0}
+					<div class="task-draft-empty">No tasks yet. Add your first item.</div>
+				{:else}
+					{#each taskDraftItems as task, index}
+						<div class="task-draft-item">
+							<input type="checkbox" checked={task.completed} disabled />
+							<div class="task-draft-item-content">
+								<div class="task-draft-item-name">{task.text}</div>
+								<div class="task-draft-meta-line">
+									<span>{task.createdBy}</span>
+									<span aria-hidden="true">•</span>
+									<span>{formatTaskMeta(task.createdAt)}</span>
+									<span aria-hidden="true">•</span>
+									<span class="task-draft-meta-finished">open</span>
+								</div>
+							</div>
+							<button
+								type="button"
+								class="task-draft-remove"
+								on:click={() => removeTaskDraftItem(index)}
+								aria-label="Remove task item"
+								title="Remove"
+							>
+								×
+							</button>
+						</div>
+					{/each}
+				{/if}
+			</div>
+			{#if taskAddInputOpen}
+				<div class="task-draft-add-row">
+					<input type="checkbox" disabled aria-hidden="true" />
+					<input
+						type="text"
+						bind:value={taskNewItemText}
+						placeholder="Task name"
+						on:keydown={onTaskDraftItemKeyDown}
+					/>
+					<button type="button" class="add-row-action confirm" on:click={addTaskDraftItem}>Add</button>
+					<button
+						type="button"
+						class="add-row-action"
+						on:click={cancelTaskDraftAddInput}
+					>
+						Cancel
+					</button>
+				</div>
+			{:else}
+				<button type="button" class="task-draft-add-trigger" on:click={openTaskDraftAddInput}>
+					<span class="plus-pill">+</span>
+					<span>Add Task</span>
+				</button>
+			{/if}
+			{#if taskDraftError}
+				<div class="task-draft-error">{taskDraftError}</div>
+			{/if}
+			<div class="task-draft-footer">
+				<button type="button" class="task-draft-footer-btn ghost" on:click={clearTaskDraft}>
+					Cancel
+				</button>
+				<button type="button" class="task-draft-footer-btn submit" on:click={submitTaskDraft}>
+					Create Task
+				</button>
+			</div>
+		</section>
+	</div>
+{/if}
+
 <footer class="composer {isDarkMode ? 'theme-dark' : ''}">
 	{#if activeReply}
 		<div class="reply-preview-panel">
@@ -507,80 +594,6 @@
 					<span>{attachedFile.name}</span>
 				</div>
 			{/if}
-		</div>
-	{/if}
-	{#if taskDraftOpen}
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
-		<div class="task-draft-shell" role="presentation" on:click={onTaskDraftBackdropClick}>
-			<section class="task-draft-card" role="group" aria-label="Task preview card">
-				<div class="task-draft-header">
-					<div class="task-draft-kicker">Task Preview</div>
-					<button type="button" class="task-draft-close" on:click={clearTaskDraft}>Cancel</button>
-				</div>
-				<input
-					type="text"
-					class="task-draft-title"
-					bind:value={taskDraftTitle}
-					placeholder="Title"
-				/>
-				<div class="task-draft-list">
-					{#if taskDraftItems.length === 0}
-						<div class="task-draft-empty">No tasks yet. Add your first item.</div>
-					{:else}
-						{#each taskDraftItems as task, index}
-							<div class="task-draft-item">
-								<input type="checkbox" checked={task.completed} disabled />
-								<div class="task-draft-item-content">
-									<div class="task-draft-item-name">{task.text}</div>
-									<div class="task-draft-meta-line">
-										<span>{task.createdBy}</span>
-										<span aria-hidden="true">•</span>
-										<span>{formatTaskMeta(task.createdAt)}</span>
-										<span aria-hidden="true">•</span>
-										<span class="task-draft-meta-finished">open</span>
-									</div>
-								</div>
-								<button
-									type="button"
-									class="task-draft-remove"
-									on:click={() => removeTaskDraftItem(index)}
-									aria-label="Remove task item"
-									title="Remove"
-								>
-									×
-								</button>
-							</div>
-						{/each}
-					{/if}
-				</div>
-				{#if taskAddInputOpen}
-					<div class="task-draft-add-row">
-						<input type="checkbox" disabled aria-hidden="true" />
-						<input
-							type="text"
-							bind:value={taskNewItemText}
-							placeholder="Task name"
-							on:keydown={onTaskDraftItemKeyDown}
-						/>
-						<button type="button" class="add-row-action confirm" on:click={addTaskDraftItem}>Add</button>
-						<button
-							type="button"
-							class="add-row-action"
-							on:click={cancelTaskDraftAddInput}
-						>
-							Cancel
-						</button>
-					</div>
-				{:else}
-					<button type="button" class="task-draft-add-trigger" on:click={openTaskDraftAddInput}>
-						<span class="plus-pill">+</span>
-						<span>Add Task</span>
-					</button>
-				{/if}
-				{#if taskDraftError}
-					<div class="task-draft-error">{taskDraftError}</div>
-				{/if}
-			</section>
 		</div>
 	{/if}
 	{#if attachError}
@@ -903,8 +916,8 @@
 	}
 
 	.task-draft-card {
-		width: min(100%, 46rem);
-		max-height: min(86vh, 760px);
+		width: min(100%, 54rem);
+		max-height: min(92vh, 820px);
 		border: 1px solid #b8cadf;
 		background: linear-gradient(180deg, #f8fbff 0%, #eef4fc 100%);
 		border-radius: 14px;
@@ -918,11 +931,11 @@
 			inset 0 1px 0 rgba(255, 255, 255, 0.78);
 	}
 
-	.composer.theme-dark .task-draft-shell {
+	.task-draft-shell.theme-dark {
 		background: rgba(3, 8, 18, 0.56);
 	}
 
-	.composer.theme-dark .task-draft-card {
+	.task-draft-shell.theme-dark .task-draft-card {
 		border-color: #36507a;
 		background: linear-gradient(180deg, #12233f 0%, #0e1d34 100%);
 		box-shadow:
@@ -945,7 +958,7 @@
 		color: #3a516f;
 	}
 
-	.composer.theme-dark .task-draft-kicker {
+	.task-draft-shell.theme-dark .task-draft-kicker {
 		color: #97b5df;
 	}
 
@@ -960,7 +973,7 @@
 		cursor: pointer;
 	}
 
-	.composer.theme-dark .task-draft-close {
+	.task-draft-shell.theme-dark .task-draft-close {
 		border-color: #3b5a85;
 		background: #12253f;
 		color: #d6e7ff;
@@ -976,7 +989,7 @@
 		font-weight: 700;
 	}
 
-	.composer.theme-dark .task-draft-title {
+	.task-draft-shell.theme-dark .task-draft-title {
 		border-color: #3a5682;
 		background: #0f1f38;
 		color: #edf4ff;
@@ -1003,7 +1016,7 @@
 		color: #526681;
 	}
 
-	.composer.theme-dark .task-draft-empty {
+	.task-draft-shell.theme-dark .task-draft-empty {
 		border-color: #45628e;
 		background: rgba(16, 35, 62, 0.75);
 		color: #b8cde7;
@@ -1020,7 +1033,7 @@
 		background: #ffffff;
 	}
 
-	.composer.theme-dark .task-draft-item {
+	.task-draft-shell.theme-dark .task-draft-item {
 		border-color: #3f5e89;
 		background: #132746;
 	}
@@ -1045,7 +1058,7 @@
 		font-weight: 600;
 	}
 
-	.composer.theme-dark .task-draft-item-name {
+	.task-draft-shell.theme-dark .task-draft-item-name {
 		color: #e7f0ff;
 	}
 
@@ -1060,7 +1073,7 @@
 		text-overflow: ellipsis;
 	}
 
-	.composer.theme-dark .task-draft-meta-line {
+	.task-draft-shell.theme-dark .task-draft-meta-line {
 		color: #9fbcde;
 	}
 
@@ -1068,7 +1081,7 @@
 		color: #64748b;
 	}
 
-	.composer.theme-dark .task-draft-meta-finished {
+	.task-draft-shell.theme-dark .task-draft-meta-finished {
 		color: #9fb1ca;
 	}
 
@@ -1084,7 +1097,7 @@
 		line-height: 1;
 	}
 
-	.composer.theme-dark .task-draft-remove {
+	.task-draft-shell.theme-dark .task-draft-remove {
 		border-color: #3f5d86;
 		background: #112540;
 		color: #b8cee8;
@@ -1104,7 +1117,7 @@
 		cursor: pointer;
 	}
 
-	.composer.theme-dark .task-draft-add-trigger {
+	.task-draft-shell.theme-dark .task-draft-add-trigger {
 		border-color: #22c55e;
 		background: rgba(22, 101, 52, 0.2);
 		color: #86efac;
@@ -1123,7 +1136,7 @@
 		line-height: 1;
 	}
 
-	.composer.theme-dark .plus-pill {
+	.task-draft-shell.theme-dark .plus-pill {
 		border-color: rgba(134, 239, 172, 0.35);
 		background: rgba(22, 163, 74, 0.22);
 	}
@@ -1151,7 +1164,7 @@
 		min-width: 0;
 	}
 
-	.composer.theme-dark .task-draft-add-row input[type='text'] {
+	.task-draft-shell.theme-dark .task-draft-add-row input[type='text'] {
 		border-color: #3f5e8b;
 		background: #10213b;
 		color: #e8f0ff;
@@ -1174,13 +1187,64 @@
 		color: #166534;
 	}
 
-	.composer.theme-dark .add-row-action {
+	.task-draft-shell.theme-dark .add-row-action {
 		border-color: #3f5d89;
 		background: #112540;
 		color: #cde1fc;
 	}
 
-	.composer.theme-dark .add-row-action.confirm {
+	.task-draft-shell.theme-dark .add-row-action.confirm {
+		border-color: #22c55e;
+		background: rgba(22, 101, 52, 0.2);
+		color: #86efac;
+	}
+
+	.task-draft-footer {
+		position: sticky;
+		bottom: -0.72rem;
+		margin-top: 0.2rem;
+		margin-inline: -0.76rem;
+		padding: 0.58rem 0.76rem 0.74rem;
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.45rem;
+		background: linear-gradient(180deg, rgba(248, 251, 255, 0.15) 0%, #eef4fc 30%);
+		border-top: 1px solid #c9d7e7;
+	}
+
+	.task-draft-footer-btn {
+		border: 1px solid #c3d3e6;
+		background: #f8fbff;
+		color: #314b6e;
+		border-radius: 10px;
+		padding: 0.43rem 0.78rem;
+		font-size: 0.78rem;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	.task-draft-footer-btn.submit {
+		border-color: #16a34a;
+		background: #ecfdf3;
+		color: #166534;
+	}
+
+	.task-draft-footer-btn.ghost {
+		background: #f6f9ff;
+	}
+
+	.task-draft-shell.theme-dark .task-draft-footer {
+		background: linear-gradient(180deg, rgba(18, 35, 63, 0.2) 0%, #0e1d34 30%);
+		border-top-color: #3a5682;
+	}
+
+	.task-draft-shell.theme-dark .task-draft-footer-btn {
+		border-color: #3f5d89;
+		background: #112540;
+		color: #d3e4fd;
+	}
+
+	.task-draft-shell.theme-dark .task-draft-footer-btn.submit {
 		border-color: #22c55e;
 		background: rgba(22, 101, 52, 0.2);
 		color: #86efac;
@@ -1200,6 +1264,12 @@
 			width: min(100%, 100vw - 1rem);
 			max-height: min(88vh, 760px);
 			padding: 0.62rem;
+		}
+
+		.task-draft-footer {
+			bottom: -0.62rem;
+			margin-inline: -0.62rem;
+			padding-inline: 0.62rem;
 		}
 
 		.task-draft-add-row {

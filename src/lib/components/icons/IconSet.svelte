@@ -2,6 +2,7 @@
 	type IconName =
 		| 'copy'
 		| 'break'
+		| 'pin'
 		| 'reply'
 		| 'paperclip'
 		| 'image'
@@ -42,6 +43,12 @@
 		<path d="M4 4v6h6"></path>
 		<path d="M20 20v-6h-6"></path>
 		<path d="M10 10l10 10"></path>
+	{:else if name === 'pin'}
+		<path
+			fill="currentColor"
+			stroke="none"
+			d="M12 2.5c-3.87 0-7 3.13-7 7 0 5.09 6 11.51 6.25 11.78a1 1 0 0 0 1.5 0C13 21.01 19 14.59 19 9.5c0-3.87-3.13-7-7-7Zm0 9.2a2.2 2.2 0 1 1 0-4.4 2.2 2.2 0 0 1 0 4.4Z"
+		></path>
 	{:else if name === 'reply'}
 		<polyline points="9 17 4 12 9 7"></polyline>
 		<path d="M20 18v-2a6 6 0 0 0-6-6H4"></path>

@@ -149,6 +149,9 @@ func (s *MessageService) CacheRecentMessage(ctx context.Context, msg models.Mess
 	if s.Redis == nil || s.Redis.Client == nil {
 		return fmt.Errorf("redis client is not configured")
 	}
+	if strings.EqualFold(strings.TrimSpace(msg.Type), "task") {
+		return nil
+	}
 
 	payload, err := json.Marshal(msg)
 	if err != nil {
@@ -207,12 +210,14 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 
 	if len(redisMessages) >= roomHistorySize {
 		s.enrichBreakMetadata(ctx, redisMessages)
+		s.enrichPinMetadata(ctx, roomID, redisMessages)
 		return redisMessages, nil
 	}
 
 	needed := roomHistorySize - len(redisMessages)
 	if s.Scylla == nil || s.Scylla.Session == nil {
 		s.enrichBreakMetadata(ctx, redisMessages)
+		s.enrichPinMetadata(ctx, roomID, redisMessages)
 		return redisMessages, nil
 	}
 
@@ -241,6 +246,7 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 		combined = combined[len(combined)-roomHistorySize:]
 	}
 	s.enrichBreakMetadata(ctx, combined)
+	s.enrichPinMetadata(ctx, roomID, combined)
 
 	return combined, nil
 }
@@ -252,6 +258,7 @@ func (s *MessageService) ensureSchema() {
 
 	messagesTable := s.Scylla.Table("messages")
 	roomPinsTable := s.Scylla.Table("room_pins")
+	pinDiscussionCommentsTable := s.Scylla.Table("pin_discussion_comments")
 	query := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s (
 			room_id text,
@@ -285,6 +292,27 @@ func (s *MessageService) ensureSchema() {
 		) WITH CLUSTERING ORDER BY (created_at DESC)`,
 		roomPinsTable,
 	)
+	pinDiscussionCommentsQuery := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text,
+			pin_message_id text,
+			created_at timestamp,
+			comment_id text,
+			parent_comment_id text,
+			sender_id text,
+			sender_name text,
+			content text,
+			is_edited boolean,
+			edited_at timestamp,
+			is_deleted boolean,
+			is_pinned boolean,
+			pinned_by text,
+			pinned_by_name text,
+			pinned_at timestamp,
+			PRIMARY KEY ((room_id, pin_message_id), created_at, comment_id)
+		) WITH CLUSTERING ORDER BY (created_at ASC, comment_id ASC)`,
+		pinDiscussionCommentsTable,
+	)
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -316,6 +344,21 @@ func (s *MessageService) ensureSchema() {
 		return
 	}
 
+	lastErr = nil
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := safeExecScyllaQuery(s.Scylla.Session, pinDiscussionCommentsQuery); err == nil {
+			lastErr = nil
+			break
+		} else {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		}
+	}
+	if lastErr != nil {
+		log.Printf("[message-service] ensure pin_discussion_comments schema failed: %v", lastErr)
+		return
+	}
+
 	alterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD media_url text`, messagesTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD media_type text`, messagesTable),
@@ -331,6 +374,18 @@ func (s *MessageService) ensureSchema() {
 	for _, alterQuery := range alterQueries {
 		if err := safeExecScyllaQuery(s.Scylla.Session, alterQuery); err != nil && !isSchemaAlreadyApplied(err) {
 			log.Printf("[message-service] ensure messages schema alter failed: %v", err)
+		}
+	}
+
+	pinDiscussionAlterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD is_pinned boolean`, pinDiscussionCommentsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD pinned_by text`, pinDiscussionCommentsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD pinned_by_name text`, pinDiscussionCommentsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD pinned_at timestamp`, pinDiscussionCommentsTable),
+	}
+	for _, alterQuery := range pinDiscussionAlterQueries {
+		if err := safeExecScyllaQuery(s.Scylla.Session, alterQuery); err != nil && !isSchemaAlreadyApplied(err) {
+			log.Printf("[message-service] ensure pin discussion schema alter failed: %v", err)
 		}
 	}
 }
@@ -369,6 +424,53 @@ func (s *MessageService) enrichBreakMetadata(ctx context.Context, messages []mod
 			messages[index].HasBreakRoom = true
 			messages[index].BreakRoomID = breakRoomID
 			messages[index].BreakJoinCount = joinCount
+		}
+	}
+}
+
+func (s *MessageService) enrichPinMetadata(ctx context.Context, roomID string, messages []models.Message) {
+	if len(messages) == 0 || s == nil || s.Scylla == nil || s.Scylla.Session == nil || roomID == "" {
+		return
+	}
+
+	first := messages[0].CreatedAt
+	last := messages[0].CreatedAt
+	for _, message := range messages {
+		if message.CreatedAt.Before(first) {
+			first = message.CreatedAt
+		}
+		if message.CreatedAt.After(last) {
+			last = message.CreatedAt
+		}
+	}
+	if first.IsZero() || last.IsZero() {
+		return
+	}
+
+	roomPinsTable := s.Scylla.Table("room_pins")
+	query := fmt.Sprintf(
+		`SELECT message_id FROM %s WHERE room_id = ? AND created_at >= ? AND created_at <= ?`,
+		roomPinsTable,
+	)
+	iter := s.Scylla.Session.Query(query, roomID, first, last).WithContext(ctx).Iter()
+	pinnedByMessageID := make(map[string]bool)
+	var pinnedMessageID string
+	for iter.Scan(&pinnedMessageID) {
+		normalizedPinnedID := normalizeMessageID(pinnedMessageID)
+		if normalizedPinnedID == "" {
+			continue
+		}
+		pinnedByMessageID[normalizedPinnedID] = true
+	}
+	if err := iter.Close(); err != nil {
+		return
+	}
+	if len(pinnedByMessageID) == 0 {
+		return
+	}
+	for index, message := range messages {
+		if pinnedByMessageID[normalizeMessageID(message.ID)] {
+			messages[index].IsPinned = true
 		}
 	}
 }
@@ -792,6 +894,220 @@ func (s *MessageService) getMessageCreatedAt(ctx context.Context, roomID, messag
 		return time.Time{}, fmt.Errorf("message not found")
 	}
 	return createdAt, nil
+}
+
+func (s *MessageService) CreatePinnedDiscussionComment(
+	ctx context.Context,
+	roomID, pinMessageID, parentCommentID, senderID, senderName, content string,
+	createdAt time.Time,
+) (models.Message, error) {
+	roomID = normalizeRoomID(roomID)
+	pinMessageID = normalizeMessageID(pinMessageID)
+	parentCommentID = normalizeMessageID(parentCommentID)
+	senderID = strings.TrimSpace(senderID)
+	senderName = strings.TrimSpace(senderName)
+	content = strings.TrimSpace(content)
+	if senderName == "" {
+		senderName = "Guest"
+	}
+	if roomID == "" || pinMessageID == "" || senderID == "" || content == "" {
+		return models.Message{}, fmt.Errorf("invalid discussion comment payload")
+	}
+	if len(content) > maxTextChars {
+		content = content[:maxTextChars]
+	}
+	if strings.TrimSpace(content) == "" {
+		return models.Message{}, fmt.Errorf("discussion comment is empty")
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	createdAt = createdAt.UTC()
+
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return models.Message{}, fmt.Errorf("scylla session is not configured")
+	}
+	commentID := generateDiscussionCommentID(createdAt)
+	ttlSeconds := s.resolveRoomTTLSeconds(ctx, roomID)
+	commentsTable := s.Scylla.Table("pin_discussion_comments")
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, pin_message_id, created_at, comment_id, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		commentsTable,
+		ttlSeconds,
+	)
+	encryptedContent, encryptErr := security.EncryptMessage(content)
+	if encryptErr != nil {
+		return models.Message{}, fmt.Errorf("encrypt discussion comment content: %w", encryptErr)
+	}
+	if err := safeExecScyllaQuery(
+		s.Scylla.Session,
+		insertQuery,
+		roomID,
+		pinMessageID,
+		createdAt,
+		commentID,
+		parentCommentID,
+		senderID,
+		senderName,
+		encryptedContent,
+		false,
+		nil,
+		false,
+		false,
+		"",
+		"",
+		nil,
+	); err != nil {
+		return models.Message{}, fmt.Errorf("save discussion comment: %w", err)
+	}
+
+	return models.Message{
+		ID:               commentID,
+		RoomID:           roomID,
+		SenderID:         senderID,
+		SenderName:       senderName,
+		Content:          content,
+		Type:             "text",
+		ReplyToMessageID: parentCommentID,
+		IsPinned:         false,
+		CreatedAt:        createdAt,
+		HasBreakRoom:     false,
+		BreakJoinCount:   0,
+	}, nil
+}
+
+func (s *MessageService) SetPinnedDiscussionComment(
+	ctx context.Context,
+	roomID, pinMessageID, commentID, pinnedBy, pinnedByName string,
+	isPinned bool,
+) (models.Message, error) {
+	roomID = normalizeRoomID(roomID)
+	pinMessageID = normalizeMessageID(pinMessageID)
+	commentID = normalizeMessageID(commentID)
+	pinnedBy = strings.TrimSpace(pinnedBy)
+	pinnedByName = strings.TrimSpace(pinnedByName)
+	if pinnedByName == "" {
+		pinnedByName = "User"
+	}
+	if roomID == "" || pinMessageID == "" || commentID == "" {
+		return models.Message{}, fmt.Errorf("invalid pin toggle payload")
+	}
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return models.Message{}, fmt.Errorf("scylla session is not configured")
+	}
+
+	commentsTable := s.Scylla.Table("pin_discussion_comments")
+	selectQuery := fmt.Sprintf(
+		`SELECT created_at, parent_comment_id, sender_id, sender_name, content, is_edited, edited_at, is_deleted, is_pinned, pinned_by, pinned_by_name, pinned_at FROM %s WHERE room_id = ? AND pin_message_id = ? AND comment_id = ? LIMIT 1 ALLOW FILTERING`,
+		commentsTable,
+	)
+	var (
+		createdAt           time.Time
+		parentCommentID     string
+		senderID            string
+		senderName          string
+		content             string
+		isEdited            bool
+		editedAt            time.Time
+		isDeleted           bool
+		currentIsPinned     bool
+		currentPinnedBy     string
+		currentPinnedByName string
+		currentPinnedAt     time.Time
+	)
+	if err := s.Scylla.Session.Query(selectQuery, roomID, pinMessageID, commentID).WithContext(ctx).Scan(
+		&createdAt,
+		&parentCommentID,
+		&senderID,
+		&senderName,
+		&content,
+		&isEdited,
+		&editedAt,
+		&isDeleted,
+		&currentIsPinned,
+		&currentPinnedBy,
+		&currentPinnedByName,
+		&currentPinnedAt,
+	); err != nil {
+		return models.Message{}, fmt.Errorf("lookup discussion comment pin state: %w", err)
+	}
+	if createdAt.IsZero() {
+		return models.Message{}, gocql.ErrNotFound
+	}
+
+	if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
+		content = decrypted
+	}
+
+	nextPinnedBy := ""
+	nextPinnedByName := ""
+	nextPinnedAt := time.Time{}
+	if isPinned {
+		nextPinnedBy = pinnedBy
+		nextPinnedByName = pinnedByName
+		nextPinnedAt = time.Now().UTC()
+	}
+	updateQuery := fmt.Sprintf(
+		`UPDATE %s SET is_pinned = ?, pinned_by = ?, pinned_by_name = ?, pinned_at = ? WHERE room_id = ? AND pin_message_id = ? AND created_at = ? AND comment_id = ?`,
+		commentsTable,
+	)
+	var pinnedAtArg interface{}
+	if nextPinnedAt.IsZero() {
+		pinnedAtArg = nil
+	} else {
+		pinnedAtArg = nextPinnedAt
+	}
+	if err := safeExecScyllaQuery(
+		s.Scylla.Session,
+		updateQuery,
+		isPinned,
+		nextPinnedBy,
+		nextPinnedByName,
+		pinnedAtArg,
+		roomID,
+		pinMessageID,
+		createdAt,
+		commentID,
+	); err != nil {
+		return models.Message{}, fmt.Errorf("update discussion comment pin state: %w", err)
+	}
+
+	messageType := "text"
+	finalContent := strings.TrimSpace(content)
+	finalIsEdited := isEdited
+	var editedAtPtr *time.Time
+	if !editedAt.IsZero() {
+		editedCopy := editedAt
+		editedAtPtr = &editedCopy
+	}
+	if isDeleted {
+		messageType = "deleted"
+		finalContent = DeletedMessagePlaceholder
+		finalIsEdited = false
+	}
+
+	return models.Message{
+		ID:               commentID,
+		RoomID:           roomID,
+		SenderID:         senderID,
+		SenderName:       senderName,
+		Content:          finalContent,
+		Type:             messageType,
+		IsEdited:         finalIsEdited,
+		EditedAt:         editedAtPtr,
+		ReplyToMessageID: normalizeMessageID(parentCommentID),
+		IsPinned:         isPinned,
+		PinnedBy:         nextPinnedBy,
+		PinnedByName:     nextPinnedByName,
+		CreatedAt:        createdAt,
+		HasBreakRoom:     false,
+		BreakJoinCount:   0,
+	}, nil
+}
+
+func generateDiscussionCommentID(now time.Time) string {
+	nowUTC := now.UTC()
+	return fmt.Sprintf("dcm_%d_%09d", nowUTC.UnixMilli(), nowUTC.UnixNano()%1_000_000_000)
 }
 
 func (s *MessageService) upsertCachedMessage(

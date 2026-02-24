@@ -55,7 +55,34 @@ export async function saveEncryptedRoomMessages(
 		return;
 	}
 
-	const recentMessages = Array.isArray(messages) ? messages.slice(-50) : [];
+	const sourceMessages = Array.isArray(messages) ? messages : [];
+	const normalMessages = sourceMessages
+		.filter(
+			(entry) =>
+				Boolean(entry) &&
+				typeof entry === 'object' &&
+				(entry as { type?: unknown }).type !== 'task'
+		)
+		.slice(-50);
+	const taskMessages = sourceMessages
+		.filter(
+			(entry) =>
+				Boolean(entry) &&
+				typeof entry === 'object' &&
+				(entry as { type?: unknown }).type === 'task'
+		)
+		.slice(-30);
+	const recentMessages = [...normalMessages, ...taskMessages].sort((left, right) => {
+		const leftCreatedAt =
+			typeof (left as { createdAt?: unknown })?.createdAt === 'number'
+				? Number((left as { createdAt?: unknown }).createdAt)
+				: 0;
+		const rightCreatedAt =
+			typeof (right as { createdAt?: unknown })?.createdAt === 'number'
+				? Number((right as { createdAt?: unknown }).createdAt)
+				: 0;
+		return leftCreatedAt - rightCreatedAt;
+	});
 	const plaintext = JSON.stringify(recentMessages);
 	const key = await deriveEncryptionKey(normalizedToken);
 	const iv = window.crypto.getRandomValues(new Uint8Array(12));
