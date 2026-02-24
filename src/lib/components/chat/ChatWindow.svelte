@@ -968,54 +968,42 @@
 									>
 										<IconSet name="reply" size={12} className="gutter-action-icon" />
 									</button>
-									{#if compactMineActionsByMessageID[message.id]}
+									<div class="gutter-owner-menu-wrap">
 										<button
 											type="button"
 											class="gutter-action-btn"
-											title="Edit message"
-											aria-label="Edit message"
-											on:click|stopPropagation={() => onEditMessage(message)}
+											title="More actions"
+											aria-label="More actions"
+											aria-expanded={openOwnerActionMessageId === message.id}
+											on:click|stopPropagation={() => toggleOwnerMessageActions(message.id)}
 										>
-											<IconSet name="edit" size={12} className="gutter-action-icon" />
+											<IconSet name="more-horizontal" size={12} className="gutter-action-icon" />
 										</button>
-									{:else}
-										<div class="gutter-owner-menu-wrap">
+										<div
+											class="gutter-action-menu {openOwnerActionMessageId === message.id
+												? 'open'
+												: ''}"
+										>
 											<button
 												type="button"
 												class="gutter-action-btn"
-												title="More actions"
-												aria-label="More actions"
-												aria-expanded={openOwnerActionMessageId === message.id}
-												on:click|stopPropagation={() => toggleOwnerMessageActions(message.id)}
+												title="Edit message"
+												aria-label="Edit message"
+												on:click|stopPropagation={() => onEditMessage(message)}
 											>
-												<IconSet name="more-horizontal" size={12} className="gutter-action-icon" />
+												<IconSet name="edit" size={12} className="gutter-action-icon" />
 											</button>
-											<div
-												class="gutter-action-menu {openOwnerActionMessageId === message.id
-													? 'open'
-													: ''}"
+											<button
+												type="button"
+												class="gutter-action-btn danger"
+												title="Delete message"
+												aria-label="Delete message"
+												on:click|stopPropagation={() => onDeleteMessage(message)}
 											>
-												<button
-													type="button"
-													class="gutter-action-btn"
-													title="Edit message"
-													aria-label="Edit message"
-													on:click|stopPropagation={() => onEditMessage(message)}
-												>
-													<IconSet name="edit" size={12} className="gutter-action-icon" />
-												</button>
-												<button
-													type="button"
-													class="gutter-action-btn danger"
-													title="Delete message"
-													aria-label="Delete message"
-													on:click|stopPropagation={() => onDeleteMessage(message)}
-												>
-													<IconSet name="trash" size={12} className="gutter-action-icon" />
-												</button>
-											</div>
+												<IconSet name="trash" size={12} className="gutter-action-icon" />
+											</button>
 										</div>
-									{/if}
+									</div>
 								</div>
 							{/if}
 					</aside>

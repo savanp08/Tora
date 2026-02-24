@@ -238,7 +238,7 @@
 	}
 
 	.theme-dark .presence-dot {
-		background: #d8d8df;
+		background: #22c55e;
 	}
 
 	.title-text {

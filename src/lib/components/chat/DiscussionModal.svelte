@@ -1162,8 +1162,8 @@
 
 	.pin-badge.op {
 		background: rgba(245, 158, 11, 0.18);
-		color: #fbbf24;
-		box-shadow: 0 0 12px rgba(251, 191, 36, 0.2);
+		color: var(--accent-warning, #f59e0b);
+		box-shadow: 0 0 12px rgba(245, 158, 11, 0.2);
 	}
 
 	.pin-badge.user {

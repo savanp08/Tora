@@ -125,7 +125,7 @@
 	}
 
 	.online-panel.theme-dark .member-dot {
-		background: #d6d6de;
+		background: #22c55e;
 	}
 
 	.member-name {

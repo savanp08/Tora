@@ -1,3 +1,4 @@
+@import '../theme.css';
 :global(html),
 :global(body) {
 	margin: 0;
@@ -6,6 +7,8 @@
 	max-width: 100%;
 	overflow-x: hidden;
 	overflow-x: clip;
+	background: var(--bg-primary);
+color: var(--text-primary);
 }
 
 :global(*) {
@@ -31,3 +34,8 @@
 	background: #ececef;
 	color: #111111;
 }
+
+
+
+
+

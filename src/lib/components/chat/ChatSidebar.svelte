@@ -1824,16 +1824,16 @@
 	}
 
 	.room-list.theme-dark .room-item.related-child {
-		border-color: rgba(183, 183, 192, 0.92);
+		border-color: rgba(245, 158, 11, 0.95);
 		box-shadow:
-			0 0 0 1px rgba(183, 183, 192, 0.4),
+			0 0 0 1px rgba(245, 158, 11, 0.55),
 			0 6px 14px rgba(0, 0, 0, 0.4);
 	}
 
 	.room-list.theme-dark .room-item.related-parent {
-		border-color: rgba(214, 214, 222, 0.9);
+		border-color: rgba(34, 197, 94, 0.95);
 		box-shadow:
-			0 0 0 1px rgba(214, 214, 222, 0.35),
+			0 0 0 1px rgba(34, 197, 94, 0.5),
 			0 6px 14px rgba(0, 0, 0, 0.4);
 	}
 
@@ -1850,11 +1850,11 @@
 	}
 
 	.room-list.theme-dark .status-dot.green {
-		background: #d0d0d8;
+		background: #22c55e;
 	}
 
 	.room-list.theme-dark .status-dot.orange {
-		background: #b7b7c0;
+		background: #f59e0b;
 	}
 
 	.room-list.theme-dark .status-dot.gray {

@@ -1,0 +1,376 @@
+/**
+ * Converse Theme System
+ * 
+ * Modern, eye-friendly color palette for light and dark modes
+ * Designed for long reading sessions with minimal eye strain
+ */
+
+:root {
+	/* ========================================
+	   LIGHT MODE (Default)
+	   ======================================== */
+	
+	/* Background colors - Warm neutrals to reduce eye strain */
+	--bg-primary: #fafafa;
+	--bg-secondary: #f5f5f5;
+	--bg-tertiary: #efefef;
+	--bg-elevated: #ffffff;
+	--bg-overlay: rgba(0, 0, 0, 0.5);
+	
+	/* Surface colors - For cards, messages, etc */
+	--surface-primary: #ffffff;
+	--surface-secondary: #f8f8f8;
+	--surface-hover: #f3f3f3;
+	--surface-active: #eeeeee;
+	
+	/* Border colors - Subtle divisions */
+	--border-subtle: #e5e5e5;
+	--border-default: #d4d4d4;
+	--border-strong: #a3a3a3;
+	--border-focus: #3b82f6;
+	
+	/* Text colors - Optimized contrast */
+	--text-primary: #171717;
+	--text-secondary: #525252;
+	--text-tertiary: #737373;
+	--text-main: #171717;
+	--text-muted: #525252;
+	--text-placeholder: #a3a3a3;
+	--text-inverse: #ffffff;
+	--text-link: #2563eb;
+	
+	/* Message bubble colors */
+	--bubble-other: #ffffff;
+	--bubble-other-border: #e5e5e5;
+	--bubble-mine: #f5f5f5;
+	--bubble-mine-border: #d4d4d4;
+	
+	/* Accent colors */
+	--accent-primary: #3b82f6;
+	--accent-primary-hover: #2563eb;
+	--accent-secondary: #8b5cf6;
+	--accent-blue: #3b82f6;
+	--accent-purple: #8b5cf6;
+	--gemini-gradient: linear-gradient(90deg, #3b82f6, #8b5cf6, #ef4444);
+	--accent-danger: #ef4444;
+	--accent-danger-hover: #dc2626;
+	--accent-success: #10b981;
+	--accent-warning: #f59e0b;
+	
+	/* Status colors */
+	--status-online: #10b981;
+	--status-offline: #9ca3af;
+	--status-away: #f59e0b;
+	
+	/* Interactive states */
+	--interactive-hover: rgba(0, 0, 0, 0.05);
+	--interactive-active: rgba(0, 0, 0, 0.1);
+	--interactive-focus: rgba(59, 130, 246, 0.1);
+	
+	/* Shadows - Subtle depth */
+	--shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+	--shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+	--shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+	
+	/* Special elements */
+	--divider: #e5e5e5;
+	--scrollbar-track: #f5f5f5;
+	--scrollbar-thumb: #d4d4d4;
+	--scrollbar-thumb-hover: #a3a3a3;
+	
+	/* Unread indicator */
+	--unread-badge: #ef4444;
+	--unread-text: #ffffff;
+	--unread-divider: #f87171;
+}
+
+/* ========================================
+   DARK MODE
+   ======================================== */
+
+:root[data-theme='dark'],
+.theme-dark {
+	/* Background colors - Gemini-inspired dark neutrals */
+	--bg-primary: #131314;
+	--bg-secondary: #1e1f20;
+	--bg-tertiary: #282a2d;
+	--bg-elevated: #1e1f20;
+	--bg-overlay: rgba(0, 0, 0, 0.7);
+	
+	/* Surface colors */
+	--surface-primary: #1e1f20;
+	--surface-secondary: #282a2d;
+	--surface-hover: #303235;
+	--surface-active: #3a3d41;
+	
+	/* Border colors - Subtle in dark mode */
+	--border-subtle: #444746;
+	--border-default: #555a5c;
+	--border-strong: #6b7073;
+	--border-focus: #4285f4;
+	
+	/* Text colors */
+	--text-primary: #e3e3e3;
+	--text-secondary: #b4b4b4;
+	--text-tertiary: #8f8f8f;
+	--text-main: #e3e3e3;
+	--text-muted: #b4b4b4;
+	--text-placeholder: #525252;
+	--text-inverse: #131314;
+	--text-link: #8ab4f8;
+	
+	/* Message bubble colors */
+	--bubble-other: #1e1f20;
+	--bubble-other-border: #444746;
+	--bubble-mine: #282a2d;
+	--bubble-mine-border: #555a5c;
+	
+	/* Accent colors */
+	--accent-primary: #4285f4;
+	--accent-primary-hover: #5a95f5;
+	--accent-secondary: #9b72cb;
+	--accent-blue: #4285f4;
+	--accent-purple: #9b72cb;
+	--gemini-gradient: linear-gradient(90deg, #4285f4, #9b72cb, #d96570);
+	--accent-danger: #ef4444;
+	--accent-danger-hover: #f87171;
+	/* Functional colors: keep green/orange unchanged */
+	--accent-success: #10b981;
+	--accent-warning: #f59e0b;
+	
+	/* Status colors */
+	--status-online: #10b981;
+	--status-offline: #525252;
+	--status-away: #f59e0b;
+	
+	/* Interactive states */
+	--interactive-hover: rgba(255, 255, 255, 0.05);
+	--interactive-active: rgba(255, 255, 255, 0.1);
+	--interactive-focus: rgba(66, 133, 244, 0.15);
+	
+	/* Shadows - Less prominent in dark mode */
+	--shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+	--shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+	--shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+	
+	/* Special elements */
+	--divider: #262626;
+	--scrollbar-track: #1a1a1a;
+	--scrollbar-thumb: #333333;
+	--scrollbar-thumb-hover: #525252;
+	
+	/* Unread indicator */
+	--unread-badge: #ef4444;
+	--unread-text: #ffffff;
+	--unread-divider: #f87171;
+}
+
+/* ========================================
+   GLOBAL STYLES
+   ======================================== */
+
+html,
+body {
+	background: var(--bg-primary);
+	color: var(--text-primary);
+	transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Smooth transitions for theme changes */
+* {
+	transition-property: background-color, border-color, color;
+	transition-duration: 0.2s;
+	transition-timing-function: ease;
+}
+
+/* Disable transitions for initial page load */
+.preload * {
+	transition: none !important;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+	width: 12px;
+	height: 12px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--scrollbar-thumb);
+	border-radius: 6px;
+	border: 2px solid var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--scrollbar-thumb-hover);
+}
+
+/* Firefox scrollbar */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+/* Selection colors */
+::selection {
+	background: var(--accent-primary);
+	color: var(--text-inverse);
+}
+
+::-moz-selection {
+	background: var(--accent-primary);
+	color: var(--text-inverse);
+}
+
+/* Focus styles */
+:focus-visible {
+	outline: 2px solid var(--border-focus);
+	outline-offset: 2px;
+}
+
+/* ========================================
+   UTILITY CLASSES
+   ======================================== */
+
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-tertiary { color: var(--text-tertiary); }
+
+.bg-primary { background: var(--bg-primary); }
+.bg-secondary { background: var(--bg-secondary); }
+.bg-surface { background: var(--surface-primary); }
+
+.border-subtle { border-color: var(--border-subtle); }
+.border-default { border-color: var(--border-default); }
+.border-strong { border-color: var(--border-strong); }
+
+/* Interactive elements */
+.interactive {
+	transition: all 0.15s ease;
+}
+
+.interactive:hover {
+	background: var(--interactive-hover);
+}
+
+.interactive:active {
+	background: var(--interactive-active);
+}
+
+/* Card/Surface component */
+.card {
+	background: var(--surface-primary);
+	border: 1px solid var(--border-subtle);
+	border-radius: 8px;
+	padding: 16px;
+}
+
+/* Button styles */
+.btn {
+	background: var(--surface-primary);
+	color: var(--text-primary);
+	border: 1px solid var(--border-default);
+	padding: 8px 16px;
+	border-radius: 6px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.btn:hover:not(:disabled) {
+	background: var(--surface-hover);
+	border-color: var(--border-strong);
+}
+
+.btn:active:not(:disabled) {
+	background: var(--surface-active);
+}
+
+.btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.btn-primary {
+	background: var(--accent-primary);
+	color: var(--text-inverse);
+	border-color: var(--accent-primary);
+}
+
+.btn-primary:hover:not(:disabled) {
+	background: var(--accent-primary-hover);
+	border-color: var(--accent-primary-hover);
+}
+
+.btn-danger {
+	background: var(--accent-danger);
+	color: var(--text-inverse);
+	border-color: var(--accent-danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+	background: var(--accent-danger-hover);
+	border-color: var(--accent-danger-hover);
+}
+
+/* ========================================
+   COMPONENT-SPECIFIC OVERRIDES
+   ======================================== */
+
+/* Message bubbles */
+.message-bubble {
+	background: var(--bubble-other);
+	border: 1px solid var(--bubble-other-border);
+	color: var(--text-primary);
+	padding: 12px 16px;
+	border-radius: 12px;
+	max-width: 70%;
+}
+
+.message-bubble.mine {
+	background: var(--bubble-mine);
+	border-color: var(--bubble-mine-border);
+}
+
+/* Input fields */
+input,
+textarea,
+select {
+	background: var(--surface-primary);
+	color: var(--text-primary);
+	border: 1px solid var(--border-default);
+	border-radius: 6px;
+	padding: 8px 12px;
+}
+
+input::placeholder,
+textarea::placeholder {
+	color: var(--text-placeholder);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+	outline: none;
+	border-color: var(--border-focus);
+	box-shadow: 0 0 0 3px var(--interactive-focus);
+}
+
+/* Links */
+a {
+	color: var(--text-link);
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+/* Dividers */
+hr {
+	border: none;
+	border-top: 1px solid var(--divider);
+	margin: 16px 0;
+}
