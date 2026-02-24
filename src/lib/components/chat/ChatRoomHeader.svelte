@@ -17,7 +17,7 @@
 		showMobileList: void;
 		openRoomDetails: void;
 		toggleRoomSearch: void;
-		renameRoom: void;
+		renameRoom: void; 
 		toggleBreakSelectionMode: void;
 		togglePinSelectionMode: void;
 		toggleEditSelectionMode: void;
