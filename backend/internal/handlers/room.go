@@ -10,6 +10,8 @@ import (
 	"math"
 	mrand "math/rand"
 	"net/http"
+	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -616,6 +618,15 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[room] break created room=%s parent=%s origin=%s", finalRoomID, parentRoomID, originMessageID)
 	expiresAt := h.getRoomExpiryUnix(ctx, finalRoomID)
+	h.broadcastBreakMetadataUpdate(
+		parentRoomID,
+		originMessageID,
+		finalRoomID,
+		finalRoomName,
+		memberCount,
+		createdAt,
+		expiresAt,
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(CreateBreakRoomResponse{
@@ -1353,7 +1364,153 @@ func normalizeRoomNameLookup(raw string) string {
 }
 
 func deriveBranchRoomName(sourceText string) string {
-	return truncateRunes(strings.TrimSpace(sourceText), roomNameMaxLength)
+	trimmed := strings.TrimSpace(sourceText)
+	if trimmed == "" {
+		return ""
+	}
+
+	if fromJSON := deriveBranchRoomNameFromJSON(trimmed); fromJSON != "" {
+		return truncateRunes(fromJSON, roomNameMaxLength)
+	}
+	if fromURL := deriveBranchRoomNameFromURL(trimmed); fromURL != "" {
+		return truncateRunes(fromURL, roomNameMaxLength)
+	}
+
+	return truncateRunes(normalizeRoomName(trimmed), roomNameMaxLength)
+}
+
+func deriveBranchRoomNameFromJSON(sourceText string) string {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(sourceText), &payload); err != nil {
+		return ""
+	}
+	if len(payload) == 0 {
+		return ""
+	}
+
+	if _, hasTasks := payload["tasks"]; hasTasks {
+		title := normalizeRoomName(
+			firstNonEmptyStringValue(
+				payload["title"],
+				payload["name"],
+				payload["content"],
+				payload["text"],
+			),
+		)
+		if title == "" || strings.EqualFold(title, "task") {
+			return "Task"
+		}
+		return normalizeRoomName(fmt.Sprintf("Task: %s", title))
+	}
+
+	if title := normalizeRoomName(firstNonEmptyStringValue(payload["title"], payload["name"])); title != "" {
+		return title
+	}
+
+	fileName := normalizeRoomName(
+		firstNonEmptyStringValue(
+			payload["fileName"],
+			payload["file_name"],
+			payload["filename"],
+			payload["name"],
+		),
+	)
+	if fileName != "" {
+		return fileName
+	}
+
+	content := strings.TrimSpace(
+		firstNonEmptyStringValue(
+			payload["content"],
+			payload["text"],
+			payload["caption"],
+			payload["message"],
+			payload["mediaUrl"],
+			payload["media_url"],
+			payload["url"],
+		),
+	)
+	if content == "" {
+		return ""
+	}
+	if fromURL := deriveBranchRoomNameFromURL(content); fromURL != "" {
+		return fromURL
+	}
+
+	return normalizeRoomName(content)
+}
+
+func deriveBranchRoomNameFromURL(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return ""
+	}
+	lowered := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lowered, "http://") && !strings.HasPrefix(lowered, "https://") {
+		return ""
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return ""
+	}
+
+	fileName := strings.TrimSpace(path.Base(parsed.Path))
+	if unescaped, unescapeErr := url.PathUnescape(fileName); unescapeErr == nil {
+		fileName = strings.TrimSpace(unescaped)
+	}
+	if fileName == "." || fileName == "/" {
+		fileName = ""
+	}
+	fileName = strings.Trim(fileName, "/")
+
+	hostName := strings.TrimSpace(parsed.Hostname())
+	if fileName == "" {
+		return normalizeRoomName(hostName)
+	}
+
+	fileStem := strings.TrimSpace(strings.TrimSuffix(fileName, path.Ext(fileName)))
+	if fileStem == "" {
+		fileStem = fileName
+	}
+	fileStem = normalizeRoomName(fileStem)
+	if fileStem == "" {
+		fileStem = normalizeRoomName(hostName)
+	}
+	if fileStem == "" {
+		return ""
+	}
+
+	kind := inferMediaLabelFromExtension(path.Ext(fileName))
+	if kind == "" || kind == "File" {
+		return fileStem
+	}
+	return normalizeRoomName(fmt.Sprintf("%s: %s", kind, fileStem))
+}
+
+func inferMediaLabelFromExtension(ext string) string {
+	switch strings.ToLower(strings.TrimSpace(ext)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".heic":
+		return "Image"
+	case ".mp4", ".mov", ".mkv", ".webm", ".avi":
+		return "Video"
+	case ".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac":
+		return "Audio"
+	case ".pdf", ".doc", ".docx", ".txt", ".csv", ".zip", ".ppt", ".pptx", ".xls", ".xlsx":
+		return "File"
+	default:
+		return ""
+	}
+}
+
+func firstNonEmptyStringValue(values ...interface{}) string {
+	for _, value := range values {
+		candidate := strings.TrimSpace(toString(value))
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func truncateRunes(input string, max int) string {
@@ -1612,6 +1769,9 @@ func (h *RoomHandler) resolveSourceMessageText(ctx context.Context, roomID strin
 				if content := strings.TrimSpace(message.Content); content != "" {
 					return content, nil
 				}
+				if mediaFallback := strings.TrimSpace(firstNonEmptyStringValue(message.FileName, message.MediaURL)); mediaFallback != "" {
+					return mediaFallback, nil
+				}
 			}
 
 			var payload map[string]interface{}
@@ -1621,7 +1781,7 @@ func (h *RoomHandler) resolveSourceMessageText(ctx context.Context, roomID strin
 			if strings.TrimSpace(toString(payload["id"])) != messageID {
 				continue
 			}
-			for _, key := range []string{"content", "text", "caption"} {
+			for _, key := range []string{"content", "text", "caption", "fileName", "file_name", "mediaUrl", "media_url"} {
 				if content := strings.TrimSpace(toString(payload[key])); content != "" {
 					return content, nil
 				}
@@ -1631,15 +1791,27 @@ func (h *RoomHandler) resolveSourceMessageText(ctx context.Context, roomID strin
 
 	if h.scylla != nil && h.scylla.Session != nil {
 		messagesTable := h.scylla.Table("messages")
-		query := fmt.Sprintf(`SELECT content FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`, messagesTable)
+		query := fmt.Sprintf(
+			`SELECT content, media_url, file_name FROM %s WHERE room_id = ? AND message_id = ? LIMIT 1 ALLOW FILTERING`,
+			messagesTable,
+		)
 		iter := h.scylla.Session.Query(query, roomID, messageID).WithContext(ctx).Iter()
 		var content string
-		if iter.Scan(&content) {
+		var mediaURL string
+		var fileName string
+		if iter.Scan(&content, &mediaURL, &fileName) {
 			_ = iter.Close()
 			if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {
 				content = decrypted
 			}
-			return strings.TrimSpace(content), nil
+			content = strings.TrimSpace(content)
+			if content != "" {
+				return content, nil
+			}
+			if mediaFallback := strings.TrimSpace(firstNonEmptyStringValue(fileName, mediaURL)); mediaFallback != "" {
+				return mediaFallback, nil
+			}
+			return "", nil
 		}
 		if err := iter.Close(); err != nil {
 			return "", err
@@ -2646,7 +2818,68 @@ func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, mem
 		return err
 	}
 	h.tryUpdateBreakMetadataInScylla(parentRoomID, originMessageID, roomID, memberCount)
+	roomName := normalizeRoomName(meta["name"])
+	createdAt, _ := strconv.ParseInt(strings.TrimSpace(meta["created_at"]), 10, 64)
+	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
+	h.broadcastBreakMetadataUpdate(
+		parentRoomID,
+		originMessageID,
+		roomID,
+		roomName,
+		memberCount,
+		createdAt,
+		expiresAt,
+	)
 	return nil
+}
+
+func (h *RoomHandler) broadcastBreakMetadataUpdate(
+	parentRoomID string,
+	originMessageID string,
+	breakRoomID string,
+	breakRoomName string,
+	memberCount int,
+	createdAt int64,
+	expiresAt int64,
+) {
+	normalizedParentRoomID := normalizeRoomID(parentRoomID)
+	normalizedOriginMessageID := strings.TrimSpace(originMessageID)
+	normalizedBreakRoomID := normalizeRoomID(breakRoomID)
+	if normalizedParentRoomID == "" || normalizedOriginMessageID == "" || normalizedBreakRoomID == "" {
+		return
+	}
+	normalizedBreakRoomName := normalizeRoomName(breakRoomName)
+	if normalizedBreakRoomName == "" {
+		normalizedBreakRoomName = "Room"
+	}
+
+	serverNow := time.Now().Unix()
+	payload := map[string]interface{}{
+		"hasBreakRoom":      true,
+		"has_break_room":    true,
+		"originMessageId":   normalizedOriginMessageID,
+		"origin_message_id": normalizedOriginMessageID,
+		"breakRoomId":       normalizedBreakRoomID,
+		"break_room_id":     normalizedBreakRoomID,
+		"breakJoinCount":    memberCount,
+		"break_join_count":  memberCount,
+		"breakRoomName":     normalizedBreakRoomName,
+		"break_room_name":   normalizedBreakRoomName,
+		"parentRoomId":      normalizedParentRoomID,
+		"parent_room_id":    normalizedParentRoomID,
+		"serverNow":         serverNow,
+		"server_now":        serverNow,
+	}
+	if createdAt > 0 {
+		payload["createdAt"] = createdAt
+		payload["created_at"] = createdAt
+	}
+	if expiresAt > 0 {
+		payload["expiresAt"] = expiresAt
+		payload["expires_at"] = expiresAt
+	}
+
+	h.broadcastRoomEvent(normalizedParentRoomID, "message_break_updated", payload)
 }
 
 func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string) (SidebarRoom, bool, error) {

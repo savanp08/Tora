@@ -10,6 +10,7 @@
 		toInt,
 		toStringValue
 	} from '$lib/utils/chat/core';
+	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 	import { inferMediaMessageType, uploadToR2, type MediaMessageType } from '$lib/utils/media';
 	import { globalMessages, sendSocketPayload } from '$lib/ws';
 	import { onDestroy, onMount } from 'svelte';
@@ -87,6 +88,9 @@
 		kind: MediaMessageType;
 		mimeType: string;
 		sizeBytes: number;
+		caption: string;
+		senderName: string;
+		sentAt: number;
 	};
 
 	type LocalBoardAction = {
@@ -158,15 +162,13 @@
 		handleLeft: -9999,
 		handleTop: DUSTER_HANDLE_PADDING
 	};
-	let pendingTapGesture:
-		| {
-				startX: number;
-				startY: number;
-				moved: boolean;
-				emptyTarget: boolean;
-				boardPoint: { x: number; y: number };
-			}
-		| null = null;
+	let pendingTapGesture: {
+		startX: number;
+		startY: number;
+		moved: boolean;
+		emptyTarget: boolean;
+		boardPoint: { x: number; y: number };
+	} | null = null;
 	let lastEmptyTapAt = 0;
 	let isPanning = false;
 	let panLastX = 0;
@@ -204,8 +206,8 @@
 		.filter((entry) => normalizeMessageID(entry.id) !== '')
 		.sort((left, right) => right.createdAt - left.createdAt)
 		.filter((entry) => {
-			const snippet = extractMessageSnippet(entry).toLowerCase();
-			return messageSearch.trim() ? snippet.includes(messageSearch.trim().toLowerCase()) : true;
+			const searchText = buildMessageSearchText(entry).toLowerCase();
+			return messageSearch.trim() ? searchText.includes(messageSearch.trim().toLowerCase()) : true;
 		})
 		.slice(0, 120);
 
@@ -387,16 +389,19 @@
 
 		boardError = '';
 		try {
-			fabricPackage = (await import(
-				/* @vite-ignore */ FABRIC_VITE_ID_URL
-			)) as Record<string, unknown>;
+			fabricPackage = (await import(/* @vite-ignore */ FABRIC_VITE_ID_URL)) as Record<
+				string,
+				unknown
+			>;
 		} catch (primaryError) {
 			try {
-				fabricPackage = (await import(
-					/* @vite-ignore */ FABRIC_CDN_URL
-				)) as Record<string, unknown>;
+				fabricPackage = (await import(/* @vite-ignore */ FABRIC_CDN_URL)) as Record<
+					string,
+					unknown
+				>;
 			} catch (fallbackError) {
-				const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError);
+				const primaryMessage =
+					primaryError instanceof Error ? primaryError.message : String(primaryError);
 				const fallbackMessage =
 					fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
 				boardError = `Failed to load board renderer. Install fabric locally or check network. (${primaryMessage}; ${fallbackMessage})`;
@@ -941,7 +946,10 @@
 		pendingInsertElementId = '';
 	}
 
-	function createShapeObjectAtPoint(kind: ShapeKind, point: { x: number; y: number }): FabricObjectLike | null {
+	function createShapeObjectAtPoint(
+		kind: ShapeKind,
+		point: { x: number; y: number }
+	): FabricObjectLike | null {
 		if (!fabricCanvas) {
 			return null;
 		}
@@ -1005,7 +1013,9 @@
 		}
 		const record = object as Record<string, unknown>;
 		return normalizeIdentifier(
-			toStringValue(record.createdByUserId ?? record.created_by_user_id ?? record.senderId ?? record.sender_id)
+			toStringValue(
+				record.createdByUserId ?? record.created_by_user_id ?? record.senderId ?? record.sender_id
+			)
 		);
 	}
 
@@ -1100,7 +1110,10 @@
 		const containerHeight = Math.max(1, boardContainerEl.clientHeight || 1);
 		const handleTop = Math.max(
 			DUSTER_HANDLE_PADDING,
-			Math.min(containerHeight - DUSTER_HANDLE_HEIGHT - DUSTER_HANDLE_PADDING, top + DUSTER_HANDLE_PADDING)
+			Math.min(
+				containerHeight - DUSTER_HANDLE_HEIGHT - DUSTER_HANDLE_PADDING,
+				top + DUSTER_HANDLE_PADDING
+			)
 		);
 		return {
 			left,
@@ -1186,7 +1199,9 @@
 		if (!object) {
 			return false;
 		}
-		const objectElementId = normalizeMessageID(toStringValue((object as Record<string, unknown>).elementId));
+		const objectElementId = normalizeMessageID(
+			toStringValue((object as Record<string, unknown>).elementId)
+		);
 		if (pendingInsertElementId && objectElementId === pendingInsertElementId) {
 			return true;
 		}
@@ -1236,7 +1251,9 @@
 			toStringValue((object as Record<string, unknown>).elementId)
 		);
 		const nextElementId = currentElementId || createMessageId(normalizedRoomId || 'board');
-		const currentType = toStringValue((object as Record<string, unknown>).elementType).trim().toLowerCase();
+		const currentType = toStringValue((object as Record<string, unknown>).elementType)
+			.trim()
+			.toLowerCase();
 		const nextType = currentType || fallbackType;
 		const currentOwnerUserID = normalizeIdentifier(
 			toStringValue(
@@ -1257,8 +1274,7 @@
 			elementType: nextType,
 			createdByUserId: nextOwnerUserID,
 			createdByName: nextOwnerName,
-			createdAt:
-				parseOptionalTimestamp((object as Record<string, unknown>).createdAt) || Date.now()
+			createdAt: parseOptionalTimestamp((object as Record<string, unknown>).createdAt) || Date.now()
 		});
 		return {
 			elementId: nextElementId,
@@ -1382,7 +1398,9 @@
 		boardLoading = true;
 		boardError = '';
 		try {
-			const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomId)}/board`);
+			const res = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomId)}/board`
+			);
 			if (!res.ok) {
 				throw new Error(`Load failed (${res.status})`);
 			}
@@ -1444,10 +1462,7 @@
 		const zIndex = toInt(record.zIndex ?? record.z_index);
 		const createdByUserId = normalizeIdentifier(
 			toStringValue(
-				record.createdByUserId ??
-					record.created_by_user_id ??
-					record.senderId ??
-					record.sender_id
+				record.createdByUserId ?? record.created_by_user_id ?? record.senderId ?? record.sender_id
 			)
 		);
 		const createdByName = toStringValue(
@@ -1497,7 +1512,9 @@
 		fabricCanvas.moveTo?.(nextObject, targetIndex);
 	}
 
-	async function createFabricObjectFromElement(element: BoardElementWire): Promise<FabricObjectLike | null> {
+	async function createFabricObjectFromElement(
+		element: BoardElementWire
+	): Promise<FabricObjectLike | null> {
 		const { elementType } = element;
 		const strokeColor = isDarkMode ? '#f3f4f6' : '#111827';
 		const fillColor = isDarkMode ? 'rgba(148, 163, 184, 0.16)' : 'rgba(30, 64, 175, 0.08)';
@@ -1588,7 +1605,13 @@
 			elementType === 'media'
 		) {
 			const media = parseBoardMediaContent(element.content);
-			const mediaObject = createMediaCardObject(media, element.x, element.y, element.width, element.height);
+			const mediaObject = createMediaCardObject(
+				media,
+				element.x,
+				element.y,
+				element.width,
+				element.height
+			);
 			if (mediaObject) {
 				return mediaObject;
 			}
@@ -1610,10 +1633,13 @@
 		if (!raw.startsWith('{')) {
 			return {
 				url: raw,
-				name: raw.split('/').pop() ?? 'File',
+				name: inferFileNameFromURL(raw) || raw.split('/').pop() || 'File',
 				kind: 'file',
 				mimeType: '',
-				sizeBytes: 0
+				sizeBytes: 0,
+				caption: '',
+				senderName: '',
+				sentAt: 0
 			};
 		}
 		try {
@@ -1622,12 +1648,19 @@
 			if (!url) {
 				return null;
 			}
+			const rawCaption = toStringValue(parsed.caption ?? parsed.text ?? parsed.content).trim();
+			const normalizedCaption = rawCaption && rawCaption !== url ? rawCaption : '';
 			return {
 				url,
-				name: toStringValue(parsed.name) || 'Attachment',
+				name: toStringValue(parsed.name).trim() || inferFileNameFromURL(url) || 'Attachment',
 				kind: normalizeMediaKind(toStringValue(parsed.kind)),
 				mimeType: toStringValue(parsed.mimeType ?? parsed.mime_type),
-				sizeBytes: Math.max(0, toNumber(parsed.sizeBytes ?? parsed.size_bytes, 0))
+				sizeBytes: Math.max(0, toNumber(parsed.sizeBytes ?? parsed.size_bytes, 0)),
+				caption: normalizedCaption,
+				senderName: toStringValue(parsed.senderName ?? parsed.sender_name).trim(),
+				sentAt: parseOptionalTimestamp(
+					parsed.sentAt ?? parsed.sent_at ?? parsed.createdAt ?? parsed.created_at
+				)
 			};
 		} catch {
 			return null;
@@ -1684,6 +1717,9 @@
 		const nameLine = media?.name || media?.url || 'Attachment';
 		const hostLine = media?.url ? safeHostFromURL(media.url) : '';
 		const sizeLine = media?.sizeBytes ? formatFileSize(media.sizeBytes) : '';
+		const senderLine = media?.senderName ? `From: ${media.senderName}` : '';
+		const sentAtLine = media?.sentAt ? `Sent: ${formatBoardMessageDateTime(media.sentAt)}` : '';
+		const captionLine = media?.caption || '';
 		const title =
 			media?.kind === 'video'
 				? 'Video'
@@ -1692,7 +1728,16 @@
 					: media?.kind === 'image'
 						? 'Image'
 						: 'File';
-		const cardText = [title, nameLine, hostLine, sizeLine, media?.url || '']
+		const cardText = [
+			title,
+			nameLine,
+			senderLine,
+			sentAtLine,
+			captionLine,
+			hostLine,
+			sizeLine,
+			media?.url || ''
+		]
 			.filter((entry) => entry !== '')
 			.join('\n');
 		const object = new TextboxClass(cardText, {
@@ -1706,7 +1751,10 @@
 			padding: 10
 		}) as FabricObjectLike;
 		if (explicitHeight > 0) {
-			const rawHeight = Math.max(1, toNumber((object as Record<string, unknown>).height, explicitHeight));
+			const rawHeight = Math.max(
+				1,
+				toNumber((object as Record<string, unknown>).height, explicitHeight)
+			);
 			object.set?.({
 				scaleY: explicitHeight / rawHeight
 			});
@@ -1733,11 +1781,17 @@
 			}) as FabricObjectLike;
 			const rawWidth = Math.max(
 				1,
-				toNumber((object as Record<string, unknown>).width, loadedImage.naturalWidth || loadedImage.width || 1)
+				toNumber(
+					(object as Record<string, unknown>).width,
+					loadedImage.naturalWidth || loadedImage.width || 1
+				)
 			);
 			const rawHeight = Math.max(
 				1,
-				toNumber((object as Record<string, unknown>).height, loadedImage.naturalHeight || loadedImage.height || 1)
+				toNumber(
+					(object as Record<string, unknown>).height,
+					loadedImage.naturalHeight || loadedImage.height || 1
+				)
 			);
 			let targetWidth = explicitWidth;
 			let targetHeight = explicitHeight;
@@ -1778,6 +1832,21 @@
 	function safeHostFromURL(url: string) {
 		try {
 			return new URL(url).hostname;
+		} catch {
+			return '';
+		}
+	}
+
+	function inferFileNameFromURL(rawURL: string) {
+		try {
+			const parsed = new URL(rawURL);
+			const pathName = parsed.pathname || '';
+			const rawSegment = pathName.split('/').pop() || '';
+			if (!rawSegment) {
+				return '';
+			}
+			const decoded = decodeURIComponent(rawSegment).trim();
+			return decoded || '';
 		} catch {
 			return '';
 		}
@@ -1825,7 +1894,9 @@
 			if (object === boardBoundsRect) {
 				continue;
 			}
-			const candidateId = normalizeMessageID(toStringValue((object as Record<string, unknown>).elementId));
+			const candidateId = normalizeMessageID(
+				toStringValue((object as Record<string, unknown>).elementId)
+			);
 			if (candidateId && candidateId === normalizedElementId) {
 				return object as FabricObjectLike;
 			}
@@ -1875,34 +1946,32 @@
 			}
 			return;
 		}
-			if (envelope.type === 'board_element_delete') {
-				const movement = parseBoardMovementRecord(envelope.payload);
-				if (!movement) {
-					return;
+		if (envelope.type === 'board_element_delete') {
+			const movement = parseBoardMovementRecord(envelope.payload);
+			if (!movement) {
+				return;
 			}
 			const target = findObjectByElementId(movement.elementId);
 			if (!target) {
 				return;
 			}
-				beginRemoteApply();
-				try {
-					fabricCanvas.remove(target as any);
-					fabricCanvas.requestRenderAll?.();
-					refreshBoardStats();
-				} finally {
-					endRemoteApply();
-				}
+			beginRemoteApply();
+			try {
+				fabricCanvas.remove(target as any);
+				fabricCanvas.requestRenderAll?.();
+				refreshBoardStats();
+			} finally {
+				endRemoteApply();
 			}
 		}
+	}
 
-	function parseBoardErrorPayload(value: unknown):
-		| {
-				roomId: string;
-				code: string;
-				message: string;
-				elementId: string;
-			}
-		| null {
+	function parseBoardErrorPayload(value: unknown): {
+		roomId: string;
+		code: string;
+		message: string;
+		elementId: string;
+	} | null {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) {
 			return null;
 		}
@@ -2000,9 +2069,7 @@
 		) {
 			return null;
 		}
-		const roomIdFromEnvelope = normalizeRoomIDValue(
-			toStringValue(record.roomId ?? record.room_id)
-		);
+		const roomIdFromEnvelope = normalizeRoomIDValue(toStringValue(record.roomId ?? record.room_id));
 		const payloadRecord = record.payload;
 		const roomIdFromPayload =
 			payloadRecord && typeof payloadRecord === 'object' && !Array.isArray(payloadRecord)
@@ -2018,7 +2085,9 @@
 			return null;
 		}
 		const resolvedPayload =
-			type === 'board_element_add' || type === 'board_element_move' || type === 'board_element_delete'
+			type === 'board_element_add' ||
+			type === 'board_element_move' ||
+			type === 'board_element_delete'
 				? payloadRecord
 				: record;
 		return {
@@ -2063,7 +2132,9 @@
 		if (!fabricCanvas || object === boardBoundsRect) {
 			return;
 		}
-		const elementId = normalizeMessageID(toStringValue((object as Record<string, unknown>).elementId));
+		const elementId = normalizeMessageID(
+			toStringValue((object as Record<string, unknown>).elementId)
+		);
 		const wasPendingInsert = Boolean(elementId && elementId === pendingInsertElementId);
 		if (emitDelete && !wasPendingInsert && !canMutateBoardObject(object)) {
 			return;
@@ -2170,7 +2241,9 @@
 			return;
 		}
 		const objects = fabricCanvas.getObjects?.() ?? [];
-		boardElementCount = objects.filter((object: unknown) => object && object !== boardBoundsRect).length;
+		boardElementCount = objects.filter(
+			(object: unknown) => object && object !== boardBoundsRect
+		).length;
 		const serialized = serializedSnapshot || serializeBoardSnapshot();
 		boardApproxBytes = serialized ? UTF8_ENCODER.encode(serialized).length : 0;
 	}
@@ -2403,7 +2476,11 @@
 		pendingTapGesture = null;
 	}
 
-	function openContextMenuAt(clientX: number, clientY: number, boardPoint: { x: number; y: number }) {
+	function openContextMenuAt(
+		clientX: number,
+		clientY: number,
+		boardPoint: { x: number; y: number }
+	) {
 		if (!boardContainerEl) {
 			return;
 		}
@@ -2442,7 +2519,10 @@
 				name: file.name || 'attachment',
 				kind: inferMediaMessageType(file),
 				mimeType: file.type || 'application/octet-stream',
-				sizeBytes: file.size
+				sizeBytes: file.size,
+				caption: '',
+				senderName: '',
+				sentAt: 0
 			};
 			await insertMediaObject(mediaPayload, contextMenuPoint);
 		} catch (error) {
@@ -2462,8 +2542,13 @@
 
 	function insertRoomMessage(message: ChatMessage) {
 		messagePickerOpen = false;
-		const snippet = extractMessageSnippet(message);
-		insertMessageLikeObject(snippet, contextMenuPoint);
+		const mediaPayload = buildBoardMediaPayloadFromMessage(message);
+		if (mediaPayload) {
+			void insertMediaObject(mediaPayload, contextMenuPoint);
+			return;
+		}
+		const cardText = buildMessageCardText(message);
+		insertMessageLikeObject(cardText, contextMenuPoint);
 	}
 
 	async function insertMediaObject(media: BoardMediaContent, point: { x: number; y: number }) {
@@ -2536,18 +2621,210 @@
 		captureHistorySnapshot();
 	}
 
+	function buildMessageSearchText(message: ChatMessage) {
+		return [
+			toStringValue(message.senderName),
+			formatBoardMessageDateTime(message.createdAt),
+			extractMessageSnippet(message),
+			toStringValue(message.fileName),
+			toStringValue(message.mediaUrl)
+		]
+			.join(' ')
+			.toLowerCase();
+	}
+
+	function buildBoardMediaPayloadFromMessage(message: ChatMessage): BoardMediaContent | null {
+		const normalizedType = toStringValue(message.type).trim().toLowerCase();
+		if (
+			normalizedType !== 'image' &&
+			normalizedType !== 'video' &&
+			normalizedType !== 'audio' &&
+			normalizedType !== 'file'
+		) {
+			return null;
+		}
+		const mediaURL =
+			toStringValue(message.mediaUrl).trim() ||
+			(toStringValue(message.content).trim().startsWith('http')
+				? toStringValue(message.content).trim()
+				: '');
+		if (!mediaURL) {
+			return null;
+		}
+		const rawContent = toStringValue(message.content).trim();
+		const caption = rawContent && rawContent !== mediaURL ? rawContent : '';
+		const senderName = toStringValue(message.senderName).trim() || 'Guest';
+		const sentAt =
+			Number.isFinite(message.createdAt) && message.createdAt > 0 ? message.createdAt : 0;
+		return {
+			url: mediaURL,
+			name:
+				toStringValue(message.fileName).trim() ||
+				inferFileNameFromURL(mediaURL) ||
+				`${resolveMessageTypeLabel(message)} attachment`,
+			kind: normalizeMediaKind(normalizedType),
+			mimeType: toStringValue(message.mediaType).trim(),
+			sizeBytes: 0,
+			caption,
+			senderName,
+			sentAt
+		};
+	}
+
+	function formatBoardMessageDateTime(timestamp: number) {
+		const safe = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now();
+		return new Date(safe).toLocaleString([], {
+			year: 'numeric',
+			month: 'short',
+			day: '2-digit',
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
+
+	function truncatePickerSnippet(value: string, max = 220) {
+		if (value.length <= max) {
+			return value;
+		}
+		return `${value.slice(0, max - 3)}...`;
+	}
+
+	function resolveMessageTypeLabel(message: ChatMessage) {
+		const normalizedType = toStringValue(message.type).trim().toLowerCase();
+		if (normalizedType === 'task') {
+			return 'Task';
+		}
+		if (normalizedType === 'image') {
+			return 'Image';
+		}
+		if (normalizedType === 'video') {
+			return 'Video';
+		}
+		if (normalizedType === 'audio') {
+			return 'Audio';
+		}
+		if (normalizedType === 'file') {
+			return 'File';
+		}
+		if (normalizedType === 'deleted') {
+			return 'Deleted';
+		}
+		return 'Message';
+	}
+
 	function extractMessageSnippet(message: ChatMessage) {
 		if (!message) {
 			return '';
 		}
+
+		const normalizedType = toStringValue(message.type).trim().toLowerCase();
+		if (normalizedType === 'task') {
+			const parsedTask = parseTaskMessagePayload(toStringValue(message.content));
+			if (!parsedTask) {
+				return 'Task';
+			}
+			const taskCount = parsedTask.tasks.length;
+			if (taskCount <= 0) {
+				return truncatePickerSnippet(`Task: ${parsedTask.title}`);
+			}
+			return truncatePickerSnippet(`Task: ${parsedTask.title} (${taskCount})`);
+		}
+
+		const mediaURL = toStringValue(message.mediaUrl).trim();
+		if (
+			normalizedType === 'image' ||
+			normalizedType === 'video' ||
+			normalizedType === 'audio' ||
+			normalizedType === 'file'
+		) {
+			const fileName = toStringValue(message.fileName).trim();
+			const caption = toStringValue(message.content).trim();
+			const preferredText = fileName || (caption && caption !== mediaURL ? caption : mediaURL);
+			return truncatePickerSnippet(
+				`${resolveMessageTypeLabel(message)}: ${preferredText || 'Attachment'}`
+			);
+		}
+
+		if (normalizedType === 'deleted') {
+			return 'This message was deleted';
+		}
+
 		const text = toStringValue(message.content).trim();
 		if (text) {
-			return text.length > 240 ? `${text.slice(0, 237)}...` : text;
+			return truncatePickerSnippet(text.replace(/\s+/g, ' '));
 		}
-		if (toStringValue(message.mediaUrl).trim()) {
-			return `[${toStringValue(message.type) || 'media'}] ${toStringValue(message.mediaUrl)}`;
+		if (mediaURL) {
+			return truncatePickerSnippet(mediaURL);
 		}
 		return `(message ${normalizeMessageID(message.id) || 'unknown'})`;
+	}
+
+	function buildTaskMessageCardBody(message: ChatMessage) {
+		const parsedTask = parseTaskMessagePayload(toStringValue(message.content));
+		if (!parsedTask) {
+			return 'Task';
+		}
+		const lines = [`Task: ${parsedTask.title || 'Task'}`];
+		const visibleTasks = parsedTask.tasks.slice(0, 8);
+		for (const task of visibleTasks) {
+			lines.push(`${task.completed ? '[x]' : '[ ]'} ${task.text}`);
+		}
+		const remainingCount = Math.max(0, parsedTask.tasks.length - visibleTasks.length);
+		if (remainingCount > 0) {
+			lines.push(`+${remainingCount} more task(s)`);
+		}
+		return lines.join('\n');
+	}
+
+	function buildMessageCardBody(message: ChatMessage) {
+		const normalizedType = toStringValue(message.type).trim().toLowerCase();
+		if (normalizedType === 'task') {
+			return buildTaskMessageCardBody(message);
+		}
+
+		const content = toStringValue(message.content).trim();
+		const mediaURL = toStringValue(message.mediaUrl).trim();
+		const fileName = toStringValue(message.fileName).trim();
+
+		if (
+			normalizedType === 'image' ||
+			normalizedType === 'video' ||
+			normalizedType === 'audio' ||
+			normalizedType === 'file'
+		) {
+			const lines = [`${resolveMessageTypeLabel(message)}: ${fileName || 'Attachment'}`];
+			if (content && content !== mediaURL) {
+				lines.push(content);
+			}
+			if (mediaURL) {
+				lines.push(mediaURL);
+			}
+			return lines.join('\n');
+		}
+
+		if (normalizedType === 'deleted') {
+			return 'This message was deleted';
+		}
+		if (content) {
+			return content;
+		}
+		if (mediaURL) {
+			return mediaURL;
+		}
+		return 'Message';
+	}
+
+	function buildMessageCardText(message: ChatMessage) {
+		const author = toStringValue(message.senderName).trim() || 'Guest';
+		const sentAt = formatBoardMessageDateTime(message.createdAt);
+		const replySnippet = toStringValue(message.replyToSnippet).trim();
+		const body = buildMessageCardBody(message);
+		const lines = ['Message Card', `From: ${author}`, `Sent: ${sentAt}`];
+		if (replySnippet) {
+			lines.push(`Reply: ${replySnippet}`);
+		}
+		lines.push('', body);
+		return lines.join('\n').trim();
 	}
 
 	function formatStorageBytes(value: number) {
@@ -2580,15 +2857,15 @@
 </script>
 
 <section class="board-root">
-		<div class="board-toolbar">
-			<button
-				type="button"
-				class="tool-icon-button"
-				class:active={activeTool === 'draw'}
-				on:click={() => toggleToolMode('draw')}
-				title="Free draw"
-				aria-label="Free draw"
-			>
+	<div class="board-toolbar">
+		<button
+			type="button"
+			class="tool-icon-button"
+			class:active={activeTool === 'draw'}
+			on:click={() => toggleToolMode('draw')}
+			title="Free draw"
+			aria-label="Free draw"
+		>
 			<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 				<path
 					d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z"
@@ -2633,14 +2910,14 @@
 				</div>
 			{/if}
 		</div>
-			<button
-				type="button"
-				class="tool-icon-button"
-				class:active={activeTool === 'eraser'}
-				on:click={() => toggleToolMode('eraser')}
-				title="Eraser"
-				aria-label="Eraser"
-				disabled={!canModerateBoardActions}
+		<button
+			type="button"
+			class="tool-icon-button"
+			class:active={activeTool === 'eraser'}
+			on:click={() => toggleToolMode('eraser')}
+			title="Eraser"
+			aria-label="Eraser"
+			disabled={!canModerateBoardActions}
 		>
 			<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 				<path
@@ -2648,14 +2925,14 @@
 				/>
 			</svg>
 		</button>
-			<button
-				type="button"
-				class="clear-tool-button"
-				class:active={activeTool === 'duster'}
-				on:click={() => toggleToolMode('duster')}
-				title="Clear board duster"
-				aria-label="Clear board duster"
-				disabled={!canModerateBoardActions}
+		<button
+			type="button"
+			class="clear-tool-button"
+			class:active={activeTool === 'duster'}
+			on:click={() => toggleToolMode('duster')}
+			title="Clear board duster"
+			aria-label="Clear board duster"
+			disabled={!canModerateBoardActions}
 		>
 			<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 				<path d="M4 7.5h16v3H4z" />
@@ -2663,7 +2940,7 @@
 			</svg>
 			<span>Clear</span>
 		</button>
-			<div class="insert-wrap" bind:this={insertWrapEl}>
+		<div class="insert-wrap" bind:this={insertWrapEl}>
 			<button
 				type="button"
 				class="insert-toggle"
@@ -2731,93 +3008,101 @@
 							<circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
 						</svg>
 					</button>
-					</div>
-				{/if}
-			</div>
-			<div class="board-details-wrap" bind:this={boardDetailsWrapEl}>
-				<button
-					type="button"
-					class="details-toggle-button"
-					class:active={showBoardDetails}
-					on:click={toggleBoardDetails}
-					title="Board details"
-					aria-label="Board details"
-				>
-					i
-				</button>
-				{#if showBoardDetails}
-					<div class="board-details-popover">
-						<div class="board-detail-row">
-							<span>Plane</span>
-							<strong>{BOARD_WIDTH}×{BOARD_HEIGHT}px</strong>
-						</div>
-						<div class="board-detail-row">
-							<span>Elements</span>
-							<strong>{boardElementCount}</strong>
-						</div>
-						<div class="board-detail-row">
-							<span>Used</span>
-							<strong>
-								{formatStorageBytes(boardApproxBytes)} / {formatStorageBytes(BOARD_STORAGE_LIMIT_BYTES)}
-							</strong>
-						</div>
-						<div class="board-detail-row">
-							<span>Remaining</span>
-							<strong>{formatStorageBytes(boardRemainingBytes)}</strong>
-						</div>
-						<div class="board-detail-row">
-							<span>Usage</span>
-							<strong>{formatUsagePercent(boardStorageUsagePercent)}</strong>
-						</div>
-						<div class="board-detail-row">
-							<span>Zoom</span>
-							<strong>{Math.round(boardZoomLevel * 100)}%</strong>
-						</div>
-						<div class="board-detail-row">
-							<span>Access</span>
-							<strong>{canManageAllBoardElements ? 'Admin full access' : 'Owner-only edits'}</strong>
-						</div>
-						<div class="board-detail-note">Drag empty board to pan. Double-tap empty space to attach.</div>
-					</div>
-				{/if}
-			</div>
+				</div>
+			{/if}
+		</div>
+		<div class="board-details-wrap" bind:this={boardDetailsWrapEl}>
 			<button
 				type="button"
-				class="toolbar-more-toggle"
-				class:active={showToolbarMore}
-				on:click={toggleToolbarMore}
-				title="More board actions"
-				aria-label="More board actions"
-				aria-expanded={showToolbarMore}
+				class="details-toggle-button"
+				class:active={showBoardDetails}
+				on:click={toggleBoardDetails}
+				title="Board details"
+				aria-label="Board details"
 			>
-				{showToolbarMore ? 'Hide' : 'More'}
+				i
 			</button>
-			<div class="toolbar-overflow" class:open={showToolbarMore}>
-				<button type="button" on:click={undo} disabled={!canModerateBoardActions || !canUndoLocalAction}>
-					Undo
-				</button>
-				<button
-					type="button"
-					on:click={redo}
-					disabled={!canModerateBoardActions || !canRedoLocalAction}
-				>
-					Redo
-				</button>
-				<button
-					type="button"
-					class="cancel-operation-button"
-					disabled={!canCancelCurrentOperation}
-					title="Cancel current operation"
-					aria-label="Cancel current operation"
-					on:click={cancelCurrentOperation}
-				>
-					×
-				</button>
-				{#if insertionHintLabel}
-					<span class="insert-operation-hint">{insertionHintLabel}</span>
-				{/if}
-			</div>
+			{#if showBoardDetails}
+				<div class="board-details-popover">
+					<div class="board-detail-row">
+						<span>Plane</span>
+						<strong>{BOARD_WIDTH}×{BOARD_HEIGHT}px</strong>
+					</div>
+					<div class="board-detail-row">
+						<span>Elements</span>
+						<strong>{boardElementCount}</strong>
+					</div>
+					<div class="board-detail-row">
+						<span>Used</span>
+						<strong>
+							{formatStorageBytes(boardApproxBytes)} / {formatStorageBytes(
+								BOARD_STORAGE_LIMIT_BYTES
+							)}
+						</strong>
+					</div>
+					<div class="board-detail-row">
+						<span>Remaining</span>
+						<strong>{formatStorageBytes(boardRemainingBytes)}</strong>
+					</div>
+					<div class="board-detail-row">
+						<span>Usage</span>
+						<strong>{formatUsagePercent(boardStorageUsagePercent)}</strong>
+					</div>
+					<div class="board-detail-row">
+						<span>Zoom</span>
+						<strong>{Math.round(boardZoomLevel * 100)}%</strong>
+					</div>
+					<div class="board-detail-row">
+						<span>Access</span>
+						<strong>{canManageAllBoardElements ? 'Admin full access' : 'Owner-only edits'}</strong>
+					</div>
+					<div class="board-detail-note">
+						Drag empty board to pan. Double-tap empty space to attach.
+					</div>
+				</div>
+			{/if}
 		</div>
+		<button
+			type="button"
+			class="toolbar-more-toggle"
+			class:active={showToolbarMore}
+			on:click={toggleToolbarMore}
+			title="More board actions"
+			aria-label="More board actions"
+			aria-expanded={showToolbarMore}
+		>
+			{showToolbarMore ? 'Hide' : 'More'}
+		</button>
+		<div class="toolbar-overflow" class:open={showToolbarMore}>
+			<button
+				type="button"
+				on:click={undo}
+				disabled={!canModerateBoardActions || !canUndoLocalAction}
+			>
+				Undo
+			</button>
+			<button
+				type="button"
+				on:click={redo}
+				disabled={!canModerateBoardActions || !canRedoLocalAction}
+			>
+				Redo
+			</button>
+			<button
+				type="button"
+				class="cancel-operation-button"
+				disabled={!canCancelCurrentOperation}
+				title="Cancel current operation"
+				aria-label="Cancel current operation"
+				on:click={cancelCurrentOperation}
+			>
+				×
+			</button>
+			{#if insertionHintLabel}
+				<span class="insert-operation-hint">{insertionHintLabel}</span>
+			{/if}
+		</div>
+	</div>
 
 	<div
 		class="board-canvas-shell"
@@ -2856,15 +3141,15 @@
 		{#if boardError}
 			<div class="board-overlay error">{boardError}</div>
 		{/if}
-			{#if contextMenuOpen}
-				<div
-					class="board-context-menu"
-					bind:this={contextMenuEl}
-					style={`left:${contextMenuX}px; top:${contextMenuY}px;`}
-				>
-					<button type="button" on:click={openMediaPicker}>Insert Media</button>
-					<button type="button" on:click={openMessagePicker}>Insert Message from Room</button>
-				</div>
+		{#if contextMenuOpen}
+			<div
+				class="board-context-menu"
+				bind:this={contextMenuEl}
+				style={`left:${contextMenuX}px; top:${contextMenuY}px;`}
+			>
+				<button type="button" on:click={openMediaPicker}>Insert Media</button>
+				<button type="button" on:click={openMessagePicker}>Insert Message from Room</button>
+			</div>
 		{/if}
 	</div>
 
@@ -2904,8 +3189,13 @@
 						<div class="empty-state">No messages available</div>
 					{:else}
 						{#each filteredMessages as message (message.id)}
-							<button type="button" class="message-picker-item" on:click={() => insertRoomMessage(message)}>
+							<button
+								type="button"
+								class="message-picker-item"
+								on:click={() => insertRoomMessage(message)}
+							>
 								<span class="author">{message.senderName || 'Guest'}</span>
+								<span class="message-meta">{formatBoardMessageDateTime(message.createdAt)}</span>
 								<span class="snippet">{extractMessageSnippet(message)}</span>
 							</button>
 						{/each}
@@ -3404,6 +3694,12 @@
 		color: var(--text-muted);
 	}
 
+	.message-meta {
+		font-size: 0.72rem;
+		color: var(--text-muted);
+		opacity: 0.9;
+	}
+
 	.snippet {
 		font-size: 0.84rem;
 		color: var(--text-main);
@@ -3456,6 +3752,5 @@
 			right: 0;
 			min-width: min(250px, 90vw);
 		}
-
 	}
 </style>

@@ -250,9 +250,7 @@
 	$: discussionBackgroundUnreadCount =
 		isDiscussionOpen && discussionOpenedAtMs > 0
 			? discussionComments.filter((comment) => {
-					if (
-						normalizeIdentifier(comment.senderId) === normalizeIdentifier(currentUserId)
-					) {
+					if (normalizeIdentifier(comment.senderId) === normalizeIdentifier(currentUserId)) {
 						return false;
 					}
 					return comment.createdAt > discussionOpenedAtMs;
@@ -393,9 +391,7 @@
 		};
 	});
 
-
-
-		function updateViewportMode() {
+	function updateViewportMode() {
 		if (!browser) {
 			return;
 		}
@@ -790,8 +786,8 @@
 		clearSidebarRefreshTimer();
 		// sidebarRefreshTimer = setInterval(() => {
 		// 	void refreshSidebarRooms();
-		// }, 15000); 
-		 // increases server load and can cause jank, so leaving out for now
+		// }, 15000);
+		// increases server load and can cause jank, so leaving out for now
 	}
 
 	function clientLog(event: string, payload?: unknown) {
@@ -1407,7 +1403,11 @@
 	}
 
 	function resolveEnvelopePayloadRecord(envelope: SocketEnvelope): Record<string, unknown> {
-		if (!envelope.payload || typeof envelope.payload !== 'object' || Array.isArray(envelope.payload)) {
+		if (
+			!envelope.payload ||
+			typeof envelope.payload !== 'object' ||
+			Array.isArray(envelope.payload)
+		) {
 			return {};
 		}
 		return envelope.payload as Record<string, unknown>;
@@ -1469,6 +1469,123 @@
 		upsertDiscussionCommentLocal(comment, pinMessageID);
 	}
 
+	function handleMessageBreakUpdatedEnvelope(envelope: SocketEnvelope, targetRoomId: string) {
+		const source = envelope as Record<string, unknown>;
+		const payload = resolveEnvelopePayloadRecord(envelope);
+		const parentRoomID = normalizeRoomIDValue(
+			toStringValue(
+				payload.parentRoomId ??
+					payload.parent_room_id ??
+					source.parentRoomId ??
+					source.parent_room_id ??
+					targetRoomId
+			)
+		);
+		const originMessageID = normalizeMessageID(
+			toStringValue(
+				payload.originMessageId ??
+					payload.origin_message_id ??
+					source.originMessageId ??
+					source.origin_message_id
+			)
+		);
+		const breakRoomID = normalizeRoomIDValue(
+			toStringValue(
+				payload.breakRoomId ?? payload.break_room_id ?? source.breakRoomId ?? source.break_room_id
+			)
+		);
+		if (!parentRoomID || !originMessageID || !breakRoomID) {
+			return;
+		}
+
+		const breakJoinCount = Math.max(
+			0,
+			toInt(
+				payload.breakJoinCount ??
+					payload.break_join_count ??
+					source.breakJoinCount ??
+					source.break_join_count
+			)
+		);
+		const breakRoomName = normalizeRoomNameValue(
+			toStringValue(
+				payload.breakRoomName ??
+					payload.break_room_name ??
+					source.breakRoomName ??
+					source.break_room_name
+			)
+		);
+		const breakCreatedAt = parseOptionalTimestamp(
+			payload.createdAt ??
+				payload.created_at ??
+				payload.breakCreatedAt ??
+				payload.break_created_at ??
+				source.createdAt ??
+				source.created_at
+		);
+		const breakExpiresAt = parseOptionalTimestamp(
+			payload.expiresAt ??
+				payload.expires_at ??
+				payload.breakExpiresAt ??
+				payload.break_expires_at ??
+				source.expiresAt ??
+				source.expires_at
+		);
+
+		const roomMessages = messagesByRoom[parentRoomID] ?? [];
+		let messageUpdated = false;
+		const nextRoomMessages = roomMessages.map((entry) => {
+			if (normalizeMessageID(entry.id) !== originMessageID) {
+				return entry;
+			}
+			messageUpdated = true;
+			return {
+				...entry,
+				hasBreakRoom: true,
+				breakRoomId: breakRoomID,
+				breakJoinCount: breakJoinCount > 0 ? breakJoinCount : (entry.breakJoinCount ?? 0),
+				branchesCreated: Math.max(1, entry.branchesCreated ?? 0)
+			};
+		});
+		if (messageUpdated) {
+			messagesByRoom = {
+				...messagesByRoom,
+				[parentRoomID]: nextRoomMessages
+			};
+			queueOfflineCachePersist(parentRoomID);
+		}
+
+		const fallbackRoomName =
+			breakRoomName ||
+			roomThreads.find((thread) => thread.id === breakRoomID)?.name ||
+			formatRoomName(breakRoomID);
+		ensureRoomThread(breakRoomID, fallbackRoomName, 'discoverable');
+		roomThreads = sortThreads(
+			roomThreads.map((thread) => {
+				if (thread.id !== breakRoomID) {
+					return thread;
+				}
+				const nextStatus: ThreadStatus =
+					thread.status === 'joined'
+						? 'joined'
+						: thread.status === 'left'
+							? 'left'
+							: 'discoverable';
+				return {
+					...thread,
+					name: fallbackRoomName || thread.name,
+					status: nextStatus,
+					parentRoomId: parentRoomID || thread.parentRoomId,
+					originMessageId: originMessageID || thread.originMessageId
+				};
+			})
+		);
+
+		if (breakCreatedAt > 0 || breakExpiresAt > 0) {
+			ensureRoomMeta(breakRoomID, breakCreatedAt, breakExpiresAt);
+		}
+	}
+
 	function handleEnvelope(envelope: SocketEnvelope) {
 		const targetRoomId = resolveEnvelopeRoomID(envelope);
 		const kind = toStringValue(envelope.type).toLowerCase();
@@ -1503,6 +1620,11 @@
 
 		if (kind === 'discussion_comment' && targetRoomId) {
 			handleDiscussionCommentEnvelope(envelope, targetRoomId);
+			return;
+		}
+
+		if (kind === 'message_break_updated' && targetRoomId) {
+			handleMessageBreakUpdatedEnvelope(envelope, targetRoomId);
 			return;
 		}
 
@@ -1592,7 +1714,9 @@
 						return thread;
 					}
 					const fallbackCount =
-						typeof thread.memberCount === 'number' ? Math.max(0, thread.memberCount - 1) : undefined;
+						typeof thread.memberCount === 'number'
+							? Math.max(0, thread.memberCount - 1)
+							: undefined;
 					const nextCount =
 						authoritativeMemberCount >= 0 ? authoritativeMemberCount : fallbackCount;
 					return { ...thread, memberCount: nextCount };
@@ -1602,9 +1726,7 @@
 		}
 
 		if (kind === 'room_expired') {
-			const payloadRoomId = normalizeRoomIDValue(
-				toStringValue(payload.roomId ?? payload.room_id)
-			);
+			const payloadRoomId = normalizeRoomIDValue(toStringValue(payload.roomId ?? payload.room_id));
 			const expiredRoomId = normalizeRoomIDValue(payloadRoomId || targetRoomId);
 			if (expiredRoomId) {
 				void handleRoomExpired([expiredRoomId], 'server');
@@ -2229,7 +2351,10 @@
 		}
 	}
 
-	function upsertDiscussionCommentLocal(comment: ChatMessage, pinnedMessageId = activeDiscussionTaskId) {
+	function upsertDiscussionCommentLocal(
+		comment: ChatMessage,
+		pinnedMessageId = activeDiscussionTaskId
+	) {
 		const normalizedID = normalizeMessageID(comment.id);
 		if (!normalizedID) {
 			return;
@@ -2460,7 +2585,9 @@
 		}
 
 		const requestedReplyID = normalizeMessageID(event.detail.replyToMessageId || '');
-		const allowedReplyIDs = new Set<string>(discussionComments.map((entry) => normalizeMessageID(entry.id)));
+		const allowedReplyIDs = new Set<string>(
+			discussionComments.map((entry) => normalizeMessageID(entry.id))
+		);
 		const parentCommentId =
 			requestedReplyID && allowedReplyIDs.has(requestedReplyID) ? requestedReplyID : '';
 		if (parentCommentId) {
@@ -3665,12 +3792,12 @@
 			discoverableRooms={filteredDiscoverableRooms}
 			leftRooms={filteredLeftRooms}
 			accessibleParentRoomIds={roomThreads.map((thread) => thread.id)}
-				activeRoomId={roomId}
-				{isMobileView}
-				{showLeftMenu}
-				isDarkMode={$isDarkMode}
-				{themePreference}
-				bind:chatListSearch
+			activeRoomId={roomId}
+			{isMobileView}
+			{showLeftMenu}
+			isDarkMode={$isDarkMode}
+			{themePreference}
+			bind:chatListSearch
 			on:select={onSidebarSelect}
 			on:jumpOrigin={onJumpToBreakOrigin}
 			on:toggleMenu={toggleLeftMenu}
@@ -3681,22 +3808,22 @@
 	</div>
 
 	<section class="chat-window">
-			<ChatRoomHeader
+		<ChatRoomHeader
 			roomName={activeThread.name}
 			onlineCount={currentOnlineMembers.length}
 			unreadCount={activeUnreadCount}
-				{isMember}
-				{isActiveRoomAdmin}
-				{isMobileView}
-				isDarkMode={$isDarkMode}
-				{messageActionMode}
-				{showRoomSearch}
-				isBoardView={showBoardView}
-				remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
-				on:showMobileList={showMobileRoomList}
-				on:openRoomDetails={openRoomDetails}
-				on:toggleBoardView={toggleBoardView}
-				on:toggleRoomSearch={toggleRoomSearch}
+			{isMember}
+			{isActiveRoomAdmin}
+			{isMobileView}
+			isDarkMode={$isDarkMode}
+			{messageActionMode}
+			{showRoomSearch}
+			isBoardView={showBoardView}
+			remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
+			on:showMobileList={showMobileRoomList}
+			on:openRoomDetails={openRoomDetails}
+			on:toggleBoardView={toggleBoardView}
+			on:toggleRoomSearch={toggleRoomSearch}
 			on:renameRoom={() => void renameRoom(roomId)}
 			on:toggleBreakSelectionMode={toggleBreakSelectionMode}
 			on:togglePinSelectionMode={togglePinSelectionMode}
@@ -3709,83 +3836,83 @@
 			on:disconnect={() => void disconnectAndWipe()}
 		/>
 
-			{#if !showBoardView}
-				<ChatStatusBars
-					{typingIndicatorText}
-					{showTrustedDevicePrompt}
+		{#if !showBoardView}
+			<ChatStatusBars
+				{typingIndicatorText}
+				{showTrustedDevicePrompt}
+				{isSelectionMode}
+				{messageActionMode}
+				selectedDeleteCount={selectedDeleteMessageIds.length}
+				{showRoomSearch}
+				bind:roomMessageSearch
+				isDarkMode={$isDarkMode}
+				on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
+				on:cancelSelection={cancelSelectionMode}
+				on:deleteSelected={deleteSelectedMessagesBatch}
+			/>
+		{/if}
+
+		<div class="chat-window-shell" class:is-expired={isRoomExpired}>
+			{#if showBoardView}
+				<Board
+					{roomId}
+					messages={currentMessages}
+					isDarkMode={$isDarkMode}
+					canEdit={isMember && !isRoomExpired}
+					{canModerateBoard}
+					{currentUserId}
+					{currentUsername}
+				/>
+			{:else}
+				<ChatWindow
+					bind:this={chatWindowRef}
+					{roomId}
+					isVisible={!isMobileView || mobilePane === 'chat'}
+					messages={currentMessages}
+					{currentUserId}
+					unreadCount={activeUnreadCount}
+					firstUnreadMessageId={activeFirstUnreadMessageId}
+					lastReadTimestamp={activeLastReadTimestamp}
+					{roomMessageSearch}
+					{expandedMessages}
+					{isMember}
 					{isSelectionMode}
-						{messageActionMode}
-						selectedDeleteCount={selectedDeleteMessageIds.length}
-						{showRoomSearch}
-						bind:roomMessageSearch
-						isDarkMode={$isDarkMode}
-						on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
-					on:cancelSelection={cancelSelectionMode}
-					on:deleteSelected={deleteSelectedMessagesBatch}
+					isDarkMode={$isDarkMode}
+					{messageActionMode}
+					selectedMessageId={selectedActionMessageId}
+					{deleteMultiEnabled}
+					{selectedDeleteMessageIds}
+					{focusMessageId}
+					isLoadingOlder={isLoadingOlderHistory}
+					hasMoreOlder={hasMoreOlderHistory}
+					on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+					on:joinBreakRoom={onJoinBreakRoom}
+					on:joinRoom={() => void joinCurrentRoom()}
+					on:messageSelect={onMessageSelected}
+					on:openPinnedDiscussion={onPinnedDiscussionOpen}
+					on:reply={onReplyRequest}
+					on:editMessage={onEditMessageRequest}
+					on:deleteMessage={onDeleteMessageRequest}
+					on:editSelected={onSelectedMessageEdit}
+					on:deleteSelected={onSelectedMessageDelete}
+					on:requestOlder={onRequestOlderHistory}
+					on:focusHandled={onFocusHandled}
+					on:readProgress={onChatReadProgress}
+					on:toggleTask={onTaskToggle}
+					on:addTask={onTaskAdd}
 				/>
 			{/if}
+		</div>
 
-			<div class="chat-window-shell" class:is-expired={isRoomExpired}>
-				{#if showBoardView}
-						<Board
-							{roomId}
-							messages={currentMessages}
-							isDarkMode={$isDarkMode}
-							canEdit={isMember && !isRoomExpired}
-							{canModerateBoard}
-						{currentUserId}
-						currentUsername={currentUsername}
-					/>
-				{:else}
-					<ChatWindow
-						bind:this={chatWindowRef}
-						{roomId}
-						isVisible={!isMobileView || mobilePane === 'chat'}
-						messages={currentMessages}
-						{currentUserId}
-						unreadCount={activeUnreadCount}
-						firstUnreadMessageId={activeFirstUnreadMessageId}
-						lastReadTimestamp={activeLastReadTimestamp}
-							{roomMessageSearch}
-							{expandedMessages}
-							{isMember}
-							{isSelectionMode}
-							isDarkMode={$isDarkMode}
-							{messageActionMode}
-						selectedMessageId={selectedActionMessageId}
-						{deleteMultiEnabled}
-						{selectedDeleteMessageIds}
-						{focusMessageId}
-						isLoadingOlder={isLoadingOlderHistory}
-						hasMoreOlder={hasMoreOlderHistory}
-						on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
-						on:joinBreakRoom={onJoinBreakRoom}
-						on:joinRoom={() => void joinCurrentRoom()}
-						on:messageSelect={onMessageSelected}
-						on:openPinnedDiscussion={onPinnedDiscussionOpen}
-						on:reply={onReplyRequest}
-						on:editMessage={onEditMessageRequest}
-						on:deleteMessage={onDeleteMessageRequest}
-						on:editSelected={onSelectedMessageEdit}
-						on:deleteSelected={onSelectedMessageDelete}
-						on:requestOlder={onRequestOlderHistory}
-						on:focusHandled={onFocusHandled}
-						on:readProgress={onChatReadProgress}
-						on:toggleTask={onTaskToggle}
-						on:addTask={onTaskAdd}
-					/>
-				{/if}
-			</div>
-
-			{#if isMember && !showBoardView}
-				<ChatComposer
+		{#if isMember && !showBoardView}
+			<ChatComposer
 				bind:draftMessage
 				bind:attachedFile
-					{roomId}
-					disabled={isRoomExpired}
-					{activeReply}
-					isDarkMode={$isDarkMode}
-					{currentUsername}
+				{roomId}
+				disabled={isRoomExpired}
+				{activeReply}
+				isDarkMode={$isDarkMode}
+				{currentUsername}
 				messageLimit={MESSAGE_TEXT_MAX_BYTES}
 				on:send={(event) => void sendMessage(event.detail)}
 				on:typing={onComposerTyping}
@@ -3796,9 +3923,9 @@
 		{/if}
 	</section>
 
-		<div class="online-pane">
-			<OnlinePanel members={currentOnlineMembers} isDarkMode={$isDarkMode} />
-		</div>
+	<div class="online-pane">
+		<OnlinePanel members={currentOnlineMembers} isDarkMode={$isDarkMode} />
+	</div>
 </section>
 
 <DiscussionModal
