@@ -12,10 +12,12 @@
 	export let messageActionMode: MessageActionMode = 'none';
 	export let showRoomSearch = false;
 	export let remainingLabel = '--';
+	export let isBoardView = false;
 
 	const dispatch = createEventDispatcher<{
 		showMobileList: void;
 		openRoomDetails: void;
+		toggleBoardView: void;
 		toggleRoomSearch: void;
 		renameRoom: void; 
 		toggleBreakSelectionMode: void;
@@ -76,7 +78,9 @@
 			on:click|stopPropagation={() => dispatch('showMobileList')}
 			aria-label="Back to room list"
 		>
-			Rooms
+			<svg class="mobile-back-icon" viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M15.5 19.5 8 12l7.5-7.5" />
+			</svg>
 		</button>
 	{/if}
 	<button type="button" class="room-title-button" on:click={() => dispatch('openRoomDetails')}>
@@ -95,10 +99,29 @@
 		</span>
 	</button>
 
-	<div class="header-actions" bind:this={headerActionsEl}>
-		<button
-			type="button"
-			class="expiry-pill"
+		<div class="header-actions" bind:this={headerActionsEl}>
+			<button
+				type="button"
+				class="board-toggle-button"
+				class:active={isBoardView}
+				on:click|stopPropagation={() => dispatch('toggleBoardView')}
+				title={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
+				aria-label={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
+			>
+				{#if isBoardView}
+					<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M5 6.5h14a1 1 0 0 1 1 1V17a1 1 0 0 1-1 1H9l-4 3V7.5a1 1 0 0 1 1-1Z" />
+					</svg>
+				{:else}
+					<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+						<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
+						<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
+					</svg>
+				{/if}
+			</button>
+			<button
+				type="button"
+				class="expiry-pill"
 			on:click|stopPropagation={() => dispatch('openRoomDetails')}
 			title="Remaining room lifetime"
 			aria-label="Open room lifetime details"
@@ -186,11 +209,23 @@
 		background: #ebf1f8;
 		color: #3b4a60;
 		border-radius: 999px;
-		padding: 0.35rem 0.65rem;
-		font-size: 0.78rem;
-		font-weight: 600;
+		width: 1.95rem;
+		height: 1.95rem;
+		padding: 0;
 		cursor: pointer;
 		flex-shrink: 0;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.mobile-back-icon {
+		width: 0.95rem;
+		height: 0.95rem;
+		stroke: currentColor;
+		stroke-width: 2.25;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.theme-dark .mobile-back-button {
@@ -317,6 +352,49 @@
 		color: #314057;
 	}
 
+	.board-toggle-button {
+		border: 1px solid #c7d0dc;
+		background: #ebf1f8;
+		border-radius: 6px;
+		width: 1.95rem;
+		height: 1.85rem;
+		padding: 0;
+		cursor: pointer;
+		color: #314057;
+		line-height: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.board-toggle-icon {
+		width: 0.92rem;
+		height: 0.92rem;
+		stroke: currentColor;
+		stroke-width: 1.7;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.board-toggle-button.active {
+		border-color: #0f9d58;
+		background: #dcfce7;
+		color: #166534;
+	}
+
+	.theme-dark .board-toggle-button {
+		border-color: #3a3a40;
+		background: #18181b;
+		color: #eeeef4;
+	}
+
+	.theme-dark .board-toggle-button.active {
+		border-color: #22c55e;
+		background: #14532d;
+		color: #dcfce7;
+	}
+
 	.theme-dark .icon-button {
 		border-color: #3a3a40;
 		background: #18181b;
@@ -379,6 +457,13 @@
 
 		.mobile-back-button {
 			display: inline-flex;
+			width: 1.75rem;
+			height: 1.75rem;
+		}
+
+		.board-toggle-button {
+			width: 1.75rem;
+			height: 1.65rem;
 		}
 	}
 </style>

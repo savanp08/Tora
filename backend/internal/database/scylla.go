@@ -91,6 +91,10 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 		return nil, fmt.Errorf("CRITICAL: session is nil")
 	}
 
+	if err := ensureBaseSchema(session, keyspace); err != nil {
+		log.Printf("⚠️  Warning: Could not ensure base schema: %v", err)
+	}
+
 	return &ScyllaStore{Session: session, Keyspace: keyspace}, nil
 }
 
@@ -117,4 +121,50 @@ func (s *ScyllaStore) Ping(ctx context.Context) error {
 	var releaseVersion string
 	query := `SELECT release_version FROM system.local LIMIT 1`
 	return s.Session.Query(query).WithContext(ctx).Scan(&releaseVersion)
+}
+
+func ensureBaseSchema(session *gocql.Session, keyspace string) error {
+	if session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	normalizedKeyspace := strings.TrimSpace(keyspace)
+	if normalizedKeyspace == "" {
+		normalizedKeyspace = "converse"
+	}
+	boardElementsTable := normalizedKeyspace + ".board_elements"
+	query := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text,
+			element_id text,
+			type text,
+			x float,
+			y float,
+			width float,
+			height float,
+			content text,
+			z_index int,
+			created_by_user_id text,
+			created_by_name text,
+			created_at timestamp,
+			PRIMARY KEY (room_id, element_id)
+		)`,
+		boardElementsTable,
+	)
+	if err := session.Query(query).Exec(); err != nil {
+		return err
+	}
+	alterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD created_by_user_id text`, boardElementsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD created_by_name text`, boardElementsTable),
+	}
+	for _, alterQuery := range alterQueries {
+		if err := session.Query(alterQuery).Exec(); err != nil {
+			lowered := strings.ToLower(strings.TrimSpace(err.Error()))
+			if strings.Contains(lowered, "duplicate") || strings.Contains(lowered, "already exists") {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }

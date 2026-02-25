@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ type Hub struct {
 	redisInbox           chan models.Message
 	typing               chan *ClientTypingEvent
 	typingInbox          chan TypingRedisEvent
+	boardEvent           chan *ClientBoardEvent
 	discussionComment    chan *ClientDiscussionCommentEvent
 	discussionCommentPin chan *ClientDiscussionCommentPinEvent
 	discussionInbox      chan DiscussionCommentEvent
@@ -52,6 +54,15 @@ type TypingRedisEvent struct {
 	UserName  string `json:"userName"`
 	IsTyping  bool   `json:"isTyping"`
 	UpdatedAt int64  `json:"updatedAt"`
+}
+
+type ClientBoardEvent struct {
+	Client    *Client
+	Type      string
+	RoomID    string
+	Payload   map[string]interface{}
+	Element   *models.BoardElement
+	ElementID string
 }
 
 type ClientDiscussionCommentEvent struct {
@@ -101,9 +112,10 @@ type MessageMutationEvent struct {
 }
 
 type RoomEvent struct {
-	Type    string                 `json:"type"`
-	RoomID  string                 `json:"roomId"`
-	Payload map[string]interface{} `json:"payload,omitempty"`
+	Type         string                 `json:"type"`
+	RoomID       string                 `json:"roomId"`
+	Payload      map[string]interface{} `json:"payload,omitempty"`
+	OriginUserID string                 `json:"originUserId,omitempty"`
 }
 
 type ClientSubscription struct {
@@ -117,6 +129,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		redisInbox:           make(chan models.Message, 256),
 		typing:               make(chan *ClientTypingEvent, 256),
 		typingInbox:          make(chan TypingRedisEvent, 512),
+		boardEvent:           make(chan *ClientBoardEvent, 256),
 		discussionComment:    make(chan *ClientDiscussionCommentEvent, 256),
 		discussionCommentPin: make(chan *ClientDiscussionCommentPinEvent, 256),
 		discussionInbox:      make(chan DiscussionCommentEvent, 512),
@@ -359,6 +372,7 @@ func (h *Hub) SubscribeRoomEvents() {
 			}
 			event.Type = strings.ToLower(strings.TrimSpace(event.Type))
 			event.RoomID = normalizeRoomID(event.RoomID)
+			event.OriginUserID = strings.TrimSpace(event.OriginUserID)
 			if event.Type == "" || event.RoomID == "" {
 				continue
 			}
@@ -438,6 +452,9 @@ func (h *Hub) Run() {
 
 		case typingEvent := <-h.typing:
 			h.handleClientTypingEvent(typingEvent)
+
+		case boardEvent := <-h.boardEvent:
+			h.handleClientBoardEvent(boardEvent)
 
 		case discussionEvent := <-h.discussionComment:
 			h.handleClientDiscussionCommentEvent(discussionEvent)
@@ -691,6 +708,207 @@ func (h *Hub) handleClientTypingEvent(event *ClientTypingEvent) {
 	}
 
 	h.broadcastTypingToLocal(typingEvent)
+}
+
+func (h *Hub) handleClientBoardEvent(event *ClientBoardEvent) {
+	if event == nil || event.Client == nil {
+		return
+	}
+	client := event.Client
+	eventType := strings.ToLower(strings.TrimSpace(event.Type))
+	roomID := normalizeRoomID(event.RoomID)
+	if roomID == "" || !isBoardEventType(eventType) {
+		return
+	}
+	if !client.isSubscribedToRoom(roomID) || !client.canWriteToRoom(roomID) {
+		return
+	}
+	if !h.isClientRoomMember(client.UserID, roomID) {
+		client.subscribeToRoom(roomID, false)
+		return
+	}
+
+	payload := map[string]interface{}{}
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	payload["type"] = eventType
+	payload["roomId"] = roomID
+	payloadBody := payload
+	if nestedPayload, ok := payload["payload"].(map[string]interface{}); ok && nestedPayload != nil {
+		payloadBody = nestedPayload
+	}
+	normalizedActorUserID := normalizeUsername(client.UserID)
+	isRoomAdmin, adminErr := h.isClientRoomAdmin(normalizedActorUserID, roomID)
+	if adminErr != nil {
+		log.Printf("[ws] board admin lookup failed room=%s user=%s err=%v", roomID, normalizedActorUserID, adminErr)
+		h.sendBoardError(client, roomID, "board_permission_check_failed", "Unable to verify board permissions. Please retry.", "")
+		return
+	}
+
+	switch eventType {
+	case boardElementAddType:
+		if event.Element == nil {
+			h.sendBoardError(client, roomID, "board_payload_invalid", "Invalid board element payload.", "")
+			return
+		}
+		element := *event.Element
+		element.RoomID = roomID
+		element.CreatedByUserID = normalizedActorUserID
+		element.CreatedByName = strings.TrimSpace(client.Username)
+		payloadBody["elementId"] = element.ElementID
+		payloadBody["elementType"] = element.Type
+		payloadBody["x"] = element.X
+		payloadBody["y"] = element.Y
+		payloadBody["width"] = element.Width
+		payloadBody["height"] = element.Height
+		payloadBody["content"] = element.Content
+		payloadBody["zIndex"] = element.ZIndex
+		payloadBody["createdByUserId"] = element.CreatedByUserID
+		payloadBody["createdByName"] = element.CreatedByName
+		payloadBody["createdAt"] = element.CreatedAt.UnixMilli()
+		if h.msgService == nil {
+			break
+		}
+		if err := h.msgService.UpsertBoardElement(context.Background(), element); err != nil {
+			log.Printf(
+				"[ws] board element add persist failed room=%s element=%s user=%s err=%v",
+				roomID,
+				element.ElementID,
+				client.UserID,
+				err,
+			)
+			if errors.Is(err, ErrBoardSizeLimitExceeded) {
+				h.sendBoardError(client, roomID, "board_size_limit", "Board is full (10MB max). Remove some elements and try again.", element.ElementID)
+			} else {
+				h.sendBoardError(client, roomID, "board_add_failed", "Unable to save board element. Please retry.", element.ElementID)
+			}
+			return
+		}
+	case boardElementMoveType:
+		elementID := normalizeMessageID(event.ElementID)
+		if elementID == "" && event.Element != nil {
+			elementID = normalizeMessageID(event.Element.ElementID)
+		}
+		if elementID == "" {
+			return
+		}
+		if !isRoomAdmin {
+			if h.msgService == nil {
+				h.sendBoardError(client, roomID, "board_permission_denied", "Only element owner can move this item.", elementID)
+				return
+			}
+			creatorUserID, _, err := h.msgService.LookupBoardElementCreator(context.Background(), roomID, elementID)
+			if err != nil {
+				log.Printf(
+					"[ws] board move creator lookup failed room=%s element=%s user=%s err=%v",
+					roomID,
+					elementID,
+					normalizedActorUserID,
+					err,
+				)
+				h.sendBoardError(client, roomID, "board_permission_check_failed", "Unable to verify board permissions. Please retry.", elementID)
+				return
+			}
+			if creatorUserID == "" || creatorUserID != normalizedActorUserID {
+				h.sendBoardError(client, roomID, "board_permission_denied", "Only element owner can move this item.", elementID)
+				return
+			}
+		}
+		payloadBody["elementId"] = elementID
+	case boardElementDeleteType:
+		elementID := normalizeMessageID(event.ElementID)
+		if elementID == "" && event.Element != nil {
+			elementID = normalizeMessageID(event.Element.ElementID)
+		}
+		if elementID == "" {
+			return
+		}
+		if !isRoomAdmin {
+			if h.msgService == nil {
+				h.sendBoardError(client, roomID, "board_permission_denied", "Only element owner can delete this item.", elementID)
+				return
+			}
+			creatorUserID, _, err := h.msgService.LookupBoardElementCreator(context.Background(), roomID, elementID)
+			if err != nil {
+				log.Printf(
+					"[ws] board delete creator lookup failed room=%s element=%s user=%s err=%v",
+					roomID,
+					elementID,
+					normalizedActorUserID,
+					err,
+				)
+				h.sendBoardError(client, roomID, "board_permission_check_failed", "Unable to verify board permissions. Please retry.", elementID)
+				return
+			}
+			if creatorUserID == "" || creatorUserID != normalizedActorUserID {
+				h.sendBoardError(client, roomID, "board_permission_denied", "Only element owner can delete this item.", elementID)
+				return
+			}
+		}
+		if h.msgService == nil {
+			payloadBody["elementId"] = elementID
+			break
+		}
+		if err := h.msgService.DeleteBoardElement(context.Background(), roomID, elementID); err != nil {
+			log.Printf(
+				"[ws] board element delete persist failed room=%s element=%s user=%s err=%v",
+				roomID,
+				elementID,
+				client.UserID,
+				err,
+			)
+			h.sendBoardError(client, roomID, "board_delete_failed", "Unable to delete board element. Please retry.", elementID)
+			return
+		}
+		payloadBody["elementId"] = elementID
+	}
+
+	h.publishRoomEvent(RoomEvent{
+		Type:         eventType,
+		RoomID:       roomID,
+		Payload:      payload,
+		OriginUserID: client.UserID,
+	})
+}
+
+func (h *Hub) isClientRoomAdmin(userID, roomID string) (bool, error) {
+	normalizedUserID := normalizeUsername(userID)
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedUserID == "" || normalizedRoomID == "" {
+		return false, nil
+	}
+	if h == nil || h.msgService == nil {
+		return false, nil
+	}
+	return h.msgService.IsRoomAdmin(context.Background(), normalizedRoomID, normalizedUserID)
+}
+
+func (h *Hub) sendBoardError(client *Client, roomID, code, message, elementID string) {
+	if client == nil {
+		return
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return
+	}
+	normalizedElementID := normalizeMessageID(elementID)
+	payload := map[string]interface{}{
+		"type":   "board_error",
+		"roomId": normalizedRoomID,
+		"payload": map[string]interface{}{
+			"code":      strings.TrimSpace(code),
+			"message":   strings.TrimSpace(message),
+			"elementId": normalizedElementID,
+			"maxBytes":  boardMaxStorageBytes,
+		},
+	}
+	select {
+	case client.Send <- payload:
+	default:
+		h.removeClientFromAllRooms(client, true)
+		client.closeSendChannel()
+	}
 }
 
 func (h *Hub) handleClientDiscussionCommentEvent(event *ClientDiscussionCommentEvent) {
@@ -964,6 +1182,7 @@ func (h *Hub) BroadcastToRoom(roomID string, payload map[string]interface{}) {
 func (h *Hub) publishRoomEvent(event RoomEvent) {
 	event.Type = strings.ToLower(strings.TrimSpace(event.Type))
 	event.RoomID = normalizeRoomID(event.RoomID)
+	event.OriginUserID = strings.TrimSpace(event.OriginUserID)
 	if event.Type == "" || event.RoomID == "" {
 		return
 	}
@@ -1128,6 +1347,15 @@ func (h *Hub) broadcastRoomEventToLocal(event RoomEvent) {
 	if roomID == "" || eventType == "" {
 		return
 	}
+	if isBoardEventType(eventType) {
+		h.broadcastBoardEventToLocal(RoomEvent{
+			Type:         eventType,
+			RoomID:       roomID,
+			Payload:      event.Payload,
+			OriginUserID: strings.TrimSpace(event.OriginUserID),
+		})
+		return
+	}
 	clients, ok := h.rooms[roomID]
 	if !ok {
 		return
@@ -1145,6 +1373,50 @@ func (h *Hub) broadcastRoomEventToLocal(event RoomEvent) {
 	}
 
 	for roomClient := range clients {
+		select {
+		case roomClient.Send <- payload:
+		default:
+			h.removeClientFromAllRooms(roomClient, true)
+			roomClient.closeSendChannel()
+		}
+	}
+}
+
+func (h *Hub) broadcastBoardEventToLocal(event RoomEvent) {
+	roomID := normalizeRoomID(event.RoomID)
+	eventType := strings.ToLower(strings.TrimSpace(event.Type))
+	if roomID == "" || !isBoardEventType(eventType) {
+		return
+	}
+	clients, ok := h.rooms[roomID]
+	if !ok {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type":   eventType,
+		"roomId": roomID,
+	}
+	for key, value := range event.Payload {
+		loweredKey := strings.ToLower(strings.TrimSpace(key))
+		if loweredKey == "type" || loweredKey == "roomid" || loweredKey == "room_id" {
+			continue
+		}
+		payload[key] = value
+	}
+
+	originUserID := strings.TrimSpace(event.OriginUserID)
+	for roomClient := range clients {
+		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
+			roomClient.subscribeToRoom(roomID, false)
+			continue
+		}
+		if !roomClient.canWriteToRoom(roomID) {
+			continue
+		}
+		if originUserID != "" && roomClient.UserID == originUserID {
+			continue
+		}
 		select {
 		case roomClient.Send <- payload:
 		default:

@@ -210,7 +210,7 @@
 	:global(body) {
 		margin: 0;
 		font-family: sans-serif;
-		background: #f4f4f4;
+		background: var(--bg-primary);
 	}
 
 	.container {
@@ -234,6 +234,7 @@
 
 	.logo {
 		font-size: 1.5rem;
+		color: var(--text-primary);
 	}
 
 	main {
@@ -246,20 +247,21 @@
 
 	.hero-box {
 		text-align: center;
-		background: white;
+		background: var(--surface-primary);
 		padding: 40px;
 		border-radius: 12px;
-		box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);
+		box-shadow: var(--shadow-lg);
 		width: 100%;
 		max-width: 500px;
+		border: 1px solid var(--border-subtle);
 	}
 
 	h1 {
 		margin-top: 0;
-		color: #222;
+		color: var(--text-primary);
 	}
 	p {
-		color: #666;
+		color: var(--text-secondary);
 		margin-bottom: 30px;
 	}
 
@@ -288,19 +290,19 @@
 	.field-group label {
 		font-size: 0.82rem;
 		font-weight: 600;
-		color: #475569;
+		color: var(--text-secondary);
 	}
 
 	.field-group small {
 		font-size: 0.75rem;
-		color: #64748b;
+		color: var(--text-tertiary);
 	}
 
 	.or-divider {
 		align-self: center;
 		font-size: 0.85rem;
 		font-weight: 700;
-		color: #64748b;
+		color: var(--text-tertiary);
 		padding: 0 2px;
 	}
 	.action-row {
@@ -309,55 +311,55 @@
 		gap: 10px;
 	}
 	input {
-		padding: 10px;
-		border: 1px solid #ddd;
+		background: var(--surface-primary);
+		color: var(--text-primary);
+		border: 1px solid var(--border-default);
 		border-radius: 6px;
+		padding: 10px;
 		font-size: 0.95rem;
 	}
 
-	button {
+	input:focus {
+		outline: none;
+		border-color: var(--border-focus);
+		box-shadow: 0 0 0 3px var(--interactive-focus);
+	}
+
+	.btn-primary-action,
+	.btn-secondary-action {
 		padding: 10px;
-		color: white;
-		border: none;
 		border-radius: 6px;
 		font-size: 0.95rem;
 		font-weight: bold;
 		cursor: pointer;
 		transition: background 0.2s;
+		background: var(--surface-secondary);
+		border: 1px solid var(--border-default);
+		color: var(--text-primary);
 	}
-	button:disabled {
-		background: #ccc;
+
+	.btn-primary-action:disabled,
+	.btn-secondary-action:disabled {
+		background: var(--surface-active);
+		color: var(--text-tertiary);
 		cursor: not-allowed;
 	}
-	button:hover:not(:disabled) {
-		background: #0056b3;
-	}
-	.btn-primary-action {
-		background: #ffffff;
-		border: 1px solid #cbd5e1;
-		color: #1f2937;
-	}
-	.btn-primary-action:hover:not(:disabled) {
-		background: #f1f5f9;
-	}
-	.btn-secondary-action {
-		background: #ffffff;
-		border: 1px solid #cbd5e1;
-		color: #1f2937;
-	}
+	.btn-primary-action:hover:not(:disabled),
 	.btn-secondary-action:hover:not(:disabled) {
-		background: #f1f5f9;
+		background: var(--surface-hover);
 	}
+
 	.error-msg {
-		color: #d9534f;
-		background: #f9d6d5;
+		color: var(--accent-danger);
+		background: var(--state-danger-bg);
+		border: 1px solid var(--state-danger-border);
 		padding: 10px;
 		border-radius: 4px;
 		margin-bottom: 15px;
 	}
 	.hint {
 		font-size: 0.8rem;
-		color: #999;
+		color: var(--text-tertiary);
 		margin-top: 20px;
 	}
 

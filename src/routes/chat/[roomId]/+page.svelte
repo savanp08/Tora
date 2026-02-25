@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
+	import Board from '$lib/components/chat/Board.svelte';
 	import DiscussionModal from '$lib/components/chat/DiscussionModal.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
 	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
@@ -124,21 +125,25 @@
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
-	let systemThemeMediaQuery: MediaQueryList | null = null;
-	let removeSystemThemeListener: (() => void) | null = null;
-	let roomMembershipSynced: Record<string, boolean> = {};
-	let roomMembershipSyncing: Record<string, boolean> = {};
-	let typingStopTimer: ReturnType<typeof setTimeout> | null = null;
-	let typingLastPingAt = 0;
-	let typingIsActive = false;
-	let typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	let cachePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	import { isDarkMode } from '$lib/store';
 
-	let toastMessage = '';
-	let showToast = false;
-	let toastTimer: ReturnType<typeof setTimeout> | null = null;
-	let lastToastRoom = '';
+	$: if (browser) {
+		// This component no longer controls the body class, but we might need the value locally.
+		// Let's ensure it's synced from the store.
+	}
 
+	function toggleThemePreference() {
+		const nextPreference = !$isDarkMode ? 'dark' : 'light';
+		isDarkMode.set(!$isDarkMode);
+		themePreference = nextPreference;
+		if (browser) {
+			window.localStorage.setItem(THEME_PREFERENCE_KEY, nextPreference);
+		}
+		showLeftMenu = false;
+	}
+	let isSelectionMode = false;
+	let messageActionMode: MessageActionMode = 'none';
+	let selectedActionMessageId = '';
 	let chatListSearch = '';
 	let roomMessageSearch = '';
 	let draftMessage = '';
@@ -146,11 +151,20 @@
 	let showLeftMenu = false;
 	let showRoomSearch = false;
 	let showRoomDetails = false;
+	let showBoardView = false;
 	let themePreference: ThemePreference = 'system';
-	let isDarkMode = false;
-	let isSelectionMode = false;
-	let messageActionMode: MessageActionMode = 'none';
-	let selectedActionMessageId = '';
+	let removeSystemThemeListener: (() => void) | null = null;
+	let typingStopTimer: ReturnType<typeof setTimeout> | null = null;
+	let typingIsActive = false;
+	let typingLastPingAt = 0;
+	let typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	let cachePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	let showToast = false;
+	let toastMessage = '';
+	let toastTimer: ReturnType<typeof setTimeout> | null = null;
+	let lastToastRoom = '';
+	let roomMembershipSynced: Record<string, boolean> = {};
+	let roomMembershipSyncing: Record<string, boolean> = {};
 	let isMobileView = false;
 	let mobilePane: 'list' | 'chat' = 'chat';
 	let focusMessageId = '';
@@ -247,6 +261,7 @@
 	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
+	$: canModerateBoard = isMember && !isRoomExpired && isActiveRoomAdmin;
 	$: activeUnreadCount = activeThread?.unread ?? 0;
 	$: activeFirstUnreadMessageId = getUnreadStartMessageId(roomId);
 	$: activeLastReadTimestamp = getLastReadTimestamp(roomId);
@@ -349,18 +364,12 @@
 		clearSidebarRefreshTimer();
 		clearRoomExpiryTicker();
 		clearToastTimer();
-		if (removeSystemThemeListener) {
-			removeSystemThemeListener();
-			removeSystemThemeListener = null;
-		}
-		systemThemeMediaQuery = null;
 	});
 
 	onMount(() => {
 		if (!browser) {
 			return;
 		}
-		initializeThemePreference();
 		initializeTrustedDevicePreference();
 		if (trustedCachingEnabled && roomId) {
 			void hydrateOfflineCache(roomId);
@@ -384,74 +393,9 @@
 		};
 	});
 
-	$: if (browser) {
-		document.body.classList.toggle('theme-dark', isDarkMode);
-		document.body.dataset.theme = isDarkMode ? 'dark' : 'light';
-	}
 
-	function initializeThemePreference() {
-		if (!browser) {
-			return;
-		}
-		systemThemeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-		registerSystemThemeListener();
-		const saved = window.localStorage.getItem(THEME_PREFERENCE_KEY);
-		if (saved === 'dark' || saved === 'light' || saved === 'system') {
-			applyThemePreference(saved, false);
-			return;
-		}
-		applyThemePreference('system', false);
-	}
 
-	function registerSystemThemeListener() {
-		if (!systemThemeMediaQuery || removeSystemThemeListener) {
-			return;
-		}
-		const onSystemThemeChange = () => {
-			if (themePreference !== 'system') {
-				return;
-			}
-			isDarkMode = Boolean(systemThemeMediaQuery?.matches);
-		};
-		if (typeof systemThemeMediaQuery.addEventListener === 'function') {
-			systemThemeMediaQuery.addEventListener('change', onSystemThemeChange);
-			removeSystemThemeListener = () => {
-				systemThemeMediaQuery?.removeEventListener('change', onSystemThemeChange);
-			};
-			return;
-		}
-		systemThemeMediaQuery.addListener(onSystemThemeChange);
-		removeSystemThemeListener = () => {
-			systemThemeMediaQuery?.removeListener(onSystemThemeChange);
-		};
-	}
-
-	function resolveDarkMode(preference: ThemePreference) {
-		if (preference === 'dark') {
-			return true;
-		}
-		if (preference === 'light') {
-			return false;
-		}
-		return Boolean(systemThemeMediaQuery?.matches);
-	}
-
-	function applyThemePreference(preference: ThemePreference, persist = true) {
-		themePreference = preference;
-		isDarkMode = resolveDarkMode(preference);
-		if (browser && persist) {
-			window.localStorage.setItem(THEME_PREFERENCE_KEY, preference);
-		}
-	}
-
-	function toggleThemePreference() {
-		// Toggle dark/light while system remains the default for first-time users.
-		const next: ThemePreference = isDarkMode ? 'light' : 'dark';
-		applyThemePreference(next);
-		showLeftMenu = false;
-	}
-
-	function updateViewportMode() {
+		function updateViewportMode() {
 		if (!browser) {
 			return;
 		}
@@ -1365,6 +1309,15 @@
 		showRoomDetails = false;
 		setMessageActionMode('none');
 		mobilePane = 'list';
+	}
+
+	function toggleBoardView() {
+		showBoardView = !showBoardView;
+		if (showBoardView) {
+			setMessageActionMode('none');
+			showRoomSearch = false;
+			activeReply = null;
+		}
 	}
 
 	function onJumpToBreakOrigin(
@@ -3662,20 +3615,17 @@
 		if (remainingMs <= 0) {
 			return 'Expired';
 		}
-
+		const ceilToSingleDecimal = (value: number) => Math.ceil(value * 10) / 10;
 		if (remainingMs < 60 * 60 * 1000) {
-			return `${Math.ceil(remainingMs / 60000)}m`;
+			const minutes = ceilToSingleDecimal(remainingMs / 60000);
+			return `${minutes.toFixed(1)}m`;
 		}
-
 		if (remainingMs < 24 * 60 * 60 * 1000) {
-			const hours = Math.floor(remainingMs / 3600000);
-			const minutes = Math.floor((remainingMs % 3600000) / 60000);
-			return `${hours}h ${minutes}m`;
+			const hours = ceilToSingleDecimal(remainingMs / 3600000);
+			return `${hours.toFixed(1)}h`;
 		}
-
-		const days = Math.floor(remainingMs / 86400000);
-		const hours = Math.floor((remainingMs % 86400000) / 3600000);
-		return `${days}d ${hours}h`;
+		const days = ceilToSingleDecimal(remainingMs / 86400000);
+		return `${days.toFixed(1)}d`;
 	}
 
 	function getRoomRemainingMs(targetRoomId: string, tickMs: number) {
@@ -3705,7 +3655,7 @@
 
 <section
 	class="chat-shell"
-	class:theme-dark={isDarkMode}
+	class:theme-dark={$isDarkMode}
 	class:mobile-list-only={isMobileView && mobilePane === 'list'}
 	class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
 >
@@ -3715,12 +3665,12 @@
 			discoverableRooms={filteredDiscoverableRooms}
 			leftRooms={filteredLeftRooms}
 			accessibleParentRoomIds={roomThreads.map((thread) => thread.id)}
-			activeRoomId={roomId}
-			{isMobileView}
-			{showLeftMenu}
-			{isDarkMode}
-			{themePreference}
-			bind:chatListSearch
+				activeRoomId={roomId}
+				{isMobileView}
+				{showLeftMenu}
+				isDarkMode={$isDarkMode}
+				{themePreference}
+				bind:chatListSearch
 			on:select={onSidebarSelect}
 			on:jumpOrigin={onJumpToBreakOrigin}
 			on:toggleMenu={toggleLeftMenu}
@@ -3731,20 +3681,22 @@
 	</div>
 
 	<section class="chat-window">
-		<ChatRoomHeader
+			<ChatRoomHeader
 			roomName={activeThread.name}
 			onlineCount={currentOnlineMembers.length}
 			unreadCount={activeUnreadCount}
-			{isMember}
-			{isActiveRoomAdmin}
-			{isMobileView}
-			{isDarkMode}
-			{messageActionMode}
-			{showRoomSearch}
-			remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
-			on:showMobileList={showMobileRoomList}
-			on:openRoomDetails={openRoomDetails}
-			on:toggleRoomSearch={toggleRoomSearch}
+				{isMember}
+				{isActiveRoomAdmin}
+				{isMobileView}
+				isDarkMode={$isDarkMode}
+				{messageActionMode}
+				{showRoomSearch}
+				isBoardView={showBoardView}
+				remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
+				on:showMobileList={showMobileRoomList}
+				on:openRoomDetails={openRoomDetails}
+				on:toggleBoardView={toggleBoardView}
+				on:toggleRoomSearch={toggleRoomSearch}
 			on:renameRoom={() => void renameRoom(roomId)}
 			on:toggleBreakSelectionMode={toggleBreakSelectionMode}
 			on:togglePinSelectionMode={togglePinSelectionMode}
@@ -3757,69 +3709,83 @@
 			on:disconnect={() => void disconnectAndWipe()}
 		/>
 
-		<ChatStatusBars
-			{typingIndicatorText}
-			{showTrustedDevicePrompt}
-			{isSelectionMode}
-			{messageActionMode}
-			selectedDeleteCount={selectedDeleteMessageIds.length}
-			{showRoomSearch}
-			bind:roomMessageSearch
-			{isDarkMode}
-			on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
-			on:cancelSelection={cancelSelectionMode}
-			on:deleteSelected={deleteSelectedMessagesBatch}
-		/>
+			{#if !showBoardView}
+				<ChatStatusBars
+					{typingIndicatorText}
+					{showTrustedDevicePrompt}
+					{isSelectionMode}
+						{messageActionMode}
+						selectedDeleteCount={selectedDeleteMessageIds.length}
+						{showRoomSearch}
+						bind:roomMessageSearch
+						isDarkMode={$isDarkMode}
+						on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
+					on:cancelSelection={cancelSelectionMode}
+					on:deleteSelected={deleteSelectedMessagesBatch}
+				/>
+			{/if}
 
-		<div class="chat-window-shell" class:is-expired={isRoomExpired}>
-			<ChatWindow
-				bind:this={chatWindowRef}
-				{roomId}
-				isVisible={!isMobileView || mobilePane === 'chat'}
-				messages={currentMessages}
-				{currentUserId}
-				unreadCount={activeUnreadCount}
-				firstUnreadMessageId={activeFirstUnreadMessageId}
-				lastReadTimestamp={activeLastReadTimestamp}
-				{roomMessageSearch}
-				{expandedMessages}
-				{isMember}
-				{isSelectionMode}
-				{isDarkMode}
-				{messageActionMode}
-				selectedMessageId={selectedActionMessageId}
-				{deleteMultiEnabled}
-				{selectedDeleteMessageIds}
-				{focusMessageId}
-				isLoadingOlder={isLoadingOlderHistory}
-				hasMoreOlder={hasMoreOlderHistory}
-				on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
-				on:joinBreakRoom={onJoinBreakRoom}
-				on:joinRoom={() => void joinCurrentRoom()}
-				on:messageSelect={onMessageSelected}
-				on:openPinnedDiscussion={onPinnedDiscussionOpen}
-				on:reply={onReplyRequest}
-				on:editMessage={onEditMessageRequest}
-				on:deleteMessage={onDeleteMessageRequest}
-				on:editSelected={onSelectedMessageEdit}
-				on:deleteSelected={onSelectedMessageDelete}
-				on:requestOlder={onRequestOlderHistory}
-				on:focusHandled={onFocusHandled}
-				on:readProgress={onChatReadProgress}
-				on:toggleTask={onTaskToggle}
-				on:addTask={onTaskAdd}
-			/>
-		</div>
+			<div class="chat-window-shell" class:is-expired={isRoomExpired}>
+				{#if showBoardView}
+						<Board
+							{roomId}
+							messages={currentMessages}
+							isDarkMode={$isDarkMode}
+							canEdit={isMember && !isRoomExpired}
+							{canModerateBoard}
+						{currentUserId}
+						currentUsername={currentUsername}
+					/>
+				{:else}
+					<ChatWindow
+						bind:this={chatWindowRef}
+						{roomId}
+						isVisible={!isMobileView || mobilePane === 'chat'}
+						messages={currentMessages}
+						{currentUserId}
+						unreadCount={activeUnreadCount}
+						firstUnreadMessageId={activeFirstUnreadMessageId}
+						lastReadTimestamp={activeLastReadTimestamp}
+							{roomMessageSearch}
+							{expandedMessages}
+							{isMember}
+							{isSelectionMode}
+							isDarkMode={$isDarkMode}
+							{messageActionMode}
+						selectedMessageId={selectedActionMessageId}
+						{deleteMultiEnabled}
+						{selectedDeleteMessageIds}
+						{focusMessageId}
+						isLoadingOlder={isLoadingOlderHistory}
+						hasMoreOlder={hasMoreOlderHistory}
+						on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+						on:joinBreakRoom={onJoinBreakRoom}
+						on:joinRoom={() => void joinCurrentRoom()}
+						on:messageSelect={onMessageSelected}
+						on:openPinnedDiscussion={onPinnedDiscussionOpen}
+						on:reply={onReplyRequest}
+						on:editMessage={onEditMessageRequest}
+						on:deleteMessage={onDeleteMessageRequest}
+						on:editSelected={onSelectedMessageEdit}
+						on:deleteSelected={onSelectedMessageDelete}
+						on:requestOlder={onRequestOlderHistory}
+						on:focusHandled={onFocusHandled}
+						on:readProgress={onChatReadProgress}
+						on:toggleTask={onTaskToggle}
+						on:addTask={onTaskAdd}
+					/>
+				{/if}
+			</div>
 
-		{#if isMember}
-			<ChatComposer
+			{#if isMember && !showBoardView}
+				<ChatComposer
 				bind:draftMessage
 				bind:attachedFile
-				{roomId}
-				disabled={isRoomExpired}
-				{activeReply}
-				{isDarkMode}
-				{currentUsername}
+					{roomId}
+					disabled={isRoomExpired}
+					{activeReply}
+					isDarkMode={$isDarkMode}
+					{currentUsername}
 				messageLimit={MESSAGE_TEXT_MAX_BYTES}
 				on:send={(event) => void sendMessage(event.detail)}
 				on:typing={onComposerTyping}
@@ -3830,9 +3796,9 @@
 		{/if}
 	</section>
 
-	<div class="online-pane">
-		<OnlinePanel members={currentOnlineMembers} {isDarkMode} />
-	</div>
+		<div class="online-pane">
+			<OnlinePanel members={currentOnlineMembers} isDarkMode={$isDarkMode} />
+		</div>
 </section>
 
 <DiscussionModal
@@ -3840,7 +3806,7 @@
 	pinnedMessage={activeDiscussionTask}
 	comments={discussionComments}
 	{roomId}
-	{isDarkMode}
+	isDarkMode={$isDarkMode}
 	canEditTask={isMember}
 	{currentUserId}
 	opUserId={activeDiscussionTask?.senderId || ''}

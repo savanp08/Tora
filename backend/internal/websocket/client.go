@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -296,6 +297,19 @@ func (c *Client) readPump() {
 			}
 			continue
 		}
+		if boardEvent, isBoardEvent := parseBoardEventPayload(raw); isBoardEvent {
+			if c.Hub != nil {
+				c.Hub.boardEvent <- &ClientBoardEvent{
+					Client:    c,
+					Type:      boardEvent.Type,
+					RoomID:    boardEvent.RoomID,
+					Payload:   boardEvent.Payload,
+					Element:   boardEvent.Element,
+					ElementID: boardEvent.ElementID,
+				}
+			}
+			continue
+		}
 
 		var msg models.Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
@@ -512,6 +526,23 @@ type clientDiscussionCommentPinPayload struct {
 	PinMessageID string
 	CommentID    string
 	IsPinned     bool
+}
+
+type boardEventEnvelope struct {
+	Type       string          `json:"type"`
+	RoomID     string          `json:"roomId"`
+	RoomID2    string          `json:"room_id"`
+	ElementID  string          `json:"elementId"`
+	ElementID2 string          `json:"element_id"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
+type clientBoardEventPayload struct {
+	Type      string
+	RoomID    string
+	Payload   map[string]interface{}
+	Element   *models.BoardElement
+	ElementID string
 }
 
 func parseSubscribeRoomIDs(raw []byte) ([]string, bool) {
@@ -846,6 +877,373 @@ func parseDiscussionCommentPinPayload(raw []byte) (clientDiscussionCommentPinPay
 		CommentID:    commentID,
 		IsPinned:     isPinned,
 	}, true
+}
+
+func parseBoardEventPayload(raw []byte) (clientBoardEventPayload, bool) {
+	if len(raw) == 0 {
+		return clientBoardEventPayload{}, false
+	}
+
+	var envelope boardEventEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientBoardEventPayload{}, false
+	}
+
+	eventType := strings.ToLower(strings.TrimSpace(envelope.Type))
+	if !isBoardEventType(eventType) {
+		return clientBoardEventPayload{}, false
+	}
+
+	var envelopeMap map[string]interface{}
+	if err := json.Unmarshal(raw, &envelopeMap); err != nil {
+		return clientBoardEventPayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	if roomID == "" {
+		roomID = normalizeRoomID(readStringFromMap(envelopeMap, "roomId", "room_id"))
+	}
+	if roomID == "" {
+		if nestedPayload, ok := envelopeMap["payload"].(map[string]interface{}); ok {
+			roomID = normalizeRoomID(readStringFromMap(nestedPayload, "roomId", "room_id"))
+		}
+	}
+	if roomID == "" {
+		return clientBoardEventPayload{}, false
+	}
+
+	broadcastPayload := map[string]interface{}{}
+	for key, value := range envelopeMap {
+		loweredKey := strings.ToLower(strings.TrimSpace(key))
+		if loweredKey == "type" || loweredKey == "roomid" || loweredKey == "room_id" {
+			continue
+		}
+		broadcastPayload[key] = value
+	}
+
+	elementID := normalizeMessageID(envelope.ElementID)
+	if elementID == "" {
+		elementID = normalizeMessageID(envelope.ElementID2)
+	}
+	if elementID == "" {
+		elementID = parseBoardElementIDFromEnvelope(envelopeMap)
+	}
+
+	var element *models.BoardElement
+	if eventType == boardElementAddType {
+		element = parseBoardElementFromEnvelope(roomID, eventType, envelopeMap)
+		if element != nil {
+			elementID = normalizeMessageID(element.ElementID)
+		}
+	}
+
+	return clientBoardEventPayload{
+		Type:      eventType,
+		RoomID:    roomID,
+		Payload:   broadcastPayload,
+		Element:   element,
+		ElementID: elementID,
+	}, true
+}
+
+func parseBoardElementFromEnvelope(roomID, eventType string, envelopeMap map[string]interface{}) *models.BoardElement {
+	candidates := make([]map[string]interface{}, 0, 4)
+	if payloadMap, ok := envelopeMap["payload"].(map[string]interface{}); ok {
+		if payloadElementMap, ok := payloadMap["element"].(map[string]interface{}); ok {
+			candidates = append(candidates, payloadElementMap)
+		}
+		candidates = append(candidates, payloadMap)
+	}
+	if elementMap, ok := envelopeMap["element"].(map[string]interface{}); ok {
+		candidates = append(candidates, elementMap)
+	}
+	candidates = append(candidates, envelopeMap)
+
+	elementID := ""
+	for _, candidate := range candidates {
+		elementID = normalizeMessageID(readStringFromMap(candidate, "elementId", "element_id", "id"))
+		if elementID != "" {
+			break
+		}
+	}
+	if elementID == "" {
+		return nil
+	}
+
+	elementType := ""
+	for _, candidate := range candidates {
+		rawType := strings.ToLower(strings.TrimSpace(readStringFromMap(candidate, "elementType", "element_type", "kind", "type")))
+		if rawType == "" || rawType == eventType || isBoardEventType(rawType) {
+			continue
+		}
+		elementType = rawType
+		break
+	}
+	if elementType == "" {
+		elementType = "shape"
+	}
+
+	x := float32(0)
+	for _, candidate := range candidates {
+		if value, ok := readFloat32FromMap(candidate, "x"); ok {
+			x = value
+			break
+		}
+	}
+	y := float32(0)
+	for _, candidate := range candidates {
+		if value, ok := readFloat32FromMap(candidate, "y"); ok {
+			y = value
+			break
+		}
+	}
+	width := float32(0)
+	for _, candidate := range candidates {
+		if value, ok := readFloat32FromMap(candidate, "width", "w"); ok {
+			width = value
+			break
+		}
+	}
+	height := float32(0)
+	for _, candidate := range candidates {
+		if value, ok := readFloat32FromMap(candidate, "height", "h"); ok {
+			height = value
+			break
+		}
+	}
+
+	content := ""
+	for _, candidate := range candidates {
+		if value, ok := candidate["content"]; ok {
+			content = stringifyBoardContent(value)
+			if content != "" {
+				break
+			}
+		}
+	}
+
+	zIndex := 0
+	for _, candidate := range candidates {
+		if value, ok := readIntFromMap(candidate, "zIndex", "z_index", "z"); ok {
+			zIndex = value
+			break
+		}
+	}
+
+	createdAt := time.Time{}
+	for _, candidate := range candidates {
+		if value, ok := candidate["createdAt"]; ok {
+			createdAt = parseBoardTimestamp(value)
+			if !createdAt.IsZero() {
+				break
+			}
+		}
+		if value, ok := candidate["created_at"]; ok {
+			createdAt = parseBoardTimestamp(value)
+			if !createdAt.IsZero() {
+				break
+			}
+		}
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+
+	return &models.BoardElement{
+		RoomID:    normalizeRoomID(roomID),
+		ElementID: elementID,
+		Type:      elementType,
+		X:         x,
+		Y:         y,
+		Width:     width,
+		Height:    height,
+		Content:   content,
+		ZIndex:    zIndex,
+		CreatedAt: createdAt,
+	}
+}
+
+func parseBoardElementIDFromEnvelope(envelopeMap map[string]interface{}) string {
+	candidates := make([]map[string]interface{}, 0, 3)
+	if payloadMap, ok := envelopeMap["payload"].(map[string]interface{}); ok {
+		if payloadElementMap, ok := payloadMap["element"].(map[string]interface{}); ok {
+			candidates = append(candidates, payloadElementMap)
+		}
+		candidates = append(candidates, payloadMap)
+	}
+	candidates = append(candidates, envelopeMap)
+
+	for _, candidate := range candidates {
+		value := normalizeMessageID(readStringFromMap(candidate, "elementId", "element_id", "id"))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func readStringFromMap(source map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		value, ok := source[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			trimmed := strings.TrimSpace(typed)
+			if trimmed != "" {
+				return trimmed
+			}
+		case json.Number:
+			trimmed := strings.TrimSpace(typed.String())
+			if trimmed != "" {
+				return trimmed
+			}
+		case float64:
+			return strconv.FormatInt(int64(typed), 10)
+		case int:
+			return strconv.Itoa(typed)
+		case int32:
+			return strconv.FormatInt(int64(typed), 10)
+		case int64:
+			return strconv.FormatInt(typed, 10)
+		}
+	}
+	return ""
+}
+
+func readFloat32FromMap(source map[string]interface{}, keys ...string) (float32, bool) {
+	for _, key := range keys {
+		value, ok := source[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case float32:
+			return typed, true
+		case float64:
+			return float32(typed), true
+		case int:
+			return float32(typed), true
+		case int32:
+			return float32(typed), true
+		case int64:
+			return float32(typed), true
+		case json.Number:
+			if parsed, err := typed.Float64(); err == nil {
+				return float32(parsed), true
+			}
+		case string:
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
+				return float32(parsed), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func readIntFromMap(source map[string]interface{}, keys ...string) (int, bool) {
+	for _, key := range keys {
+		value, ok := source[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case int:
+			return typed, true
+		case int32:
+			return int(typed), true
+		case int64:
+			return int(typed), true
+		case float32:
+			return int(typed), true
+		case float64:
+			return int(typed), true
+		case json.Number:
+			if parsed, err := typed.Int64(); err == nil {
+				return int(parsed), true
+			}
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseBoardTimestamp(value interface{}) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC()
+	case json.Number:
+		if asInt, err := typed.Int64(); err == nil {
+			return parseBoardUnixTimestamp(asInt)
+		}
+		if asFloat, err := typed.Float64(); err == nil {
+			return parseBoardUnixTimestamp(int64(asFloat))
+		}
+	case float64:
+		return parseBoardUnixTimestamp(int64(typed))
+	case float32:
+		return parseBoardUnixTimestamp(int64(typed))
+	case int:
+		return parseBoardUnixTimestamp(int64(typed))
+	case int32:
+		return parseBoardUnixTimestamp(int64(typed))
+	case int64:
+		return parseBoardUnixTimestamp(typed)
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return time.Time{}
+		}
+		if asInt, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return parseBoardUnixTimestamp(asInt)
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+			return parsed.UTC()
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func parseBoardUnixTimestamp(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	// Milliseconds or microseconds are common in frontend timestamps.
+	switch {
+	case value >= 1_000_000_000_000_000:
+		return time.UnixMicro(value).UTC()
+	case value >= 1_000_000_000_000:
+		return time.UnixMilli(value).UTC()
+	default:
+		return time.Unix(value, 0).UTC()
+	}
+}
+
+func stringifyBoardContent(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.RawMessage:
+		return strings.TrimSpace(string(typed))
+	case nil:
+		return ""
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(encoded))
+	}
 }
 
 func normalizeInboundMessage(msg *models.Message) bool {

@@ -43,3 +43,18 @@ type Room struct {
 	OriginMessageID string    `json:"originMessageId,omitempty"`
 	MemberCount     int       `json:"memberCount"`
 }
+
+type BoardElement struct {
+	RoomID          string    `json:"roomId"`
+	ElementID       string    `json:"elementId"`
+	Type            string    `json:"type"`
+	X               float32   `json:"x"`
+	Y               float32   `json:"y"`
+	Width           float32   `json:"width"`
+	Height          float32   `json:"height"`
+	Content         string    `json:"content"`
+	ZIndex          int       `json:"zIndex"`
+	CreatedByUserID string    `json:"createdByUserId,omitempty"`
+	CreatedByName   string    `json:"createdByName,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+}

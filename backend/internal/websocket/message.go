@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -27,7 +28,26 @@ const (
 	roomKeyPrefix              = "room:"
 	roomMessageSoftExpiryTable = "room_message_soft_expiry"
 	DeletedMessagePlaceholder  = "This message was deleted"
+	boardDrawStartType         = "board_draw_start"
+	boardDrawProgressType      = "board_draw_progress"
+	boardElementAddType        = "board_element_add"
+	boardElementMoveType       = "board_element_move"
+	boardElementDeleteType     = "board_element_delete"
+	boardMaxStorageBytes       = int64(10 * 1024 * 1024)
+	boardSizeTotalPrefix       = "board:size:total:"
+	boardSizeElementsPrefix    = "board:size:elements:"
+	boardSizeEntryTTL          = scyllaMessageTTL
 )
+
+var ErrBoardSizeLimitExceeded = errors.New("board storage limit exceeded")
+
+var supportedBoardEventTypes = map[string]struct{}{
+	boardDrawStartType:     {},
+	boardDrawProgressType:  {},
+	boardElementAddType:    {},
+	boardElementMoveType:   {},
+	boardElementDeleteType: {},
+}
 
 type MessageService struct {
 	Redis          *database.RedisStore
@@ -190,6 +210,595 @@ func (s *MessageService) resolveRoomTTLSeconds(ctx context.Context, roomID strin
 	return seconds
 }
 
+func isBoardEventType(eventType string) bool {
+	normalizedType := strings.ToLower(strings.TrimSpace(eventType))
+	_, ok := supportedBoardEventTypes[normalizedType]
+	return ok
+}
+
+func (s *MessageService) UpsertBoardElement(ctx context.Context, element models.BoardElement) error {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	roomID := normalizeRoomID(element.RoomID)
+	elementID := normalizeMessageID(element.ElementID)
+	elementType := strings.TrimSpace(element.Type)
+	if roomID == "" || elementID == "" || elementType == "" {
+		return fmt.Errorf("invalid board element payload")
+	}
+
+	createdAt := element.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	normalizedElement := models.BoardElement{
+		RoomID:          roomID,
+		ElementID:       elementID,
+		Type:            elementType,
+		X:               element.X,
+		Y:               element.Y,
+		Width:           element.Width,
+		Height:          element.Height,
+		Content:         element.Content,
+		ZIndex:          element.ZIndex,
+		CreatedByUserID: normalizeUsername(element.CreatedByUserID),
+		CreatedByName:   strings.TrimSpace(element.CreatedByName),
+		CreatedAt:       createdAt,
+	}
+
+	existingSize, err := s.lookupBoardElementSizeBytes(ctx, roomID, elementID)
+	if err != nil {
+		return fmt.Errorf("resolve board element size: %w", err)
+	}
+	fallbackRoomTotal, err := s.resolveBoardRoomTotalFallbackBytes(ctx, roomID)
+	if err != nil {
+		return fmt.Errorf("resolve board room size: %w", err)
+	}
+	newSize := estimateBoardElementStorageBytes(normalizedElement)
+	allowed, previousTrackedSize, _, err := s.reserveBoardStorageBytes(
+		ctx,
+		roomID,
+		elementID,
+		fallbackRoomTotal,
+		existingSize,
+		newSize,
+	)
+	if err != nil {
+		return fmt.Errorf("reserve board storage: %w", err)
+	}
+	if !allowed {
+		return fmt.Errorf(
+			"%w: room=%s projected_bytes_exceed_limit=%d",
+			ErrBoardSizeLimitExceeded,
+			roomID,
+			boardMaxStorageBytes,
+		)
+	}
+
+	boardTable := s.Scylla.Table("board_elements")
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, element_id, type, x, y, width, height, content, z_index, created_by_user_id, created_by_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		boardTable,
+		scyllaMessageTTL,
+	)
+	if err := s.Scylla.Session.Query(
+		insertQuery,
+		roomID,
+		elementID,
+		elementType,
+		element.X,
+		element.Y,
+		element.Width,
+		element.Height,
+		element.Content,
+		element.ZIndex,
+		normalizedElement.CreatedByUserID,
+		normalizedElement.CreatedByName,
+		createdAt,
+	).WithContext(ctx).Exec(); err != nil {
+		if rollbackErr := s.rollbackBoardStorageBytes(
+			ctx,
+			roomID,
+			elementID,
+			newSize,
+			previousTrackedSize,
+		); rollbackErr != nil {
+			log.Printf(
+				"[message-service] board storage rollback failed room=%s element=%s err=%v",
+				roomID,
+				elementID,
+				rollbackErr,
+			)
+		}
+		return fmt.Errorf("save board element: %w", err)
+	}
+
+	return nil
+}
+
+func (s *MessageService) DeleteBoardElement(ctx context.Context, roomID, elementID string) error {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedElementID := normalizeMessageID(elementID)
+	if normalizedRoomID == "" || normalizedElementID == "" {
+		return fmt.Errorf("invalid board element identity")
+	}
+	existingSize, err := s.lookupBoardElementSizeBytes(ctx, normalizedRoomID, normalizedElementID)
+	if err != nil {
+		return fmt.Errorf("resolve board element size: %w", err)
+	}
+
+	boardTable := s.Scylla.Table("board_elements")
+	deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ? AND element_id = ?`, boardTable)
+	if err := s.Scylla.Session.Query(
+		deleteQuery,
+		normalizedRoomID,
+		normalizedElementID,
+	).WithContext(ctx).Exec(); err != nil {
+		return fmt.Errorf("delete board element: %w", err)
+	}
+	if existingSize > 0 {
+		fallbackRoomTotal, fallbackErr := s.resolveBoardRoomTotalFallbackBytes(ctx, normalizedRoomID)
+		if fallbackErr == nil {
+			if _, _, _, reserveErr := s.reserveBoardStorageBytes(
+				ctx,
+				normalizedRoomID,
+				normalizedElementID,
+				fallbackRoomTotal,
+				existingSize,
+				0,
+			); reserveErr != nil {
+				log.Printf(
+					"[message-service] board storage delete reconcile failed room=%s element=%s err=%v",
+					normalizedRoomID,
+					normalizedElementID,
+					reserveErr,
+				)
+			}
+		} else {
+			log.Printf(
+				"[message-service] board storage fallback resolve failed room=%s err=%v",
+				normalizedRoomID,
+				fallbackErr,
+			)
+		}
+	}
+
+	return nil
+}
+
+func (s *MessageService) LookupBoardElementCreator(
+	ctx context.Context,
+	roomID string,
+	elementID string,
+) (creatorUserID string, creatorName string, err error) {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return "", "", fmt.Errorf("scylla session is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedElementID := normalizeMessageID(elementID)
+	if normalizedRoomID == "" || normalizedElementID == "" {
+		return "", "", nil
+	}
+	boardTable := s.Scylla.Table("board_elements")
+	query := fmt.Sprintf(
+		`SELECT created_by_user_id, created_by_name FROM %s WHERE room_id = ? AND element_id = ? LIMIT 1`,
+		boardTable,
+	)
+	var (
+		rawCreatorID string
+		rawCreator   string
+	)
+	scanErr := s.Scylla.Session.Query(
+		query,
+		normalizedRoomID,
+		normalizedElementID,
+	).WithContext(ctx).Scan(&rawCreatorID, &rawCreator)
+	if scanErr != nil {
+		if errors.Is(scanErr, gocql.ErrNotFound) {
+			return "", "", nil
+		}
+		return "", "", scanErr
+	}
+	return normalizeUsername(rawCreatorID), strings.TrimSpace(rawCreator), nil
+}
+
+func (s *MessageService) IsRoomAdmin(ctx context.Context, roomID, userID string) (bool, error) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedUserID := normalizeUsername(userID)
+	if normalizedRoomID == "" || normalizedUserID == "" {
+		return false, nil
+	}
+	if s == nil || s.Redis == nil || s.Redis.Client == nil {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	membersKey := roomKeyPrefix + normalizedRoomID + ":members"
+	members, err := s.Redis.Client.SMembers(ctx, membersKey).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return false, nil
+		}
+		return false, err
+	}
+	if len(members) == 0 {
+		return false, nil
+	}
+
+	memberJoinedKey := roomKeyPrefix + normalizedRoomID + ":member_joined_at"
+	joinedAtMap, err := s.Redis.Client.HGetAll(ctx, memberJoinedKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return false, err
+	}
+
+	earliestUserID := ""
+	earliestJoinedAt := int64(0)
+	hasKnownJoinTimestamp := false
+	fallbackUserID := ""
+	for _, rawMember := range members {
+		memberID := normalizeUsername(rawMember)
+		if memberID == "" {
+			continue
+		}
+		if fallbackUserID == "" || memberID < fallbackUserID {
+			fallbackUserID = memberID
+		}
+		joinedAt := int64(0)
+		if rawJoinedAt, ok := joinedAtMap[memberID]; ok {
+			if parsed, parseErr := strconv.ParseInt(strings.TrimSpace(rawJoinedAt), 10, 64); parseErr == nil {
+				joinedAt = parsed
+			}
+		}
+		if joinedAt <= 0 {
+			// Missing join timestamps are treated as unknown. They should not outrank
+			// members with a recorded join time.
+			continue
+		}
+		if !hasKnownJoinTimestamp || earliestUserID == "" || joinedAt < earliestJoinedAt || (joinedAt == earliestJoinedAt && memberID < earliestUserID) {
+			earliestUserID = memberID
+			earliestJoinedAt = joinedAt
+			hasKnownJoinTimestamp = true
+		}
+	}
+	if hasKnownJoinTimestamp {
+		return earliestUserID == normalizedUserID, nil
+	}
+	if fallbackUserID == "" {
+		return false, nil
+	}
+	return fallbackUserID == normalizedUserID, nil
+}
+
+func estimateBoardElementStorageBytes(element models.BoardElement) int64 {
+	normalized := map[string]interface{}{
+		"roomId":          normalizeRoomID(element.RoomID),
+		"elementId":       normalizeMessageID(element.ElementID),
+		"type":            strings.TrimSpace(element.Type),
+		"x":               element.X,
+		"y":               element.Y,
+		"width":           element.Width,
+		"height":          element.Height,
+		"content":         element.Content,
+		"zIndex":          element.ZIndex,
+		"createdByUserId": normalizeUsername(element.CreatedByUserID),
+		"createdByName":   strings.TrimSpace(element.CreatedByName),
+		"createdAt":       element.CreatedAt.UTC().UnixMilli(),
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return int64(len(element.Content)) + 384
+	}
+	estimated := int64(len(encoded)) + 192
+	if estimated < 256 {
+		return 256
+	}
+	return estimated
+}
+
+func (s *MessageService) lookupBoardElementSizeBytes(ctx context.Context, roomID, elementID string) (int64, error) {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return 0, nil
+	}
+	boardTable := s.Scylla.Table("board_elements")
+	query := fmt.Sprintf(
+		`SELECT type, x, y, width, height, content, z_index, created_by_user_id, created_by_name, created_at FROM %s WHERE room_id = ? AND element_id = ? LIMIT 1`,
+		boardTable,
+	)
+	var (
+		elementType string
+		x           float32
+		y           float32
+		width       float32
+		height      float32
+		content     string
+		zIndex      int
+		createdByID string
+		createdBy   string
+		createdAt   time.Time
+	)
+	err := s.Scylla.Session.Query(
+		query,
+		roomID,
+		elementID,
+	).WithContext(ctx).Scan(
+		&elementType,
+		&x,
+		&y,
+		&width,
+		&height,
+		&content,
+		&zIndex,
+		&createdByID,
+		&createdBy,
+		&createdAt,
+	)
+	if err != nil {
+		if errors.Is(err, gocql.ErrNotFound) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	element := models.BoardElement{
+		RoomID:          roomID,
+		ElementID:       elementID,
+		Type:            elementType,
+		X:               x,
+		Y:               y,
+		Width:           width,
+		Height:          height,
+		Content:         content,
+		ZIndex:          zIndex,
+		CreatedByUserID: createdByID,
+		CreatedByName:   createdBy,
+		CreatedAt:       createdAt,
+	}
+	return estimateBoardElementStorageBytes(element), nil
+}
+
+func (s *MessageService) resolveBoardRoomTotalFallbackBytes(ctx context.Context, roomID string) (int64, error) {
+	if s == nil {
+		return 0, nil
+	}
+	if s.Redis == nil || s.Redis.Client == nil {
+		return s.calculateBoardRoomStorageBytes(ctx, roomID)
+	}
+
+	totalKey := boardSizeTotalPrefix + roomID
+	exists, err := s.Redis.Client.Exists(ctx, totalKey).Result()
+	if err != nil {
+		return 0, err
+	}
+	if exists > 0 {
+		return 0, nil
+	}
+	return s.calculateBoardRoomStorageBytes(ctx, roomID)
+}
+
+func (s *MessageService) calculateBoardRoomStorageBytes(ctx context.Context, roomID string) (int64, error) {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return 0, nil
+	}
+	boardTable := s.Scylla.Table("board_elements")
+	query := fmt.Sprintf(
+		`SELECT element_id, type, x, y, width, height, content, z_index, created_by_user_id, created_by_name, created_at FROM %s WHERE room_id = ?`,
+		boardTable,
+	)
+	iter := s.Scylla.Session.Query(query, roomID).WithContext(ctx).Iter()
+	var (
+		elementID   string
+		elementType string
+		x           float32
+		y           float32
+		width       float32
+		height      float32
+		content     string
+		zIndex      int
+		createdByID string
+		createdBy   string
+		createdAt   time.Time
+	)
+	var total int64
+	for iter.Scan(&elementID, &elementType, &x, &y, &width, &height, &content, &zIndex, &createdByID, &createdBy, &createdAt) {
+		total += estimateBoardElementStorageBytes(models.BoardElement{
+			RoomID:          roomID,
+			ElementID:       elementID,
+			Type:            elementType,
+			X:               x,
+			Y:               y,
+			Width:           width,
+			Height:          height,
+			Content:         content,
+			ZIndex:          zIndex,
+			CreatedByUserID: createdByID,
+			CreatedByName:   createdBy,
+			CreatedAt:       createdAt,
+		})
+	}
+	if err := iter.Close(); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (s *MessageService) reserveBoardStorageBytes(
+	ctx context.Context,
+	roomID string,
+	elementID string,
+	fallbackRoomTotal int64,
+	fallbackElementBytes int64,
+	newBytes int64,
+) (allowed bool, previousTrackedBytes int64, projectedBytes int64, err error) {
+	if newBytes < 0 {
+		newBytes = 0
+	}
+	if fallbackRoomTotal < 0 {
+		fallbackRoomTotal = 0
+	}
+	if fallbackElementBytes < 0 {
+		fallbackElementBytes = 0
+	}
+
+	projectedWithoutRedis := fallbackRoomTotal - fallbackElementBytes + newBytes
+	if projectedWithoutRedis < 0 {
+		projectedWithoutRedis = 0
+	}
+	if s == nil || s.Redis == nil || s.Redis.Client == nil {
+		if projectedWithoutRedis > boardMaxStorageBytes {
+			return false, fallbackElementBytes, projectedWithoutRedis, nil
+		}
+		return true, fallbackElementBytes, projectedWithoutRedis, nil
+	}
+
+	totalKey := boardSizeTotalPrefix + roomID
+	elementsKey := boardSizeElementsPrefix + roomID
+	lua := `
+local totalKey = KEYS[1]
+local elementsKey = KEYS[2]
+local elementId = ARGV[1]
+local fallbackTotal = tonumber(ARGV[2]) or 0
+local fallbackExisting = tonumber(ARGV[3]) or 0
+local newSize = tonumber(ARGV[4]) or 0
+local maxLimit = tonumber(ARGV[5]) or 0
+local ttl = tonumber(ARGV[6]) or 0
+
+local currentTotal = tonumber(redis.call('GET', totalKey))
+if currentTotal == nil then
+	currentTotal = fallbackTotal
+end
+if currentTotal < 0 then
+	currentTotal = 0
+end
+
+local existingSize = tonumber(redis.call('HGET', elementsKey, elementId))
+if existingSize == nil then
+	existingSize = fallbackExisting
+end
+if existingSize < 0 then
+	existingSize = 0
+end
+
+local projected = currentTotal - existingSize + newSize
+if projected < 0 then
+	projected = 0
+end
+if projected > maxLimit then
+	return {0, existingSize, projected}
+end
+
+redis.call('SET', totalKey, projected, 'EX', ttl)
+if newSize > 0 then
+	redis.call('HSET', elementsKey, elementId, newSize)
+else
+	redis.call('HDEL', elementsKey, elementId)
+end
+redis.call('EXPIRE', elementsKey, ttl)
+return {1, existingSize, projected}
+`
+	result, evalErr := s.Redis.Client.Eval(
+		ctx,
+		lua,
+		[]string{totalKey, elementsKey},
+		elementID,
+		fallbackRoomTotal,
+		fallbackElementBytes,
+		newBytes,
+		boardMaxStorageBytes,
+		boardSizeEntryTTL,
+	).Result()
+	if evalErr != nil {
+		if projectedWithoutRedis > boardMaxStorageBytes {
+			return false, fallbackElementBytes, projectedWithoutRedis, nil
+		}
+		return true, fallbackElementBytes, projectedWithoutRedis, nil
+	}
+
+	parts, ok := result.([]interface{})
+	if !ok || len(parts) < 3 {
+		return false, fallbackElementBytes, projectedWithoutRedis, fmt.Errorf("invalid board storage response")
+	}
+	allowValue, parseErr := toInt64(parts[0])
+	if parseErr != nil {
+		return false, fallbackElementBytes, projectedWithoutRedis, parseErr
+	}
+	previousValue, parseErr := toInt64(parts[1])
+	if parseErr != nil {
+		return false, fallbackElementBytes, projectedWithoutRedis, parseErr
+	}
+	projectedValue, parseErr := toInt64(parts[2])
+	if parseErr != nil {
+		return false, fallbackElementBytes, projectedWithoutRedis, parseErr
+	}
+	return allowValue == 1, previousValue, projectedValue, nil
+}
+
+func (s *MessageService) rollbackBoardStorageBytes(
+	ctx context.Context,
+	roomID string,
+	elementID string,
+	appliedBytes int64,
+	previousBytes int64,
+) error {
+	if s == nil || s.Redis == nil || s.Redis.Client == nil {
+		return nil
+	}
+	fallbackRoomTotal, err := s.resolveBoardRoomTotalFallbackBytes(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	_, _, _, err = s.reserveBoardStorageBytes(
+		ctx,
+		roomID,
+		elementID,
+		fallbackRoomTotal,
+		appliedBytes,
+		previousBytes,
+	)
+	return err
+}
+
+func toInt64(value interface{}) (int64, error) {
+	switch typed := value.(type) {
+	case int64:
+		return typed, nil
+	case int32:
+		return int64(typed), nil
+	case int:
+		return int64(typed), nil
+	case uint64:
+		return int64(typed), nil
+	case float64:
+		return int64(typed), nil
+	case []byte:
+		parsed, err := strconv.ParseInt(string(typed), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return parsed, nil
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("unexpected int64 value type %T", value)
+	}
+}
+
 func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) ([]models.Message, error) {
 	if roomID == "" {
 		return []models.Message{}, nil
@@ -261,6 +870,7 @@ func (s *MessageService) ensureSchema() {
 	roomPinsTable := s.Scylla.Table("room_pins")
 	roomSoftExpiryTable := s.Scylla.Table(roomMessageSoftExpiryTable)
 	pinDiscussionCommentsTable := s.Scylla.Table("pin_discussion_comments")
+	boardElementsTable := s.Scylla.Table("board_elements")
 	query := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s (
 			room_id text,
@@ -323,6 +933,24 @@ func (s *MessageService) ensureSchema() {
 		)`,
 		roomSoftExpiryTable,
 	)
+	boardElementsQuery := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text,
+			element_id text,
+			type text,
+			x float,
+			y float,
+			width float,
+			height float,
+			content text,
+			z_index int,
+			created_by_user_id text,
+			created_by_name text,
+			created_at timestamp,
+			PRIMARY KEY (room_id, element_id)
+		)`,
+		boardElementsTable,
+	)
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -382,6 +1010,20 @@ func (s *MessageService) ensureSchema() {
 		log.Printf("[message-service] ensure room message soft-expiry schema failed: %v", lastErr)
 		return
 	}
+	lastErr = nil
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := safeExecScyllaQuery(s.Scylla.Session, boardElementsQuery); err == nil {
+			lastErr = nil
+			break
+		} else {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		}
+	}
+	if lastErr != nil {
+		log.Printf("[message-service] ensure board schema failed: %v", lastErr)
+		return
+	}
 
 	alterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD media_url text`, messagesTable),
@@ -410,6 +1052,15 @@ func (s *MessageService) ensureSchema() {
 	for _, alterQuery := range pinDiscussionAlterQueries {
 		if err := safeExecScyllaQuery(s.Scylla.Session, alterQuery); err != nil && !isSchemaAlreadyApplied(err) {
 			log.Printf("[message-service] ensure pin discussion schema alter failed: %v", err)
+		}
+	}
+	boardAlterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD created_by_user_id text`, boardElementsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD created_by_name text`, boardElementsTable),
+	}
+	for _, alterQuery := range boardAlterQueries {
+		if err := safeExecScyllaQuery(s.Scylla.Session, alterQuery); err != nil && !isSchemaAlreadyApplied(err) {
+			log.Printf("[message-service] ensure board schema alter failed: %v", err)
 		}
 	}
 }
