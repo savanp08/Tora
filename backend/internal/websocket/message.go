@@ -29,7 +29,8 @@ const (
 	roomMessageSoftExpiryTable = "room_message_soft_expiry"
 	DeletedMessagePlaceholder  = "This message was deleted"
 	boardDrawStartType         = "board_draw_start"
-	boardDrawProgressType      = "board_draw_progress"
+	boardCursorMoveType        = "board_cursor_move"
+	boardClearType             = "board_clear"
 	boardElementAddType        = "board_element_add"
 	boardElementMoveType       = "board_element_move"
 	boardElementDeleteType     = "board_element_delete"
@@ -43,7 +44,8 @@ var ErrBoardSizeLimitExceeded = errors.New("board storage limit exceeded")
 
 var supportedBoardEventTypes = map[string]struct{}{
 	boardDrawStartType:     {},
-	boardDrawProgressType:  {},
+	boardCursorMoveType:    {},
+	boardClearType:         {},
 	boardElementAddType:    {},
 	boardElementMoveType:   {},
 	boardElementDeleteType: {},
@@ -370,6 +372,40 @@ func (s *MessageService) DeleteBoardElement(ctx context.Context, roomID, element
 				normalizedRoomID,
 				fallbackErr,
 			)
+		}
+	}
+
+	return nil
+}
+
+func (s *MessageService) ClearBoardElements(ctx context.Context, roomID string) error {
+	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("invalid room id")
+	}
+
+	boardTable := s.Scylla.Table("board_elements")
+	clearQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ?`, boardTable)
+	if err := s.Scylla.Session.Query(
+		clearQuery,
+		normalizedRoomID,
+	).WithContext(ctx).Exec(); err != nil {
+		return fmt.Errorf("clear board elements: %w", err)
+	}
+
+	if s.Redis != nil && s.Redis.Client != nil {
+		if err := s.Redis.Client.Del(
+			ctx,
+			boardSizeTotalPrefix+normalizedRoomID,
+			boardSizeElementsPrefix+normalizedRoomID,
+		).Err(); err != nil {
+			log.Printf("[message-service] board storage clear reconcile failed room=%s err=%v", normalizedRoomID, err)
 		}
 	}
 

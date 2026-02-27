@@ -13,6 +13,7 @@
 	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 	import { inferMediaMessageType, uploadToR2, type MediaMessageType } from '$lib/utils/media';
 	import { globalMessages, sendSocketPayload } from '$lib/ws';
+	import imageCompression from 'browser-image-compression';
 	import { onDestroy, onMount } from 'svelte';
 
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
@@ -22,7 +23,8 @@
 	const MAX_ZOOM = 4;
 	const DOUBLE_TAP_MS = 340;
 	const TAP_MOVE_TOLERANCE = 8;
-	const DRAW_PROGRESS_THROTTLE_MS = 90;
+	const CURSOR_MOVE_THROTTLE_MS = 250;
+	const REMOTE_CURSOR_STALE_MS = 8000;
 	const HISTORY_LIMIT = 80;
 	const BRUSH_WIDTH_PRESETS = [1.5, 3, 5, 8] as const;
 	const FABRIC_VITE_ID_URL = '/@id/fabric';
@@ -42,14 +44,18 @@
 	const DUSTER_HANDLE_WIDTH = 56;
 	const DUSTER_HANDLE_HEIGHT = 34;
 	const DUSTER_HANDLE_PADDING = 8;
+	const MINIMAP_WIDTH = 200;
+	const MINIMAP_HEIGHT = 150;
 	const BOARD_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024;
+	const RICH_MESSAGE_SCHEMA = 'rich_message_v1';
 	const UTF8_ENCODER = new TextEncoder();
 
 	type ToolMode = 'select' | 'draw' | 'eraser' | 'duster';
 	type ShapeKind = 'line' | 'arrow' | 'rect' | 'circle';
 	type BoardEventType =
 		| 'board_draw_start'
-		| 'board_draw_progress'
+		| 'board_cursor_move'
+		| 'board_clear'
 		| 'board_element_add'
 		| 'board_element_move'
 		| 'board_element_delete';
@@ -100,6 +106,29 @@
 		after?: BoardElementWire;
 	};
 
+	type BoardCursorWire = {
+		userId: string;
+		name: string;
+		x: number;
+		y: number;
+		updatedAt: number;
+		color: string;
+	};
+
+	type BoardMessageCardPayload = {
+		schema: string;
+		messageId: string;
+		senderId: string;
+		senderName: string;
+		content: string;
+		type: string;
+		mediaUrl: string;
+		mediaType: string;
+		fileName: string;
+		createdAt: number;
+		replyToSnippet: string;
+	};
+
 	export let roomId = '';
 	export let messages: ChatMessage[] = [];
 	export let isDarkMode = false;
@@ -110,6 +139,7 @@
 
 	let boardContainerEl: HTMLDivElement | null = null;
 	let canvasEl: HTMLCanvasElement | null = null;
+	let minimapEl: HTMLCanvasElement | null = null;
 	let mediaInputEl: HTMLInputElement | null = null;
 	let insertWrapEl: HTMLDivElement | null = null;
 	let widthMenuWrapEl: HTMLDivElement | null = null;
@@ -173,9 +203,14 @@
 	let isPanning = false;
 	let panLastX = 0;
 	let panLastY = 0;
-	let isDrawingGesture = false;
-	let lastDrawProgressAt = 0;
-	let drawingProgressPoint: { x: number; y: number } | null = null;
+	let lastCursorMoveBroadcastAt = 0;
+	let remoteCursors: BoardCursorWire[] = [];
+	let remoteCursorByUserId = new Map<string, BoardCursorWire>();
+	let zControlVisible = false;
+	let zControlLeft = -9999;
+	let zControlTop = -9999;
+	let minimapDrawSeq = 0;
+	let minimapRenderInProgress = false;
 
 	let isApplyingRemoteEvent = false;
 	let remoteApplyDepth = 0;
@@ -302,6 +337,12 @@
 		boardStorageUsagePercent = 0;
 		boardRemainingBytes = BOARD_STORAGE_LIMIT_BYTES;
 		boardZoomLevel = 1;
+		remoteCursorByUserId = new Map<string, BoardCursorWire>();
+		remoteCursors = [];
+		zControlVisible = false;
+		zControlLeft = -9999;
+		zControlTop = -9999;
+		minimapRenderInProgress = false;
 	}
 
 	function registerWindowGuards() {
@@ -352,7 +393,7 @@
 				return;
 			}
 			event.preventDefault();
-			moveDusterToClientX(event.clientX, true);
+			moveDusterToClientX(event.clientX);
 		};
 		const onPointerUp = (event: PointerEvent) => {
 			if (!dusterIsDragging) {
@@ -362,7 +403,7 @@
 				return;
 			}
 			event.preventDefault();
-			stopDusterDrag();
+			stopDusterDrag(true);
 		};
 
 		window.addEventListener('keydown', onKeyDown);
@@ -613,11 +654,10 @@
 			}
 
 			if (canEdit && activeTool === 'draw') {
-				isDrawingGesture = true;
-				drawingProgressPoint = getBoardPointFromClientPosition(clientPoint.x, clientPoint.y);
+				const drawStartPoint = getBoardPointFromClientPosition(clientPoint.x, clientPoint.y);
 				sendBoardEnvelope('board_draw_start', {
-					x: drawingProgressPoint.x,
-					y: drawingProgressPoint.y
+					x: drawStartPoint.x,
+					y: drawStartPoint.y
 				});
 				return;
 			}
@@ -640,6 +680,21 @@
 			if (!clientPoint) {
 				return;
 			}
+			const boardPoint = getBoardPointFromClientPosition(clientPoint.x, clientPoint.y);
+			const now = Date.now();
+			if (
+				canEdit &&
+				normalizedCurrentUserID &&
+				now - lastCursorMoveBroadcastAt >= CURSOR_MOVE_THROTTLE_MS
+			) {
+				lastCursorMoveBroadcastAt = now;
+				sendBoardEnvelope('board_cursor_move', {
+					x: boardPoint.x,
+					y: boardPoint.y,
+					userId: normalizedCurrentUserID,
+					name: normalizedCurrentUsername || 'Guest'
+				});
+			}
 			if (isPanning) {
 				const viewport = fabricCanvas.viewportTransform;
 				if (!viewport) {
@@ -653,26 +708,10 @@
 				fabricCanvas.requestRenderAll?.();
 				return;
 			}
-
-			if (!canEdit || activeTool !== 'draw' || !isDrawingGesture) {
-				return;
-			}
-			const now = Date.now();
-			if (now - lastDrawProgressAt < DRAW_PROGRESS_THROTTLE_MS) {
-				return;
-			}
-			lastDrawProgressAt = now;
-			drawingProgressPoint = getBoardPointFromClientPosition(clientPoint.x, clientPoint.y);
-			sendBoardEnvelope('board_draw_progress', {
-				x: drawingProgressPoint.x,
-				y: drawingProgressPoint.y
-			});
 		});
 
 		fabricCanvas.on('mouse:up', () => {
 			isPanning = false;
-			isDrawingGesture = false;
-			drawingProgressPoint = null;
 			fabricCanvas.selection = true;
 		});
 
@@ -744,6 +783,28 @@
 				return;
 			}
 			enforceMinimumObjectSize(target);
+			updateSelectionControlsPosition();
+		});
+
+		fabricCanvas.on('selection:created', () => {
+			updateSelectionControlsPosition();
+		});
+		fabricCanvas.on('selection:updated', () => {
+			updateSelectionControlsPosition();
+		});
+		fabricCanvas.on('selection:cleared', () => {
+			zControlVisible = false;
+		});
+		fabricCanvas.on('object:moving', () => {
+			updateSelectionControlsPosition();
+		});
+		fabricCanvas.on('object:modified', () => {
+			updateSelectionControlsPosition();
+		});
+		fabricCanvas.on('after:render', () => {
+			updateSelectionControlsPosition();
+			pruneStaleRemoteCursors();
+			updateMinimap();
 		});
 	}
 
@@ -774,6 +835,204 @@
 			x: (clientX - rect.left - viewport[4]) / zoom,
 			y: (clientY - rect.top - viewport[5]) / zoom
 		};
+	}
+
+	function getViewportMetrics() {
+		const viewport = fabricCanvas?.viewportTransform ?? [1, 0, 0, 1, 0, 0];
+		const zoom = clampZoom(toNumber(viewport[0], 1));
+		const translateX = toNumber(viewport[4], 0);
+		const translateY = toNumber(viewport[5], 0);
+		return { zoom, translateX, translateY };
+	}
+
+	function getCursorScreenPosition(cursor: BoardCursorWire) {
+		const { zoom, translateX, translateY } = getViewportMetrics();
+		return {
+			left: translateX + cursor.x * zoom,
+			top: translateY + cursor.y * zoom
+		};
+	}
+
+	function updateSelectionControlsPosition() {
+		if (!fabricCanvas || !boardContainerEl) {
+			zControlVisible = false;
+			return;
+		}
+		const activeObject = fabricCanvas.getActiveObject?.() as FabricObjectLike | null;
+		if (!activeObject || activeObject === boardBoundsRect || !canMutateBoardObject(activeObject)) {
+			zControlVisible = false;
+			return;
+		}
+		const bounds = (activeObject as any).getBoundingRect?.();
+		if (!bounds) {
+			zControlVisible = false;
+			return;
+		}
+		const containerWidth = Math.max(1, boardContainerEl.clientWidth || 1);
+		zControlLeft = Math.max(
+			6,
+			Math.min(containerWidth - 140, toNumber(bounds.left, 0) + toNumber(bounds.width, 0) + 8)
+		);
+		zControlTop = Math.max(8, toNumber(bounds.top, 0) - 36);
+		zControlVisible = true;
+	}
+
+	function bringSelectedObjectForward() {
+		if (!fabricCanvas) {
+			return;
+		}
+		const activeObject = fabricCanvas.getActiveObject?.() as FabricObjectLike | null;
+		if (!activeObject || activeObject === boardBoundsRect || !canMutateBoardObject(activeObject)) {
+			return;
+		}
+		fabricCanvas.bringForward?.(activeObject as any);
+		emitBoardElementMove(activeObject);
+		fabricCanvas.requestRenderAll?.();
+		captureHistorySnapshot();
+		updateSelectionControlsPosition();
+	}
+
+	function sendSelectedObjectBackward() {
+		if (!fabricCanvas) {
+			return;
+		}
+		const activeObject = fabricCanvas.getActiveObject?.() as FabricObjectLike | null;
+		if (!activeObject || activeObject === boardBoundsRect || !canMutateBoardObject(activeObject)) {
+			return;
+		}
+		fabricCanvas.sendBackwards?.(activeObject as any);
+		emitBoardElementMove(activeObject);
+		fabricCanvas.requestRenderAll?.();
+		captureHistorySnapshot();
+		updateSelectionControlsPosition();
+	}
+
+	function cursorColorFromUserID(userId: string) {
+		const normalized = normalizeIdentifier(userId);
+		if (!normalized) {
+			return '#06b6d4';
+		}
+		let hash = 0;
+		for (let index = 0; index < normalized.length; index += 1) {
+			hash = (hash * 31 + normalized.charCodeAt(index)) >>> 0;
+		}
+		const palette = ['#22c55e', '#0ea5e9', '#f97316', '#f59e0b', '#ef4444', '#a855f7'];
+		return palette[hash % palette.length];
+	}
+
+	function upsertRemoteCursor(payload: { userId: string; name: string; x: number; y: number }) {
+		const userId = normalizeIdentifier(payload.userId);
+		if (!userId || userId === normalizedCurrentUserID) {
+			return;
+		}
+		remoteCursorByUserId.set(userId, {
+			userId,
+			name: payload.name.trim() || 'Guest',
+			x: payload.x,
+			y: payload.y,
+			updatedAt: Date.now(),
+			color: cursorColorFromUserID(userId)
+		});
+		remoteCursors = [...remoteCursorByUserId.values()];
+	}
+
+	function pruneStaleRemoteCursors() {
+		if (remoteCursorByUserId.size === 0) {
+			return;
+		}
+		const expirationThreshold = Date.now() - REMOTE_CURSOR_STALE_MS;
+		let changed = false;
+		for (const [userId, cursor] of remoteCursorByUserId.entries()) {
+			if (cursor.updatedAt >= expirationThreshold) {
+				continue;
+			}
+			remoteCursorByUserId.delete(userId);
+			changed = true;
+		}
+		if (changed) {
+			remoteCursors = [...remoteCursorByUserId.values()];
+		}
+	}
+
+	function updateMinimap() {
+		if (!fabricCanvas || !minimapEl || !boardContainerEl || minimapRenderInProgress) {
+			return;
+		}
+		const ctx = minimapEl.getContext('2d');
+		if (!ctx) {
+			return;
+		}
+		minimapRenderInProgress = true;
+		const seq = ++minimapDrawSeq;
+		const scale = Math.min(MINIMAP_WIDTH / BOARD_WIDTH, MINIMAP_HEIGHT / BOARD_HEIGHT);
+		const drawWidth = BOARD_WIDTH * scale;
+		const drawHeight = BOARD_HEIGHT * scale;
+		const offsetX = (MINIMAP_WIDTH - drawWidth) / 2;
+		const offsetY = (MINIMAP_HEIGHT - drawHeight) / 2;
+		ctx.clearRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
+		ctx.fillStyle = isDarkMode ? '#0b1220' : '#f8fafc';
+		ctx.fillRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
+		const snapshotDataURL = fabricCanvas.toDataURL?.({
+			format: 'png',
+			left: 0,
+			top: 0,
+			width: BOARD_WIDTH,
+			height: BOARD_HEIGHT,
+			multiplier: scale
+		});
+		if (typeof snapshotDataURL === 'string' && snapshotDataURL !== '') {
+			const image = new Image();
+			image.onload = () => {
+				if (seq !== minimapDrawSeq) {
+					minimapRenderInProgress = false;
+					return;
+				}
+				ctx.clearRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
+				ctx.fillStyle = isDarkMode ? '#0b1220' : '#f8fafc';
+				ctx.fillRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
+				ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+				drawMinimapViewport(ctx, offsetX, offsetY, scale);
+				minimapRenderInProgress = false;
+			};
+			image.onerror = () => {
+				drawMinimapViewport(ctx, offsetX, offsetY, scale);
+				minimapRenderInProgress = false;
+			};
+			image.src = snapshotDataURL;
+			return;
+		}
+		drawMinimapViewport(ctx, offsetX, offsetY, scale);
+		minimapRenderInProgress = false;
+	}
+
+	function drawMinimapViewport(
+		ctx: CanvasRenderingContext2D,
+		offsetX: number,
+		offsetY: number,
+		scale: number
+	) {
+		const { zoom, translateX, translateY } = getViewportMetrics();
+		const viewportWidth = Math.max(1, boardContainerEl?.clientWidth ?? 1);
+		const viewportHeight = Math.max(1, boardContainerEl?.clientHeight ?? 1);
+		const viewLeft = -translateX / zoom;
+		const viewTop = -translateY / zoom;
+		const viewWidth = viewportWidth / zoom;
+		const viewHeight = viewportHeight / zoom;
+		ctx.fillStyle = 'rgba(239, 68, 68, 0.22)';
+		ctx.strokeStyle = 'rgba(239, 68, 68, 0.92)';
+		ctx.lineWidth = 1.2;
+		ctx.fillRect(
+			offsetX + viewLeft * scale,
+			offsetY + viewTop * scale,
+			viewWidth * scale,
+			viewHeight * scale
+		);
+		ctx.strokeRect(
+			offsetX + viewLeft * scale,
+			offsetY + viewTop * scale,
+			viewWidth * scale,
+			viewHeight * scale
+		);
 	}
 
 	function enforceMinimumObjectSize(object: FabricObjectLike) {
@@ -885,6 +1144,76 @@
 			showInsertMenu = false;
 			showWidthMenu = false;
 		}
+	}
+
+	function getBoardViewportCenter() {
+		if (!boardContainerEl || !fabricCanvas) {
+			return { x: BOARD_WIDTH / 2, y: BOARD_HEIGHT / 2 };
+		}
+		const rect = boardContainerEl.getBoundingClientRect();
+		return getBoardPointFromClientPosition(rect.left + rect.width / 2, rect.top + rect.height / 2);
+	}
+
+	function insertStickyNote() {
+		if (!fabricCanvas || !canEdit) {
+			return;
+		}
+		const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
+		if (!TextboxClass) {
+			return;
+		}
+		const noteSize = 150;
+		const point = getBoardViewportCenter();
+		const stickyNote = new TextboxClass('Type here...', {
+			left: clampBoardX(point.x, noteSize),
+			top: clampBoardY(point.y, noteSize),
+			width: noteSize,
+			height: noteSize,
+			fontSize: 16,
+			lineHeight: 1.2,
+			fill: '#1f2937',
+			backgroundColor: '#fef08a',
+			padding: 12
+		}) as FabricObjectLike;
+		ensureObjectIdentity(stickyNote, 'sticky_note');
+		stickyNote.set?.({
+			content: 'Type here...'
+		});
+		fabricCanvas.add(stickyNote);
+		applyObjectPermission(stickyNote);
+		fabricCanvas.setActiveObject?.(stickyNote);
+		fabricCanvas.requestRenderAll?.();
+		emitBoardElementAdd(stickyNote);
+		const addedElement = boardObjectToElement(stickyNote);
+		if (addedElement && !isApplyingLocalAction) {
+			recordLocalAction({
+				kind: 'add',
+				elementId: addedElement.elementId,
+				after: cloneBoardElement(addedElement)
+			});
+		}
+		captureHistorySnapshot();
+	}
+
+	function exportBoardAsPNG() {
+		if (!fabricCanvas || !browser) {
+			return;
+		}
+		const dataURL = fabricCanvas.toDataURL?.({
+			format: 'png',
+			quality: 0.8,
+			multiplier: 1
+		});
+		if (typeof dataURL !== 'string' || dataURL === '') {
+			return;
+		}
+		const anchor = document.createElement('a');
+		anchor.href = dataURL;
+		anchor.download = 'board_export.png';
+		anchor.style.display = 'none';
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
 	}
 
 	function beginShapeInsert(kind: ShapeKind) {
@@ -1125,59 +1454,32 @@
 		};
 	}
 
-	function stopDusterDrag() {
+	function stopDusterDrag(shouldClear = false) {
+		const wasDragging = dusterIsDragging;
 		dusterIsDragging = false;
 		dusterPointerId = null;
+		if (shouldClear && wasDragging) {
+			clearBoardWithBounds(true);
+		}
 	}
 
-	function moveDusterToBoardX(boardX: number, sweep = false) {
+	function moveDusterToBoardX(boardX: number) {
 		const nextX = clampDusterCenterX(boardX);
-		if (Math.abs(nextX - dusterCenterX) < 0.01 && !sweep) {
+		if (Math.abs(nextX - dusterCenterX) < 0.01) {
 			return;
 		}
 		dusterCenterX = nextX;
 		markViewportForRender();
-		if (sweep) {
-			sweepBoardAtDuster(nextX);
-		}
 	}
 
-	function moveDusterToClientX(clientX: number, sweep = false) {
+	function moveDusterToClientX(clientX: number) {
 		if (!boardContainerEl) {
 			return;
 		}
 		const rect = boardContainerEl.getBoundingClientRect();
 		const anchorY = rect.top + Math.max(8, Math.min(rect.height - 8, rect.height * 0.35));
 		const point = getBoardPointFromClientPosition(clientX, anchorY);
-		moveDusterToBoardX(point.x, sweep);
-	}
-
-	function sweepBoardAtDuster(centerX: number) {
-		if (!fabricCanvas || !canModerateBoardActions) {
-			return;
-		}
-		const stripeLeft = centerX - DUSTER_STRIPE_WIDTH / 2;
-		const stripeRight = centerX + DUSTER_STRIPE_WIDTH / 2;
-		const objects = [...(fabricCanvas.getObjects?.() ?? [])];
-		for (const object of objects) {
-			if (object === boardBoundsRect) {
-				continue;
-			}
-			const candidate = object as FabricObjectLike;
-			if (isPendingObject(candidate)) {
-				continue;
-			}
-			const element = boardObjectToElement(candidate);
-			if (!element) {
-				continue;
-			}
-			const elementLeft = element.x;
-			const elementRight = element.x + Math.max(1, element.width);
-			if (elementRight < stripeLeft || elementLeft > stripeRight) {
-				continue;
-			}
-			removeBoardObject(candidate, true);
-		}
+		moveDusterToBoardX(point.x);
 	}
 
 	function onDusterHandlePointerDown(event: PointerEvent) {
@@ -1192,7 +1494,7 @@
 		messagePickerOpen = false;
 		dusterIsDragging = true;
 		dusterPointerId = event.pointerId;
-		moveDusterToClientX(event.clientX, true);
+		moveDusterToClientX(event.clientX);
 	}
 
 	function isPendingObject(object: FabricObjectLike | null) {
@@ -1347,6 +1649,9 @@
 			parseOptionalTimestamp((object as Record<string, unknown>).createdAt) || Date.now();
 
 		let content = toStringValue((object as Record<string, unknown>).content);
+		if (!content) {
+			content = toStringValue((object as Record<string, unknown>).text);
+		}
 		if (!content && elementType === 'stroke') {
 			const strokePath = ((object as Record<string, unknown>).path as unknown[]) ?? [];
 			content = serializePathCommands(strokePath);
@@ -1427,17 +1732,29 @@
 	}
 
 	function clearBoardElements() {
+		clearBoardWithBounds(false);
+	}
+
+	function clearBoardWithBounds(emitClearEvent: boolean) {
 		if (!fabricCanvas) {
 			return;
 		}
-		const objects = [...(fabricCanvas.getObjects?.() ?? [])];
-		for (const object of objects) {
-			if (object === boardBoundsRect) {
-				continue;
-			}
-			fabricCanvas.remove(object);
-		}
+		fabricCanvas.clear();
+		ensureBoardBoundsObject();
+		updateBoardVisualTheme();
+		fabricCanvas.discardActiveObject?.();
+		pendingInsertElementId = '';
+		pendingShapeKind = null;
+		pendingTransformSnapshotByElementId.clear();
+		localUndoStack = [];
+		localRedoStack = [];
+		zControlVisible = false;
 		refreshBoardStats();
+		captureHistorySnapshot(true);
+		fabricCanvas.requestRenderAll?.();
+		if (emitClearEvent) {
+			sendBoardEnvelope('board_clear', {});
+		}
 	}
 
 	function parseBoardElementRecord(value: unknown): BoardElementWire | null {
@@ -1617,6 +1934,28 @@
 			}
 		}
 
+		if (elementType === 'sticky_note') {
+			return createStickyNoteObject(
+				element.content || 'Type here...',
+				element.x,
+				element.y,
+				Math.max(120, element.width),
+				Math.max(120, element.height)
+			);
+		}
+
+		if (elementType === 'message') {
+			const richMessage = parseRichMessageCardPayload(element.content);
+			if (richMessage) {
+				return await createRichMessageObjectFromPayload(
+					richMessage,
+					element.x,
+					element.y,
+					Math.max(220, element.width)
+				);
+			}
+		}
+
 		return createMessageCardObject(
 			element.content || `Pinned message (${element.elementId.slice(0, 6)})`,
 			element.x,
@@ -1679,6 +2018,33 @@
 		return type === 'media' ? DEFAULT_MEDIA_CARD_WIDTH : DEFAULT_MESSAGE_CARD_WIDTH;
 	}
 
+	function createStickyNoteObject(
+		content: string,
+		left: number,
+		top: number,
+		explicitWidth = 150,
+		explicitHeight = 150
+	): FabricObjectLike | null {
+		const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
+		if (!TextboxClass) {
+			return null;
+		}
+		const width = Math.max(120, explicitWidth);
+		const height = Math.max(120, explicitHeight);
+		const text = toStringValue(content).trim() || 'Type here...';
+		return new TextboxClass(text, {
+			left: clampBoardX(left, width),
+			top: clampBoardY(top, height),
+			width,
+			height,
+			fontSize: 16,
+			lineHeight: 1.2,
+			fill: '#1f2937',
+			backgroundColor: '#fef08a',
+			padding: 12
+		}) as FabricObjectLike;
+	}
+
 	function createMessageCardObject(
 		content: string,
 		left: number,
@@ -1699,6 +2065,193 @@
 			fill: isDarkMode ? '#f3f4f6' : '#111827',
 			backgroundColor: isDarkMode ? '#1f2937' : '#fef9c3',
 			padding: 10
+		}) as FabricObjectLike;
+	}
+
+	function createRichMessageCardPayload(message: ChatMessage): BoardMessageCardPayload {
+		return {
+			schema: RICH_MESSAGE_SCHEMA,
+			messageId: normalizeMessageID(message.id) || createMessageId(normalizedRoomId || 'board'),
+			senderId: normalizeIdentifier(message.senderId),
+			senderName: toStringValue(message.senderName).trim() || 'Guest',
+			content: toStringValue(message.content),
+			type: toStringValue(message.type).trim().toLowerCase() || 'text',
+			mediaUrl: toStringValue(message.mediaUrl).trim(),
+			mediaType: toStringValue(message.mediaType).trim(),
+			fileName: toStringValue(message.fileName).trim(),
+			createdAt:
+				Number.isFinite(message.createdAt) && message.createdAt > 0
+					? message.createdAt
+					: Date.now(),
+			replyToSnippet: toStringValue(message.replyToSnippet).trim()
+		};
+	}
+
+	function parseRichMessageCardPayload(rawContent: string): BoardMessageCardPayload | null {
+		const raw = toStringValue(rawContent).trim();
+		if (!raw || !raw.startsWith('{')) {
+			return null;
+		}
+		try {
+			const parsed = JSON.parse(raw) as Record<string, unknown>;
+			const schema = toStringValue(parsed.schema).trim();
+			if (schema !== RICH_MESSAGE_SCHEMA) {
+				return null;
+			}
+			return {
+				schema,
+				messageId:
+					normalizeMessageID(toStringValue(parsed.messageId ?? parsed.message_id)) ||
+					createMessageId(normalizedRoomId || 'board'),
+				senderId: normalizeIdentifier(toStringValue(parsed.senderId ?? parsed.sender_id)),
+				senderName: toStringValue(parsed.senderName ?? parsed.sender_name).trim() || 'Guest',
+				content: toStringValue(parsed.content),
+				type: toStringValue(parsed.type).trim().toLowerCase() || 'text',
+				mediaUrl: toStringValue(parsed.mediaUrl ?? parsed.media_url).trim(),
+				mediaType: toStringValue(parsed.mediaType ?? parsed.media_type).trim(),
+				fileName: toStringValue(parsed.fileName ?? parsed.file_name).trim(),
+				createdAt: parseOptionalTimestamp(parsed.createdAt ?? parsed.created_at) || Date.now(),
+				replyToSnippet: toStringValue(parsed.replyToSnippet ?? parsed.reply_to_snippet).trim()
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	function richMessageHasImage(payload: BoardMessageCardPayload) {
+		const mediaURL = toStringValue(payload.mediaUrl).trim();
+		if (!mediaURL) {
+			return false;
+		}
+		if (payload.type === 'image') {
+			return true;
+		}
+		if (toStringValue(payload.mediaType).toLowerCase().startsWith('image/')) {
+			return true;
+		}
+		return /\.(png|jpe?g|gif|webp|avif|bmp|svg)(\?|#|$)/i.test(mediaURL);
+	}
+
+	function toChatMessageFromRichPayload(payload: BoardMessageCardPayload): ChatMessage {
+		return {
+			id: payload.messageId,
+			roomId: normalizedRoomId,
+			senderId: payload.senderId,
+			senderName: payload.senderName,
+			content: payload.content,
+			type: payload.type,
+			mediaUrl: payload.mediaUrl,
+			mediaType: payload.mediaType,
+			fileName: payload.fileName,
+			replyToSnippet: payload.replyToSnippet,
+			createdAt: payload.createdAt
+		};
+	}
+
+	async function createRichMessageObject(
+		message: ChatMessage,
+		left: number,
+		top: number,
+		explicitWidth = 0
+	): Promise<FabricObjectLike | null> {
+		const payload = createRichMessageCardPayload(message);
+		return createRichMessageObjectFromPayload(payload, left, top, explicitWidth);
+	}
+
+	async function createRichMessageObjectFromPayload(
+		payload: BoardMessageCardPayload,
+		left: number,
+		top: number,
+		explicitWidth = 0
+	): Promise<FabricObjectLike | null> {
+		const RectClass = getFabricClass('Rect');
+		const GroupClass = getFabricClass('Group');
+		const TextClass = getFabricClass('Text');
+		const TextboxClass = getFabricClass('Textbox') ?? TextClass;
+		if (!RectClass || !GroupClass || !TextClass || !TextboxClass) {
+			return createMessageCardObject(
+				buildMessageCardBody(toChatMessageFromRichPayload(payload)),
+				left,
+				top,
+				explicitWidth || getBoardCardWidth('message')
+			);
+		}
+
+		const cardWidth = Math.max(260, Math.min(420, explicitWidth || getBoardCardWidth('message')));
+		const padding = 14;
+		const maxContentWidth = cardWidth - padding * 2;
+		const senderText = new TextClass(payload.senderName || 'Guest', {
+			left: padding,
+			top: padding,
+			fontSize: 12,
+			fontWeight: '700',
+			fill: isDarkMode ? '#e2e8f0' : '#111827'
+		});
+		const timestampText = new TextClass(formatBoardMessageDateTime(payload.createdAt), {
+			left: padding,
+			top: padding + 15,
+			fontSize: 10,
+			fill: isDarkMode ? '#94a3b8' : '#475569'
+		});
+		const bodyText = buildMessageCardBody(toChatMessageFromRichPayload(payload));
+		const bodyObject = new TextboxClass(bodyText || '(empty)', {
+			left: padding,
+			top: padding + 34,
+			width: maxContentWidth,
+			fontSize: 14,
+			lineHeight: 1.34,
+			fill: isDarkMode ? '#f8fafc' : '#0f172a'
+		});
+		let contentBottom = padding + 34 + Math.max(22, toNumber((bodyObject as any).height, 22));
+		const groupChildren: any[] = [senderText, timestampText, bodyObject];
+		if (richMessageHasImage(payload) && payload.mediaUrl) {
+			const ImageClass = getFabricClass('Image') ?? getFabricClass('FabricImage');
+			if (ImageClass) {
+				try {
+					const imageEl = await loadBrowserImage(payload.mediaUrl);
+					const imageObject = new ImageClass(imageEl, {
+						left: padding,
+						top: contentBottom + 10
+					});
+					const rawWidth = Math.max(
+						1,
+						toNumber((imageObject as any).width, imageEl.naturalWidth || imageEl.width || 1)
+					);
+					const rawHeight = Math.max(
+						1,
+						toNumber((imageObject as any).height, imageEl.naturalHeight || imageEl.height || 1)
+					);
+					const maxImageWidth = Math.min(300, maxContentWidth);
+					const imageScale = Math.min(maxImageWidth / rawWidth, 1);
+					const targetWidth = Math.max(80, rawWidth * imageScale);
+					const targetHeight = Math.max(60, rawHeight * imageScale);
+					(imageObject as any).set?.({
+						scaleX: targetWidth / rawWidth,
+						scaleY: targetHeight / rawHeight
+					});
+					groupChildren.push(imageObject);
+					contentBottom += 10 + targetHeight;
+				} catch {
+					// Keep message card render even if media fetch fails.
+				}
+			}
+		}
+		const cardHeight = Math.max(100, contentBottom + padding);
+		const background = new RectClass({
+			left: 0,
+			top: 0,
+			width: cardWidth,
+			height: cardHeight,
+			rx: 14,
+			ry: 14,
+			fill: isDarkMode ? '#111827' : '#f8fafc',
+			stroke: isDarkMode ? '#334155' : '#cbd5e1',
+			strokeWidth: 1.2
+		});
+		groupChildren.unshift(background);
+		return new GroupClass(groupChildren, {
+			left: clampBoardX(left, cardWidth),
+			top: clampBoardY(top, cardHeight)
 		}) as FabricObjectLike;
 	}
 
@@ -1914,6 +2467,24 @@
 		if (!envelope || envelope.roomId !== normalizedRoomId) {
 			return;
 		}
+		if (envelope.type === 'board_cursor_move') {
+			const cursorMove = parseBoardCursorMoveRecord(envelope.payload);
+			if (!cursorMove) {
+				return;
+			}
+			upsertRemoteCursor(cursorMove);
+			return;
+		}
+		if (envelope.type === 'board_clear') {
+			beginRemoteApply();
+			try {
+				clearBoardWithBounds(false);
+				refreshBoardStats();
+			} finally {
+				endRemoteApply();
+			}
+			return;
+		}
 		if (envelope.type === 'board_element_add') {
 			const parsedElement = parseBoardElementRecord(envelope.payload);
 			if (!parsedElement) {
@@ -2062,7 +2633,8 @@
 		const type = toStringValue(record.type).trim().toLowerCase() as BoardEventType;
 		if (
 			type !== 'board_draw_start' &&
-			type !== 'board_draw_progress' &&
+			type !== 'board_cursor_move' &&
+			type !== 'board_clear' &&
 			type !== 'board_element_add' &&
 			type !== 'board_element_move' &&
 			type !== 'board_element_delete'
@@ -2085,6 +2657,8 @@
 			return null;
 		}
 		const resolvedPayload =
+			type === 'board_cursor_move' ||
+			type === 'board_clear' ||
 			type === 'board_element_add' ||
 			type === 'board_element_move' ||
 			type === 'board_element_delete'
@@ -2125,6 +2699,33 @@
 			y: toNumber(source.y, 0),
 			scaleX: toNumber(source.scaleX ?? source.scale_x, 1),
 			scaleY: toNumber(source.scaleY ?? source.scale_y, 1)
+		};
+	}
+
+	function parseBoardCursorMoveRecord(value: unknown): {
+		userId: string;
+		name: string;
+		x: number;
+		y: number;
+	} | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		const record = value as Record<string, unknown>;
+		const nestedPayload =
+			record.payload && typeof record.payload === 'object' && !Array.isArray(record.payload)
+				? (record.payload as Record<string, unknown>)
+				: null;
+		const source = nestedPayload ?? record;
+		const userId = normalizeIdentifier(toStringValue(source.userId ?? source.user_id));
+		if (!userId) {
+			return null;
+		}
+		return {
+			userId,
+			name: toStringValue(source.name).trim() || 'Guest',
+			x: toNumber(source.x, 0),
+			y: toNumber(source.y, 0)
 		};
 	}
 
@@ -2385,7 +2986,7 @@
 			}
 			event.preventDefault();
 			contextMenuOpen = false;
-			moveDusterToBoardX(boardPoint.x, true);
+			moveDusterToBoardX(boardPoint.x);
 			return;
 		}
 
@@ -2513,13 +3114,29 @@
 		isUploadingMedia = true;
 		boardError = '';
 		try {
-			const uploaded = await uploadToR2(file, normalizedRoomId);
+			let fileForUpload = file;
+			if (file.type.startsWith('image/')) {
+				const options = {
+					maxSizeMB: 1,
+					maxWidthOrHeight: 1200,
+					useWebWorker: true
+				};
+				const compressed = await imageCompression(file, options);
+				fileForUpload =
+					compressed instanceof File
+						? compressed
+						: new File([compressed], file.name, {
+								type: compressed.type || file.type || 'image/jpeg',
+								lastModified: file.lastModified
+							});
+			}
+			const uploaded = await uploadToR2(fileForUpload, normalizedRoomId);
 			const mediaPayload: BoardMediaContent = {
 				url: uploaded.fileUrl,
-				name: file.name || 'attachment',
-				kind: inferMediaMessageType(file),
-				mimeType: file.type || 'application/octet-stream',
-				sizeBytes: file.size,
+				name: fileForUpload.name || file.name || 'attachment',
+				kind: inferMediaMessageType(fileForUpload),
+				mimeType: fileForUpload.type || 'application/octet-stream',
+				sizeBytes: fileForUpload.size,
 				caption: '',
 				senderName: '',
 				sentAt: 0
@@ -2542,13 +3159,36 @@
 
 	function insertRoomMessage(message: ChatMessage) {
 		messagePickerOpen = false;
-		const mediaPayload = buildBoardMediaPayloadFromMessage(message);
-		if (mediaPayload) {
-			void insertMediaObject(mediaPayload, contextMenuPoint);
+		void insertRichMessageObject(message, contextMenuPoint);
+	}
+
+	async function insertRichMessageObject(message: ChatMessage, point: { x: number; y: number }) {
+		if (!fabricCanvas || !canEdit) {
 			return;
 		}
-		const cardText = buildMessageCardText(message);
-		insertMessageLikeObject(cardText, contextMenuPoint);
+		const object = await createRichMessageObject(message, point.x, point.y);
+		if (!object) {
+			return;
+		}
+		const richPayload = createRichMessageCardPayload(message);
+		ensureObjectIdentity(object, 'message');
+		object.set?.({
+			content: JSON.stringify(richPayload)
+		});
+		fabricCanvas.add(object);
+		applyObjectPermission(object);
+		fabricCanvas.setActiveObject?.(object);
+		fabricCanvas.requestRenderAll?.();
+		emitBoardElementAdd(object);
+		const addedElement = boardObjectToElement(object);
+		if (addedElement && !isApplyingLocalAction) {
+			recordLocalAction({
+				kind: 'add',
+				elementId: addedElement.elementId,
+				after: cloneBoardElement(addedElement)
+			});
+		}
+		captureHistorySnapshot();
 	}
 
 	async function insertMediaObject(media: BoardMediaContent, point: { x: number; y: number }) {
@@ -2680,6 +3320,24 @@
 			hour: '2-digit',
 			minute: '2-digit'
 		});
+	}
+
+	function messageAvatarInitial(name: string) {
+		const trimmed = toStringValue(name).trim();
+		return trimmed ? trimmed.slice(0, 1).toUpperCase() : 'G';
+	}
+
+	function resolveMessagePreviewImageURL(message: ChatMessage) {
+		const mediaURL = toStringValue(message.mediaUrl).trim();
+		if (!mediaURL) {
+			return '';
+		}
+		const messageType = toStringValue(message.type).trim().toLowerCase();
+		const mediaType = toStringValue(message.mediaType).trim().toLowerCase();
+		if (messageType === 'image' || mediaType.startsWith('image/')) {
+			return mediaURL;
+		}
+		return /\.(png|jpe?g|gif|webp|avif|bmp|svg)(\?|#|$)/i.test(mediaURL) ? mediaURL : '';
 	}
 
 	function truncatePickerSnippet(value: string, max = 220) {
@@ -2940,6 +3598,12 @@
 			</svg>
 			<span>Clear</span>
 		</button>
+		<button type="button" class="toolbar-action-button" on:click={insertStickyNote} disabled={!canEdit}>
+			Sticky Note
+		</button>
+		<button type="button" class="toolbar-action-button" on:click={exportBoardAsPNG} disabled={!boardReady}>
+			Export Board
+		</button>
 		<div class="insert-wrap" bind:this={insertWrapEl}>
 			<button
 				type="button"
@@ -3116,6 +3780,25 @@
 		on:contextmenu|preventDefault
 	>
 		<canvas bind:this={canvasEl}></canvas>
+		{#if remoteCursors.length > 0}
+			<div class="board-cursor-layer" aria-hidden="true">
+				{#each remoteCursors as cursor (cursor.userId)}
+					<div
+						class="board-remote-cursor"
+						style={`left:${getCursorScreenPosition(cursor).left}px;top:${getCursorScreenPosition(cursor).top}px;--cursor-color:${cursor.color};`}
+					>
+						<span class="cursor-dot"></span>
+						<span class="cursor-name">{cursor.name}</span>
+					</div>
+				{/each}
+			</div>
+		{/if}
+		{#if zControlVisible}
+			<div class="board-z-controls" style={`left:${zControlLeft}px;top:${zControlTop}px;`}>
+				<button type="button" on:click={bringSelectedObjectForward}>Bring Forward</button>
+				<button type="button" on:click={sendSelectedObjectBackward}>Send Backward</button>
+			</div>
+		{/if}
 		{#if activeTool === 'duster' && canModerateBoardActions}
 			<div class="board-duster-layer" aria-hidden="true">
 				<div
@@ -3152,6 +3835,14 @@
 			</div>
 		{/if}
 	</div>
+	<canvas
+		id="minimap"
+		bind:this={minimapEl}
+		class="board-minimap"
+		width={MINIMAP_WIDTH}
+		height={MINIMAP_HEIGHT}
+		aria-label="Board minimap"
+	></canvas>
 
 	{#if messagePickerOpen}
 		<div
@@ -3189,15 +3880,32 @@
 						<div class="empty-state">No messages available</div>
 					{:else}
 						{#each filteredMessages as message (message.id)}
-							<button
-								type="button"
-								class="message-picker-item"
-								on:click={() => insertRoomMessage(message)}
-							>
-								<span class="author">{message.senderName || 'Guest'}</span>
-								<span class="message-meta">{formatBoardMessageDateTime(message.createdAt)}</span>
-								<span class="snippet">{extractMessageSnippet(message)}</span>
-							</button>
+							<div class="message-picker-item">
+								<div class="message-picker-preview">
+									<div class="message-picker-avatar">
+										{messageAvatarInitial(message.senderName || 'Guest')}
+									</div>
+									<div class="message-picker-bubble">
+										<div class="message-picker-bubble-header">
+											<strong>{message.senderName || 'Guest'}</strong>
+											<time>{formatBoardMessageDateTime(message.createdAt)}</time>
+										</div>
+										<p>{extractMessageSnippet(message)}</p>
+										{#if resolveMessagePreviewImageURL(message)}
+											<img
+												src={resolveMessagePreviewImageURL(message)}
+												alt="Message attachment preview"
+												loading="lazy"
+											/>
+										{/if}
+									</div>
+								</div>
+								<div class="message-picker-actions">
+									<button type="button" on:click={() => insertRoomMessage(message)}>
+										Pin to Board
+									</button>
+								</div>
+							</div>
 						{/each}
 					{/if}
 				</div>
@@ -3285,6 +3993,14 @@
 		align-items: center;
 		gap: 0.32rem;
 		padding: 0.35rem 0.52rem;
+	}
+
+	.toolbar-action-button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: 34px;
+		padding: 0 0.62rem;
 	}
 
 	.brush-width-wrap {
@@ -3510,6 +4226,65 @@
 		touch-action: none;
 	}
 
+	.board-cursor-layer {
+		position: absolute;
+		inset: 0;
+		z-index: 16;
+		pointer-events: none;
+	}
+
+	.board-remote-cursor {
+		position: absolute;
+		transform: translate(-4px, -4px);
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+	}
+
+	.cursor-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--cursor-color, #06b6d4);
+		box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.78);
+	}
+
+	.cursor-name {
+		font-size: 0.64rem;
+		font-weight: 700;
+		padding: 0.08rem 0.35rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--cursor-color, #06b6d4) 70%, #0f172a 30%);
+		color: #f8fafc;
+		white-space: nowrap;
+	}
+
+	.board-z-controls {
+		position: absolute;
+		z-index: 22;
+		display: inline-flex;
+		gap: 0.3rem;
+		padding: 0.3rem;
+		border-radius: 10px;
+		border: 1px solid rgba(148, 163, 184, 0.45);
+		background: rgba(15, 23, 42, 0.9);
+		backdrop-filter: blur(6px);
+	}
+
+	.board-z-controls button {
+		border: 1px solid rgba(148, 163, 184, 0.55);
+		background: rgba(30, 41, 59, 0.95);
+		color: #e2e8f0;
+		border-radius: 7px;
+		padding: 0.22rem 0.46rem;
+		font-size: 0.7rem;
+		font-weight: 600;
+	}
+
+	.board-z-controls button:hover {
+		background: rgba(51, 65, 85, 0.95);
+	}
+
 	.board-duster-layer {
 		position: absolute;
 		inset: 0;
@@ -3667,42 +4442,114 @@
 	.message-picker-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.4rem;
+		gap: 0.55rem;
 		overflow: auto;
 		padding-right: 0.15rem;
 	}
 
 	.message-picker-item {
 		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-		text-align: left;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.7rem;
 		border: 1px solid var(--border-subtle);
 		background: var(--bg-primary);
-		border-radius: 8px;
-		padding: 0.56rem 0.65rem;
-		cursor: pointer;
+		border-radius: 10px;
+		padding: 0.62rem;
 	}
 
 	.message-picker-item:hover {
 		background: var(--bg-tertiary);
 	}
 
-	.author {
-		font-size: 0.77rem;
+	.message-picker-preview {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.58rem;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.message-picker-avatar {
+		width: 28px;
+		height: 28px;
+		flex: 0 0 28px;
+		border-radius: 999px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.74rem;
 		font-weight: 700;
-		color: var(--text-muted);
+		color: #f8fafc;
+		background: linear-gradient(145deg, #0ea5e9 0%, #2563eb 100%);
 	}
 
-	.message-meta {
-		font-size: 0.72rem;
-		color: var(--text-muted);
-		opacity: 0.9;
+	.message-picker-bubble {
+		min-width: 0;
+		flex: 1;
+		border-radius: 10px;
+		padding: 0.5rem 0.58rem;
+		background: color-mix(in srgb, var(--bg-secondary) 85%, #0f172a 15%);
+		border: 1px solid color-mix(in srgb, var(--border-subtle) 78%, transparent 22%);
 	}
 
-	.snippet {
-		font-size: 0.84rem;
+	.message-picker-bubble-header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 0.55rem;
+		margin-bottom: 0.26rem;
+	}
+
+	.message-picker-bubble-header strong {
+		font-size: 0.76rem;
 		color: var(--text-main);
+	}
+
+	.message-picker-bubble-header time {
+		font-size: 0.68rem;
+		color: var(--text-muted);
+		white-space: nowrap;
+	}
+
+	.message-picker-bubble p {
+		margin: 0;
+		font-size: 0.82rem;
+		line-height: 1.36;
+		color: var(--text-main);
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.message-picker-bubble img {
+		margin-top: 0.42rem;
+		display: block;
+		max-width: min(260px, 100%);
+		max-height: 170px;
+		border-radius: 8px;
+		object-fit: cover;
+		border: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent 30%);
+	}
+
+	.message-picker-actions {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.message-picker-actions button {
+		border: 1px solid rgba(34, 197, 94, 0.55);
+		background: rgba(34, 197, 94, 0.18);
+		color: #bbf7d0;
+		border-radius: 8px;
+		padding: 0.38rem 0.58rem;
+		font-size: 0.75rem;
+		font-weight: 700;
+		white-space: nowrap;
+	}
+
+	.message-picker-actions button:hover {
+		background: rgba(34, 197, 94, 0.28);
 	}
 
 	.empty-state {
@@ -3713,6 +4560,19 @@
 
 	.hidden-input {
 		display: none;
+	}
+
+	.board-minimap {
+		position: fixed;
+		right: 1rem;
+		bottom: 1rem;
+		z-index: 45;
+		width: 200px;
+		height: 150px;
+		border-radius: 10px;
+		border: 1px solid rgba(148, 163, 184, 0.55);
+		background: rgba(15, 23, 42, 0.9);
+		box-shadow: 0 14px 26px rgba(15, 23, 42, 0.35);
 	}
 
 	@media (max-width: 1200px) {
@@ -3751,6 +4611,13 @@
 		.board-details-popover {
 			right: 0;
 			min-width: min(250px, 90vw);
+		}
+
+		.board-minimap {
+			right: 0.65rem;
+			bottom: 0.65rem;
+			width: 160px;
+			height: 120px;
 		}
 	}
 </style>

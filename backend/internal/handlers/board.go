@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,23 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/savanp08/converse/internal/models"
 )
+
+func (h *RoomHandler) ClearBoardElements(ctx context.Context, roomID string) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("board storage unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("invalid room id")
+	}
+
+	boardTable := h.scylla.Table("board_elements")
+	query := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ?`, boardTable)
+	return h.scylla.Session.Query(query, normalizedRoomID).WithContext(ctx).Exec()
+}
 
 func (h *RoomHandler) GetBoardElements(w http.ResponseWriter, r *http.Request) {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {

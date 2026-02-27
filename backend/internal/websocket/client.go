@@ -299,6 +299,14 @@ func (c *Client) readPump() {
 		}
 		if boardEvent, isBoardEvent := parseBoardEventPayload(raw); isBoardEvent {
 			if c.Hub != nil {
+				if boardEvent.Type == boardCursorMoveType {
+					c.forwardBoardCursorMove(boardEvent)
+					continue
+				}
+				if boardEvent.Type == boardClearType {
+					c.handleBoardClear(boardEvent)
+					continue
+				}
 				c.Hub.boardEvent <- &ClientBoardEvent{
 					Client:    c,
 					Type:      boardEvent.Type,
@@ -352,6 +360,80 @@ func (c *Client) readPump() {
 		}
 		c.Hub.broadcast <- msg
 	}
+}
+
+func (c *Client) canProcessRoomBoardBroadcast(roomID string) bool {
+	if c == nil || c.Hub == nil {
+		return false
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return false
+	}
+	if !c.isSubscribedToRoom(normalizedRoomID) || !c.canWriteToRoom(normalizedRoomID) {
+		return false
+	}
+	if !c.Hub.isClientRoomMember(c.UserID, normalizedRoomID) {
+		c.subscribeToRoom(normalizedRoomID, false)
+		return false
+	}
+	return true
+}
+
+func (c *Client) forwardBoardCursorMove(event clientBoardEventPayload) {
+	if !c.canProcessRoomBoardBroadcast(event.RoomID) {
+		return
+	}
+	payload := map[string]interface{}{
+		"type": boardCursorMoveType,
+	}
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	if _, ok := payload["payload"]; !ok {
+		payload["payload"] = map[string]interface{}{}
+	}
+	c.Hub.BroadcastToRoom(event.RoomID, payload)
+}
+
+func (c *Client) handleBoardClear(event clientBoardEventPayload) {
+	if !c.canProcessRoomBoardBroadcast(event.RoomID) {
+		return
+	}
+	normalizedRoomID := normalizeRoomID(event.RoomID)
+	if normalizedRoomID == "" {
+		return
+	}
+	isRoomAdmin, adminErr := c.Hub.isClientRoomAdmin(normalizeUsername(c.UserID), normalizedRoomID)
+	if adminErr != nil {
+		log.Printf("[ws] board clear admin lookup failed room=%s user=%s err=%v", normalizedRoomID, c.UserID, adminErr)
+		c.Hub.sendBoardError(c, normalizedRoomID, "board_permission_check_failed", "Unable to verify board permissions. Please retry.", "")
+		return
+	}
+	if !isRoomAdmin {
+		c.Hub.sendBoardError(c, normalizedRoomID, "board_permission_denied", "Only room admin can clear the board.", "")
+		return
+	}
+	if c.Hub.msgService == nil {
+		c.Hub.sendBoardError(c, normalizedRoomID, "board_clear_failed", "Unable to clear board right now. Please retry.", "")
+		return
+	}
+	if err := c.Hub.msgService.ClearBoardElements(context.Background(), normalizedRoomID); err != nil {
+		log.Printf("[ws] board clear persist failed room=%s user=%s err=%v", normalizedRoomID, c.UserID, err)
+		c.Hub.sendBoardError(c, normalizedRoomID, "board_clear_failed", "Unable to clear board. Please retry.", "")
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type": boardClearType,
+	}
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	if _, ok := payload["payload"]; !ok {
+		payload["payload"] = map[string]interface{}{}
+	}
+	c.Hub.BroadcastToRoom(normalizedRoomID, payload)
 }
 
 func normalizeRoomID(raw string) string {
