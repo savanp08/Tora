@@ -230,6 +230,29 @@
 </div>
 
 <style>
+	:global(:root) {
+		--home-action-primary: #4f5f78;
+		--home-action-primary-hover: #45546b;
+		--home-action-secondary: #4f5f78;
+		--home-action-secondary-hover: #45546b;
+		--home-action-border: #4f5f78;
+		--home-action-text: #ffffff;
+		--home-action-focus: rgba(79, 95, 120, 0.35);
+		--home-action-shadow: rgba(79, 95, 120, 0.28);
+	}
+
+	:global(:root[data-theme='dark']),
+	:global(.theme-dark) {
+		--home-action-primary: #93c5fd;
+		--home-action-primary-hover: #bfdbfe;
+		--home-action-secondary: #7dd3fc;
+		--home-action-secondary-hover: #bae6fd;
+		--home-action-border: #7dd3fc;
+		--home-action-text: #0f172a;
+		--home-action-focus: rgba(147, 197, 253, 0.45);
+		--home-action-shadow: rgba(147, 197, 253, 0.22);
+	}
+
 	:global(body) {
 		margin: 0;
 		font-family: sans-serif;
@@ -366,21 +389,43 @@
 		font-size: 0.95rem;
 		font-weight: bold;
 		cursor: pointer;
-		transition: background 0.2s;
-		background: var(--surface-secondary);
-		border: 1px solid var(--border-default);
-		color: var(--text-primary);
+		transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+		color: var(--home-action-text);
+		border: 1px solid var(--home-action-border);
+		box-shadow: 0 6px 14px var(--home-action-shadow);
+	}
+
+	.btn-primary-action {
+		background: var(--home-action-primary);
+	}
+
+	.btn-secondary-action {
+		background: var(--home-action-secondary);
 	}
 
 	.btn-primary-action:disabled,
 	.btn-secondary-action:disabled {
 		background: var(--surface-active);
+		border-color: var(--border-default);
 		color: var(--text-tertiary);
+		box-shadow: none;
 		cursor: not-allowed;
 	}
-	.btn-primary-action:hover:not(:disabled),
+
+	.btn-primary-action:hover:not(:disabled) {
+		background: var(--home-action-primary-hover);
+		border-color: var(--home-action-primary-hover);
+	}
+
 	.btn-secondary-action:hover:not(:disabled) {
-		background: var(--surface-hover);
+		background: var(--home-action-secondary-hover);
+		border-color: var(--home-action-secondary-hover);
+	}
+
+	.btn-primary-action:focus-visible,
+	.btn-secondary-action:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 3px var(--home-action-focus), 0 6px 14px var(--home-action-shadow);
 	}
 
 	.error-msg {
