@@ -125,11 +125,11 @@ type ClientSubscription struct {
 
 func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	hub := &Hub{
-		broadcast:            make(chan models.Message),
-		redisInbox:           make(chan models.Message, 256),
+		broadcast:            make(chan models.Message, 4096),
+		redisInbox:           make(chan models.Message, 4096),
 		typing:               make(chan *ClientTypingEvent, 256),
-		typingInbox:          make(chan TypingRedisEvent, 512),
-		boardEvent:           make(chan *ClientBoardEvent, 256),
+		typingInbox:          make(chan TypingRedisEvent, 4096),
+		boardEvent:           make(chan *ClientBoardEvent, 4096),
 		discussionComment:    make(chan *ClientDiscussionCommentEvent, 256),
 		discussionCommentPin: make(chan *ClientDiscussionCommentPinEvent, 256),
 		discussionInbox:      make(chan DiscussionCommentEvent, 512),
@@ -138,8 +138,8 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		roomEvent:            make(chan RoomEvent, 256),
 		roomEventInbox:       make(chan RoomEvent, 512),
 		mutationInbox:        make(chan MessageMutationEvent, 512),
-		register:             make(chan *Client),
-		unregister:           make(chan *Client),
+		register:             make(chan *Client, 4096),
+		unregister:           make(chan *Client, 4096),
 		subscribe:            make(chan *ClientSubscription, 256),
 		rooms:                make(map[string]map[*Client]bool),
 		msgService:           service,
@@ -147,7 +147,9 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	}
 
 	if service != nil && service.CanPersistToDisk() {
-		go hub.persistenceWorker()
+		for i := 0; i < 30; i++ {
+			go hub.persistenceWorker()
+		}
 	}
 	if service != nil && service.Redis != nil && service.Redis.Client != nil {
 		go hub.Subscribe()

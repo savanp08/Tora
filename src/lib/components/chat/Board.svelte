@@ -216,7 +216,6 @@
 	let zControlVisible = false;
 	let zControlLeft = -9999;
 	let zControlTop = -9999;
-	let minimapDrawSeq = 0;
 	let minimapRenderInProgress = false;
 
 	let isApplyingRemoteEvent = false;
@@ -1122,7 +1121,6 @@
 			return;
 		}
 		minimapRenderInProgress = true;
-		const seq = ++minimapDrawSeq;
 		const scale = Math.min(MINIMAP_WIDTH / BOARD_WIDTH, MINIMAP_HEIGHT / BOARD_HEIGHT);
 		const drawWidth = BOARD_WIDTH * scale;
 		const drawHeight = BOARD_HEIGHT * scale;
@@ -1131,35 +1129,25 @@
 		ctx.clearRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
 		ctx.fillStyle = isDarkMode ? '#0b1220' : '#f8fafc';
 		ctx.fillRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
-		const snapshotDataURL = fabricCanvas.toDataURL?.({
-			format: 'png',
-			left: 0,
-			top: 0,
-			width: BOARD_WIDTH,
-			height: BOARD_HEIGHT,
-			multiplier: scale
-		});
-		if (typeof snapshotDataURL === 'string' && snapshotDataURL !== '') {
-			const image = new Image();
-			image.onload = () => {
-				if (seq !== minimapDrawSeq) {
-					minimapRenderInProgress = false;
-					return;
-				}
-				ctx.clearRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
-				ctx.fillStyle = isDarkMode ? '#0b1220' : '#f8fafc';
-				ctx.fillRect(0, 0, MINIMAP_WIDTH, MINIMAP_HEIGHT);
-				ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
-				drawMinimapViewport(ctx, offsetX, offsetY, scale);
-				minimapRenderInProgress = false;
-			};
-			image.onerror = () => {
-				drawMinimapViewport(ctx, offsetX, offsetY, scale);
-				minimapRenderInProgress = false;
-			};
-			image.src = snapshotDataURL;
+
+		const mainCanvasEl = document.querySelector('.upper-canvas') as HTMLCanvasElement | null;
+		if (!mainCanvasEl) {
+			drawMinimapViewport(ctx, offsetX, offsetY, scale);
+			minimapRenderInProgress = false;
 			return;
 		}
+
+		ctx.drawImage(
+			mainCanvasEl,
+			0,
+			0,
+			mainCanvasEl.width,
+			mainCanvasEl.height,
+			offsetX,
+			offsetY,
+			drawWidth,
+			drawHeight
+		);
 		drawMinimapViewport(ctx, offsetX, offsetY, scale);
 		minimapRenderInProgress = false;
 	}
@@ -2441,17 +2429,120 @@
 			fontSize: 10,
 			fill: isDarkMode ? '#94a3b8' : '#475569'
 		});
-		const bodyText = buildMessageCardBody(toChatMessageFromRichPayload(payload));
-		const bodyObject = new TextboxClass(bodyText || '(empty)', {
-			left: padding,
-			top: padding + 34,
-			width: maxContentWidth,
-			fontSize: 14,
-			lineHeight: 1.34,
-			fill: isDarkMode ? '#f8fafc' : '#0f172a'
-		});
-		let contentBottom = padding + 34 + Math.max(22, toNumber((bodyObject as any).height, 22));
-		const groupChildren: any[] = [senderText, timestampText, bodyObject];
+		const groupChildren: any[] = [senderText, timestampText];
+		const messageLikePayload = toChatMessageFromRichPayload(payload);
+		const parsedTask =
+			payload.type === 'task'
+				? parseTaskMessagePayload(toStringValue(messageLikePayload.content))
+				: null;
+		let contentBottom = padding + 34;
+		if (parsedTask) {
+			const taskTitle = new TextboxClass(parsedTask.title || 'Task', {
+				left: padding,
+				top: contentBottom,
+				width: maxContentWidth,
+				fontSize: 13,
+				fontWeight: '700',
+				lineHeight: 1.3,
+				fill: isDarkMode ? '#f8fafc' : '#0f172a'
+			});
+			groupChildren.push(taskTitle);
+			contentBottom += Math.max(20, toNumber((taskTitle as any).height, 20)) + 3;
+
+			const completedCount = parsedTask.tasks.filter((task) => task.completed).length;
+			const progressLabel = new TextClass(`${completedCount}/${parsedTask.tasks.length} done`, {
+				left: padding,
+				top: contentBottom,
+				fontSize: 10,
+				fill: isDarkMode ? '#94a3b8' : '#64748b'
+			});
+			groupChildren.push(progressLabel);
+			contentBottom += 18;
+
+			const checkboxSize = 14;
+			const visibleTasks = parsedTask.tasks.slice(0, 8);
+			if (visibleTasks.length === 0) {
+				const emptyState = new TextClass('No checklist items', {
+					left: padding,
+					top: contentBottom + 2,
+					fontSize: 12,
+					fill: isDarkMode ? '#94a3b8' : '#64748b'
+				});
+				groupChildren.push(emptyState);
+				contentBottom += 22;
+			} else {
+				for (const task of visibleTasks) {
+					const rowTop = contentBottom;
+					const isDone = Boolean(task.completed);
+					const checkbox = new RectClass({
+						left: padding,
+						top: rowTop + 1,
+						width: checkboxSize,
+						height: checkboxSize,
+						rx: 3,
+						ry: 3,
+						fill: isDone ? '#22c55e' : isDarkMode ? '#0f172a' : '#ffffff',
+						stroke: isDone ? '#22c55e' : isDarkMode ? '#475569' : '#94a3b8',
+						strokeWidth: 1
+					});
+					groupChildren.push(checkbox);
+
+					if (isDone) {
+						const tick = new TextClass('✓', {
+							left: padding + 3,
+							top: rowTop - 0.5,
+							fontSize: 12,
+							fontWeight: '700',
+							fill: '#ffffff'
+						});
+						groupChildren.push(tick);
+					}
+
+					const taskText = new TextboxClass(task.text || 'Untitled task', {
+						left: padding + checkboxSize + 8,
+						top: rowTop,
+						width: maxContentWidth - checkboxSize - 8,
+						fontSize: 13,
+						lineHeight: 1.25,
+						fill: isDone
+							? isDarkMode
+								? '#94a3b8'
+								: '#64748b'
+							: isDarkMode
+								? '#e2e8f0'
+								: '#1e293b',
+						textDecoration: isDone ? 'line-through' : ''
+					});
+					groupChildren.push(taskText);
+					const rowHeight = Math.max(18, toNumber((taskText as any).height, 18));
+					contentBottom = rowTop + rowHeight + 7;
+				}
+			}
+
+			const remainingCount = Math.max(0, parsedTask.tasks.length - visibleTasks.length);
+			if (remainingCount > 0) {
+				const moreText = new TextClass(`+${remainingCount} more`, {
+					left: padding,
+					top: contentBottom + 1,
+					fontSize: 11,
+					fill: isDarkMode ? '#94a3b8' : '#64748b'
+				});
+				groupChildren.push(moreText);
+				contentBottom += 20;
+			}
+		} else {
+			const bodyText = buildMessageCardBody(messageLikePayload);
+			const bodyObject = new TextboxClass(bodyText || '(empty)', {
+				left: padding,
+				top: contentBottom,
+				width: maxContentWidth,
+				fontSize: 14,
+				lineHeight: 1.34,
+				fill: isDarkMode ? '#f8fafc' : '#0f172a'
+			});
+			groupChildren.push(bodyObject);
+			contentBottom += Math.max(22, toNumber((bodyObject as any).height, 22));
+		}
 		if (richMessageHasImage(payload) && payload.mediaUrl) {
 			const ImageClass = getFabricClass('Image') ?? getFabricClass('FabricImage');
 			if (ImageClass) {
@@ -3684,7 +3775,7 @@
 		const lines = [`Task: ${parsedTask.title || 'Task'}`];
 		const visibleTasks = parsedTask.tasks.slice(0, 8);
 		for (const task of visibleTasks) {
-			lines.push(`${task.completed ? '[x]' : '[ ]'} ${task.text}`);
+			lines.push(`${task.completed ? '✓' : '○'} ${task.text}`);
 		}
 		const remainingCount = Math.max(0, parsedTask.tasks.length - visibleTasks.length);
 		if (remainingCount > 0) {
@@ -4799,8 +4890,8 @@
 
 	.message-picker-actions button {
 		border: 1px solid rgba(34, 197, 94, 0.55);
-		background: rgba(34, 197, 94, 0.18);
-		color: #bbf7d0;
+		background: rgba(2, 243, 90, 0.636);
+		color: #f9f9f9;
 		border-radius: 8px;
 		padding: 0.38rem 0.58rem;
 		font-size: 0.75rem;

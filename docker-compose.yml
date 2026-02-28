@@ -3,6 +3,10 @@ services:
     image: redis:alpine
     container_name: converse-redis
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly no
     ports:
       - '6379:6379'

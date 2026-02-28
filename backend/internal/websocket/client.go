@@ -28,12 +28,12 @@ const (
 	maxMediaURLLen = 4096
 	maxFileNameLen = 180
 
-	maxGlobalWSConnections = int32(15000)
-	maxWSConnectionsPerIP  = int32(5)
+	maxGlobalWSConnections = int32(60000)
+	maxWSConnectionsPerIP  = int32(2000)
 )
 
 var (
-	wsConnectLimiter = security.NewLimiter(40, time.Minute, 15, 15*time.Minute)
+	wsConnectLimiter = security.NewLimiter(1000, time.Minute, 600, 15*time.Minute)
 
 	globalWSConnections    atomic.Int32
 	activeConnectionsPerIP sync.Map
