@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { activeRoomPassword } from '$lib/store';
 	import type { OnlineMember } from '$lib/types/chat';
 	import { normalizeIdentifier } from '$lib/utils/chat/core';
 	import { createEventDispatcher, onDestroy } from 'svelte';
@@ -7,6 +8,7 @@
 	export let isMobileView = false;
 	export let roomId = '';
 	export let roomName = 'Room';
+	export let roomAdminCode = '';
 	export let createdLabel = 'Unknown';
 	export let expiresLabel = 'Unknown';
 	export let isExtendingRoom = false;
@@ -15,19 +17,31 @@
 	export let currentUserId = '';
 	export let formatDateTime: (timestamp: number) => string = (timestamp) =>
 		new Date(timestamp).toLocaleString();
+	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 
 	const dispatch = createEventDispatcher<{
 		close: void;
 		extend: void;
 		removeMember: { memberId: string };
+		promoted: { token?: string; adminCode?: string };
 	}>();
 
 	let copied = false;
 	let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+	let adminCodeCopied = false;
+	let adminCodeCopyTimer: ReturnType<typeof setTimeout> | null = null;
+	let promotionCode = '';
+	let isPromoting = false;
+	let promotionError = '';
+	let promotionSuccess = '';
+	$: visibleAdminCode = (roomAdminCode || '').trim().toUpperCase().slice(0, 4);
 
 	onDestroy(() => {
 		if (copiedTimer) {
 			clearTimeout(copiedTimer);
+		}
+		if (adminCodeCopyTimer) {
+			clearTimeout(adminCodeCopyTimer);
 		}
 	});
 
@@ -44,7 +58,9 @@
 		if (typeof window === 'undefined' || !roomId) {
 			return;
 		}
-		const inviteUrl = `${window.location.origin}/chat/${encodeURIComponent(roomId)}`;
+		const normalizedPassword = ($activeRoomPassword || '').trim().slice(0, 32);
+		const inviteHash = normalizedPassword ? `#key=${encodeURIComponent(normalizedPassword)}` : '';
+		const inviteUrl = `${window.location.origin}/chat/${encodeURIComponent(roomId)}${inviteHash}`;
 
 		const fallbackCopy = () => {
 			const textarea = document.createElement('textarea');
@@ -78,6 +94,112 @@
 				resetCopiedStateSoon();
 			});
 	}
+
+	function resetAdminCodeCopiedStateSoon() {
+		if (adminCodeCopyTimer) {
+			clearTimeout(adminCodeCopyTimer);
+		}
+		adminCodeCopyTimer = setTimeout(() => {
+			adminCodeCopied = false;
+		}, 2000);
+	}
+
+	function copyAdminCode() {
+		if (!visibleAdminCode) {
+			return;
+		}
+		const onSuccess = () => {
+			adminCodeCopied = true;
+			resetAdminCodeCopiedStateSoon();
+		};
+		const fallbackCopy = () => {
+			const textarea = document.createElement('textarea');
+			textarea.value = visibleAdminCode;
+			textarea.setAttribute('readonly', 'true');
+			textarea.style.position = 'fixed';
+			textarea.style.opacity = '0';
+			textarea.style.pointerEvents = 'none';
+			document.body.appendChild(textarea);
+			textarea.select();
+			document.execCommand('copy');
+			document.body.removeChild(textarea);
+			onSuccess();
+		};
+		if (!navigator.clipboard?.writeText) {
+			fallbackCopy();
+			return;
+		}
+		navigator.clipboard.writeText(visibleAdminCode).then(onSuccess).catch(fallbackCopy);
+	}
+
+	function onPromotionInput(event: Event) {
+		const target = event.currentTarget as HTMLInputElement | null;
+		const next = (target?.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+		promotionCode = next.slice(0, 4);
+		promotionError = '';
+		promotionSuccess = '';
+	}
+
+	async function promoteToAdmin() {
+		if (!roomId || isPromoting || isActiveRoomAdmin) {
+			return;
+		}
+		const code = promotionCode.trim().toUpperCase();
+		if (code.length !== 4) {
+			promotionError = 'Enter the 4-character admin code.';
+			return;
+		}
+		const normalizedUserId = normalizeIdentifier(currentUserId);
+		if (!normalizedUserId) {
+			promotionError = 'Unable to identify your account. Rejoin the room and retry.';
+			return;
+		}
+
+		isPromoting = true;
+		promotionError = '';
+		promotionSuccess = '';
+		try {
+			const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/promote`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					code,
+					userId: normalizedUserId
+				})
+			});
+			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!res.ok) {
+				promotionError =
+					(typeof data.error === 'string' && data.error.trim()) || 'Admin promotion failed.';
+				return;
+			}
+			const token = typeof data.token === 'string' ? data.token.trim() : '';
+			const adminCode =
+				typeof data.adminCode === 'string'
+					? data.adminCode.trim().toUpperCase().slice(0, 4)
+					: visibleAdminCode;
+			promotionSuccess = 'Admin access granted.';
+			dispatch('promoted', {
+				token,
+				adminCode
+			});
+		} catch {
+			promotionError = 'Network error while promoting to admin.';
+		} finally {
+			isPromoting = false;
+		}
+	}
+
+	function memberHasAdminPrivilege(member: OnlineMember) {
+		if (member.isAdmin) {
+			return true;
+		}
+		return (
+			isActiveRoomAdmin &&
+			normalizeIdentifier(member.id) !== '' &&
+			normalizeIdentifier(member.id) === normalizeIdentifier(currentUserId)
+		);
+	}
 </script>
 
 {#if show}
@@ -96,7 +218,12 @@
 		aria-modal="true"
 	>
 		<header>
-			<h3>{roomName}</h3>
+			<h3>
+				{roomName}
+				{#if isActiveRoomAdmin}
+					<span class="role-indicator" aria-label="Admin privilege">Admin</span>
+				{/if}
+			</h3>
 			<button type="button" on:click={() => dispatch('close')}>Close</button>
 		</header>
 		<div class="mobile-info-content">
@@ -110,6 +237,38 @@
 					<span>Expires</span>
 					<strong>{expiresLabel}</strong>
 				</div>
+			</div>
+
+			<div class="admin-access-card">
+				<h4>Admin Access</h4>
+				{#if isActiveRoomAdmin}
+					<div class="admin-code-row">
+						<span>Admin Code</span>
+						<strong>{visibleAdminCode || '----'}</strong>
+						<button type="button" on:click={copyAdminCode}>
+							{adminCodeCopied ? 'Copied!' : 'Copy'}
+						</button>
+					</div>
+				{:else}
+					<div class="admin-promote-row">
+						<input
+							type="text"
+							maxlength="4"
+							placeholder="4-Char Code"
+							value={promotionCode}
+							on:input={onPromotionInput}
+							style="text-transform: uppercase;"
+						/>
+						<button type="button" on:click={promoteToAdmin} disabled={isPromoting}>
+							{isPromoting ? 'Promoting...' : 'Promote Me'}
+						</button>
+					</div>
+					{#if promotionError}
+						<p class="admin-promote-feedback error">{promotionError}</p>
+					{:else if promotionSuccess}
+						<p class="admin-promote-feedback success">{promotionSuccess}</p>
+					{/if}
+				{/if}
 			</div>
 
 			<div class="room-actions">
@@ -139,7 +298,12 @@
 					<div class="online-member">
 						<span class="member-dot"></span>
 						<div>
-							<div class="member-name">{member.name}</div>
+							<div class="member-name">
+								<span>{member.name}</span>
+								{#if memberHasAdminPrivilege(member)}
+									<span class="member-role-badge" aria-label="Admin">Admin</span>
+								{/if}
+							</div>
 							<div class="member-meta">Joined {formatDateTime(member.joinedAt)}</div>
 						</div>
 						{#if isActiveRoomAdmin && normalizeIdentifier(member.id) !== normalizeIdentifier(currentUserId)}
@@ -202,6 +366,21 @@
 	.mobile-info-panel header h3 {
 		margin: 0;
 		font-size: 1rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.38rem;
+	}
+
+	.role-indicator {
+		font-size: 0.64rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: #64748b;
+		border: 1px solid #cbd5e1;
+		border-radius: 999px;
+		padding: 0.08rem 0.36rem;
+		line-height: 1.1;
 	}
 
 	.mobile-info-panel header button {
@@ -232,6 +411,93 @@
 		border: 1px solid #c8d1de;
 		border-radius: 10px;
 		background: #e9eef6;
+	}
+
+	.admin-access-card {
+		margin-bottom: 0.9rem;
+		padding: 0.75rem;
+		border: 1px solid #c8d1de;
+		border-radius: 10px;
+		background: #e9eef6;
+	}
+
+	.admin-access-card h4 {
+		margin: 0 0 0.45rem;
+		font-size: 0.86rem;
+		color: #2d3d54;
+	}
+
+	.admin-code-row {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		font-size: 0.78rem;
+		color: #5e6d83;
+	}
+
+	.admin-code-row strong {
+		font-size: 0.84rem;
+		letter-spacing: 0.08em;
+		color: #334155;
+	}
+
+	.admin-code-row button {
+		margin-left: auto;
+		border: 1px solid #c4cdd9;
+		background: #f5f8fc;
+		color: #324158;
+		border-radius: 7px;
+		padding: 0.22rem 0.46rem;
+		font-size: 0.72rem;
+		cursor: pointer;
+	}
+
+	.admin-promote-row {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
+	.admin-promote-row input {
+		flex: 1;
+		min-width: 0;
+		border: 1px solid #c4cdd9;
+		border-radius: 7px;
+		padding: 0.34rem 0.46rem;
+		font-size: 0.8rem;
+		letter-spacing: 0.08em;
+		background: #f8fafc;
+		color: #334155;
+	}
+
+	.admin-promote-row button {
+		border: 1px solid #4c5e7b;
+		background: #4c5e7b;
+		color: #ffffff;
+		border-radius: 7px;
+		padding: 0.34rem 0.52rem;
+		font-size: 0.74rem;
+		font-weight: 600;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+
+	.admin-promote-row button:disabled {
+		opacity: 0.7;
+		cursor: not-allowed;
+	}
+
+	.admin-promote-feedback {
+		margin: 0.4rem 0 0;
+		font-size: 0.73rem;
+	}
+
+	.admin-promote-feedback.error {
+		color: #b91c1c;
+	}
+
+	.admin-promote-feedback.success {
+		color: #15803d;
 	}
 
 	.room-details-card h4 {
@@ -323,6 +589,21 @@
 	.member-name {
 		font-size: 0.88rem;
 		color: #2c3b50;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.34rem;
+	}
+
+	.member-role-badge {
+		font-size: 0.62rem;
+		font-weight: 600;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+		color: #64748b;
+		border: 1px solid #cbd5e1;
+		border-radius: 999px;
+		padding: 0.08rem 0.34rem;
+		line-height: 1.1;
 	}
 
 	.member-meta {

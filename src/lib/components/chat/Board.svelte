@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import type { ChatMessage } from '$lib/types/chat';
+	import { activeRoomPassword } from '$lib/store';
 	import {
 		createMessageId,
 		normalizeIdentifier,
@@ -10,6 +11,7 @@
 		toInt,
 		toStringValue
 	} from '$lib/utils/chat/core';
+	import { decryptText, encryptText } from '$lib/utils/crypto';
 	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 	import { inferMediaMessageType, uploadToR2, type MediaMessageType } from '$lib/utils/media';
 	import { globalMessages, sendSocketPayload } from '$lib/ws';
@@ -138,6 +140,9 @@
 	export let currentUsername = '';
 
 	let boardContainerEl: HTMLDivElement | null = null;
+	let boardToolbarEl: HTMLDivElement | null = null;
+	let toolbarPrimaryEl: HTMLDivElement | null = null;
+	let toolbarSecondaryEl: HTMLDivElement | null = null;
 	let canvasEl: HTMLCanvasElement | null = null;
 	let minimapEl: HTMLCanvasElement | null = null;
 	let mediaInputEl: HTMLInputElement | null = null;
@@ -169,7 +174,9 @@
 	let pendingInsertElementId = '';
 	let isInsertOperationActive = false;
 	let insertionHintLabel = '';
-	let showToolbarMore = false;
+	let isWidthControlVisible = false;
+	let shouldUseToolbarMenu = false;
+	let isToolbarExpanded = false;
 	let showBoardDetails = false;
 	let canModerateBoardActions = false;
 	let canManageAllBoardElements = false;
@@ -224,8 +231,11 @@
 
 	let removeMessageSubscription: (() => void) | null = null;
 	let resizeObserver: ResizeObserver | null = null;
+	let toolbarResizeObserver: ResizeObserver | null = null;
+	let toolbarOverflowMeasureRAF = 0;
 	let removeWindowKeyListeners: (() => void) | null = null;
 	let removeWindowPointerListener: (() => void) | null = null;
+	let removeWindowResizeListener: (() => void) | null = null;
 	let boardPermissionRefreshKey = '';
 
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
@@ -255,7 +265,14 @@
 	}
 	$: canModerateBoardActions = canEdit;
 	$: canManageAllBoardElements = canEdit && canModerateBoard;
-	$: if (!canModerateBoardActions && (activeTool === 'eraser' || activeTool === 'duster')) {
+	$: isWidthControlVisible = activeTool === 'draw' || activeTool === 'eraser';
+	$: if (!isWidthControlVisible && showWidthMenu) {
+		showWidthMenu = false;
+	}
+	$: if (
+		(!canModerateBoardActions && activeTool === 'eraser') ||
+		(!canManageAllBoardElements && activeTool === 'duster')
+	) {
 		applyToolMode('select');
 	}
 	$: canUndoLocalAction = localUndoStack.length > 0;
@@ -279,6 +296,10 @@
 		void boardPermissionRefreshKey;
 		applyBoardObjectPermissions();
 	}
+	$: if (browser && boardToolbarEl && toolbarPrimaryEl && toolbarSecondaryEl) {
+		void isWidthControlVisible;
+		scheduleToolbarOverflowCheck();
+	}
 
 	onMount(() => {
 		if (!browser) {
@@ -286,6 +307,7 @@
 		}
 
 		registerWindowGuards();
+		registerToolbarLayoutGuards();
 		void initializeBoard();
 
 		removeMessageSubscription = globalMessages.subscribe((event) => {
@@ -316,6 +338,14 @@
 			resizeObserver.disconnect();
 			resizeObserver = null;
 		}
+		if (toolbarResizeObserver) {
+			toolbarResizeObserver.disconnect();
+			toolbarResizeObserver = null;
+		}
+		if (toolbarOverflowMeasureRAF) {
+			cancelAnimationFrame(toolbarOverflowMeasureRAF);
+			toolbarOverflowMeasureRAF = 0;
+		}
 		if (removeWindowKeyListeners) {
 			removeWindowKeyListeners();
 			removeWindowKeyListeners = null;
@@ -323,6 +353,10 @@
 		if (removeWindowPointerListener) {
 			removeWindowPointerListener();
 			removeWindowPointerListener = null;
+		}
+		if (removeWindowResizeListener) {
+			removeWindowResizeListener();
+			removeWindowResizeListener = null;
 		}
 		if (fabricCanvas) {
 			fabricCanvas.dispose();
@@ -352,11 +386,11 @@
 				cancelCurrentOperation();
 				return;
 			}
-			if ((event.key === 'Delete' || event.key === 'Backspace') && canModerateBoardActions) {
+			if ((event.key === 'Delete' || event.key === 'Backspace') && canEdit) {
 				const activeObject = fabricCanvas?.getActiveObject?.();
-				if (activeObject) {
+				if (activeObject && canMutateBoardObject(activeObject as FabricObjectLike)) {
 					event.preventDefault();
-					removeBoardObject(activeObject, true);
+					removeBoardObject(activeObject as FabricObjectLike, true);
 				}
 			}
 		};
@@ -383,7 +417,7 @@
 			showInsertMenu = false;
 			showWidthMenu = false;
 			showBoardDetails = false;
-			showToolbarMore = false;
+			isToolbarExpanded = false;
 		};
 		const onPointerMove = (event: PointerEvent) => {
 			if (!dusterIsDragging) {
@@ -421,6 +455,96 @@
 			window.removeEventListener('pointerup', onPointerUp);
 			window.removeEventListener('pointercancel', onPointerUp);
 		};
+	}
+
+	function registerToolbarLayoutGuards() {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		const onResize = () => {
+			scheduleToolbarOverflowCheck();
+		};
+		window.addEventListener('resize', onResize);
+		removeWindowResizeListener = () => {
+			window.removeEventListener('resize', onResize);
+		};
+		if (typeof ResizeObserver !== 'undefined' && boardToolbarEl) {
+			toolbarResizeObserver?.disconnect();
+			toolbarResizeObserver = new ResizeObserver(() => {
+				scheduleToolbarOverflowCheck();
+			});
+			toolbarResizeObserver.observe(boardToolbarEl);
+		}
+		scheduleToolbarOverflowCheck();
+	}
+
+	function scheduleToolbarOverflowCheck() {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		if (!boardToolbarEl || !toolbarPrimaryEl || !toolbarSecondaryEl) {
+			return;
+		}
+		if (toolbarOverflowMeasureRAF) {
+			cancelAnimationFrame(toolbarOverflowMeasureRAF);
+		}
+		toolbarOverflowMeasureRAF = window.requestAnimationFrame(() => {
+			toolbarOverflowMeasureRAF = 0;
+			syncToolbarOverflowState();
+		});
+	}
+
+	function syncToolbarOverflowState() {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		if (!boardToolbarEl || !toolbarPrimaryEl || !toolbarSecondaryEl) {
+			return;
+		}
+		const isCompactScreen = window.matchMedia('(max-width: 768px)').matches;
+		if (!isCompactScreen) {
+			shouldUseToolbarMenu = false;
+			isToolbarExpanded = false;
+			return;
+		}
+		const toolbarStyles = window.getComputedStyle(boardToolbarEl);
+		const paddingLeft = parseFloat(toolbarStyles.paddingLeft || '0') || 0;
+		const paddingRight = parseFloat(toolbarStyles.paddingRight || '0') || 0;
+		const toolbarGap = parseFloat(toolbarStyles.columnGap || toolbarStyles.gap || '0') || 0;
+		const availableWidth = Math.max(0, boardToolbarEl.clientWidth - paddingLeft - paddingRight);
+		const primaryWidth = measureToolbarGroupWidth(toolbarPrimaryEl, '.mobile-expand-btn');
+		const secondaryWidth = measureToolbarGroupWidth(toolbarSecondaryEl);
+		const requiredWidth = primaryWidth + secondaryWidth + toolbarGap;
+		const needsMenu = requiredWidth > availableWidth + 1;
+		shouldUseToolbarMenu = needsMenu;
+		if (!needsMenu) {
+			isToolbarExpanded = false;
+		}
+	}
+
+	function measureToolbarGroupWidth(groupEl: HTMLDivElement | null, omitSelector = '') {
+		if (!browser || typeof document === 'undefined' || !groupEl) {
+			return 0;
+		}
+		const clone = groupEl.cloneNode(true) as HTMLDivElement;
+		if (omitSelector) {
+			clone.querySelectorAll(omitSelector).forEach((node) => {
+				node.remove();
+			});
+		}
+		clone.style.position = 'absolute';
+		clone.style.visibility = 'hidden';
+		clone.style.pointerEvents = 'none';
+		clone.style.left = '-10000px';
+		clone.style.top = '-10000px';
+		clone.style.display = 'inline-flex';
+		clone.style.flexWrap = 'nowrap';
+		clone.style.width = 'max-content';
+		clone.style.maxWidth = 'none';
+		document.body.appendChild(clone);
+		const width = clone.getBoundingClientRect().width;
+		clone.remove();
+		return Number.isFinite(width) ? width : 0;
 	}
 
 	async function initializeBoard() {
@@ -596,17 +720,30 @@
 			if (!nativeEvent) {
 				return;
 			}
-			const delta = nativeEvent.deltaY;
-			let zoom = fabricCanvas.getZoom?.() ?? 1;
-			const intensity = Math.max(0.5, Math.min(2, Math.abs(delta) / 80));
-			const step = delta > 0 ? 0.84 : 1.19;
-			zoom *= step ** intensity;
-			zoom = clampZoom(zoom);
-			const pointer = {
-				x: nativeEvent.offsetX,
-				y: nativeEvent.offsetY
-			};
-			fabricCanvas.zoomToPoint?.(pointer, zoom);
+
+			// If Ctrl or Cmd is held (or trackpad pinch), ZOOM
+			if (nativeEvent.ctrlKey || nativeEvent.metaKey) {
+				const delta = nativeEvent.deltaY;
+				let zoom = fabricCanvas.getZoom?.() ?? 1;
+				const intensity = Math.max(0.5, Math.min(2, Math.abs(delta) / 80));
+				const step = delta > 0 ? 0.88 : 1.12; // Smooth zoom step
+				zoom *= step ** intensity;
+				zoom = clampZoom(zoom);
+				const pointer = {
+					x: nativeEvent.offsetX,
+					y: nativeEvent.offsetY
+				};
+				fabricCanvas.zoomToPoint?.(pointer, zoom);
+			} else {
+				// Otherwise, PAN (Scroll)
+				const viewport = fabricCanvas.viewportTransform;
+				if (viewport) {
+					// Subtract delta to move the canvas in the direction of the scroll
+					viewport[4] -= nativeEvent.deltaX;
+					viewport[5] -= nativeEvent.deltaY;
+					fabricCanvas.setViewportTransform?.(viewport);
+				}
+			}
 			clampViewportTransform();
 			fabricCanvas.requestRenderAll?.();
 			nativeEvent.preventDefault();
@@ -646,10 +783,17 @@
 				canModerateBoardActions &&
 				activeTool === 'eraser' &&
 				target &&
-				target !== boardBoundsRect &&
-				canMutateBoardObject(target)
+				target !== boardBoundsRect
 			) {
-				removeBoardObject(target, true);
+				if (canMutateBoardObject(target)) {
+					removeBoardObject(target, true);
+				} else {
+					target.set?.({ opacity: 0.5 });
+					setTimeout(() => {
+						target.set?.({ opacity: 1 });
+						fabricCanvas.requestRenderAll();
+					}, 150);
+				}
 				return;
 			}
 
@@ -745,36 +889,49 @@
 			if (!target || target === boardBoundsRect) {
 				return;
 			}
-			if (!canMutateBoardObject(target)) {
-				applyObjectPermission(target);
-				fabricCanvas.requestRenderAll?.();
-				return;
-			}
-			if (isPendingObject(target)) {
+			if ((target as Record<string, unknown>).type === 'activeSelection') {
+				// Ensure the group doesn't contain unauthorized items before broadcasting moves
+				enforceSelectionPermissions();
+				const objects = (target as any).getObjects?.() || [];
+				for (const obj of objects) {
+					ensureObjectIdentity(obj as FabricObjectLike);
+					emitBoardElementMove(obj as FabricObjectLike);
+				}
 				captureHistorySnapshot();
-				return;
+			} else {
+				if (!canMutateBoardObject(target)) {
+					applyObjectPermission(target);
+					fabricCanvas.discardActiveObject?.();
+					fabricCanvas.requestRenderAll?.();
+					return;
+				}
+				// ... (keep the rest of your single object move/history tracking logic here)
+				if (isPendingObject(target)) {
+					captureHistorySnapshot();
+					return;
+				}
+				const afterElement = boardObjectToElement(target);
+				if (!afterElement) {
+					return;
+				}
+				const beforeElement = pendingTransformSnapshotByElementId.get(afterElement.elementId);
+				discardPendingTransformForElement(afterElement.elementId);
+				ensureObjectIdentity(target);
+				emitBoardElementMove(target);
+				if (
+					beforeElement &&
+					!elementsEquivalent(beforeElement, afterElement) &&
+					!isApplyingLocalAction
+				) {
+					recordLocalAction({
+						kind: 'move',
+						elementId: afterElement.elementId,
+						before: cloneBoardElement(beforeElement),
+						after: cloneBoardElement(afterElement)
+					});
+				}
+				captureHistorySnapshot();
 			}
-			const afterElement = boardObjectToElement(target);
-			if (!afterElement) {
-				return;
-			}
-			const beforeElement = pendingTransformSnapshotByElementId.get(afterElement.elementId);
-			discardPendingTransformForElement(afterElement.elementId);
-			ensureObjectIdentity(target);
-			emitBoardElementMove(target);
-			if (
-				beforeElement &&
-				!elementsEquivalent(beforeElement, afterElement) &&
-				!isApplyingLocalAction
-			) {
-				recordLocalAction({
-					kind: 'move',
-					elementId: afterElement.elementId,
-					before: cloneBoardElement(beforeElement),
-					after: cloneBoardElement(afterElement)
-				});
-			}
-			captureHistorySnapshot();
 		});
 
 		fabricCanvas.on('object:scaling', (event: any) => {
@@ -786,10 +943,12 @@
 			updateSelectionControlsPosition();
 		});
 
-		fabricCanvas.on('selection:created', () => {
+		fabricCanvas.on('selection:created', (event: any) => {
+			enforceSelectionPermissions(event);
 			updateSelectionControlsPosition();
 		});
-		fabricCanvas.on('selection:updated', () => {
+		fabricCanvas.on('selection:updated', (event: any) => {
+			enforceSelectionPermissions(event);
 			updateSelectionControlsPosition();
 		});
 		fabricCanvas.on('selection:cleared', () => {
@@ -1067,7 +1226,10 @@
 	}
 
 	function applyToolMode(mode: ToolMode, resetSelection = true) {
-		if ((mode === 'eraser' || mode === 'duster') && !canModerateBoardActions) {
+		if (
+			(mode === 'eraser' && !canModerateBoardActions) ||
+			(mode === 'duster' && !canManageAllBoardElements)
+		) {
 			mode = 'select';
 		}
 		if (mode !== 'select' && isInsertOperationActive) {
@@ -1102,6 +1264,9 @@
 	}
 
 	function toggleWidthMenu() {
+		if (!isWidthControlVisible) {
+			return;
+		}
 		showWidthMenu = !showWidthMenu;
 		if (showWidthMenu) {
 			showInsertMenu = false;
@@ -1129,13 +1294,6 @@
 		showWidthMenu = false;
 		showBoardDetails = false;
 		showInsertMenu = !showInsertMenu;
-	}
-
-	function toggleToolbarMore() {
-		showToolbarMore = !showToolbarMore;
-		if (!showToolbarMore) {
-			showBoardDetails = false;
-		}
 	}
 
 	function toggleBoardDetails() {
@@ -1349,14 +1507,11 @@
 	}
 
 	function canMutateOwner(ownerUserID: string) {
-		if (!canEdit) {
-			return false;
-		}
-		if (canManageAllBoardElements) {
-			return true;
-		}
+		if (!canEdit) return false;
+		if (canManageAllBoardElements) return true; // Admins can delete anything
 		const normalizedOwner = normalizeIdentifier(ownerUserID);
-		return normalizedOwner !== '' && normalizedOwner === normalizedCurrentUserID;
+		const currentUser = normalizeIdentifier(currentUserId);
+		return normalizedOwner !== '' && currentUser !== '' && normalizedOwner === currentUser;
 	}
 
 	function canMutateBoardObject(object: FabricObjectLike | null) {
@@ -1403,6 +1558,48 @@
 			fabricCanvas.discardActiveObject?.();
 		}
 		fabricCanvas.requestRenderAll?.();
+	}
+
+	function enforceSelectionPermissions(event?: any) {
+		void event;
+		if (!fabricCanvas || canManageAllBoardElements) return;
+
+		const activeSelection = fabricCanvas.getActiveObject?.();
+		if (!activeSelection) return;
+
+		// If it's a multi-selection group
+		if ((activeSelection as Record<string, unknown>).type === 'activeSelection') {
+			const objects = (activeSelection as any).getObjects?.() || [];
+			let selectionChanged = false;
+
+			for (const obj of objects) {
+				if (!canMutateBoardObject(obj as FabricObjectLike)) {
+					(activeSelection as any).removeWithUpdate?.(obj);
+					selectionChanged = true;
+				}
+			}
+
+			const selectionSize =
+				typeof (activeSelection as any).size === 'function'
+					? Number((activeSelection as any).size())
+					: ((activeSelection as any).getObjects?.() || []).length;
+
+			// If the group is now empty, discard it entirely
+			if (selectionSize === 0) {
+				fabricCanvas.discardActiveObject?.();
+			}
+
+			if (selectionChanged) {
+				fabricCanvas.requestRenderAll?.();
+			}
+		}
+		// If it's a single object that somehow got selected
+		else {
+			if (!canMutateBoardObject(activeSelection as FabricObjectLike)) {
+				fabricCanvas.discardActiveObject?.();
+				fabricCanvas.requestRenderAll?.();
+			}
+		}
 	}
 
 	function clampDusterCenterX(x: number) {
@@ -1483,7 +1680,7 @@
 	}
 
 	function onDusterHandlePointerDown(event: PointerEvent) {
-		if (!canModerateBoardActions || activeTool !== 'duster') {
+		if (!canManageAllBoardElements || activeTool !== 'duster') {
 			return;
 		}
 		event.preventDefault();
@@ -1544,7 +1741,6 @@
 		contextMenuOpen = false;
 		messagePickerOpen = false;
 		showBoardDetails = false;
-		showToolbarMore = false;
 		pendingTapGesture = null;
 	}
 
@@ -1587,21 +1783,33 @@
 	}
 
 	function emitBoardElementAdd(object: FabricObjectLike) {
+		void emitBoardElementAddEncrypted(object);
+	}
+
+	async function emitBoardElementAddEncrypted(object: FabricObjectLike) {
 		const element = boardObjectToElement(object);
 		if (!element) {
 			return;
 		}
-		sendBoardEnvelope('board_element_add', element);
+		const payload: Record<string, unknown> = { ...element };
+		if (element.content) {
+			payload.content = await encryptBoardContentField(element.content);
+		}
+		sendBoardEnvelope('board_element_add', payload);
 	}
 
 	function emitBoardElementMove(object: FabricObjectLike) {
+		void emitBoardElementMoveEncrypted(object);
+	}
+
+	async function emitBoardElementMoveEncrypted(object: FabricObjectLike) {
 		const element = boardObjectToElement(object);
 		if (!element) {
 			return;
 		}
 		const scaleX = toNumber((object as Record<string, unknown>).scaleX, 1);
 		const scaleY = toNumber((object as Record<string, unknown>).scaleY, 1);
-		sendBoardEnvelope('board_element_move', {
+		const payload: Record<string, unknown> = {
 			elementId: element.elementId,
 			x: element.x,
 			y: element.y,
@@ -1610,7 +1818,11 @@
 			scaleX,
 			scaleY,
 			zIndex: element.zIndex
-		});
+		};
+		if (element.content) {
+			payload.content = await encryptBoardContentField(element.content);
+		}
+		sendBoardEnvelope('board_element_move', payload);
 	}
 
 	function emitBoardElementDelete(elementId: string) {
@@ -1632,6 +1844,18 @@
 			roomId: normalizedRoomId,
 			payload
 		});
+	}
+
+	function normalizeBoardPasswordValue(value: string) {
+		return (value || '').trim().slice(0, 32);
+	}
+
+	async function encryptBoardContentField(content: string) {
+		return encryptText(content, normalizeBoardPasswordValue($activeRoomPassword));
+	}
+
+	async function decryptBoardContentField(content: string) {
+		return decryptText(content, normalizeBoardPasswordValue($activeRoomPassword));
 	}
 
 	function boardObjectToElement(object: FabricObjectLike): BoardElementWire | null {
@@ -1714,7 +1938,7 @@
 			beginRemoteApply();
 			clearBoardElements();
 			for (const rawElement of elements) {
-				const parsed = parseBoardElementRecord(rawElement);
+				const parsed = await parseBoardElementRecordDecrypted(rawElement);
 				if (!parsed) {
 					continue;
 				}
@@ -1798,6 +2022,21 @@
 			createdByUserId,
 			createdByName,
 			createdAt
+		};
+	}
+
+	async function parseBoardElementRecordDecrypted(value: unknown): Promise<BoardElementWire | null> {
+		const parsed = parseBoardElementRecord(value);
+		if (!parsed || !parsed.content) {
+			return parsed;
+		}
+		const decryptedContent = await decryptBoardContentField(parsed.content);
+		if (decryptedContent === parsed.content) {
+			return parsed;
+		}
+		return {
+			...parsed,
+			content: decryptedContent
 		};
 	}
 
@@ -1921,7 +2160,16 @@
 			elementType === 'file' ||
 			elementType === 'media'
 		) {
-			const media = parseBoardMediaContent(element.content);
+			const media = parseBoardMediaContent(element.content) ?? {
+				url: '',
+				name: 'Attachment',
+				kind: 'file',
+				mimeType: '',
+				sizeBytes: 0,
+				caption: '',
+				senderName: '',
+				sentAt: 0
+			};
 			const mediaObject = createMediaCardObject(
 				media,
 				element.x,
@@ -2256,63 +2504,70 @@
 	}
 
 	function createMediaCardObject(
-		media: BoardMediaContent | null,
+		media: BoardMediaContent,
 		left: number,
 		top: number,
-		explicitWidth = 0,
-		explicitHeight = 0
+		width: number,
+		height: number
 	): FabricObjectLike | null {
-		const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
-		if (!TextboxClass) {
-			return null;
-		}
-		const baseWidth = Math.max(220, explicitWidth || getBoardCardWidth('media'));
-		const nameLine = media?.name || media?.url || 'Attachment';
-		const hostLine = media?.url ? safeHostFromURL(media.url) : '';
-		const sizeLine = media?.sizeBytes ? formatFileSize(media.sizeBytes) : '';
-		const senderLine = media?.senderName ? `From: ${media.senderName}` : '';
-		const sentAtLine = media?.sentAt ? `Sent: ${formatBoardMessageDateTime(media.sentAt)}` : '';
-		const captionLine = media?.caption || '';
-		const title =
-			media?.kind === 'video'
-				? 'Video'
-				: media?.kind === 'audio'
-					? 'Audio'
-					: media?.kind === 'image'
-						? 'Image'
-						: 'File';
-		const cardText = [
-			title,
-			nameLine,
-			senderLine,
-			sentAtLine,
-			captionLine,
-			hostLine,
-			sizeLine,
-			media?.url || ''
-		]
-			.filter((entry) => entry !== '')
-			.join('\n');
-		const object = new TextboxClass(cardText, {
-			left: clampBoardX(left, baseWidth),
-			top: clampBoardY(top, explicitHeight > 0 ? explicitHeight : MIN_SHAPE_HEIGHT),
-			width: baseWidth,
-			fontSize: 13,
-			lineHeight: 1.32,
-			fill: isDarkMode ? '#e2e8f0' : '#1f2937',
-			backgroundColor: isDarkMode ? '#172032' : '#ecf2fb',
-			padding: 10
-		}) as FabricObjectLike;
-		if (explicitHeight > 0) {
-			const rawHeight = Math.max(
-				1,
-				toNumber((object as Record<string, unknown>).height, explicitHeight)
-			);
-			object.set?.({
-				scaleY: explicitHeight / rawHeight
-			});
-		}
-		return object;
+		const GroupClass = getFabricClass('Group');
+		const RectClass = getFabricClass('Rect');
+		const TextClass = getFabricClass('Textbox');
+		const PathClass = getFabricClass('Path');
+		if (!GroupClass || !RectClass || !TextClass || !PathClass) return null;
+
+		const cardWidth = Math.max(160, width || 220);
+		const cardHeight = Math.max(60, height || 80);
+
+		// Background card
+		const bg = new RectClass({
+			left: 0,
+			top: 0,
+			width: cardWidth,
+			height: cardHeight,
+			fill: isDarkMode ? '#1e293b' : '#ffffff',
+			stroke: isDarkMode ? '#475569' : '#cbd5e1',
+			strokeWidth: 1,
+			rx: 8,
+			ry: 8
+		});
+
+		// File Icon SVG Path (Generic Document Icon)
+		const iconPath =
+			'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 1.5L18.5 9H13V3.5zM6 20V4h5v7h7v9H6z';
+		const icon = new PathClass(iconPath, {
+			left: 12,
+			top: cardHeight / 2 - 12,
+			fill: isDarkMode ? '#94a3b8' : '#64748b',
+			scaleX: 1.2,
+			scaleY: 1.2
+		});
+
+		// Filename Text
+		const fileName = new TextClass(media.name || 'Attachment', {
+			left: 48,
+			top: cardHeight / 2 - 14,
+			width: cardWidth - 60,
+			fontSize: 14,
+			fontWeight: 'bold',
+			fill: isDarkMode ? '#f1f5f9' : '#0f172a',
+			splitByGrapheme: true
+		});
+
+		// File Size / Type Text
+		const metaText = new TextClass(`${formatFileSize(media.sizeBytes)} • ${media.kind}`, {
+			left: 48,
+			top: cardHeight / 2 + 4,
+			width: cardWidth - 60,
+			fontSize: 11,
+			fill: isDarkMode ? '#64748b' : '#94a3b8'
+		});
+
+		const group = new GroupClass([bg, icon, fileName, metaText], {
+			left: clampBoardX(left, cardWidth),
+			top: clampBoardY(top, cardHeight)
+		});
+		return group as FabricObjectLike;
 	}
 
 	async function createImageObjectFromMedia(
@@ -2486,11 +2741,7 @@
 			return;
 		}
 		if (envelope.type === 'board_element_add') {
-			const parsedElement = parseBoardElementRecord(envelope.payload);
-			if (!parsedElement) {
-				return;
-			}
-			void applyIncomingAdd(parsedElement);
+			void applyIncomingAddPayload(envelope.payload);
 			return;
 		}
 		if (envelope.type === 'board_element_move') {
@@ -2609,6 +2860,14 @@
 		} finally {
 			endRemoteApply();
 		}
+	}
+
+	async function applyIncomingAddPayload(rawElement: unknown) {
+		const parsedElement = await parseBoardElementRecordDecrypted(rawElement);
+		if (!parsedElement) {
+			return;
+		}
+		await applyIncomingAdd(parsedElement);
 	}
 
 	function beginRemoteApply() {
@@ -2981,7 +3240,7 @@
 			return;
 		}
 		if (activeTool === 'duster') {
-			if (!canModerateBoardActions) {
+			if (!canManageAllBoardElements) {
 				return;
 			}
 			event.preventDefault();
@@ -3515,256 +3774,269 @@
 </script>
 
 <section class="board-root">
-	<div class="board-toolbar">
-		<button
-			type="button"
-			class="tool-icon-button"
-			class:active={activeTool === 'draw'}
-			on:click={() => toggleToolMode('draw')}
-			title="Free draw"
-			aria-label="Free draw"
-		>
-			<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-				<path
-					d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z"
-				/>
-			</svg>
-		</button>
-		<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
+	<div class="board-toolbar" bind:this={boardToolbarEl}>
+		<div class="toolbar-primary-group" bind:this={toolbarPrimaryEl}>
 			<button
 				type="button"
-				class="line-width-toggle"
-				on:click={toggleWidthMenu}
-				aria-haspopup="true"
-				aria-expanded={showWidthMenu}
-				title="Brush width"
+				class="tool-icon-button"
+				class:active={activeTool === 'draw'}
+				on:click={() => toggleToolMode('draw')}
+				title="Free draw"
 			>
-				<svg class="brush-width-icon" viewBox="0 0 24 24" aria-hidden="true">
-					<line
-						x1="4"
-						y1="12"
-						x2="20"
-						y2="12"
-						stroke="currentColor"
-						stroke-linecap="round"
-						stroke-width={Math.max(2, Math.min(8, drawBrushWidth))}
-					/>
+				<svg class="tool-icon" viewBox="0 0 24 24">
+					<path d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z" />
 				</svg>
-				<span class="brush-width-text">{drawBrushWidth.toFixed(1)}px</span>
 			</button>
-			{#if showWidthMenu}
-				<div class="brush-width-menu">
-					{#each BRUSH_WIDTH_PRESETS as width}
-						<button
-							type="button"
-							class="brush-width-option"
-							class:active={Math.abs(drawBrushWidth - width) < 0.01}
-							on:click={() => setDrawWidthPreset(width)}
-						>
-							<span class="brush-width-sample" style={`height:${Math.max(2, width)}px;`}></span>
-							<span>{width.toFixed(1)}px</span>
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
-		<button
-			type="button"
-			class="tool-icon-button"
-			class:active={activeTool === 'eraser'}
-			on:click={() => toggleToolMode('eraser')}
-			title="Eraser"
-			aria-label="Eraser"
-			disabled={!canModerateBoardActions}
-		>
-			<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-				<path
-					d="M3.6 14.5 11.9 6a1.7 1.7 0 0 1 2.4 0l6.1 6.1a1.7 1.7 0 0 1 0 2.4l-4.1 4.1a1.7 1.7 0 0 1-1.2.5H8.8a1.7 1.7 0 0 1-1.2-.5l-4-4a1.7 1.7 0 0 1 0-2.4Zm7.7-6.8L5.2 13.8l3.5 3.5h3.1l5.2-5.2-5.7-5.4Z"
-				/>
-			</svg>
-		</button>
-		<button
-			type="button"
-			class="clear-tool-button"
-			class:active={activeTool === 'duster'}
-			on:click={() => toggleToolMode('duster')}
-			title="Clear board duster"
-			aria-label="Clear board duster"
-			disabled={!canModerateBoardActions}
-		>
-			<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-				<path d="M4 7.5h16v3H4z" />
-				<path d="M7 11.5h10v7H7z" fill="none" stroke="currentColor" stroke-width="1.8" />
-			</svg>
-			<span>Clear</span>
-		</button>
-		<button type="button" class="toolbar-action-button" on:click={insertStickyNote} disabled={!canEdit}>
-			Sticky Note
-		</button>
-		<button type="button" class="toolbar-action-button" on:click={exportBoardAsPNG} disabled={!boardReady}>
-			Export Board
-		</button>
-		<div class="insert-wrap" bind:this={insertWrapEl}>
-			<button
-				type="button"
-				class="insert-toggle"
-				class:active={showInsertMenu}
-				on:click={toggleInsertMenu}
-				aria-haspopup="true"
-				aria-expanded={showInsertMenu}
-				title="Insert shape"
-			>
-				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M11 5h2v14h-2z" />
-					<path d="M5 11h14v2H5z" />
-				</svg>
-				<span>Insert</span>
-			</button>
-			{#if showInsertMenu}
-				<div class="insert-menu">
+			{#if isWidthControlVisible}
+				<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
 					<button
 						type="button"
-						class="shape-icon-button"
-						on:click={() => beginShapeInsert('line')}
-						title="Line"
+						class="line-width-toggle"
+						on:click={toggleWidthMenu}
+						aria-haspopup="true"
+						aria-expanded={showWidthMenu}
+						title="Brush width"
 					>
-						<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-							<line x1="4" y1="18" x2="20" y2="6" stroke="currentColor" stroke-width="2.3" />
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="shape-icon-button"
-						on:click={() => beginShapeInsert('arrow')}
-						title="Arrow"
-					>
-						<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M4 12h13" stroke="currentColor" stroke-width="2.3" fill="none" />
-							<path d="m13 7 6 5-6 5" fill="currentColor" />
-						</svg>
-					</button>
-					<button
-						type="button"
-						class="shape-icon-button"
-						on:click={() => beginShapeInsert('rect')}
-						title="Rect"
-					>
-						<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-							<rect
-								x="5"
-								y="7"
-								width="14"
-								height="10"
-								rx="2"
-								fill="none"
+						<svg class="brush-width-icon" viewBox="0 0 24 24" aria-hidden="true">
+							<line
+								x1="4"
+								y1="12"
+								x2="20"
+								y2="12"
 								stroke="currentColor"
-								stroke-width="2"
+								stroke-linecap="round"
+								stroke-width={Math.max(2, Math.min(8, drawBrushWidth))}
 							/>
 						</svg>
+						<span class="brush-width-text">{drawBrushWidth.toFixed(1)}px</span>
 					</button>
-					<button
-						type="button"
-						class="shape-icon-button"
-						on:click={() => beginShapeInsert('circle')}
-						title="Circle"
-					>
-						<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-							<circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
-						</svg>
-					</button>
+					{#if showWidthMenu}
+						<div class="brush-width-menu">
+							{#each BRUSH_WIDTH_PRESETS as width}
+								<button
+									type="button"
+									class="brush-width-option"
+									class:active={Math.abs(drawBrushWidth - width) < 0.01}
+									on:click={() => setDrawWidthPreset(width)}
+								>
+									<span class="brush-width-sample" style={`height:${Math.max(2, width)}px;`}></span>
+									<span>{width.toFixed(1)}px</span>
+								</button>
+							{/each}
+						</div>
+					{/if}
 				</div>
 			{/if}
-		</div>
-		<div class="board-details-wrap" bind:this={boardDetailsWrapEl}>
+
+			<div class="insert-wrap" bind:this={insertWrapEl}>
+				<button
+					type="button"
+					class="insert-toggle"
+					class:active={showInsertMenu}
+					on:click={toggleInsertMenu}
+					aria-haspopup="true"
+					aria-expanded={showInsertMenu}
+					title="Insert shape"
+				>
+					<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M11 5h2v14h-2z" />
+						<path d="M5 11h14v2H5z" />
+					</svg>
+					<span>Insert</span>
+				</button>
+				{#if showInsertMenu}
+					<div class="insert-menu">
+						<button
+							type="button"
+							class="shape-icon-button"
+							on:click={() => beginShapeInsert('line')}
+							title="Line"
+						>
+							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<line x1="4" y1="18" x2="20" y2="6" stroke="currentColor" stroke-width="2.3" />
+							</svg>
+						</button>
+						<button
+							type="button"
+							class="shape-icon-button"
+							on:click={() => beginShapeInsert('arrow')}
+							title="Arrow"
+						>
+							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M4 12h13" stroke="currentColor" stroke-width="2.3" fill="none" />
+								<path d="m13 7 6 5-6 5" fill="currentColor" />
+							</svg>
+						</button>
+						<button
+							type="button"
+							class="shape-icon-button"
+							on:click={() => beginShapeInsert('rect')}
+							title="Rect"
+						>
+							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<rect
+									x="5"
+									y="7"
+									width="14"
+									height="10"
+									rx="2"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+								/>
+							</svg>
+						</button>
+						<button
+							type="button"
+							class="shape-icon-button"
+							on:click={() => beginShapeInsert('circle')}
+							title="Circle"
+						>
+							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
+							</svg>
+						</button>
+					</div>
+				{/if}
+			</div>
+
+			<div class="divider"></div>
+
 			<button
 				type="button"
-				class="details-toggle-button"
-				class:active={showBoardDetails}
-				on:click={toggleBoardDetails}
-				title="Board details"
-				aria-label="Board details"
-			>
-				i
-			</button>
-			{#if showBoardDetails}
-				<div class="board-details-popover">
-					<div class="board-detail-row">
-						<span>Plane</span>
-						<strong>{BOARD_WIDTH}×{BOARD_HEIGHT}px</strong>
-					</div>
-					<div class="board-detail-row">
-						<span>Elements</span>
-						<strong>{boardElementCount}</strong>
-					</div>
-					<div class="board-detail-row">
-						<span>Used</span>
-						<strong>
-							{formatStorageBytes(boardApproxBytes)} / {formatStorageBytes(
-								BOARD_STORAGE_LIMIT_BYTES
-							)}
-						</strong>
-					</div>
-					<div class="board-detail-row">
-						<span>Remaining</span>
-						<strong>{formatStorageBytes(boardRemainingBytes)}</strong>
-					</div>
-					<div class="board-detail-row">
-						<span>Usage</span>
-						<strong>{formatUsagePercent(boardStorageUsagePercent)}</strong>
-					</div>
-					<div class="board-detail-row">
-						<span>Zoom</span>
-						<strong>{Math.round(boardZoomLevel * 100)}%</strong>
-					</div>
-					<div class="board-detail-row">
-						<span>Access</span>
-						<strong>{canManageAllBoardElements ? 'Admin full access' : 'Owner-only edits'}</strong>
-					</div>
-					<div class="board-detail-note">
-						Drag empty board to pan. Double-tap empty space to attach.
-					</div>
-				</div>
-			{/if}
-		</div>
-		<button
-			type="button"
-			class="toolbar-more-toggle"
-			class:active={showToolbarMore}
-			on:click={toggleToolbarMore}
-			title="More board actions"
-			aria-label="More board actions"
-			aria-expanded={showToolbarMore}
-		>
-			{showToolbarMore ? 'Hide' : 'More'}
-		</button>
-		<div class="toolbar-overflow" class:open={showToolbarMore}>
-			<button
-				type="button"
+				class="tool-icon-button"
 				on:click={undo}
 				disabled={!canModerateBoardActions || !canUndoLocalAction}
+				title="Undo"
 			>
-				Undo
+				<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M3 7v6h6" />
+					<path d="M3 13a9 9 0 0 1 15-6.7L21 9" />
+				</svg>
 			</button>
 			<button
 				type="button"
+				class="tool-icon-button"
 				on:click={redo}
 				disabled={!canModerateBoardActions || !canRedoLocalAction}
+				title="Redo"
 			>
-				Redo
+				<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M21 7v6h-6" />
+					<path d="M21 13A9 9 0 0 0 6 6.3L3 9" />
+				</svg>
 			</button>
 			<button
 				type="button"
 				class="cancel-operation-button"
 				disabled={!canCancelCurrentOperation}
-				title="Cancel current operation"
-				aria-label="Cancel current operation"
 				on:click={cancelCurrentOperation}
+				title="Cancel"
 			>
 				×
 			</button>
-			{#if insertionHintLabel}
-				<span class="insert-operation-hint">{insertionHintLabel}</span>
+			{#if shouldUseToolbarMenu}
+				<button
+					type="button"
+					class="tool-icon-button mobile-expand-btn"
+					class:active={isToolbarExpanded}
+					on:click={() => (isToolbarExpanded = !isToolbarExpanded)}
+					title="More tools"
+					aria-label="More tools"
+				>
+					<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M4 6h16M4 12h16M4 18h16" />
+					</svg>
+				</button>
 			{/if}
+		</div>
+
+		<div
+			class="toolbar-secondary-group"
+			class:expanded={isToolbarExpanded}
+			class:menu-mode={shouldUseToolbarMenu}
+			bind:this={toolbarSecondaryEl}
+		>
+
+			<button
+				type="button"
+				class="tool-icon-button"
+				class:active={activeTool === 'eraser'}
+				on:click={() => toggleToolMode('eraser')}
+				title="Eraser"
+			>
+				<svg class="tool-icon" viewBox="0 0 24 24">
+					<path d="M3.6 14.5 11.9 6a1.7 1.7 0 0 1 2.4 0l6.1 6.1a1.7 1.7 0 0 1 0 2.4l-4.1 4.1a1.7 1.7 0 0 1-1.2.5H8.8a1.7 1.7 0 0 1-1.2-.5l-4-4a1.7 1.7 0 0 1 0-2.4Zm7.7-6.8L5.2 13.8l3.5 3.5h3.1l5.2-5.2-5.7-5.4Z" />
+				</svg>
+			</button>
+
+			<button
+				type="button"
+				class="clear-tool-button"
+				class:active={activeTool === 'duster'}
+				on:click={() => toggleToolMode('duster')}
+				title="Clear board duster"
+				aria-label="Clear board duster"
+				disabled={!canManageAllBoardElements}
+			>
+				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M4 7.5h16v3H4z" />
+					<path d="M7 11.5h10v7H7z" fill="none" stroke="currentColor" stroke-width="1.8" />
+				</svg>
+				<span>Clear</span>
+			</button>
+
+			<div class="board-details-wrap" bind:this={boardDetailsWrapEl}>
+				<button
+					type="button"
+					class="details-toggle-button"
+					class:active={showBoardDetails}
+					on:click={toggleBoardDetails}
+					title="Board details"
+					aria-label="Board details"
+				>
+					i
+				</button>
+				{#if showBoardDetails}
+					<div class="board-details-popover">
+						<div class="board-detail-row">
+							<span>Plane</span>
+							<strong>{BOARD_WIDTH}×{BOARD_HEIGHT}px</strong>
+						</div>
+						<div class="board-detail-row">
+							<span>Elements</span>
+							<strong>{boardElementCount}</strong>
+						</div>
+						<div class="board-detail-row">
+							<span>Used</span>
+							<strong>
+								{formatStorageBytes(boardApproxBytes)} / {formatStorageBytes(
+									BOARD_STORAGE_LIMIT_BYTES
+								)}
+							</strong>
+						</div>
+						<div class="board-detail-row">
+							<span>Remaining</span>
+							<strong>{formatStorageBytes(boardRemainingBytes)}</strong>
+						</div>
+						<div class="board-detail-row">
+							<span>Usage</span>
+							<strong>{formatUsagePercent(boardStorageUsagePercent)}</strong>
+						</div>
+						<div class="board-detail-row">
+							<span>Zoom</span>
+							<strong>{Math.round(boardZoomLevel * 100)}%</strong>
+						</div>
+						<div class="board-detail-row">
+							<span>Access</span>
+							<strong>{canManageAllBoardElements ? 'Admin full access' : 'Owner-only edits'}</strong>
+						</div>
+						<div class="board-detail-note">
+							Drag empty board to pan. Double-tap empty space to attach.
+						</div>
+					</div>
+				{/if}
+			</div>
 		</div>
 	</div>
 
@@ -3799,7 +4071,7 @@
 				<button type="button" on:click={sendSelectedObjectBackward}>Send Backward</button>
 			</div>
 		{/if}
-		{#if activeTool === 'duster' && canModerateBoardActions}
+		{#if activeTool === 'duster' && canManageAllBoardElements}
 			<div class="board-duster-layer" aria-hidden="true">
 				<div
 					class="board-duster-stripe"
@@ -3945,6 +4217,33 @@
 		background: var(--bg-secondary);
 	}
 
+	.toolbar-primary-group {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		flex-wrap: wrap;
+		min-width: 0;
+	}
+
+	.toolbar-secondary-group {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		flex-wrap: wrap;
+		min-width: 0;
+	}
+
+	.divider {
+		width: 1px;
+		height: 24px;
+		background: var(--border-subtle);
+		margin: 0 0.2rem;
+	}
+
+	.mobile-expand-btn {
+		display: none;
+	}
+
 	.board-toolbar button {
 		border: 1px solid var(--border-subtle);
 		background: var(--bg-tertiary);
@@ -3993,14 +4292,6 @@
 		align-items: center;
 		gap: 0.32rem;
 		padding: 0.35rem 0.52rem;
-	}
-
-	.toolbar-action-button {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		height: 34px;
-		padding: 0 0.62rem;
 	}
 
 	.brush-width-wrap {
@@ -4161,27 +4452,6 @@
 		text-align: right;
 	}
 
-	.toolbar-more-toggle {
-		display: none;
-		min-width: 58px;
-		height: 34px;
-		padding: 0 0.6rem;
-		border-radius: 8px;
-		font-size: 0.78rem;
-		font-weight: 700;
-		line-height: 1;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.toolbar-overflow {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.45rem;
-		flex-wrap: wrap;
-		margin-left: auto;
-	}
-
 	.cancel-operation-button {
 		width: 34px;
 		height: 34px;
@@ -4200,16 +4470,6 @@
 
 	.cancel-operation-button:hover:not(:disabled) {
 		background: rgba(220, 38, 38, 0.98);
-	}
-
-	.insert-operation-hint {
-		font-size: 0.72rem;
-		color: #fca5a5;
-		border: 1px solid rgba(239, 68, 68, 0.35);
-		background: rgba(127, 29, 29, 0.2);
-		border-radius: 999px;
-		padding: 0.2rem 0.52rem;
-		white-space: nowrap;
 	}
 
 	.board-canvas-shell {
@@ -4580,26 +4840,6 @@
 			padding: 0.45rem;
 		}
 
-		.toolbar-more-toggle {
-			display: inline-flex;
-			margin-left: auto;
-		}
-
-		.toolbar-overflow {
-			display: none;
-			width: 100%;
-			order: 20;
-			margin-left: 0;
-		}
-
-		.toolbar-overflow.open {
-			display: flex;
-		}
-
-		.toolbar-overflow {
-			justify-content: flex-start;
-		}
-
 		.brush-width-menu {
 			top: calc(100% + 6px);
 			left: 0;
@@ -4618,6 +4858,78 @@
 			bottom: 0.65rem;
 			width: 160px;
 			height: 120px;
+		}
+	}
+
+	@media (max-width: 768px) {
+		.board-toolbar {
+			flex-direction: row;
+			align-items: center;
+			flex-wrap: wrap;
+			gap: 0.3rem;
+			padding: 0.42rem;
+		}
+
+		.toolbar-primary-group {
+			width: auto;
+			flex: 1 1 auto;
+			justify-content: flex-start;
+			gap: 0.3rem;
+			flex-wrap: nowrap;
+		}
+
+		.mobile-expand-btn {
+			display: inline-flex;
+		}
+
+		.toolbar-secondary-group {
+			display: flex;
+			width: auto;
+			gap: 0.3rem;
+			flex-wrap: nowrap;
+		}
+
+		.toolbar-secondary-group.menu-mode {
+			display: none;
+			width: 100%;
+			border-top: 1px solid var(--border-subtle);
+			padding-top: 0.42rem;
+			margin-top: 0.1rem;
+			flex-wrap: wrap;
+		}
+
+		.toolbar-secondary-group.menu-mode.expanded {
+			display: flex;
+		}
+
+		.board-toolbar button {
+			padding: 0.28rem 0.46rem;
+			font-size: 0.74rem;
+		}
+
+		.tool-icon-button {
+			width: 30px;
+			height: 30px;
+		}
+
+		.insert-toggle {
+			gap: 0.25rem;
+			padding: 0.28rem 0.46rem;
+		}
+
+		.clear-tool-button {
+			gap: 0.24rem;
+			padding: 0.28rem 0.44rem;
+		}
+
+		.line-width-toggle {
+			gap: 0.26rem;
+			padding: 0.22rem 0.38rem;
+		}
+
+		.brush-width-text {
+			min-width: 2.4rem;
+			font-size: 0.69rem;
 		}
 	}
 </style>

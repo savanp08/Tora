@@ -95,6 +95,7 @@ export type ChatThread = {
 	originMessageId?: string;
 	treeNumber?: number;
 	isAdmin?: boolean;
+	adminCode?: string;
 };
 
 export type OnlineMember = {
@@ -102,6 +103,7 @@ export type OnlineMember = {
 	name: string;
 	isOnline: boolean;
 	joinedAt: number;
+	isAdmin?: boolean;
 };
 
 export type RoomMeta = {
@@ -120,6 +122,7 @@ export type SidebarRoom = {
 	createdAt?: number;
 	expiresAt?: number;
 	isAdmin?: boolean;
+	adminCode?: string;
 };
 
 export type ReplyTarget = {

@@ -12,7 +12,7 @@
 	import ChatUiDialog from '$lib/components/chat/ChatUiDialog.svelte';
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
-	import { authToken, currentUser } from '$lib/store';
+	import { activeRoomPassword, authToken, currentUser, isDarkMode } from '$lib/store';
 	import type {
 		ChatMessage,
 		ChatThread,
@@ -102,6 +102,7 @@
 		wipeEncryptedRoomCache,
 		type TrustedDevicePreference
 	} from '$lib/utils/offlineCache';
+	import { decryptText, encryptText } from '$lib/utils/crypto';
 	import { getOrInitIdentity } from '$lib/utils/identity';
 	import { generateUsername } from '$lib/utils/usernameGenerator';
 	import { clearSessionToken, getSessionToken, setSessionToken } from '$lib/utils/sessionToken';
@@ -125,8 +126,6 @@
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
-	import { isDarkMode } from '$lib/store';
-
 	$: if (browser) {
 		// This component no longer controls the body class, but we might need the value locally.
 		// Let's ensure it's synced from the store.
@@ -211,8 +210,15 @@
 		capturePrependAnchor?: () => { scrollTop: number; scrollHeight: number } | null;
 		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
 	} | null = null;
+	let lastHandledPasswordRouteSignature = '';
+	let skipPasswordResetForPath = '';
 
 	$: roomId = normalizeRoomIDValue(decodeURIComponent($page.params.roomId ?? ''));
+	$: roomRouteSignature = `${$page.url.pathname}|${$page.url.search}|${$page.url.hash}`;
+	$: if (browser && roomRouteSignature !== lastHandledPasswordRouteSignature) {
+		lastHandledPasswordRouteSignature = roomRouteSignature;
+		syncActiveRoomPasswordFromHash();
+	}
 	$: activeRoomId = roomId;
 	$: roomNameFromURL = normalizeRoomNameValue(
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
@@ -303,15 +309,17 @@
 			const payloadType = toStringValue(source.type).toLowerCase();
 			const payloadRoomID = normalizeRoomIDValue(toStringValue(source.roomId ?? source.room_id));
 			if (payloadType === 'text' && payloadRoomID) {
-				const directMessage = parseIncomingMessage(source, payloadRoomID, API_BASE);
-				if (directMessage) {
-					addIncomingMessage(directMessage);
-				}
+				void (async () => {
+					const directMessage = await parseIncomingMessageWithE2EE(source, payloadRoomID);
+					if (directMessage) {
+						addIncomingMessage(directMessage);
+					}
+				})();
 				handledDirectPayload = true;
 			}
 		}
 		if (!handledDirectPayload) {
-			handleGlobalPayload(payload);
+			void handleGlobalPayload(payload);
 		}
 	}
 	$: if (browser && identityReady) {
@@ -368,6 +376,7 @@
 		if (!browser) {
 			return;
 		}
+		syncActiveRoomPasswordFromHash();
 		initializeTrustedDevicePreference();
 		if (trustedCachingEnabled && roomId) {
 			void hydrateOfflineCache(roomId);
@@ -399,6 +408,91 @@
 		if (!isMobileView) {
 			mobilePane = 'chat';
 		}
+	}
+
+	function normalizeRoomPasswordValue(value: string) {
+		return (value || '').trim().slice(0, 32);
+	}
+
+	function normalizeAdminCodeValue(value: unknown) {
+		return toStringValue(value).trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+	}
+
+	function buildRoomPasswordHash(password: string) {
+		const normalizedPassword = normalizeRoomPasswordValue(password);
+		return normalizedPassword ? `#key=${encodeURIComponent(normalizedPassword)}` : '';
+	}
+
+	function syncActiveRoomPasswordFromHash() {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		const pathname = window.location.pathname;
+		const hash = window.location.hash || '';
+		if (!pathname.startsWith('/chat/')) {
+			return;
+		}
+		if (hash.startsWith('#key=')) {
+			let decoded = '';
+			try {
+				decoded = decodeURIComponent(hash.slice(5));
+			} catch {
+				decoded = hash.slice(5);
+			}
+			const key = normalizeRoomPasswordValue(decoded);
+			activeRoomPassword.set(key);
+			skipPasswordResetForPath = pathname;
+			window.history.replaceState(null, '', window.location.pathname + window.location.search);
+			return;
+		}
+		if (skipPasswordResetForPath && skipPasswordResetForPath === pathname) {
+			skipPasswordResetForPath = '';
+			return;
+		}
+		activeRoomPassword.set('');
+	}
+
+	async function encryptMessageContent(content: string) {
+		return encryptText(content, normalizeRoomPasswordValue($activeRoomPassword));
+	}
+
+	async function decryptMessageContent(content: string) {
+		return decryptText(content, normalizeRoomPasswordValue($activeRoomPassword));
+	}
+
+	async function decryptChatMessage(message: ChatMessage): Promise<ChatMessage> {
+		if (!message.content) {
+			return message;
+		}
+		const decryptedContent = await decryptMessageContent(message.content);
+		if (decryptedContent === message.content) {
+			return message;
+		}
+		return {
+			...message,
+			content: decryptedContent
+		};
+	}
+
+	async function parseIncomingMessageWithE2EE(
+		value: unknown,
+		fallbackRoomId: string
+	): Promise<ChatMessage | null> {
+		const parsed = parseIncomingMessage(value, fallbackRoomId, API_BASE);
+		if (!parsed) {
+			return null;
+		}
+		return decryptChatMessage(parsed);
+	}
+
+	async function parseIncomingMessagesWithE2EE(
+		values: unknown[],
+		fallbackRoomId: string
+	): Promise<ChatMessage[]> {
+		const parsed = await Promise.all(
+			values.map((entry) => parseIncomingMessageWithE2EE(entry, fallbackRoomId))
+		);
+		return parsed.filter((entry): entry is ChatMessage => Boolean(entry));
 	}
 
 	function clearTypingStopTimer() {
@@ -629,9 +723,7 @@
 		if (!Array.isArray(cached) || cached.length === 0) {
 			return;
 		}
-		const hydrated = cached
-			.map((entry) => parseIncomingMessage(entry, targetRoomId, API_BASE))
-			.filter((entry): entry is ChatMessage => Boolean(entry));
+		const hydrated = await parseIncomingMessagesWithE2EE(cached, targetRoomId);
 		if (hydrated.length === 0) {
 			return;
 		}
@@ -709,12 +801,19 @@
 			const joinedCreatedAt = toTimestamp(data.createdAt);
 			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 			const joinedIsAdmin = toBool(data.isAdmin ?? data.is_admin);
+			const joinedAdminCode = normalizeAdminCodeValue(data.adminCode ?? data.admin_code);
 
 			ensureRoomThread(joinedRoomId, joinedName, 'joined');
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
 					thread.id === joinedRoomId
-						? { ...thread, status: 'joined', name: joinedName, isAdmin: joinedIsAdmin }
+						? {
+								...thread,
+								status: 'joined',
+								name: joinedName,
+								isAdmin: joinedIsAdmin,
+								adminCode: joinedIsAdmin ? joinedAdminCode : ''
+							}
 						: thread
 				)
 			);
@@ -932,6 +1031,24 @@
 		uiDialog = updateRoomActionDialogName(uiDialog, value);
 	}
 
+	async function openOptionalRoomPasswordDialog(initialValue = '') {
+		const rawValue = await openPromptDialog({
+			title: 'Room Password (E2EE)',
+			message:
+				'Optional. Encrypts all messages and board data. The server cannot read protected rooms.',
+			initialValue: normalizeRoomPasswordValue(initialValue),
+			placeholder: 'Optional password',
+			maxLength: 32,
+			confirmLabel: 'Continue',
+			cancelLabel: 'Cancel',
+			multiline: false
+		});
+		if (rawValue === null) {
+			return null;
+		}
+		return normalizeRoomPasswordValue(rawValue);
+	}
+
 	function setMessageActionMode(mode: MessageActionMode) {
 		messageActionMode = mode;
 		isSelectionMode = mode !== 'none';
@@ -1120,10 +1237,20 @@
 				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
 					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
 			);
+			const joinedAdminCode = normalizeAdminCodeValue(
+				(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
+					(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
+			);
 			ensureRoomThread(normalizedRoomId, joinedName, 'joined');
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
-					thread.id === normalizedRoomId ? { ...thread, isAdmin: joinedIsAdmin } : thread
+					thread.id === normalizedRoomId
+						? {
+								...thread,
+								isAdmin: joinedIsAdmin,
+								adminCode: joinedIsAdmin ? joinedAdminCode : ''
+							}
+						: thread
 				)
 			);
 			ensureRoomMeta(normalizedRoomId, joinedCreatedAt, joinedExpiresAt);
@@ -1175,6 +1302,8 @@
 
 				const roomStatus: ThreadStatus =
 					room.status === 'joined' ? 'joined' : room.status === 'left' ? 'left' : 'discoverable';
+				const nextIsAdmin = toBool(room.isAdmin ?? prev?.isAdmin ?? false);
+				const nextAdminCode = normalizeAdminCodeValue(room.adminCode ?? (nextIsAdmin ? prev?.adminCode : ''));
 
 				const next: ChatThread = {
 					id: roomID,
@@ -1191,7 +1320,8 @@
 					originMessageId:
 						toStringValue(room.originMessageId) || prev?.originMessageId || undefined,
 					treeNumber: toInt(room.treeNumber ?? prev?.treeNumber ?? 0),
-					isAdmin: toBool(room.isAdmin ?? prev?.isAdmin ?? false)
+					isAdmin: nextIsAdmin,
+					adminCode: nextIsAdmin ? nextAdminCode : ''
 				};
 
 				acc.push(next);
@@ -1348,11 +1478,9 @@
 		}
 	}
 
-	function handleGlobalPayload(payload: unknown) {
+	async function handleGlobalPayload(payload: unknown) {
 		if (Array.isArray(payload)) {
-			const parsedMessages = payload
-				.map((entry) => parseIncomingMessage(entry, '', API_BASE))
-				.filter((entry): entry is ChatMessage => Boolean(entry));
+			const parsedMessages = await parseIncomingMessagesWithE2EE(payload, '');
 			if (parsedMessages.length === 0) {
 				return;
 			}
@@ -1370,11 +1498,11 @@
 		}
 
 		if (isEnvelope(payload)) {
-			handleEnvelope(payload);
+			await handleEnvelope(payload);
 			return;
 		}
 
-		const single = parseIncomingMessage(payload, '', API_BASE);
+		const single = await parseIncomingMessageWithE2EE(payload, '');
 		if (single) {
 			addIncomingMessage(single);
 		}
@@ -1451,7 +1579,10 @@
 		return '';
 	}
 
-	function handleDiscussionCommentEnvelope(envelope: SocketEnvelope, targetRoomId: string) {
+	async function handleDiscussionCommentEnvelope(
+		envelope: SocketEnvelope,
+		targetRoomId: string
+	) {
 		const targetRoomID = normalizeRoomIDValue(targetRoomId);
 		const activeRoomID = normalizeRoomIDValue(roomId);
 		if (!targetRoomID || targetRoomID !== activeRoomID) {
@@ -1462,7 +1593,7 @@
 		if (!pinMessageID || !activeTaskID || pinMessageID !== activeTaskID) {
 			return;
 		}
-		const comment = parseIncomingMessage(envelope.payload, targetRoomID, API_BASE);
+		const comment = await parseIncomingMessageWithE2EE(envelope.payload, targetRoomID);
 		if (!comment) {
 			return;
 		}
@@ -1586,15 +1717,13 @@
 		}
 	}
 
-	function handleEnvelope(envelope: SocketEnvelope) {
+	async function handleEnvelope(envelope: SocketEnvelope) {
 		const targetRoomId = resolveEnvelopeRoomID(envelope);
 		const kind = toStringValue(envelope.type).toLowerCase();
 		const payload = resolveEnvelopePayloadRecord(envelope);
 		if (kind === 'history' || kind === 'recent_messages' || kind === 'initial_messages') {
 			if (Array.isArray(envelope.payload)) {
-				const history = envelope.payload
-					.map((entry) => parseIncomingMessage(entry, targetRoomId, API_BASE))
-					.filter((entry): entry is ChatMessage => Boolean(entry));
+				const history = await parseIncomingMessagesWithE2EE(envelope.payload, targetRoomId);
 				if (history.length > 0) {
 					const grouped = new Map<string, ChatMessage[]>();
 					for (const message of history) {
@@ -1611,7 +1740,7 @@
 		}
 
 		if (kind === 'new_message') {
-			const message = parseIncomingMessage(envelope.payload, targetRoomId, API_BASE);
+			const message = await parseIncomingMessageWithE2EE(envelope.payload, targetRoomId);
 			if (message) {
 				addIncomingMessage(message);
 			}
@@ -1619,7 +1748,7 @@
 		}
 
 		if (kind === 'discussion_comment' && targetRoomId) {
-			handleDiscussionCommentEnvelope(envelope, targetRoomId);
+			await handleDiscussionCommentEnvelope(envelope, targetRoomId);
 			return;
 		}
 
@@ -1775,7 +1904,14 @@
 		}
 
 		if (kind === 'message_edit' && targetRoomId) {
-			applyMessageEdit(targetRoomId, envelope.payload);
+			const decryptedPayload =
+				payload && typeof payload.content === 'string'
+					? {
+							...payload,
+							content: await decryptMessageContent(payload.content)
+						}
+					: envelope.payload;
+			applyMessageEdit(targetRoomId, decryptedPayload);
 			return;
 		}
 
@@ -2255,7 +2391,13 @@
 		}
 
 		upsertMessage(roomId, outgoing, false);
-		sendSocketPayload(toWireMessage(outgoing));
+		const encryptedContent = await encryptMessageContent(outgoing.content);
+		sendSocketPayload(
+			toWireMessage({
+				...outgoing,
+				content: encryptedContent
+			})
+		);
 		applyReadProgress(roomId, outgoing.id);
 		sendTypingStop();
 		draftMessage = '';
@@ -2389,10 +2531,10 @@
 			if (!res.ok) {
 				throw new Error(toStringValue(data.error) || 'Failed to load discussion comments');
 			}
-			const parsedComments = (Array.isArray(data.comments) ? data.comments : [])
-				.map((entry) => parseIncomingMessage(entry, targetRoomID, API_BASE))
-				.filter((entry): entry is ChatMessage => Boolean(entry))
-				.sort((left, right) => left.createdAt - right.createdAt);
+			const parsedComments = (await parseIncomingMessagesWithE2EE(
+				Array.isArray(data.comments) ? data.comments : [],
+				targetRoomID
+			)).sort((left, right) => left.createdAt - right.createdAt);
 			writeDiscussionCommentsCache(targetRoomID, normalizedPinnedMessageID, parsedComments);
 
 			if (normalizeMessageID(activeDiscussionTaskId) !== normalizedPinnedMessageID) {
@@ -2447,7 +2589,7 @@
 		discussionComments = [];
 	}
 
-	function commitTaskPayloadUpdate(messageId: string, nextContent: string) {
+	async function commitTaskPayloadUpdate(messageId: string, nextContent: string) {
 		if (!roomId || !messageId || !nextContent) {
 			return;
 		}
@@ -2457,11 +2599,12 @@
 			editedAt: Date.now(),
 			messageType: 'task'
 		});
+		const encryptedContent = await encryptMessageContent(nextContent);
 		sendSocketPayload({
 			type: 'message_edit',
 			roomId,
 			messageId,
-			content: nextContent,
+			content: encryptedContent,
 			messageType: 'task'
 		});
 	}
@@ -2497,7 +2640,7 @@
 			showErrorToast('Task update is too large');
 			return;
 		}
-		commitTaskPayloadUpdate(messageId, nextContent);
+		await commitTaskPayloadUpdate(messageId, nextContent);
 	}
 
 	async function onTaskAdd(event: CustomEvent<{ messageId: string; text: string }>) {
@@ -2531,7 +2674,7 @@
 			showErrorToast('Task update is too large');
 			return;
 		}
-		commitTaskPayloadUpdate(messageId, nextContent);
+		await commitTaskPayloadUpdate(messageId, nextContent);
 	}
 
 	function buildDiscussionCommentMap(items: ChatMessage[]) {
@@ -2604,12 +2747,13 @@
 			return;
 		}
 
+		const encryptedContent = await encryptMessageContent(content);
 		const queued = sendSocketPayload({
 			type: 'discussion_comment',
 			roomId,
 			pinMessageId: normalizedTaskID,
 			parentCommentId,
-			content
+			content: encryptedContent
 		});
 		if (!queued) {
 			showErrorToast('Socket reconnecting. Comment queued.');
@@ -2666,6 +2810,7 @@
 			return;
 		}
 		try {
+			const encryptedContent = await encryptMessageContent(nextContent);
 			const res = await fetch(
 				`${discussionCommentsEndpoint(roomId, normalizedTaskID)}/${encodeURIComponent(commentId)}`,
 				{
@@ -2673,7 +2818,7 @@
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
 						userId: normalizedUserID,
-						content: nextContent
+						content: encryptedContent
 					})
 				}
 			);
@@ -2681,7 +2826,7 @@
 			if (!res.ok) {
 				throw new Error(toStringValue(data.error) || 'Failed to edit comment');
 			}
-			const parsed = parseIncomingMessage(data.comment, roomId, API_BASE);
+			const parsed = await parseIncomingMessageWithE2EE(data.comment, roomId);
 			if (!parsed) {
 				throw new Error('Comment payload is invalid');
 			}
@@ -2742,7 +2887,7 @@
 			if (!res.ok) {
 				throw new Error(toStringValue(data.error) || 'Failed to delete comment');
 			}
-			const parsed = parseIncomingMessage(data.comment, roomId, API_BASE);
+			const parsed = await parseIncomingMessageWithE2EE(data.comment, roomId);
 			if (!parsed) {
 				throw new Error('Comment payload is invalid');
 			}
@@ -2809,7 +2954,7 @@
 				throw new Error(toStringValue(data.error) || 'Failed to navigate pinned discussions');
 			}
 			const rawMessage = data.message;
-			const parsed = parseIncomingMessage(rawMessage, roomId, API_BASE);
+			const parsed = await parseIncomingMessageWithE2EE(rawMessage, roomId);
 			if (!parsed) {
 				showErrorToast(
 					direction === 'previous'
@@ -2932,6 +3077,11 @@
 		if (!action) {
 			return;
 		}
+		const roomPassword = await openOptionalRoomPasswordDialog($activeRoomPassword);
+		if (roomPassword === null) {
+			return;
+		}
+		activeRoomPassword.set(roomPassword);
 
 		const requestedName = normalizeRoomNameValue(action.roomName);
 		if (!requestedName) {
@@ -2976,11 +3126,21 @@
 				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
 					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
 			);
+			const nextAdminCode = normalizeAdminCodeValue(
+				(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
+					(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
+			);
 
 			ensureRoomThread(nextRoomId, nextRoomName, 'joined');
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
-					thread.id === nextRoomId ? { ...thread, isAdmin: nextIsAdmin } : thread
+					thread.id === nextRoomId
+						? {
+								...thread,
+								isAdmin: nextIsAdmin,
+								adminCode: nextIsAdmin ? nextAdminCode : ''
+							}
+						: thread
 				)
 			);
 			markRoomMembershipSynced(nextRoomId);
@@ -2996,7 +3156,8 @@
 			if (nextExpiresAt > 0) {
 				params.set('expiresAt', String(nextExpiresAt));
 			}
-			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}`);
+			const passwordHash = buildRoomPasswordHash(roomPassword);
+			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}${passwordHash}`);
 		} catch (error) {
 			showErrorToast(
 				error instanceof Error
@@ -3012,6 +3173,11 @@
 		if (!roomId) {
 			return;
 		}
+		const roomPassword = await openOptionalRoomPasswordDialog($activeRoomPassword);
+		if (roomPassword === null) {
+			return;
+		}
+		activeRoomPassword.set(roomPassword);
 		try {
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
 				method: 'POST',
@@ -3042,13 +3208,23 @@
 				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
 					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
 			);
+			const joinedAdminCode = normalizeAdminCodeValue(
+				(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
+					(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
+			);
 			ensureRoomThread(roomId, joinedName, 'joined');
 			markRoomMembershipSynced(roomId);
 			ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
 					thread.id === roomId
-						? { ...thread, status: 'joined', name: joinedName, isAdmin: joinedIsAdmin }
+						? {
+								...thread,
+								status: 'joined',
+								name: joinedName,
+								isAdmin: joinedIsAdmin,
+								adminCode: joinedIsAdmin ? joinedAdminCode : ''
+							}
 						: thread
 				)
 			);
@@ -3060,7 +3236,8 @@
 			if (joinedExpiresAt > 0) {
 				params.set('expiresAt', String(joinedExpiresAt));
 			}
-			await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}`);
+			const passwordHash = buildRoomPasswordHash(roomPassword);
+			await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}${passwordHash}`);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Unable to join room');
 		}
@@ -3144,6 +3321,34 @@
 		showRoomDetails = false;
 	}
 
+	async function onRoomPromoted(event: CustomEvent<{ token?: string; adminCode?: string }>) {
+		const nextToken = toStringValue(event.detail?.token).trim();
+		if (nextToken) {
+			setSessionToken(nextToken);
+			authToken.set(nextToken);
+		}
+
+		const nextAdminCode = normalizeAdminCodeValue(event.detail?.adminCode);
+		if (roomId) {
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === roomId
+						? {
+								...thread,
+								isAdmin: true,
+								adminCode: nextAdminCode || thread.adminCode || ''
+							}
+						: thread
+				)
+			);
+		}
+		showErrorToast('Admin access granted');
+		await refreshSidebarRooms();
+		if (roomId) {
+			await syncRoomMembership(roomId);
+		}
+	}
+
 	function clearCurrentRoomMessages() {
 		if (!roomId) {
 			return;
@@ -3219,9 +3424,7 @@
 			}
 
 			const payloadMessages = Array.isArray(data.messages) ? data.messages : [];
-			const incoming = payloadMessages
-				.map((entry: unknown) => parseIncomingMessage(entry, normalizedRoomID, API_BASE))
-				.filter((entry: ChatMessage | null): entry is ChatMessage => Boolean(entry));
+			const incoming = await parseIncomingMessagesWithE2EE(payloadMessages, normalizedRoomID);
 			if (incoming.length > 0) {
 				mergeMessages(normalizedRoomID, incoming);
 				await tick();
@@ -3274,11 +3477,12 @@
 			content: nextContent,
 			editedAt: Date.now()
 		});
+		const encryptedContent = await encryptMessageContent(nextContent);
 		sendSocketPayload({
 			type: 'message_edit',
 			roomId,
 			messageId,
-			content: nextContent
+			content: encryptedContent
 		});
 	}
 
@@ -3697,7 +3901,8 @@
 			if (breakExpiresAt > 0) {
 				params.set('expiresAt', String(breakExpiresAt));
 			}
-			await goto(`/chat/${encodeURIComponent(breakRoomId)}?${params.toString()}`);
+			const passwordHash = buildRoomPasswordHash($activeRoomPassword);
+			await goto(`/chat/${encodeURIComponent(breakRoomId)}?${params.toString()}${passwordHash}`);
 			return true;
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to create break room');
@@ -3954,6 +4159,7 @@
 	{isMobileView}
 	{roomId}
 	roomName={activeThread.name}
+	roomAdminCode={activeThread.adminCode || ''}
 	createdLabel={formatDateTime(getRoomCreatedAt(roomId))}
 	expiresLabel={formatDateTime(getRoomExpiry(roomId))}
 	{isExtendingRoom}
@@ -3964,6 +4170,7 @@
 	on:close={closeRoomDetails}
 	on:extend={requestRoomExtension}
 	on:removeMember={(event) => void removeMemberFromRoom(event.detail.memberId)}
+	on:promoted={(event) => void onRoomPromoted(event)}
 />
 
 <style>

@@ -1,8 +1,11 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	let roomPassword = '';
 
 	function navigateToApp() {
-		goto('/');
+		const normalizedPassword = (roomPassword || '').trim().slice(0, 32);
+		const hash = normalizedPassword ? `#key=${encodeURIComponent(normalizedPassword)}` : '';
+		goto(`/${hash}`);
 	}
 </script>
 
@@ -12,6 +15,20 @@
 		<p class="sub-headline">
 			The modern, secure, and real-time chat application for seamless collaboration.
 		</p>
+		<div class="launch-password-field">
+			<label for="launch-password">Room Password (E2EE)</label>
+			<input
+				id="launch-password"
+				type="password"
+				bind:value={roomPassword}
+				maxlength="32"
+				placeholder="Optional password"
+				autocomplete="off"
+			/>
+			<small>
+				Optional. Encrypts all messages and board data. The server cannot read protected rooms.
+			</small>
+		</div>
 		<button class="cta-button" on:click={navigateToApp}>Get Started</button>
 	</header>
 
@@ -99,6 +116,35 @@
 		border-radius: 0.5rem;
 		cursor: pointer;
 		transition: background-color 0.2s;
+	}
+
+	.launch-password-field {
+		max-width: 440px;
+		margin: 0 auto 1rem;
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.35rem;
+	}
+
+	.launch-password-field label {
+		font-size: 0.85rem;
+		font-weight: 600;
+		color: #334155;
+	}
+
+	.launch-password-field input {
+		width: 100%;
+		border: 1px solid #cbd5e1;
+		border-radius: 0.5rem;
+		padding: 0.55rem 0.7rem;
+		font-size: 0.92rem;
+	}
+
+	.launch-password-field small {
+		font-size: 0.78rem;
+		color: #64748b;
+		text-align: left;
 	}
 
 	.cta-button:hover {

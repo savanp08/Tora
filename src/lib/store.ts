@@ -4,3 +4,4 @@ import type { User } from './types';
 export const currentUser = writable<User | null>(null);
 export const authToken = writable<string | null>(null);
 export const isDarkMode = writable<boolean>(false);
+export const activeRoomPassword = writable<string>('');

@@ -132,6 +132,39 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		normalizedKeyspace = "converse"
 	}
 	boardElementsTable := normalizedKeyspace + ".board_elements"
+	roomsTable := normalizedKeyspace + ".rooms"
+
+	roomsQuery := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text PRIMARY KEY,
+			name text,
+			type text,
+			parent_room_id text,
+			origin_message_id text,
+			admin_code text,
+			created_at timestamp,
+			updated_at timestamp
+		)`,
+		roomsTable,
+	)
+	if err := session.Query(roomsQuery).Exec(); err != nil {
+		return err
+	}
+
+	roomAlterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
+	}
+	for _, alterQuery := range roomAlterQueries {
+		if err := session.Query(alterQuery).Exec(); err != nil {
+			lowered := strings.ToLower(strings.TrimSpace(err.Error()))
+			if strings.Contains(lowered, "duplicate") || strings.Contains(lowered, "already exists") {
+				continue
+			}
+			return err
+		}
+	}
+
 	query := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS %s (
 			room_id text,

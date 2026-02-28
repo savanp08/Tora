@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	crand "crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,11 +19,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/gocql/gocql"
 	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/websocket"
+	namegen "github.com/savanp08/converse/utils"
 )
 
 const (
@@ -35,9 +39,11 @@ const (
 	roomHistoryTTL       = roomDefaultTTL
 	roomHistorySize      = 50
 	roomCodeDigits       = 6
+	roomAdminCodeLength  = 4
 	roomNameMaxLength    = 20
 	roomIDLength         = 14
 	roomIDAlphabet       = "abcdefghijklmnopqrstuvwxyz0123456789"
+	roomAdminCodeCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	roomTreeNumberPrefix = "user:tree_numbers:"
 	roomNameIndexPrefix  = "room:name:"
 	messageBreakPrefix   = "message:break:"
@@ -50,23 +56,6 @@ var (
 	CreateRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
 	JoinRoomLimiter   = security.NewLimiter(20, time.Minute, 20, 15*time.Minute)
 	ExtendRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
-
-	roomNameAdjectives = []string{
-		"happy", "silly", "cool", "lazy", "wild", "calm", "brave", "smart", "kind", "busy",
-		"cozy", "dizzy", "lucky", "jolly", "nice", "proud", "quiet", "wise", "pure", "warm",
-		"zany", "wacky", "funky", "groovy", "sleepy", "hyper", "chill", "hasty", "spicy", "fresh",
-		"tiny", "huge", "tall", "short", "soft", "hard", "shiny", "bright", "dark", "clean",
-		"fast", "slow", "swift", "rapid", "quick", "turbo", "sonic", "mega", "ultra", "mighty",
-		"cyber", "pixel", "retro", "modern", "alpha", "beta", "prime", "royal", "meta", "magic",
-	}
-	roomNameNouns = []string{
-		"bear", "cat", "dog", "fox", "wolf", "lion", "tiger", "duck", "frog", "fish",
-		"bird", "owl", "crow", "hawk", "dove", "deer", "elk", "moose", "goat", "sheep",
-		"horse", "pony", "rat", "mouse", "bat", "whale", "shark", "crab", "squid", "eel",
-		"snake", "cobra", "viper", "panda", "koala", "otter", "beetle", "lizard", "raven", "falcon",
-		"cloud", "stone", "river", "ocean", "wave", "comet", "orbit", "galaxy", "nebula", "dune",
-		"spark", "pulse", "core", "forge", "vault", "tower", "lab", "haven", "crew", "grid",
-	}
 )
 
 type RoomHandler struct {
@@ -117,6 +106,7 @@ type JoinRoomResponse struct {
 	RoomID    string `json:"roomId"`
 	RoomName  string `json:"roomName"`
 	RoomCode  string `json:"roomCode,omitempty"`
+	AdminCode string `json:"adminCode,omitempty"`
 	UserID    string `json:"userId"`
 	Token     string `json:"token"`
 	CreatedAt int64  `json:"createdAt"`
@@ -188,11 +178,24 @@ type SidebarRoom struct {
 	CreatedAt       int64  `json:"createdAt"`
 	ExpiresAt       int64  `json:"expiresAt,omitempty"`
 	IsAdmin         bool   `json:"isAdmin,omitempty"`
+	AdminCode       string `json:"adminCode,omitempty"`
 }
 
 type SidebarRoomsResponse struct {
 	Rooms     []SidebarRoom `json:"rooms"`
 	ServerNow int64         `json:"serverNow,omitempty"`
+}
+
+type RoomDetailsResponse struct {
+	RoomID      string `json:"roomId"`
+	RoomName    string `json:"roomName"`
+	RoomCode    string `json:"roomCode,omitempty"`
+	AdminCode   string `json:"adminCode,omitempty"`
+	MemberCount int    `json:"memberCount"`
+	CreatedAt   int64  `json:"createdAt"`
+	ExpiresAt   int64  `json:"expiresAt,omitempty"`
+	IsAdmin     bool   `json:"isAdmin,omitempty"`
+	ServerNow   int64  `json:"serverNow,omitempty"`
 }
 
 type RemoveRoomMemberRequest struct {
@@ -211,6 +214,19 @@ type RoomAdminActionResponse struct {
 	RemovedUserID string `json:"removedUserId,omitempty"`
 	Message       string `json:"message"`
 	ServerNow     int64  `json:"serverNow,omitempty"`
+}
+
+type PromoteToAdminRequest struct {
+	Code   string `json:"code"`
+	UserID string `json:"userId,omitempty"`
+}
+
+type PromoteToAdminResponse struct {
+	RoomID    string `json:"roomId"`
+	IsAdmin   bool   `json:"isAdmin"`
+	AdminCode string `json:"adminCode,omitempty"`
+	Token     string `json:"token,omitempty"`
+	ServerNow int64  `json:"serverNow,omitempty"`
 }
 
 func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
@@ -386,7 +402,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// "New" must always create a room. If the requested root name exists,
 		// generate alternates before falling back to a 3-digit suffix.
-		resolvedCreateName, resolveErr := h.resolveCreateRoomName(ctx, requestedRoomName, rng)
+		resolvedCreateName, resolveErr := h.resolveCreateRoomName(ctx, requestedRoomName)
 		if resolveErr != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room name availability"})
@@ -431,6 +447,13 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to join room"})
 		return
 	}
+	if mode == "create" {
+		if err := h.grantRoomAdmin(ctx, finalRoomID, userID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to initialize room admin"})
+			return
+		}
+	}
 	if err := h.syncBreakJoinCount(ctx, finalRoomID, memberCount); err != nil {
 		log.Printf("[room] break join count sync failed room=%s err=%v", finalRoomID, err)
 	}
@@ -454,11 +477,20 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	if adminErr != nil {
 		log.Printf("[room] admin resolve failed room=%s user=%s err=%v", finalRoomID, userID, adminErr)
 	}
+	adminCode := ""
+	if isAdmin {
+		if resolvedAdminCode, codeErr := h.ensureRoomAdminCode(ctx, finalRoomID); codeErr != nil {
+			log.Printf("[room] admin code resolve failed room=%s user=%s err=%v", finalRoomID, userID, codeErr)
+		} else {
+			adminCode = resolvedAdminCode
+		}
+	}
 
 	response := JoinRoomResponse{
 		RoomID:    finalRoomID,
 		RoomName:  finalRoomName,
 		RoomCode:  roomCode,
+		AdminCode: adminCode,
 		UserID:    userID,
 		Token:     token,
 		CreatedAt: finalCreatedAt,
@@ -597,6 +629,11 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to attach creator to break room"})
+		return
+	}
+	if err := h.grantRoomAdmin(ctx, finalRoomID, creatorID); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to initialize break room admin"})
 		return
 	}
 
@@ -861,12 +898,186 @@ func (h *RoomHandler) GetSidebarRooms(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		rooms[idx].IsAdmin = isAdmin
+		if isAdmin {
+			adminCode, codeErr := h.ensureRoomAdminCode(ctx, rooms[idx].RoomID)
+			if codeErr != nil {
+				log.Printf("[room] sidebar admin code resolve failed room=%s user=%s err=%v", rooms[idx].RoomID, userID, codeErr)
+				continue
+			}
+			rooms[idx].AdminCode = adminCode
+		} else {
+			rooms[idx].AdminCode = ""
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(SidebarRoomsResponse{
 		Rooms:     rooms,
+		ServerNow: time.Now().Unix(),
+	})
+}
+
+func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
+	roomID := normalizeRoomID(chi.URLParam(r, "id"))
+	if roomID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room id is required"})
+		return
+	}
+
+	ctx := context.Background()
+	meta, err := h.redis.Client.HGetAll(ctx, roomKey(roomID)).Result()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read room metadata"})
+		return
+	}
+	if len(meta) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+		return
+	}
+
+	roomName := normalizeRoomName(meta["name"])
+	if roomName == "" {
+		roomName = "Room"
+	}
+	createdAt, _ := strconv.ParseInt(strings.TrimSpace(meta["created_at"]), 10, 64)
+	memberCount64, _ := strconv.ParseInt(strings.TrimSpace(meta["member_count"]), 10, 64)
+	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
+	roomCode, codeErr := h.ensureRoomCode(ctx, roomID)
+	if codeErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
+		return
+	}
+
+	userID := normalizeIdentifier(r.URL.Query().Get("userId"))
+	isAdmin := false
+	adminCode := ""
+	if userID != "" {
+		resolvedIsAdmin, adminErr := h.isRoomAdmin(ctx, roomID, userID)
+		if adminErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room admin"})
+			return
+		}
+		isAdmin = resolvedIsAdmin
+	}
+	if isAdmin {
+		resolvedAdminCode, adminCodeErr := h.ensureRoomAdminCode(ctx, roomID)
+		if adminCodeErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room admin code"})
+			return
+		}
+		adminCode = resolvedAdminCode
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(RoomDetailsResponse{
+		RoomID:      roomID,
+		RoomName:    roomName,
+		RoomCode:    roomCode,
+		AdminCode:   adminCode,
+		MemberCount: int(memberCount64),
+		CreatedAt:   createdAt,
+		ExpiresAt:   expiresAt,
+		IsAdmin:     isAdmin,
+		ServerNow:   time.Now().Unix(),
+	})
+}
+
+func (h *RoomHandler) PromoteToAdmin(w http.ResponseWriter, r *http.Request) {
+	roomID := normalizeRoomID(chi.URLParam(r, "id"))
+	if roomID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room id is required"})
+		return
+	}
+
+	var req PromoteToAdminRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	userID := normalizeIdentifier(req.UserID)
+	if userID == "" {
+		userID = normalizeIdentifier(r.URL.Query().Get("userId"))
+	}
+	if userID == "" {
+		userID = normalizeIdentifier(r.Header.Get("X-User-Id"))
+	}
+	if userID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "userId is required"})
+		return
+	}
+
+	ctx := context.Background()
+	exists, err := h.roomExists(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+		return
+	}
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+		return
+	}
+
+	isMember, err := h.redis.Client.SIsMember(ctx, roomMembersKey(roomID), userID).Result()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+		return
+	}
+	if !isMember {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Join the room before requesting admin access"})
+		return
+	}
+
+	resolvedAdminCode, err := h.ensureRoomAdminCode(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room admin code"})
+		return
+	}
+	expectedCode := normalizeRoomAdminCode(resolvedAdminCode)
+	submittedCode := normalizeRoomAdminCode(strings.ToUpper(strings.TrimSpace(req.Code)))
+	if expectedCode == "" || submittedCode == "" || subtle.ConstantTimeCompare([]byte(expectedCode), []byte(submittedCode)) != 1 {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid admin code"})
+		return
+	}
+
+	if err := h.grantRoomAdmin(ctx, roomID, userID); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to grant admin access"})
+		return
+	}
+
+	updatedToken := ""
+	if token, tokenErr := newToken(); tokenErr == nil {
+		updatedToken = token
+	} else {
+		log.Printf("[room] admin promote token generation failed room=%s user=%s err=%v", roomID, userID, tokenErr)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(PromoteToAdminResponse{
+		RoomID:    roomID,
+		IsAdmin:   true,
+		AdminCode: expectedCode,
+		Token:     updatedToken,
 		ServerNow: time.Now().Unix(),
 	})
 }
@@ -1049,6 +1260,7 @@ func (h *RoomHandler) LeaveRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.redis.Client.SRem(ctx, userRoomsKey(userID), roomID).Err()
 	_ = h.redis.Client.HDel(ctx, roomMemberJoinedAtKey(roomID), userID).Err()
+	_ = h.redis.Client.SRem(ctx, roomAdminsKey(roomID), userID).Err()
 	if err := h.redis.Client.SAdd(ctx, userHiddenRoomsKey(userID), roomID).Err(); err != nil {
 		log.Printf("[room] leave hidden-room set failed user=%s room=%s err=%v", userID, roomID, err)
 	}
@@ -1132,6 +1344,7 @@ func (h *RoomHandler) RemoveRoomMember(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.redis.Client.SRem(ctx, userRoomsKey(targetUserID), roomID).Err()
 	_ = h.redis.Client.HDel(ctx, roomMemberJoinedAtKey(roomID), targetUserID).Err()
+	_ = h.redis.Client.SRem(ctx, roomAdminsKey(roomID), targetUserID).Err()
 	_ = h.redis.Client.SAdd(ctx, userHiddenRoomsKey(targetUserID), roomID).Err()
 	_ = h.redis.Client.Expire(ctx, userHiddenRoomsKey(targetUserID), roomMaxExtendAge).Err()
 
@@ -1295,7 +1508,7 @@ func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
 	if err := h.indexRoomName(ctx, roomID, nextName, time.Now().Unix()); err != nil {
 		log.Printf("[room] rename name-index update failed room=%s err=%v", roomID, err)
 	}
-	h.upsertRoomRecord(ctx, roomID, nextName, "", "", "")
+	h.upsertRoomRecord(ctx, roomID, nextName, "", "", "", "")
 	h.broadcastRoomEvent(roomID, "room_renamed", map[string]interface{}{
 		"roomName":  nextName,
 		"serverNow": time.Now().Unix(),
@@ -1593,6 +1806,31 @@ func normalizeRoomCode(raw string) string {
 	return code
 }
 
+func normalizeRoomAdminCode(raw string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(raw))
+	if len(normalized) != roomAdminCodeLength {
+		return ""
+	}
+	for _, ch := range normalized {
+		if (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') {
+			return ""
+		}
+	}
+	return normalized
+}
+
+func generateRoomAdminCode() (string, error) {
+	randomBytes := make([]byte, roomAdminCodeLength)
+	if _, err := crand.Read(randomBytes); err != nil {
+		return "", err
+	}
+	code := make([]byte, roomAdminCodeLength)
+	for index, value := range randomBytes {
+		code[index] = roomAdminCodeCharset[int(value)%len(roomAdminCodeCharset)]
+	}
+	return string(code), nil
+}
+
 func resolveInitialRoomTTL(requestedHours float64) (time.Duration, error) {
 	if requestedHours <= 0 {
 		return roomDefaultTTL, nil
@@ -1619,7 +1857,7 @@ func isFinite(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
-func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomName string, rng *mrand.Rand) (string, error) {
+func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomName string) (string, error) {
 	candidate := normalizeRoomName(requestedRoomName)
 	if candidate == "" {
 		candidate = "Room"
@@ -1635,7 +1873,7 @@ func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomNa
 
 	lastGenerated := ""
 	for attempt := 0; attempt < roomNameRetryLimit; attempt++ {
-		generated := normalizeRoomName(generateRoomNameFromGeneratorLogic(rng))
+		generated := normalizeRoomName(namegen.GenerateRoomName())
 		if generated == "" {
 			continue
 		}
@@ -1650,7 +1888,7 @@ func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomNa
 	}
 
 	if lastGenerated == "" {
-		lastGenerated = normalizeRoomName(generateRoomNameFromGeneratorLogic(rng))
+		lastGenerated = normalizeRoomName(namegen.GenerateRoomName())
 	}
 	if lastGenerated == "" {
 		lastGenerated = "room"
@@ -1662,7 +1900,7 @@ func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomNa
 	}
 
 	for attempt := 0; attempt < 1000; attempt++ {
-		fallback := normalizeRoomName(fmt.Sprintf("%s%03d", base, randomThreeDigit(rng)))
+		fallback := normalizeRoomName(fmt.Sprintf("%s%03d", base, randomThreeDigit()))
 		if fallback == "" {
 			continue
 		}
@@ -1678,41 +1916,8 @@ func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomNa
 	return "", fmt.Errorf("failed to resolve available room name")
 }
 
-func generateRoomNameFromGeneratorLogic(rng *mrand.Rand) string {
-	normalizedRng := ensureMathRand(rng)
-	adjective := randomWordFromList(normalizedRng, roomNameAdjectives)
-	noun := randomWordFromList(normalizedRng, roomNameNouns)
-
-	base := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%s_%s", adjective, noun)))
-	if base == "_" || base == "" {
-		return "room"
-	}
-
-	if normalizedRng.Float64() < 0.5 {
-		return fmt.Sprintf("%s%02d", base, randomTwoDigit(normalizedRng))
-	}
-	return base
-}
-
-func ensureMathRand(rng *mrand.Rand) *mrand.Rand {
-	if rng != nil {
-		return rng
-	}
-	return mrand.New(mrand.NewSource(time.Now().UnixNano()))
-}
-
-func randomWordFromList(rng *mrand.Rand, words []string) string {
-	if len(words) == 0 {
-		return "room"
-	}
-	return words[rng.Intn(len(words))]
-}
-
-func randomTwoDigit(rng *mrand.Rand) int {
-	return rng.Intn(90) + 10
-}
-
-func randomThreeDigit(rng *mrand.Rand) int {
+func randomThreeDigit() int {
+	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	return rng.Intn(1000)
 }
 
@@ -2044,6 +2249,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 		type text,
 		parent_room_id text,
 		origin_message_id text,
+		admin_code text,
 		created_at timestamp,
 		updated_at timestamp
 	)`, roomsTable)
@@ -2055,6 +2261,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 	// Ensure upgraded nodes have the tree-link column even if the table was created earlier.
 	alterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
 	}
 	for _, query := range alterQueries {
 		if err := h.scylla.Session.Query(query).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
@@ -2089,7 +2296,7 @@ func isSchemaAlreadyAppliedError(err error) bool {
 		strings.Contains(lowered, "duplicate")
 }
 
-func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, roomType, parentRoomID, originMessageID string) {
+func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, roomType, parentRoomID, originMessageID, adminCode string) {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return
 	}
@@ -2128,6 +2335,12 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 			originMessageID = strings.TrimSpace(cachedOrigin)
 		}
 	}
+	adminCode = normalizeRoomAdminCode(adminCode)
+	if adminCode == "" && h.redis != nil && h.redis.Client != nil {
+		if cachedAdminCode, err := h.redis.Client.HGet(ctx, roomKey(roomID), "admin_code").Result(); err == nil {
+			adminCode = normalizeRoomAdminCode(cachedAdminCode)
+		}
+	}
 
 	createdAt := time.Now().UTC()
 	if storedCreatedAt, err := h.getRoomCreatedAt(ctx, roomID); err == nil && storedCreatedAt > 0 {
@@ -2137,7 +2350,7 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 
 	roomsTable := h.scylla.Table("rooms")
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, admin_code, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		roomsTable,
 		hardScyllaTTLSeconds,
 	)
@@ -2148,6 +2361,7 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 		roomType,
 		parentRoomID,
 		originMessageID,
+		adminCode,
 		createdAt,
 		updatedAt,
 	).WithContext(ctx).Exec(); err != nil {
@@ -2470,6 +2684,112 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 	return "", fmt.Errorf("failed to allocate room code")
 }
 
+func (h *RoomHandler) ensureRoomAdminCode(ctx context.Context, roomID string) (string, error) {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return "", fmt.Errorf("room id is required")
+	}
+
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return "", fmt.Errorf("redis is not configured")
+	}
+
+	existing, err := h.redis.Client.HGet(ctx, roomKey(roomID), "admin_code").Result()
+	if err == nil {
+		if normalized := normalizeRoomAdminCode(existing); normalized != "" {
+			if normalized != existing {
+				_ = h.redis.Client.HSet(ctx, roomKey(roomID), "admin_code", normalized).Err()
+			}
+			return normalized, nil
+		}
+	} else if err != redis.Nil {
+		return "", err
+	}
+
+	if h.scylla != nil && h.scylla.Session != nil {
+		roomsTable := h.scylla.Table("rooms")
+		query := fmt.Sprintf(`SELECT admin_code FROM %s WHERE room_id = ? LIMIT 1`, roomsTable)
+		var scyllaAdminCode string
+		scanErr := h.scylla.Session.Query(query, roomID).WithContext(ctx).Scan(&scyllaAdminCode)
+		if scanErr == nil {
+			if normalized := normalizeRoomAdminCode(scyllaAdminCode); normalized != "" {
+				if err := h.redis.Client.HSet(ctx, roomKey(roomID), "admin_code", normalized).Err(); err != nil {
+					return "", err
+				}
+				return normalized, nil
+			}
+		} else if !errors.Is(scanErr, gocql.ErrNotFound) {
+			log.Printf("[room] admin code scylla lookup failed room=%s err=%v", roomID, scanErr)
+		}
+	}
+
+	generated, err := generateRoomAdminCode()
+	if err != nil {
+		return "", err
+	}
+	if err := h.redis.Client.HSet(ctx, roomKey(roomID), "admin_code", generated).Err(); err != nil {
+		return "", err
+	}
+	h.syncRoomAdminCodeToScylla(ctx, roomID, generated)
+	return generated, nil
+}
+
+func (h *RoomHandler) syncRoomAdminCodeToScylla(ctx context.Context, roomID string, adminCode string) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedAdminCode := normalizeRoomAdminCode(adminCode)
+	if normalizedRoomID == "" || normalizedAdminCode == "" {
+		return
+	}
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return
+	}
+
+	roomsTable := h.scylla.Table("rooms")
+	query := fmt.Sprintf(
+		`UPDATE %s USING TTL %d SET admin_code = ?, updated_at = ? WHERE room_id = ?`,
+		roomsTable,
+		hardScyllaTTLSeconds,
+	)
+	if err := h.scylla.Session.Query(
+		query,
+		normalizedAdminCode,
+		time.Now().UTC(),
+		normalizedRoomID,
+	).WithContext(ctx).Exec(); err != nil {
+		log.Printf("[room] sync scylla admin code failed room=%s err=%v", normalizedRoomID, err)
+	}
+}
+
+func (h *RoomHandler) grantRoomAdmin(ctx context.Context, roomID string, userID string) error {
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedUserID := normalizeIdentifier(userID)
+	if normalizedRoomID == "" || normalizedUserID == "" {
+		return fmt.Errorf("room and user are required")
+	}
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return fmt.Errorf("redis is not configured")
+	}
+
+	membersKey := roomMembersKey(normalizedRoomID)
+	isMember, err := h.redis.Client.SIsMember(ctx, membersKey, normalizedUserID).Result()
+	if err != nil {
+		return err
+	}
+	if !isMember {
+		return fmt.Errorf("user is not a room member")
+	}
+
+	adminKey := roomAdminsKey(normalizedRoomID)
+	if err := h.redis.Client.SAdd(ctx, adminKey, normalizedUserID).Err(); err != nil {
+		return err
+	}
+	roomTTL := h.effectiveRoomTTL(ctx, normalizedRoomID)
+	if roomTTL > 0 {
+		_ = h.redis.Client.Expire(ctx, adminKey, roomTTL).Err()
+	}
+	return nil
+}
+
 func (h *RoomHandler) indexRoomName(ctx context.Context, roomID, roomName string, createdAt int64) error {
 	roomID = normalizeRoomID(roomID)
 	lookup := normalizeRoomNameLookup(roomName)
@@ -2545,10 +2865,22 @@ func (h *RoomHandler) createRoom(
 	if _, err := h.ensureRoomCode(ctx, normalizedRoomID); err != nil {
 		return err
 	}
+	adminCode, err := h.ensureRoomAdminCode(ctx, normalizedRoomID)
+	if err != nil {
+		return err
+	}
 	if err := h.indexRoomName(ctx, normalizedRoomID, normalizedRoomName, createdAt); err != nil {
 		return err
 	}
-	h.upsertRoomRecord(ctx, normalizedRoomID, normalizedRoomName, normalizedRoomType, normalizedParentID, normalizedOriginMessageID)
+	h.upsertRoomRecord(
+		ctx,
+		normalizedRoomID,
+		normalizedRoomName,
+		normalizedRoomType,
+		normalizedParentID,
+		normalizedOriginMessageID,
+		adminCode,
+	)
 
 	return nil
 }
@@ -2608,10 +2940,36 @@ func (h *RoomHandler) isRoomAdmin(ctx context.Context, roomID, userID string) (b
 	if roomID == "" || userID == "" {
 		return false, nil
 	}
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return false, nil
+	}
+
+	adminMembers, err := h.redis.Client.SMembers(ctx, roomAdminsKey(roomID)).Result()
+	if err != nil && err != redis.Nil {
+		return false, err
+	}
+	normalizedAdmins := make(map[string]struct{}, len(adminMembers))
+	for _, rawAdminID := range adminMembers {
+		adminID := normalizeIdentifier(rawAdminID)
+		if adminID == "" {
+			_ = h.redis.Client.SRem(ctx, roomAdminsKey(roomID), rawAdminID).Err()
+			continue
+		}
+		normalizedAdmins[adminID] = struct{}{}
+	}
+	if len(normalizedAdmins) > 0 {
+		_, ok := normalizedAdmins[userID]
+		return ok, nil
+	}
 
 	adminUserID, err := h.resolveRoomAdminUserID(ctx, roomID)
 	if err != nil {
 		return false, err
+	}
+	if adminUserID == userID {
+		if grantErr := h.grantRoomAdmin(ctx, roomID, userID); grantErr != nil {
+			log.Printf("[room] migrate implicit admin failed room=%s user=%s err=%v", roomID, userID, grantErr)
+		}
 	}
 	return adminUserID == userID, nil
 }
@@ -2779,6 +3137,7 @@ func (h *RoomHandler) deleteSingleRoom(ctx context.Context, roomID string) error
 
 	_, _ = h.redis.Client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		pipe.Del(ctx, roomMembersKey(roomID))
+		pipe.Del(ctx, roomAdminsKey(roomID))
 		pipe.Del(ctx, roomMemberJoinedAtKey(roomID))
 		pipe.Del(ctx, roomChildrenKey(roomID))
 		pipe.Del(ctx, roomHistoryKey(roomID))
@@ -3069,6 +3428,10 @@ func roomKey(roomID string) string {
 
 func roomMembersKey(roomID string) string {
 	return "room:" + roomID + ":members"
+}
+
+func roomAdminsKey(roomID string) string {
+	return "room:" + roomID + ":admins"
 }
 
 func roomMemberJoinedAtKey(roomID string) string {

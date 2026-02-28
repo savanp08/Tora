@@ -174,10 +174,18 @@ export function parseMember(value: unknown, fallbackIndex: number): OnlineMember
 		toStringValue(source.name ?? source.username ?? source.userName ?? source.user_name) ||
 		memberId;
 	const joinedAt = toTimestamp(source.joinedAt ?? source.joined_at ?? Date.now());
+	const isAdmin = toBool(
+		source.isAdmin ??
+			source.is_admin ??
+			source.roomAdmin ??
+			source.room_admin ??
+			source.admin ??
+			(source.role === 'admin')
+	);
 	if (!memberId) {
 		return null;
 	}
-	return { id: memberId, name: memberName, isOnline: true, joinedAt };
+	return { id: memberId, name: memberName, isOnline: true, joinedAt, isAdmin };
 }
 
 export function toWireMessage(message: ChatMessage) {

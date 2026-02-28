@@ -3,7 +3,7 @@
 	import ExpiryClockPicker from '$lib/components/home/ExpiryClockPicker.svelte';
 	import LoginFooter from '$lib/components/home/LoginFooter.svelte';
 	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
-	import { currentUser, authToken } from '$lib/store';
+	import { activeRoomPassword, authToken, currentUser } from '$lib/store';
 	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
 	import {
 		normalizeRoomCodeInput,
@@ -21,6 +21,7 @@
 	let roomName = '';
 	let roomCode = '';
 	let guestUsername = '';
+	let roomPassword = '';
 	let roomDurationHours = 24;
 	let activeActionMode: JoinMode | '' = '';
 	let isJoining = false;
@@ -69,6 +70,8 @@
 		const userIdentity = requestedUsername ? updateUsername(requestedUsername) : identity;
 		const userToJoin = userIdentity.username;
 		guestUsername = userToJoin;
+		const normalizedRoomPassword = (roomPassword || '').trim().slice(0, 32);
+		activeRoomPassword.set(normalizedRoomPassword);
 
 		try {
 			clientLog('api-rooms-join-request', {
@@ -116,8 +119,11 @@
 			const serverNowQuery =
 				Number.isFinite(serverNow) && serverNow > 0 ? `&serverNow=${serverNow}` : '';
 			clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
+			const roomPasswordHash = normalizedRoomPassword
+				? `#key=${encodeURIComponent(normalizedRoomPassword)}`
+				: '';
 			goto(
-				`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}${expiresAtQuery}${serverNowQuery}`
+				`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${createdAtQuery}${expiresAtQuery}${serverNowQuery}${roomPasswordHash}`
 			);
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
@@ -172,14 +178,31 @@
 					<ExpiryClockPicker bind:valueHours={roomDurationHours} disabled={isJoining} />
 				</div>
 
-				<div class="field-group">
-					<label for="username-input">Username (optional)</label>
-					<input
-						id="username-input"
-						type="text"
-						placeholder="e.g. dizzy_panda"
-						bind:value={guestUsername}
-					/>
+				<div class="identity-inputs-row">
+					<div class="field-group">
+						<label for="username-input">Username (optional)</label>
+						<input
+							id="username-input"
+							type="text"
+							placeholder="e.g. dizzy_panda"
+							bind:value={guestUsername}
+						/>
+					</div>
+
+					<div class="field-group">
+						<label for="room-password-input">Room Password (optional)</label>
+						<input
+							id="room-password-input"
+							type="password"
+							placeholder="Optional password"
+							bind:value={roomPassword}
+							maxlength="32"
+							autocomplete="off"
+						/>
+						<small>
+							Private, Secured
+						</small>
+					</div>
 				</div>
 
 				<div class="action-row">
@@ -214,7 +237,7 @@
 	}
 
 	.container {
-		width: min(860px, 100%);
+		
 		margin: 0 auto;
 		padding: 16px clamp(12px, 3vw, 24px) 20px;
 		min-height: 100dvh;
@@ -276,6 +299,17 @@
 		align-items: stretch;
 		gap: 10px;
 		flex-wrap: nowrap;
+	}
+
+	.identity-inputs-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 10px;
+		flex-wrap: nowrap;
+	}
+
+	.identity-inputs-row .field-group {
+		flex: 1 1 50%;
 	}
 
 	.field-group {
@@ -382,6 +416,14 @@
 
 		.room-name-group,
 		.room-code-group {
+			flex-basis: 100%;
+		}
+
+		.identity-inputs-row {
+			flex-wrap: wrap;
+		}
+
+		.identity-inputs-row .field-group {
 			flex-basis: 100%;
 		}
 

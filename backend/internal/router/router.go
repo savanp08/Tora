@@ -3,12 +3,15 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/handlers"
 	"github.com/savanp08/converse/internal/monitor"
+	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
 	"github.com/savanp08/converse/internal/websocket"
 
@@ -47,6 +50,7 @@ func New(
 	authHandler := handlers.NewAuthHandler()
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
+	promoteLimiter := security.NewLimiter(5, time.Minute, 5, time.Minute)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		type dependencyStatus struct {
@@ -116,7 +120,12 @@ func New(
 		r.Post("/rooms/break", roomHandler.CreateBreakRoom)
 		r.Post("/rooms/remove-member", roomHandler.RemoveRoomMember)
 		r.Post("/rooms/delete", roomHandler.DeleteRoom)
+		r.With(rateLimitMiddleware(promoteLimiter, "Admin promotion rate limit exceeded")).Post(
+			"/rooms/{id}/promote",
+			roomHandler.PromoteToAdmin,
+		)
 		r.Get("/rooms/sidebar", roomHandler.GetSidebarRooms)
+		r.Get("/rooms/{id}", roomHandler.GetRoom)
 		r.Get("/rooms/{id}/board", roomHandler.GetBoardElements)
 		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
 		r.Post("/rooms/{roomId}/pins", roomHandler.UpsertRoomPin)
@@ -131,4 +140,47 @@ func New(
 	})
 
 	return r
+}
+
+func rateLimitMiddleware(limiter *security.Limiter, message string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if limiter != nil && !limiter.Allow(extractClientIP(r)) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": strings.TrimSpace(message)})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func extractClientIP(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		if len(parts) > 0 {
+			ip := strings.TrimSpace(parts[0])
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	if strings.TrimSpace(r.RemoteAddr) != "" {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return "unknown"
 }

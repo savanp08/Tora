@@ -463,6 +463,26 @@ func (s *MessageService) IsRoomAdmin(ctx context.Context, roomID, userID string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	adminsKey := roomKeyPrefix + normalizedRoomID + ":admins"
+	adminMembers, err := s.Redis.Client.SMembers(ctx, adminsKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return false, err
+	}
+	normalizedAdmins := make(map[string]struct{}, len(adminMembers))
+	for _, rawAdmin := range adminMembers {
+		adminID := normalizeUsername(rawAdmin)
+		if adminID == "" {
+			_ = s.Redis.Client.SRem(ctx, adminsKey, rawAdmin).Err()
+			continue
+		}
+		normalizedAdmins[adminID] = struct{}{}
+	}
+	if len(normalizedAdmins) > 0 {
+		_, ok := normalizedAdmins[normalizedUserID]
+		return ok, nil
+	}
+
 	membersKey := roomKeyPrefix + normalizedRoomID + ":members"
 	members, err := s.Redis.Client.SMembers(ctx, membersKey).Result()
 	if err != nil {

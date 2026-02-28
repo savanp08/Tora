@@ -42,6 +42,7 @@ type Room struct {
 	ParentRoomID    string    `json:"parentRoomId,omitempty"`
 	OriginMessageID string    `json:"originMessageId,omitempty"`
 	MemberCount     int       `json:"memberCount"`
+	AdminCode       string    `json:"adminCode,omitempty"`
 }
 
 type BoardElement struct {
