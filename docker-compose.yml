@@ -7,25 +7,50 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly no
-    ports:
-      - '6379:6379'
+    command: redis-server --maxmemory 6gb --maxmemory-policy allkeys-lru --appendonly no
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 5
-
-  cassandra:
-    image: cassandra:latest
-    container_name: converse-cassandra
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    depends_on:
+      redis:
+        condition: service_healthy
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
     ports:
-      - "9042:9042"
-    environment:
-      - CASSANDRA_CLUSTER_NAME=ConverseCluster
-      - CASSANDRA_DC=dc1
-    healthcheck:
-      test: ["CMD-SHELL", "cqlsh -e 'describe cluster'"]
-      interval: 20s
-      timeout: 10s
-      retries: 5
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+  # cassandra:
+  #   image: cassandra:latest
+  #   container_name: converse-cassandra
+  #   ports:
+  #     - "9042:9042"
+  #   environment:
+  #     - CASSANDRA_CLUSTER_NAME=ConverseCluster
+  #     - CASSANDRA_DC=dc1
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "cqlsh -e 'describe cluster'"]
+  #     interval: 20s
+  #     timeout: 10s
+  #     retries: 5

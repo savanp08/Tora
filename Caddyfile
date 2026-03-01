@@ -1,0 +1,3 @@
+api-tora.monokenos.com {
+    reverse_proxy backend:8080
+}

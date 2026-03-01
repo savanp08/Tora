@@ -1,0 +1,20 @@
+# Step 1: Start with a base computer that already has Go installed
+FROM golang:1.25-alpine
+
+# Step 2: Create a folder inside the container called /app
+WORKDIR /app
+
+# Step 3: Copy the go.mod and go.sum files from your Oracle server INTO the container
+COPY go.mod go.sum ./
+
+# Step 4: Download the Go dependencies inside the container
+RUN go mod download
+
+# Step 5: Copy all the rest of your Go code from your Oracle server INTO the container
+COPY . .
+
+# Step 6: Compile the Go code into a highly optimized executable named 'server'
+RUN go build -o server ./cmd/server/main.go
+
+# Step 7: Tell the container what to do when it boots up
+CMD ["./server"]
