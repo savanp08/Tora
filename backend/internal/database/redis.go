@@ -19,6 +19,7 @@ func InitRedis(addr, password string) *redis.Client {
 		Addr:     addr,
 		Password: password,
 		DB:       0,
+		PoolSize: 200,
 	})
 
 	if _, err := rdb.Ping(Ctx).Result(); err != nil {
