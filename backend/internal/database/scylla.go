@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"os"
 
 	gocqlastra "github.com/datastax/gocql-astra"
 	"github.com/gocql/gocql"
