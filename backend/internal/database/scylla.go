@@ -18,6 +18,7 @@ type ScyllaStore struct {
 }
 
 func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
+	gocql.Logger = log.New(os.Stdout, "[gocql-debug] ", log.LstdFlags)
 	var (
 		cluster *gocql.ClusterConfig
 		session *gocql.Session
@@ -31,7 +32,7 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 
 	// --- MODE 1: ASTRA CLOUD (via ID & Token) ---
 	if cfg.AstraDatabaseID != "" && cfg.AstraToken != "" {
-		log.Printf("☁️  Astra: Connecting via API (ID: %s)...", cfg.AstraDatabaseID)
+		log.Printf("☁️  Astra: Connecting via API ...")
 
 		// This uses the official NewClusterFromURL method you requested
 		cluster, err = gocqlastra.NewClusterFromURL(

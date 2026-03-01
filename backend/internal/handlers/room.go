@@ -417,7 +417,10 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		finalRoomID = nextRoomID
+		log.Println("DEBUG: 👉 Starting tryCreateRoom...")
+		startCreate := time.Now()
 		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "", initialRoomTTL)
+		log.Printf("DEBUG: 🛑 tryCreateRoom finished in %v. Error: %v", time.Since(startCreate), err)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -479,11 +482,14 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	adminCode := ""
 	if isAdmin {
+		log.Println("DEBUG: 👉 Starting ensureRoomAdminCode...")
+		startAdmin := time.Now()
 		if resolvedAdminCode, codeErr := h.ensureRoomAdminCode(ctx, finalRoomID); codeErr != nil {
 			log.Printf("[room] admin code resolve failed room=%s user=%s err=%v", finalRoomID, userID, codeErr)
 		} else {
 			adminCode = resolvedAdminCode
 		}
+		log.Printf("DEBUG: 🛑 ensureRoomAdminCode finished in %v", time.Since(startAdmin))
 	}
 
 	response := JoinRoomResponse{
