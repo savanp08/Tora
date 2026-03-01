@@ -402,8 +402,12 @@ func (h *Hub) persistenceWorker() {
 			continue
 		}
 
-		result, err := h.msgService.Redis.Client.BLPop(ctx, 0, messageQueueKey).Result()
+		// Use a 2-second timeout
+		result, err := h.msgService.Redis.Client.BLPop(ctx, 2*time.Second, messageQueueKey).Result()
 		if err != nil {
+			if err.Error() == "redis: nil" {
+				continue
+			}
 			log.Printf("persistence worker pop error: %v", err)
 			time.Sleep(time.Second)
 			continue
