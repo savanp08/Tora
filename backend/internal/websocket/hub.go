@@ -406,6 +406,9 @@ func (h *Hub) persistenceWorker() {
 		result, err := h.msgService.Redis.Client.BLPop(ctx, 2*time.Second, messageQueueKey).Result()
 		if err != nil {
 			if err.Error() == "redis: nil" {
+				// YIELD THE CPU: Give the main HTTP router 10 milliseconds
+				// to grab a connection for user requests before looping again!
+				time.Sleep(10 * time.Millisecond)
 				continue
 			}
 			log.Printf("persistence worker pop error: %v", err)

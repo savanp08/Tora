@@ -16,10 +16,11 @@ type RedisStore struct {
 
 func InitRedis(addr, password string) *redis.Client {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       0,
-		PoolSize: 200,
+		Addr:         addr,
+		Password:     password,
+		DB:           0,
+		PoolSize:     400, // Absolutely force a massive pool of 400 connections
+		MinIdleConns: 50,  // Keep 50 connections warm and ready at all times
 	})
 
 	if _, err := rdb.Ping(Ctx).Result(); err != nil {
@@ -35,9 +36,11 @@ func InitRedis(addr, password string) *redis.Client {
 
 func NewRedisStore(addr, password string) (*RedisStore, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       0,
+		Addr:         addr,
+		Password:     password,
+		DB:           0,
+		PoolSize:     400, // Absolutely force a massive pool of 400 connections
+		MinIdleConns: 50,  // Keep 50 connections warm and ready at all times
 	})
 
 	if _, err := client.Ping(Ctx).Result(); err != nil {
