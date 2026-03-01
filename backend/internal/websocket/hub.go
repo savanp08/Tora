@@ -192,7 +192,6 @@ func (h *Hub) Subscribe() {
 			select {
 			case h.redisInbox <- msg:
 			default:
-				log.Printf("redis subscribe drop room=%s reason=inbox_full", msg.RoomID)
 			}
 		}
 
@@ -235,7 +234,6 @@ func (h *Hub) SubscribeTyping() {
 			select {
 			case h.typingInbox <- event:
 			default:
-				log.Printf("redis typing drop room=%s user=%s reason=inbox_full", event.RoomID, event.UserID)
 			}
 		}
 
@@ -290,12 +288,6 @@ func (h *Hub) SubscribeDiscussionComments() {
 			select {
 			case h.discussionInbox <- event:
 			default:
-				log.Printf(
-					"redis discussion drop room=%s pin=%s comment=%s reason=inbox_full",
-					event.RoomID,
-					event.PinMessageID,
-					event.Payload.ID,
-				)
 			}
 		}
 
@@ -338,7 +330,6 @@ func (h *Hub) SubscribeMessageMutations() {
 			select {
 			case h.mutationInbox <- event:
 			default:
-				log.Printf("redis mutation drop room=%s message=%s reason=inbox_full", event.RoomID, event.MessageID)
 			}
 		}
 
@@ -384,7 +375,6 @@ func (h *Hub) SubscribeRoomEvents() {
 			select {
 			case h.roomEventInbox <- event:
 			default:
-				log.Printf("redis room-event drop room=%s type=%s reason=inbox_full", event.RoomID, event.Type)
 			}
 		}
 
@@ -1051,7 +1041,6 @@ func (h *Hub) handleClientMessageEditEvent(event *ClientMessageEditEvent) {
 			return
 		}
 		if !ownsMessage {
-			log.Printf("[ws] message edit denied room=%s message=%s user=%s reason=not_owner", roomID, messageID, client.UserID)
 			return
 		}
 	}
@@ -1102,7 +1091,6 @@ func (h *Hub) handleClientMessageDeleteEvent(event *ClientMessageDeleteEvent) {
 		return
 	}
 	if !ownsMessage {
-		log.Printf("[ws] message delete denied room=%s message=%s user=%s reason=not_owner", roomID, messageID, client.UserID)
 		return
 	}
 	if err := h.msgService.MarkMessageDeleted(context.Background(), roomID, messageID, time.Now().UTC()); err != nil {
@@ -1184,7 +1172,6 @@ func (h *Hub) BroadcastToRoom(roomID string, payload map[string]interface{}) {
 	select {
 	case h.roomEvent <- event:
 	case <-time.After(200 * time.Millisecond):
-		log.Printf("[ws] room event enqueue timeout room=%s type=%s", normalizedRoomID, eventType)
 	}
 }
 

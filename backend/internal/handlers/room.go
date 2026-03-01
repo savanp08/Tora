@@ -64,19 +64,6 @@ type RoomHandler struct {
 	scylla *database.ScyllaStore
 }
 
-func logTraceRoomDuration(operation string, started time.Time, err error) {
-	duration := time.Since(started)
-	if err != nil {
-		log.Printf("[TRACE-ROOM] %s took %v (err=%v)", operation, duration, err)
-		return
-	}
-	log.Printf("[TRACE-ROOM] %s took %v", operation, duration)
-}
-
-func logTraceRedisDuration(operation string, started time.Time) {
-	log.Printf("[TRACE-REDIS] %s took %v", operation, time.Since(started))
-}
-
 func NewRoomHandler(hub *websocket.Hub, redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *RoomHandler {
 	handler := &RoomHandler{hub: hub, redis: redisStore, scylla: scyllaStore}
 	handler.ensureRoomSchema()
@@ -256,16 +243,6 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
 		return
 	}
-	log.Printf(
-		"[room] join requested room_id=%q room_name=%q room_code=%q username=%q type=%q mode=%q duration_hours=%.2f",
-		req.RoomID,
-		req.RoomName,
-		req.RoomCode,
-		req.Username,
-		req.Type,
-		req.Mode,
-		req.RoomDurationHours,
-	)
 
 	roomType := strings.TrimSpace(req.Type)
 	if roomType == "" {
@@ -327,9 +304,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	finalRoomName := requestedRoomName
 	if mode == "join" {
 		if normalizedRoomCode != "" {
-			startResolveRoomIDByCode := time.Now()
 			resolvedRoomID, err := h.resolveRoomIDByCode(ctx, normalizedRoomCode)
-			logTraceRoomDuration("resolveRoomIDByCode", startResolveRoomIDByCode, err)
 			if err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
@@ -343,9 +318,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			finalRoomID = resolvedRoomID
 		} else {
 			if requestedRoomName != "" {
-				startResolveRoomIDByName := time.Now()
 				resolvedRoomID, err := h.resolveRoomIDByName(ctx, requestedRoomName)
-				logTraceRoomDuration("resolveRoomIDByName", startResolveRoomIDByName, err)
 				if err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
 					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room name"})
@@ -357,9 +330,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if finalRoomID == "" && requestedRoomID != "" {
-				startRoomExists := time.Now()
 				existsAsID, err := h.roomExists(ctx, requestedRoomID)
-				logTraceRoomDuration("roomExists", startRoomExists, err)
 				if err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
 					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -372,9 +343,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 
 			// Backward compatibility for clients that still send room names in roomId.
 			if finalRoomID == "" && requestedRoomID != "" {
-				startResolveLegacyRoomIDByName := time.Now()
 				resolvedLegacyRoomID, err := h.resolveRoomIDByName(ctx, requestedRoomID)
-				logTraceRoomDuration("resolveRoomIDByName", startResolveLegacyRoomIDByName, err)
 				if err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
 					json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room name"})
@@ -394,9 +363,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		startFinalRoomExists := time.Now()
 		exists, err := h.roomExists(ctx, finalRoomID)
-		logTraceRoomDuration("roomExists", startFinalRoomExists, err)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -408,9 +375,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		startGetRoomName := time.Now()
 		name, err := h.getRoomName(ctx, finalRoomID)
-		logTraceRoomDuration("getRoomName", startGetRoomName, err)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read room data"})
@@ -443,9 +408,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		}
 		finalRoomID = nextRoomID
 
-		startTryCreateRoom := time.Now()
 		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "", initialRoomTTL)
-		logTraceRoomDuration("tryCreateRoom", startTryCreateRoom, err)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -458,17 +421,13 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	startEnsureRoomCode := time.Now()
 	roomCode, err := h.ensureRoomCode(ctx, finalRoomID)
-	logTraceRoomDuration("ensureRoomCode", startEnsureRoomCode, err)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room code"})
 		return
 	}
-	startRegisterRoomMembership := time.Now()
 	memberCount, err := h.registerRoomMembership(ctx, finalRoomID, userID)
-	logTraceRoomDuration("registerRoomMembership", startRegisterRoomMembership, err)
 	if err != nil {
 		if errors.Is(err, errRoomFull) {
 			w.WriteHeader(http.StatusConflict)
@@ -486,18 +445,12 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	startSyncBreakJoinCount := time.Now()
 	syncBreakErr := h.syncBreakJoinCount(ctx, finalRoomID, memberCount)
-	logTraceRoomDuration("syncBreakJoinCount", startSyncBreakJoinCount, syncBreakErr)
 	if syncBreakErr != nil {
 		log.Printf("[room] break join count sync failed room=%s err=%v", finalRoomID, syncBreakErr)
 	}
 
-	log.Printf("[room] join resolved room_id=%s room_name=%s user_id=%s mode=%s members=%d", finalRoomID, finalRoomName, userID, mode, memberCount)
-
-	startGetRoomCreatedAt := time.Now()
 	finalCreatedAt, err := h.getRoomCreatedAt(ctx, finalRoomID)
-	logTraceRoomDuration("getRoomCreatedAt", startGetRoomCreatedAt, err)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room created time"})
@@ -506,24 +459,18 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	if finalCreatedAt <= 0 {
 		finalCreatedAt = createdAt
 	}
-	startIndexRoomName := time.Now()
 	indexErr := h.indexRoomName(ctx, finalRoomID, finalRoomName, finalCreatedAt)
-	logTraceRoomDuration("indexRoomName", startIndexRoomName, indexErr)
 	if indexErr != nil {
 		log.Printf("[room] join name-index sync failed room=%s err=%v", finalRoomID, indexErr)
 	}
 	expiresAt := h.getRoomExpiryUnix(ctx, finalRoomID)
-	startIsRoomAdmin := time.Now()
 	isAdmin, adminErr := h.isRoomAdmin(ctx, finalRoomID, userID)
-	logTraceRoomDuration("isRoomAdmin", startIsRoomAdmin, adminErr)
 	if adminErr != nil {
 		log.Printf("[room] admin resolve failed room=%s user=%s err=%v", finalRoomID, userID, adminErr)
 	}
 	adminCode := ""
 	if isAdmin {
-		startEnsureRoomAdminCode := time.Now()
 		resolvedAdminCode, codeErr := h.ensureRoomAdminCode(ctx, finalRoomID)
-		logTraceRoomDuration("ensureRoomAdminCode", startEnsureRoomAdminCode, codeErr)
 		if codeErr != nil {
 			log.Printf("[room] admin code resolve failed room=%s user=%s err=%v", finalRoomID, userID, codeErr)
 		} else {
@@ -698,7 +645,6 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	h.tryUpdateBreakMetadataInScylla(parentRoomID, originMessageID, finalRoomID, memberCount)
 
-	log.Printf("[room] break created room=%s parent=%s origin=%s", finalRoomID, parentRoomID, originMessageID)
 	expiresAt := h.getRoomExpiryUnix(ctx, finalRoomID)
 	h.broadcastBreakMetadataUpdate(
 		parentRoomID,
@@ -1141,8 +1087,6 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
 		return
 	}
-	log.Printf("[room] extend requested room_id=%q", req.RoomID)
-
 	roomID := normalizeRoomID(req.RoomID)
 	if roomID == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -1188,7 +1132,6 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 	maxExpiry := createdAt.Add(roomMaxExtendAge)
 	maxRemaining := time.Until(maxExpiry)
 	if maxRemaining <= 0 {
-		log.Printf("[room] extend denied room_id=%s reason=max_age_reached", roomID)
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Room has reached its 15-day limit"})
 		return
@@ -1236,7 +1179,6 @@ func (h *RoomHandler) ExtendRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expiresAt := time.Now().Add(nextTTL).Unix()
-	log.Printf("[room] extend success room_id=%s ttl_seconds=%d", roomID, int64(nextTTL.Seconds()))
 	responseMessage := "Room extended for 24 hours"
 	if nextTTL < currentTTL+roomExtendedTTL {
 		responseMessage = "Room extended to its 15-day limit"
@@ -2444,9 +2386,7 @@ func (h *RoomHandler) roomExists(ctx context.Context, roomID string) (bool, erro
 	if normalizedRoomID == "" {
 		return false, nil
 	}
-	startExists := time.Now()
 	count, err := h.redis.Client.Exists(ctx, roomKey(normalizedRoomID)).Result()
-	logTraceRedisDuration("roomExists.Exists", startExists)
 	if err != nil {
 		return false, err
 	}
@@ -2459,9 +2399,7 @@ func (h *RoomHandler) effectiveRoomTTL(ctx context.Context, roomID string) time.
 		return roomDefaultTTL
 	}
 
-	startTTL := time.Now()
 	ttl, err := h.redis.Client.TTL(ctx, roomKey(normalizedRoomID)).Result()
-	logTraceRedisDuration("effectiveRoomTTL.TTL", startTTL)
 	if err != nil || ttl <= 0 {
 		return roomDefaultTTL
 	}
@@ -2473,9 +2411,7 @@ func (h *RoomHandler) getRoomName(ctx context.Context, roomID string) (string, e
 	if normalizedRoomID == "" {
 		return "", nil
 	}
-	startHGetName := time.Now()
 	name, err := h.redis.Client.HGet(ctx, roomKey(normalizedRoomID), "name").Result()
-	logTraceRedisDuration("getRoomName.HGet(name)", startHGetName)
 	if err == redis.Nil {
 		return "", nil
 	}
@@ -2703,15 +2639,11 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 	}
 	codeTTL := h.effectiveRoomTTL(ctx, roomID)
 
-	startHGetRoomCode := time.Now()
 	existing, err := h.redis.Client.HGet(ctx, roomKey(roomID), "room_code").Result()
-	logTraceRedisDuration("ensureRoomCode.HGet(room_code)", startHGetRoomCode)
 	if err == nil {
 		normalized := normalizeRoomCode(existing)
 		if normalized != "" {
-			startSetRoomCode := time.Now()
 			_ = h.redis.Client.Set(ctx, roomCodeKey(normalized), roomID, codeTTL).Err()
-			logTraceRedisDuration("ensureRoomCode.Set(room_code index)", startSetRoomCode)
 			return normalized, nil
 		}
 	} else if err != redis.Nil {
@@ -2721,9 +2653,7 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	for attempts := 0; attempts < 40; attempts++ {
 		code := fmt.Sprintf("%0*d", roomCodeDigits, rng.Intn(1000000))
-		startSetNXRoomCode := time.Now()
 		created, err := h.redis.Client.SetNX(ctx, roomCodeKey(code), roomID, codeTTL).Result()
-		logTraceRedisDuration("ensureRoomCode.SetNX(room_code index)", startSetNXRoomCode)
 		if err != nil {
 			return "", err
 		}
@@ -2731,15 +2661,10 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 			continue
 		}
 
-		startHSetRoomCode := time.Now()
 		if err := h.redis.Client.HSet(ctx, roomKey(roomID), "room_code", code).Err(); err != nil {
-			logTraceRedisDuration("ensureRoomCode.HSet(room_code)", startHSetRoomCode)
-			startDelRoomCode := time.Now()
 			_ = h.redis.Client.Del(ctx, roomCodeKey(code)).Err()
-			logTraceRedisDuration("ensureRoomCode.Del(room_code index)", startDelRoomCode)
 			return "", err
 		}
-		logTraceRedisDuration("ensureRoomCode.HSet(room_code)", startHSetRoomCode)
 		return code, nil
 	}
 
@@ -2955,16 +2880,12 @@ func (h *RoomHandler) registerRoomMembership(ctx context.Context, roomID, userID
 	}
 
 	membersKey := roomMembersKey(roomID)
-	startIsMember := time.Now()
 	alreadyMember, err := h.redis.Client.SIsMember(ctx, membersKey, userID).Result()
-	logTraceRedisDuration("registerRoomMembership.SIsMember", startIsMember)
 	if err != nil {
 		return 0, err
 	}
 
-	startSCardBeforeJoin := time.Now()
 	count, err := h.redis.Client.SCard(ctx, membersKey).Result()
-	logTraceRedisDuration("registerRoomMembership.SCard(before join)", startSCardBeforeJoin)
 	if err != nil {
 		return 0, err
 	}
@@ -2973,49 +2894,29 @@ func (h *RoomHandler) registerRoomMembership(ctx context.Context, roomID, userID
 	}
 
 	if !alreadyMember {
-		startSAddMember := time.Now()
 		if err := h.redis.Client.SAdd(ctx, membersKey, userID).Err(); err != nil {
-			logTraceRedisDuration("registerRoomMembership.SAdd(member)", startSAddMember)
 			return 0, err
 		}
-		logTraceRedisDuration("registerRoomMembership.SAdd(member)", startSAddMember)
 	}
 
-	startSCardAfterJoin := time.Now()
 	count, err = h.redis.Client.SCard(ctx, membersKey).Result()
-	logTraceRedisDuration("registerRoomMembership.SCard(after join)", startSCardAfterJoin)
 	if err != nil {
 		return 0, err
 	}
 
-	startHSetMemberCount := time.Now()
 	if err := h.redis.Client.HSet(ctx, roomKey(roomID), "member_count", count).Err(); err != nil {
-		logTraceRedisDuration("registerRoomMembership.HSet(member_count)", startHSetMemberCount)
 		return int(count), err
 	}
-	logTraceRedisDuration("registerRoomMembership.HSet(member_count)", startHSetMemberCount)
-	startSAddUserRoom := time.Now()
 	if err := h.redis.Client.SAdd(ctx, userRoomsKey(userID), roomID).Err(); err != nil {
-		logTraceRedisDuration("registerRoomMembership.SAdd(user_rooms)", startSAddUserRoom)
 		return int(count), err
 	}
-	logTraceRedisDuration("registerRoomMembership.SAdd(user_rooms)", startSAddUserRoom)
-	startSRemHiddenRoom := time.Now()
 	_ = h.redis.Client.SRem(ctx, userHiddenRoomsKey(userID), roomID).Err()
-	logTraceRedisDuration("registerRoomMembership.SRem(hidden_rooms)", startSRemHiddenRoom)
 	roomTTL := h.effectiveRoomTTL(ctx, roomID)
-	startExpireMembers := time.Now()
 	_ = h.redis.Client.Expire(ctx, membersKey, roomTTL).Err()
-	logTraceRedisDuration("registerRoomMembership.Expire(members)", startExpireMembers)
-	startHSetNXJoinedAt := time.Now()
 	if err := h.redis.Client.HSetNX(ctx, roomMemberJoinedAtKey(roomID), userID, time.Now().Unix()).Err(); err != nil {
-		logTraceRedisDuration("registerRoomMembership.HSetNX(joined_at)", startHSetNXJoinedAt)
 		return int(count), err
 	}
-	logTraceRedisDuration("registerRoomMembership.HSetNX(joined_at)", startHSetNXJoinedAt)
-	startExpireJoinedAt := time.Now()
 	_ = h.redis.Client.Expire(ctx, roomMemberJoinedAtKey(roomID), roomTTL).Err()
-	logTraceRedisDuration("registerRoomMembership.Expire(joined_at)", startExpireJoinedAt)
 
 	return int(count), nil
 }
@@ -3391,12 +3292,6 @@ func (h *RoomHandler) refreshRoomMessageTTL(ctx context.Context, roomID string, 
 		return err
 	}
 
-	log.Printf(
-		"[room] message soft-expiry refreshed room_id=%s cutoff=%s ttl_seconds=%d",
-		roomID,
-		softCutoff.UTC().Format(time.RFC3339Nano),
-		int64(ttl.Seconds()),
-	)
 	return nil
 }
 

@@ -161,13 +161,11 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 	if !wsConnectLimiter.Allow(clientIP) {
 		http.Error(w, "Too many socket connection attempts", http.StatusTooManyRequests)
-		log.Printf("[ws] connect rate limited ip=%s", clientIP)
 		return
 	}
 	releaseReservation, status, rejectReason := reserveWSConnection(clientIP)
 	if releaseReservation == nil {
 		http.Error(w, rejectReason, status)
-		log.Printf("[ws] connection rejected ip=%s status=%d reason=%s", clientIP, status, rejectReason)
 		return
 	}
 
@@ -328,28 +326,22 @@ func (c *Client) readPump() {
 		msg.SenderName = c.Username
 		msg.RoomID = normalizeRoomID(msg.RoomID)
 		if msg.RoomID == "" {
-			log.Printf("[ws] message rejected user=%s reason=missing_room_id", c.UserID)
 			continue
 		}
 		if !c.isSubscribedToRoom(msg.RoomID) {
-			log.Printf("[ws] message rejected user=%s room=%s reason=not_subscribed", c.UserID, msg.RoomID)
 			continue
 		}
 		if !c.canWriteToRoom(msg.RoomID) {
-			log.Printf("[ws] message rejected user=%s room=%s reason=read_only_subscription", c.UserID, msg.RoomID)
 			continue
 		}
 		if c.Hub != nil && !c.Hub.isClientRoomMember(c.UserID, msg.RoomID) {
 			c.subscribeToRoom(msg.RoomID, false)
-			log.Printf("[ws] message rejected user=%s room=%s reason=membership_revoked", c.UserID, msg.RoomID)
 			continue
 		}
 		if c.msgLimiter != nil && !c.msgLimiter.Allow() {
-			log.Printf("[ws] message rate limited room=%s user=%s", msg.RoomID, c.UserID)
 			continue
 		}
 		if !normalizeInboundMessage(&msg) {
-			log.Printf("[ws] message rejected room=%s user=%s type=%s", msg.RoomID, c.UserID, msg.Type)
 			continue
 		}
 		if msg.ID == "" {

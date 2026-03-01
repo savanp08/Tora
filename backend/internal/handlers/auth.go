@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -44,7 +43,6 @@ func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 	email := strings.TrimSpace(strings.ToLower(req.Email))
 	password := strings.TrimSpace(req.Password)
 	username := normalizeUsername(req.Username)
-	log.Printf("[auth] signup requested email=%q username=%q", email, username)
 
 	if email == "" || password == "" || username == "" {
 		writeAuthError(w, http.StatusBadRequest, "Email, password, and username are required")
@@ -58,7 +56,6 @@ func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuthJSON(w, http.StatusCreated, response)
-	log.Printf("[auth] signup success user_id=%s username=%q", response.User.ID, response.User.Username)
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +68,6 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	email := strings.TrimSpace(strings.ToLower(req.Email))
 	password := strings.TrimSpace(req.Password)
 	username := normalizeUsername(req.Username)
-	log.Printf("[auth] login requested email=%q username=%q", email, username)
 
 	if email == "" || password == "" {
 		writeAuthError(w, http.StatusBadRequest, "Email and password are required")
@@ -92,7 +88,6 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuthJSON(w, http.StatusOK, response)
-	log.Printf("[auth] login success user_id=%s username=%q", response.User.ID, response.User.Username)
 }
 
 func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +101,6 @@ func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
 	if username == "" {
 		username = fmt.Sprintf("Guest_%06d", time.Now().UTC().UnixNano()%1000000)
 	}
-	log.Printf("[auth] anonymous login requested username=%q", username)
 
 	response, err := buildAuthResponse("", username)
 	if err != nil {
@@ -115,7 +109,6 @@ func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuthJSON(w, http.StatusOK, response)
-	log.Printf("[auth] anonymous login success user_id=%s username=%q", response.User.ID, response.User.Username)
 }
 
 func buildAuthResponse(email, username string) (AuthResponse, error) {

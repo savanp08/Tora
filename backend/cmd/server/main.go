@@ -78,7 +78,6 @@ func startRoomExpiryCleanupWorker(
 	r2Client *storage.R2Client,
 ) {
 	if redisStore == nil || redisStore.Client == nil {
-		log.Printf("[expiry-worker] skipped: redis is unavailable")
 		return
 	}
 
@@ -92,7 +91,6 @@ func startRoomExpiryCleanupWorker(
 			time.Sleep(time.Second)
 			continue
 		}
-		log.Printf("[expiry-worker] listening on redis keyspace notifications channel=%s", keyEventChannel)
 
 		channel := pubsub.Channel()
 		for message := range channel {
@@ -138,8 +136,6 @@ func cleanupExpiredRoom(
 		deleteCtx, cancelDelete := context.WithTimeout(ctx, 45*time.Second)
 		if err := r2Client.DeleteObjects(deleteCtx, objectKeys); err != nil {
 			log.Printf("[expiry-worker] r2 cleanup failed room=%s files=%d err=%v", normalizedRoomID, len(objectKeys), err)
-		} else {
-			log.Printf("[expiry-worker] r2 cleanup complete room=%s files=%d", normalizedRoomID, len(objectKeys))
 		}
 		cancelDelete()
 	}
@@ -156,8 +152,6 @@ func cleanupExpiredRoom(
 		deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ?`, messagesTable)
 		if err := scyllaStore.Session.Query(deleteQuery, normalizedRoomID).WithContext(deleteCtx).Exec(); err != nil {
 			log.Printf("[expiry-worker] scylla partition delete failed room=%s err=%v", normalizedRoomID, err)
-		} else {
-			log.Printf("[expiry-worker] scylla partition deleted room=%s", normalizedRoomID)
 		}
 		cancelDelete()
 	}
