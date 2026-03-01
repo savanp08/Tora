@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
+	import toraLogo from '$lib/assets/tora-logo.svg';
+	import { normalizeUsernameInput } from '$lib/utils/homeJoin';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[auth-client]';
 
@@ -11,8 +13,24 @@
 	let username = '';
 	let error = '';
 	let isLoading = false;
+	const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 	const dispatch = createEventDispatcher();
+
+	$: normalizedEmail = email.trim().toLowerCase();
+	$: normalizedPassword = password.trim();
+	$: normalizedUsername = normalizeUsernameInput(username);
+	$: hasValidEmail = emailRegex.test(normalizedEmail);
+	$: hasPassword = normalizedPassword.length > 0;
+	$: hasSignupUsername = normalizedUsername.length > 0;
+	$: canSubmit = hasValidEmail && hasPassword && (!isRegisterMode || hasSignupUsername);
+	$: authSubtitle = isRegisterMode
+		? 'Set your handle and start secure, disappearing conversations in seconds.'
+		: 'Sign in to mint a fresh session token and jump straight into your rooms.';
+	$: switchPrompt = isRegisterMode
+		? 'Prefer quick access with just email + password?'
+		: 'Want to lock in a custom handle for this session?';
+	$: submitLabel = isLoading ? 'Processing...' : isRegisterMode ? 'Create Session' : 'Start Session';
 
 	function clientLog(event: string, payload?: unknown) {
 		const timestamp = new Date().toISOString();
@@ -29,22 +47,34 @@
 	}
 
 	async function handleAuth() {
+		if (!canSubmit) {
+			error = isRegisterMode
+				? 'Use a valid email, password, and username to continue'
+				: 'Use a valid email and password to continue';
+			return;
+		}
+
 		isLoading = true;
 		error = '';
 
 		const endpoint = isRegisterMode ? '/api/auth/signup' : '/api/auth/login';
+		const payload = {
+			email: normalizedEmail,
+			password: normalizedPassword,
+			username: normalizedUsername
+		};
 
 		try {
 			clientLog('api-auth-request', {
 				mode: isRegisterMode ? 'signup' : 'login',
 				endpoint,
-				email,
-				username
+				email: payload.email,
+				username: payload.username
 			});
 			const res = await fetch(`${API_BASE}${endpoint}`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ email, password, username })
+				body: JSON.stringify(payload)
 			});
 
 			const data = await res.json().catch(() => ({}));
@@ -60,11 +90,6 @@
 		} finally {
 			isLoading = false;
 		}
-	}
-
-	function handleGoogleLogin() {
-		clientLog('google-login-clicked');
-		error = 'Google login is not configured yet';
 	}
 </script>
 
@@ -82,8 +107,12 @@
 			}
 		}}
 	>
-		<div class="modal">
-			<h2>{isRegisterMode ? 'Create Account' : 'Welcome Back'}</h2>
+		<div class="auth-modal">
+			<div class="auth-brand">
+				<img src={toraLogo} alt="Tora logo" class="brand-logo" />
+				<h2>Welcome to Tora</h2>
+			</div>
+			<p class="auth-subtitle">{authSubtitle}</p>
 
 			{#if error}
 				<div class="error-banner">{error}</div>
@@ -91,33 +120,85 @@
 
 			<div class="form-group">
 				<label for="email">Email</label>
-				<input type="email" id="email" bind:value={email} placeholder="you@example.com" />
+				<input
+					type="email"
+					id="email"
+					bind:value={email}
+					placeholder="you@example.com"
+					autocomplete="email"
+					inputmode="email"
+					maxlength="254"
+					required
+				/>
+					<small class="input-helper">Required. Sent lowercase after trimming spaces.</small>
+					{#if normalizedEmail !== '' && !hasValidEmail}
+						<small class="input-helper invalid">Use a valid address like you@example.com.</small>
+					{/if}
 			</div>
 
 			{#if isRegisterMode}
 				<div class="form-group">
 					<label for="username">Username</label>
-					<input type="text" id="username" bind:value={username} placeholder="CoolUser123" />
+					<input
+						type="text"
+						id="username"
+						bind:value={username}
+						placeholder="CoolUser123"
+						autocomplete="username"
+						maxlength="32"
+						pattern="[A-Za-z0-9 _-]+"
+						required={isRegisterMode}
+					/>
+						<small class="input-helper">
+							Required for signup. Letters, numbers, spaces, hyphens, and underscores only.
+						</small>
+						{#if username.trim() !== '' && normalizedUsername !== username.trim()}
+							<small class="input-helper">Will be normalized to {normalizedUsername}.</small>
+						{/if}
+					{#if username.trim() !== '' && !hasSignupUsername}
+						<small class="input-helper invalid">
+							Username must include at least one letter or number.
+						</small>
+					{/if}
 				</div>
 			{/if}
 
 			<div class="form-group">
 				<label for="password">Password</label>
-				<input type="password" id="password" bind:value={password} placeholder="••••••••" />
+				<input
+					type="password"
+					id="password"
+					bind:value={password}
+					placeholder="Enter your password"
+					autocomplete={isRegisterMode ? 'new-password' : 'current-password'}
+					minlength="1"
+					maxlength="128"
+					required
+				/>
+				<small class="input-helper">Required. Current backend validates presence.</small>
 			</div>
 
-			<button class="btn-primary" on:click={handleAuth} disabled={isLoading}>
-				{isLoading ? 'Processing...' : isRegisterMode ? 'Sign Up' : 'Log In'}
+			<button class="btn-primary" on:click={handleAuth} disabled={isLoading || !canSubmit}>
+				{submitLabel}
 			</button>
 
 			<div class="divider">OR</div>
 
-			<button class="btn-google" on:click={handleGoogleLogin}> Continue with Google </button>
+			<button class="btn-google" type="button" disabled>
+				Google Sign-In (Coming Soon)
+			</button>
+			<small class="input-helper muted">Password auth is active today. OAuth is not wired yet.</small>
 
 			<p class="switch-mode">
-				{isRegisterMode ? 'Already have an account?' : 'Need an account?'}
-				<button class="link-btn" on:click={() => (isRegisterMode = !isRegisterMode)}>
-					{isRegisterMode ? 'Log In' : 'Sign Up'}
+				{switchPrompt}
+				<button
+					class="link-btn"
+					on:click={() => {
+						isRegisterMode = !isRegisterMode;
+						error = '';
+					}}
+				>
+					{isRegisterMode ? 'Switch to Log In' : 'Switch to Sign Up'}
 				</button>
 			</p>
 		</div>
@@ -127,79 +208,177 @@
 <style>
 	.modal-backdrop {
 		position: fixed;
-		top: 0;
-		left: 0;
-		width: 100%;
-		height: 100%;
-		background: rgba(0, 0, 0, 0.5);
+		inset: 0;
+		background:
+			radial-gradient(circle at 20% 20%, rgba(0, 240, 255, 0.15), transparent 40%),
+			radial-gradient(circle at 80% 10%, rgba(112, 0, 255, 0.18), transparent 35%),
+			rgba(3, 8, 20, 0.72);
 		display: flex;
 		justify-content: center;
 		align-items: center;
 		z-index: 1000;
 	}
-	.modal {
-		background: white;
-		padding: 2rem;
-		border-radius: 8px;
-		width: min(350px, calc(100vw - 2rem));
+
+	.auth-modal {
+		position: fixed;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		background: rgba(25, 25, 30, 0.65);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+		padding: 2.5rem;
+		border-radius: 16px;
+		width: min(420px, calc(100vw - 2rem));
 		max-width: 100%;
-		box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+		color: white;
+		text-align: center;
 	}
+
+	.auth-modal h2 {
+		margin: 0;
+		font-size: 1.6rem;
+	}
+
+	.auth-brand {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.7rem;
+	}
+
+	.brand-logo {
+		width: 34px;
+		height: 34px;
+	}
+
+	.auth-subtitle {
+		margin: 0.8rem 0 1.2rem;
+		color: rgba(255, 255, 255, 0.82);
+		font-size: 0.94rem;
+		line-height: 1.45;
+	}
+
 	.form-group {
 		margin-bottom: 1rem;
+		text-align: left;
 	}
+
 	.form-group label {
 		display: block;
 		margin-bottom: 0.5rem;
-		font-weight: bold;
+		font-weight: 600;
+		color: rgba(255, 255, 255, 0.88);
 	}
-	.form-group input {
+
+	.auth-modal input {
 		width: 100%;
-		padding: 0.5rem;
-		border: 1px solid #ccc;
-		border-radius: 4px;
-	}
-	.btn-primary {
-		width: 100%;
-		padding: 0.75rem;
-		background: #333;
+		padding: 12px 16px;
+		margin: 10px 0;
+		background: rgba(0, 0, 0, 0.2);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 8px;
 		color: white;
-		border: none;
-		cursor: pointer;
-		border-radius: 4px;
+		font-size: 1rem;
+		transition: all 0.2s ease;
 	}
-	.btn-google {
+
+	.input-helper {
+		display: block;
+		margin-top: 0.25rem;
+		font-size: 0.78rem;
+		color: rgba(255, 255, 255, 0.72);
+		line-height: 1.35;
+	}
+
+	.input-helper.invalid {
+		color: #fca5a5;
+	}
+
+	.input-helper.muted {
+		margin-top: 0.6rem;
+		text-align: center;
+	}
+
+	.auth-modal input::placeholder {
+		color: rgba(255, 255, 255, 0.6);
+	}
+
+	.auth-modal input:focus {
+		outline: none;
+		border-color: #00f0ff;
+		background: rgba(0, 0, 0, 0.4);
+	}
+
+	.auth-modal button {
 		width: 100%;
-		padding: 0.75rem;
-		background: #fff;
-		border: 1px solid #ccc;
+		padding: 12px;
+		margin-top: 15px;
+		background: linear-gradient(135deg, #00f0ff, #7000ff);
+		border: none;
+		border-radius: 8px;
+		color: white;
+		font-weight: 600;
+		font-size: 1rem;
 		cursor: pointer;
-		margin-top: 0.5rem;
-		border-radius: 4px;
+		transition: opacity 0.2s ease, transform 0.1s ease;
 	}
+
+	.auth-modal button:hover:not(:disabled) {
+		opacity: 0.9;
+	}
+
+	.auth-modal button:active:not(:disabled) {
+		transform: scale(0.98);
+	}
+
+	.auth-modal button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.btn-google {
+		background: rgba(255, 255, 255, 0.08) !important;
+		border: 1px solid rgba(255, 255, 255, 0.2) !important;
+		color: rgba(255, 255, 255, 0.78) !important;
+	}
+
 	.error-banner {
-		background: #fee;
-		color: #c00;
-		padding: 0.5rem;
+		background: rgba(248, 113, 113, 0.15);
+		color: #fecaca;
+		padding: 0.65rem;
 		margin-bottom: 1rem;
-		border-radius: 4px;
+		border: 1px solid rgba(248, 113, 113, 0.3);
+		border-radius: 8px;
+		text-align: left;
 	}
+
 	.divider {
 		text-align: center;
 		margin: 1rem 0;
-		color: #666;
+		color: rgba(255, 255, 255, 0.7);
 		font-size: 0.9rem;
 	}
+
 	.switch-mode {
 		text-align: center;
 		margin-top: 1rem;
 		font-size: 0.9rem;
+		color: rgba(255, 255, 255, 0.85);
 	}
-	.link-btn {
+
+	.switch-mode .link-btn {
+		width: auto;
+		margin-top: 0;
+		padding: 0;
 		background: none;
 		border: none;
-		color: blue;
+		color: #67e8f9;
 		text-decoration: underline;
 		cursor: pointer;
+		font-size: 0.9rem;
+		font-weight: 600;
 	}
 </style>

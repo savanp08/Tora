@@ -3,6 +3,7 @@
 	import ExpiryClockPicker from '$lib/components/home/ExpiryClockPicker.svelte';
 	import LoginFooter from '$lib/components/home/LoginFooter.svelte';
 	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
+	import toraLogo from '$lib/assets/tora-logo.svg';
 	import { activeRoomPassword, authToken, currentUser } from '$lib/store';
 	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
 	import {
@@ -141,7 +142,10 @@
 
 <div class="container">
 	<header>
-		<div class="logo">Ephemeral<b>Chat</b></div>
+		<div class="logo">
+			<img src={toraLogo} alt="Tora logo" class="logo-mark" />
+			<span>Tora</span>
+		</div>
 	</header>
 
 	<main>
@@ -162,6 +166,7 @@
 							type="text"
 							placeholder="e.g. Product Sprint"
 							bind:value={roomName}
+							maxlength="20"
 							on:focus={onRoomNameFocus}
 						/>
 						<small>Used as display name (max 20 chars).</small>
@@ -186,7 +191,10 @@
 							type="text"
 							placeholder="e.g. dizzy_panda"
 							bind:value={guestUsername}
+							maxlength="32"
+							pattern="[A-Za-z0-9 _-]+"
 						/>
+						<small>Optional. Spaces and dashes are normalized to underscores.</small>
 					</div>
 
 					<div class="field-group">
@@ -281,6 +289,17 @@
 	.logo {
 		font-size: 1.5rem;
 		color: var(--text-primary);
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
+	}
+
+	.logo-mark {
+		width: 30px;
+		height: 30px;
+		filter: drop-shadow(0 6px 12px rgba(56, 189, 248, 0.24));
 	}
 
 	main {

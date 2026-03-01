@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" fill="none">
+  <defs>
+    <linearGradient id="paperGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f7e7bf" />
+      <stop offset="45%" stop-color="#ecd29f" />
+      <stop offset="60%" stop-color="#dfbd84" />
+      <stop offset="100%" stop-color="#cda063" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+
+  <!-- Paper body with naturally torn right edge (no straight right border) -->
+  <path d="M 80 80
+           L 196 80
+           L 202 86 L 198 94 L 204 101 L 199 110
+           L 206 118 L 200 127 L 207 136 L 201 145
+           L 208 154 L 202 163 L 210 172 L 203 182
+           L 211 191 L 204 201 L 213 210 L 206 220
+           L 214 229 L 207 239 L 216 248 L 209 258
+           L 218 268 L 211 278 L 220 288 L 213 298
+           L 222 308 L 214 317
+           L 80 320 Z"
+        fill="url(#paperGradient)"
+        stroke="#b78f5a"
+        stroke-width="2"
+        filter="url(#shadow)" />
+
+  <!-- Top-left folded corner -->
+  <path d="M 80 80 L 80 100 L 100 80 Z"
+        fill="#e5c48d"
+        stroke="#b88c55"
+        stroke-width="1" />
+
+  <!-- Faded text lines -->
+  <line x1="95" y1="110" x2="185" y2="110" stroke="#6c4e2a" stroke-width="3" opacity="0.28" stroke-linecap="round"/>
+  <line x1="95" y1="130" x2="180" y2="130" stroke="#6c4e2a" stroke-width="3" opacity="0.28" stroke-linecap="round"/>
+  <line x1="95" y1="150" x2="175" y2="150" stroke="#6c4e2a" stroke-width="3" opacity="0.28" stroke-linecap="round"/>
+  <line x1="95" y1="180" x2="185" y2="180" stroke="#6c4e2a" stroke-width="3" opacity="0.24" stroke-linecap="round"/>
+  <line x1="95" y1="200" x2="170" y2="200" stroke="#6c4e2a" stroke-width="3" opacity="0.24" stroke-linecap="round"/>
+  <line x1="95" y1="220" x2="180" y2="220" stroke="#6c4e2a" stroke-width="3" opacity="0.24" stroke-linecap="round"/>
+  <line x1="95" y1="250" x2="175" y2="250" stroke="#6c4e2a" stroke-width="3" opacity="0.2" stroke-linecap="round"/>
+  <line x1="95" y1="270" x2="185" y2="270" stroke="#6c4e2a" stroke-width="3" opacity="0.2" stroke-linecap="round"/>
+  <line x1="95" y1="290" x2="165" y2="290" stroke="#6c4e2a" stroke-width="3" opacity="0.2" stroke-linecap="round"/>
+
+  <!-- Hairline cracks on left parchment half -->
+  <path d="M 108 118 C 116 112, 126 116, 132 110 C 139 103, 148 108, 154 100"
+        stroke="#7b5630" stroke-width="1.5" opacity="0.22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 132 110 L 128 120 L 137 126"
+        stroke="#7b5630" stroke-width="1.2" opacity="0.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 104 188 C 114 180, 126 186, 136 176 C 146 166, 160 173, 168 164"
+        stroke="#77512c" stroke-width="1.6" opacity="0.24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 136 176 L 130 188 L 140 195"
+        stroke="#77512c" stroke-width="1.2" opacity="0.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 100 246 C 112 240, 124 246, 134 238 C 144 230, 156 236, 166 228"
+        stroke="#724c29" stroke-width="1.5" opacity="0.22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 148 234 L 144 246 L 152 252"
+        stroke="#724c29" stroke-width="1.1" opacity="0.19" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- T mark -->
+  <path d="M 120 150 H 170 V 170 H 155 V 250 H 135 V 170 H 120 Z" fill="#2f2114" />
+
+  <!-- Natural torn chunks: irregular shapes with subtle edge tint -->
+  <g>
+    <path d="M 222 90 L 264 82 L 278 112 L 252 130 L 224 116 Z"
+          fill="#f0dab0" stroke="#bb8d58" stroke-opacity="0.35" stroke-width="1.2"
+          filter="url(#shadow)" transform="rotate(8 250 105)"/>
+    <path d="M 226 136 L 270 126 L 282 160 L 260 178 L 230 168 Z"
+          fill="#e5c695" stroke="#b68650" stroke-opacity="0.34" stroke-width="1.2"
+          filter="url(#shadow)" transform="rotate(-11 254 152)"/>
+    <path d="M 230 186 L 276 176 L 288 212 L 264 234 L 234 224 Z"
+          fill="#efd4a5" stroke="#b88953" stroke-opacity="0.33" stroke-width="1.2"
+          filter="url(#shadow)" transform="rotate(10 260 204)"/>
+    <path d="M 236 242 L 286 232 L 298 270 L 274 292 L 242 282 Z"
+          fill="#dcb983" stroke="#ad7f4b" stroke-opacity="0.32" stroke-width="1.15"
+          filter="url(#shadow)" transform="rotate(-12 268 260)"/>
+
+    <path d="M 262 104 L 296 98 L 306 126 L 286 142 L 264 132 Z"
+          fill="#d4ab73" stroke="#a67845" stroke-opacity="0.3" stroke-width="1"
+          filter="url(#shadow)" transform="rotate(15 284 120)"/>
+    <path d="M 274 186 L 308 180 L 318 208 L 300 224 L 278 216 Z"
+          fill="#c89b62" stroke="#9b6f3f" stroke-opacity="0.28" stroke-width="1"
+          filter="url(#shadow)" transform="rotate(-7 296 202)"/>
+    <path d="M 286 254 L 316 248 L 324 272 L 308 286 L 288 280 Z"
+          fill="#b78851" stroke="#8f6436" stroke-opacity="0.26" stroke-width="1"
+          filter="url(#shadow)" transform="rotate(10 306 268)"/>
+
+    <!-- tiny residue to keep motion direction -->
+    <ellipse cx="330" cy="166" rx="6.5" ry="6" fill="#8b6033" opacity="0.42"/>
+    <ellipse cx="338" cy="236" rx="6" ry="5.5" fill="#775025" opacity="0.38"/>
+
+    <!-- subtle fiber trails from tear edge -->
+    <path d="M 214 116 C 222 120, 230 126, 238 132" stroke="#bc8e58" stroke-width="1.5" opacity="0.38" stroke-linecap="round"/>
+    <path d="M 213 198 C 223 204, 232 212, 240 220" stroke="#b18350" stroke-width="1.4" opacity="0.34" stroke-linecap="round"/>
+    <path d="M 214 274 C 224 278, 234 286, 242 294" stroke="#a77847" stroke-width="1.3" opacity="0.3" stroke-linecap="round"/>
+  </g>
+</svg>
