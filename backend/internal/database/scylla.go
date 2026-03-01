@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
-	"os"
 
 	gocqlastra "github.com/datastax/gocql-astra"
 	"github.com/gocql/gocql"
@@ -16,6 +16,15 @@ import (
 type ScyllaStore struct {
 	Session  *gocql.Session
 	Keyspace string
+}
+
+func logTraceAstraQueryDuration(table string, started time.Time, err error) {
+	duration := time.Since(started)
+	if err != nil {
+		log.Printf("[TRACE-ASTRA] Query to table %s took %v (err=%v)", table, duration, err)
+		return
+	}
+	log.Printf("[TRACE-ASTRA] Query to table %s took %v", table, duration)
 }
 
 func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
@@ -76,7 +85,9 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 		sysSession, sysErr := cluster.CreateSession()
 		if sysErr == nil {
 			q := fmt.Sprintf("CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}", keyspace)
-			sysSession.Query(q).Exec()
+			startCreateKeyspace := time.Now()
+			createKeyspaceErr := sysSession.Query(q).Exec()
+			logTraceAstraQueryDuration("system_schema.keyspaces", startCreateKeyspace, createKeyspaceErr)
 			sysSession.Close()
 
 			// Retry original connection
@@ -122,7 +133,10 @@ func (s *ScyllaStore) Ping(ctx context.Context) error {
 	}
 	var releaseVersion string
 	query := `SELECT release_version FROM system.local LIMIT 1`
-	return s.Session.Query(query).WithContext(ctx).Scan(&releaseVersion)
+	startPingQuery := time.Now()
+	err := s.Session.Query(query).WithContext(ctx).Scan(&releaseVersion)
+	logTraceAstraQueryDuration("system.local", startPingQuery, err)
+	return err
 }
 
 func ensureBaseSchema(session *gocql.Session, keyspace string) error {
@@ -149,7 +163,10 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		)`,
 		roomsTable,
 	)
-	if err := session.Query(roomsQuery).Exec(); err != nil {
+	startCreateRoomsTable := time.Now()
+	err := session.Query(roomsQuery).Exec()
+	logTraceAstraQueryDuration(roomsTable, startCreateRoomsTable, err)
+	if err != nil {
 		return err
 	}
 
@@ -158,7 +175,10 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
 	}
 	for _, alterQuery := range roomAlterQueries {
-		if err := session.Query(alterQuery).Exec(); err != nil {
+		startAlterRoomsTable := time.Now()
+		err := session.Query(alterQuery).Exec()
+		logTraceAstraQueryDuration(roomsTable, startAlterRoomsTable, err)
+		if err != nil {
 			lowered := strings.ToLower(strings.TrimSpace(err.Error()))
 			if strings.Contains(lowered, "duplicate") || strings.Contains(lowered, "already exists") {
 				continue
@@ -185,7 +205,10 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		)`,
 		boardElementsTable,
 	)
-	if err := session.Query(query).Exec(); err != nil {
+	startCreateBoardElementsTable := time.Now()
+	err = session.Query(query).Exec()
+	logTraceAstraQueryDuration(boardElementsTable, startCreateBoardElementsTable, err)
+	if err != nil {
 		return err
 	}
 	alterQueries := []string{
@@ -193,7 +216,10 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD created_by_name text`, boardElementsTable),
 	}
 	for _, alterQuery := range alterQueries {
-		if err := session.Query(alterQuery).Exec(); err != nil {
+		startAlterBoardElementsTable := time.Now()
+		err := session.Query(alterQuery).Exec()
+		logTraceAstraQueryDuration(boardElementsTable, startAlterBoardElementsTable, err)
+		if err != nil {
 			lowered := strings.ToLower(strings.TrimSpace(err.Error()))
 			if strings.Contains(lowered, "duplicate") || strings.Contains(lowered, "already exists") {
 				continue
