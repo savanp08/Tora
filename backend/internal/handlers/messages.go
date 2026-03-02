@@ -119,6 +119,46 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requiresPassword, passwordErr := h.isRoomPasswordProtected(ctx, roomID)
+	if passwordErr != nil {
+		log.Printf("[room-messages] room password lookup failed room=%s err=%v", roomID, passwordErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room access settings"})
+		return
+	}
+	if requiresPassword {
+		userID := normalizeIdentifier(
+			firstNonEmpty(
+				r.URL.Query().Get("userId"),
+				r.URL.Query().Get("user_id"),
+				r.Header.Get("X-User-Id"),
+			),
+		)
+		if userID == "" {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "Join the room to view messages",
+				"requiresPassword": true,
+			})
+			return
+		}
+		isMember, memberErr := h.isRoomMember(ctx, roomID, userID)
+		if memberErr != nil {
+			log.Printf("[room-messages] member check failed room=%s user=%s err=%v", roomID, userID, memberErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify membership"})
+			return
+		}
+		if !isMember {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "Join the room to view messages",
+				"requiresPassword": true,
+			})
+			return
+		}
+	}
+
 	messages, hasMore, err := h.queryRoomMessagesPage(
 		ctx,
 		roomID,

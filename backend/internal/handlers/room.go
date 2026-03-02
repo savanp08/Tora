@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	crand "crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +51,7 @@ const (
 	messageBreakPrefix   = "message:break:"
 	roomNameRetryLimit   = 3
 	roomSoftExpiryTable  = "room_message_soft_expiry"
+	roomPasswordMaxLen   = 64
 )
 
 var (
@@ -95,6 +98,7 @@ type JoinRoomRequest struct {
 	RoomID            string  `json:"roomId"`
 	RoomName          string  `json:"roomName"`
 	RoomCode          string  `json:"roomCode"`
+	RoomPassword      string  `json:"roomPassword"`
 	Username          string  `json:"username"`
 	UserID            string  `json:"userId"`
 	Type              string  `json:"type"`
@@ -103,16 +107,17 @@ type JoinRoomRequest struct {
 }
 
 type JoinRoomResponse struct {
-	RoomID    string `json:"roomId"`
-	RoomName  string `json:"roomName"`
-	RoomCode  string `json:"roomCode,omitempty"`
-	AdminCode string `json:"adminCode,omitempty"`
-	UserID    string `json:"userId"`
-	Token     string `json:"token"`
-	CreatedAt int64  `json:"createdAt"`
-	ExpiresAt int64  `json:"expiresAt,omitempty"`
-	IsAdmin   bool   `json:"isAdmin,omitempty"`
-	ServerNow int64  `json:"serverNow,omitempty"`
+	RoomID           string `json:"roomId"`
+	RoomName         string `json:"roomName"`
+	RoomCode         string `json:"roomCode,omitempty"`
+	AdminCode        string `json:"adminCode,omitempty"`
+	UserID           string `json:"userId"`
+	Token            string `json:"token"`
+	CreatedAt        int64  `json:"createdAt"`
+	ExpiresAt        int64  `json:"expiresAt,omitempty"`
+	IsAdmin          bool   `json:"isAdmin,omitempty"`
+	RequiresPassword bool   `json:"requiresPassword,omitempty"`
+	ServerNow        int64  `json:"serverNow,omitempty"`
 }
 
 type ExtendRoomRequest struct {
@@ -153,32 +158,35 @@ type CreateBreakRoomRequest struct {
 	ParentRoomID    string `json:"parentRoomId"`
 	OriginMessageID string `json:"originMessageId"`
 	RoomName        string `json:"roomName"`
+	RoomPassword    string `json:"roomPassword"`
 	UserID          string `json:"userId"`
 	Username        string `json:"username"`
 }
 
 type CreateBreakRoomResponse struct {
-	RoomID          string `json:"roomId"`
-	RoomName        string `json:"roomName"`
-	ParentRoomID    string `json:"parentRoomId"`
-	OriginMessageID string `json:"originMessageId"`
-	CreatedAt       int64  `json:"createdAt"`
-	ExpiresAt       int64  `json:"expiresAt,omitempty"`
-	ServerNow       int64  `json:"serverNow,omitempty"`
+	RoomID           string `json:"roomId"`
+	RoomName         string `json:"roomName"`
+	ParentRoomID     string `json:"parentRoomId"`
+	OriginMessageID  string `json:"originMessageId"`
+	CreatedAt        int64  `json:"createdAt"`
+	ExpiresAt        int64  `json:"expiresAt,omitempty"`
+	RequiresPassword bool   `json:"requiresPassword,omitempty"`
+	ServerNow        int64  `json:"serverNow,omitempty"`
 }
 
 type SidebarRoom struct {
-	RoomID          string `json:"roomId"`
-	RoomName        string `json:"roomName"`
-	Status          string `json:"status"`
-	ParentRoomID    string `json:"parentRoomId,omitempty"`
-	OriginMessageID string `json:"originMessageId,omitempty"`
-	TreeNumber      int    `json:"treeNumber"`
-	MemberCount     int    `json:"memberCount"`
-	CreatedAt       int64  `json:"createdAt"`
-	ExpiresAt       int64  `json:"expiresAt,omitempty"`
-	IsAdmin         bool   `json:"isAdmin,omitempty"`
-	AdminCode       string `json:"adminCode,omitempty"`
+	RoomID           string `json:"roomId"`
+	RoomName         string `json:"roomName"`
+	Status           string `json:"status"`
+	ParentRoomID     string `json:"parentRoomId,omitempty"`
+	OriginMessageID  string `json:"originMessageId,omitempty"`
+	TreeNumber       int    `json:"treeNumber"`
+	MemberCount      int    `json:"memberCount"`
+	CreatedAt        int64  `json:"createdAt"`
+	ExpiresAt        int64  `json:"expiresAt,omitempty"`
+	IsAdmin          bool   `json:"isAdmin,omitempty"`
+	AdminCode        string `json:"adminCode,omitempty"`
+	RequiresPassword bool   `json:"requiresPassword,omitempty"`
 }
 
 type SidebarRoomsResponse struct {
@@ -187,15 +195,16 @@ type SidebarRoomsResponse struct {
 }
 
 type RoomDetailsResponse struct {
-	RoomID      string `json:"roomId"`
-	RoomName    string `json:"roomName"`
-	RoomCode    string `json:"roomCode,omitempty"`
-	AdminCode   string `json:"adminCode,omitempty"`
-	MemberCount int    `json:"memberCount"`
-	CreatedAt   int64  `json:"createdAt"`
-	ExpiresAt   int64  `json:"expiresAt,omitempty"`
-	IsAdmin     bool   `json:"isAdmin,omitempty"`
-	ServerNow   int64  `json:"serverNow,omitempty"`
+	RoomID           string `json:"roomId"`
+	RoomName         string `json:"roomName"`
+	RoomCode         string `json:"roomCode,omitempty"`
+	AdminCode        string `json:"adminCode,omitempty"`
+	MemberCount      int    `json:"memberCount"`
+	CreatedAt        int64  `json:"createdAt"`
+	ExpiresAt        int64  `json:"expiresAt,omitempty"`
+	IsAdmin          bool   `json:"isAdmin,omitempty"`
+	RequiresPassword bool   `json:"requiresPassword,omitempty"`
+	ServerNow        int64  `json:"serverNow,omitempty"`
 }
 
 type RemoveRoomMemberRequest struct {
@@ -408,7 +417,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		}
 		finalRoomID = nextRoomID
 
-		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "", initialRoomTTL)
+		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "", initialRoomTTL, "")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -418,6 +427,36 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create room, retry"})
 			return
+		}
+	}
+	requiresPassword, err := h.isRoomPasswordProtected(ctx, finalRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room access settings"})
+		return
+	}
+	if mode == "join" && requiresPassword {
+		isMember, memberErr := h.redis.Client.SIsMember(ctx, roomMembersKey(finalRoomID), userID).Result()
+		if memberErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+			return
+		}
+		if !isMember {
+			storedPasswordHash, hashErr := h.getRoomPasswordHash(ctx, finalRoomID)
+			if hashErr != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room access settings"})
+				return
+			}
+			if !h.verifyRoomPassword(req.RoomPassword, storedPasswordHash) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":            "Room password is required",
+					"requiresPassword": true,
+				})
+				return
+			}
 		}
 	}
 
@@ -479,16 +518,17 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := JoinRoomResponse{
-		RoomID:    finalRoomID,
-		RoomName:  finalRoomName,
-		RoomCode:  roomCode,
-		AdminCode: adminCode,
-		UserID:    userID,
-		Token:     token,
-		CreatedAt: finalCreatedAt,
-		ExpiresAt: expiresAt,
-		IsAdmin:   isAdmin,
-		ServerNow: time.Now().Unix(),
+		RoomID:           finalRoomID,
+		RoomName:         finalRoomName,
+		RoomCode:         roomCode,
+		AdminCode:        adminCode,
+		UserID:           userID,
+		Token:            token,
+		CreatedAt:        finalCreatedAt,
+		ExpiresAt:        expiresAt,
+		IsAdmin:          isAdmin,
+		RequiresPassword: requiresPassword,
+		ServerNow:        time.Now().Unix(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -568,6 +608,8 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	createdAt := time.Now().Unix()
+	normalizedBreakRoomPassword := normalizeRoomPassword(req.RoomPassword)
+	breakRoomPasswordHash := hashRoomPassword(normalizedBreakRoomPassword)
 	roomType, err := h.getRoomType(ctx, parentRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -593,6 +635,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		parentRoomID,
 		originMessageID,
 		roomDefaultTTL,
+		breakRoomPasswordHash,
 	)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -605,6 +648,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	finalRoomName := branchRoomName
+	requiresPassword := breakRoomPasswordHash != ""
 
 	if err := h.redis.Client.SAdd(ctx, roomChildrenKey(parentRoomID), finalRoomID).Err(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -654,17 +698,19 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		memberCount,
 		createdAt,
 		expiresAt,
+		requiresPassword,
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(CreateBreakRoomResponse{
-		RoomID:          finalRoomID,
-		RoomName:        finalRoomName,
-		ParentRoomID:    parentRoomID,
-		OriginMessageID: originMessageID,
-		CreatedAt:       createdAt,
-		ExpiresAt:       expiresAt,
-		ServerNow:       time.Now().Unix(),
+		RoomID:           finalRoomID,
+		RoomName:         finalRoomName,
+		ParentRoomID:     parentRoomID,
+		OriginMessageID:  originMessageID,
+		CreatedAt:        createdAt,
+		ExpiresAt:        expiresAt,
+		RequiresPassword: requiresPassword,
+		ServerNow:        time.Now().Unix(),
 	})
 }
 
@@ -937,6 +983,7 @@ func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
 	createdAt, _ := strconv.ParseInt(strings.TrimSpace(meta["created_at"]), 10, 64)
 	memberCount64, _ := strconv.ParseInt(strings.TrimSpace(meta["member_count"]), 10, 64)
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
+	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
 	roomCode, codeErr := h.ensureRoomCode(ctx, roomID)
 	if codeErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -969,15 +1016,16 @@ func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(RoomDetailsResponse{
-		RoomID:      roomID,
-		RoomName:    roomName,
-		RoomCode:    roomCode,
-		AdminCode:   adminCode,
-		MemberCount: int(memberCount64),
-		CreatedAt:   createdAt,
-		ExpiresAt:   expiresAt,
-		IsAdmin:     isAdmin,
-		ServerNow:   time.Now().Unix(),
+		RoomID:           roomID,
+		RoomName:         roomName,
+		RoomCode:         roomCode,
+		AdminCode:        adminCode,
+		MemberCount:      int(memberCount64),
+		CreatedAt:        createdAt,
+		ExpiresAt:        expiresAt,
+		IsAdmin:          isAdmin,
+		RequiresPassword: requiresPassword,
+		ServerNow:        time.Now().Unix(),
 	})
 }
 
@@ -1793,6 +1841,27 @@ func normalizeRoomCode(raw string) string {
 	return code
 }
 
+func normalizeRoomPassword(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	return truncateRunes(trimmed, roomPasswordMaxLen)
+}
+
+func normalizeRoomPasswordHash(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func hashRoomPassword(password string) string {
+	normalized := normalizeRoomPassword(password)
+	if normalized == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])
+}
+
 func normalizeRoomAdminCode(raw string) string {
 	normalized := strings.ToUpper(strings.TrimSpace(raw))
 	if len(normalized) != roomAdminCodeLength {
@@ -2365,6 +2434,7 @@ func (h *RoomHandler) tryCreateRoom(
 	parentRoomID string,
 	originMessageID string,
 	roomTTL time.Duration,
+	roomPasswordHash string,
 ) (bool, error) {
 	exists, err := h.roomExists(ctx, roomID)
 	if err != nil {
@@ -2374,7 +2444,7 @@ func (h *RoomHandler) tryCreateRoom(
 		return false, nil
 	}
 
-	if err := h.createRoom(ctx, roomID, roomName, roomType, createdAt, parentRoomID, originMessageID, roomTTL); err != nil {
+	if err := h.createRoom(ctx, roomID, roomName, roomType, createdAt, parentRoomID, originMessageID, roomTTL, roomPasswordHash); err != nil {
 		return false, err
 	}
 
@@ -2428,6 +2498,41 @@ func (h *RoomHandler) getRoomType(ctx context.Context, roomID string) (string, e
 		return "", nil
 	}
 	return roomType, err
+}
+
+func (h *RoomHandler) getRoomPasswordHash(ctx context.Context, roomID string) (string, error) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return "", nil
+	}
+	rawHash, err := h.redis.Client.HGet(ctx, roomKey(normalizedRoomID), "room_password_hash").Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return normalizeRoomPasswordHash(rawHash), nil
+}
+
+func (h *RoomHandler) isRoomPasswordProtected(ctx context.Context, roomID string) (bool, error) {
+	passwordHash, err := h.getRoomPasswordHash(ctx, roomID)
+	if err != nil {
+		return false, err
+	}
+	return passwordHash != "", nil
+}
+
+func (h *RoomHandler) verifyRoomPassword(submittedPassword string, storedHash string) bool {
+	normalizedHash := normalizeRoomPasswordHash(storedHash)
+	if normalizedHash == "" {
+		return true
+	}
+	submittedHash := hashRoomPassword(submittedPassword)
+	if submittedHash == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(submittedHash), []byte(normalizedHash)) == 1
 }
 
 func (h *RoomHandler) getRoomCreatedAt(ctx context.Context, roomID string) (int64, error) {
@@ -2811,6 +2916,7 @@ func (h *RoomHandler) createRoom(
 	parentRoomID string,
 	originMessageID string,
 	roomTTL time.Duration,
+	roomPasswordHash string,
 ) error {
 	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {
@@ -2827,16 +2933,18 @@ func (h *RoomHandler) createRoom(
 	normalizedNameLookup := normalizeRoomNameLookup(normalizedRoomName)
 	normalizedParentID := normalizeRoomID(parentRoomID)
 	normalizedOriginMessageID := strings.TrimSpace(originMessageID)
+	normalizedRoomPasswordHash := normalizeRoomPasswordHash(roomPasswordHash)
 
 	if err := h.redis.Client.HSet(ctx, roomKey(normalizedRoomID), map[string]interface{}{
-		"id":                normalizedRoomID,
-		"name":              normalizedRoomName,
-		"name_lookup":       normalizedNameLookup,
-		"type":              normalizedRoomType,
-		"created_at":        createdAt,
-		"parent_room_id":    normalizedParentID,
-		"origin_message_id": normalizedOriginMessageID,
-		"member_count":      0,
+		"id":                 normalizedRoomID,
+		"name":               normalizedRoomName,
+		"name_lookup":        normalizedNameLookup,
+		"type":               normalizedRoomType,
+		"created_at":         createdAt,
+		"parent_room_id":     normalizedParentID,
+		"origin_message_id":  normalizedOriginMessageID,
+		"room_password_hash": normalizedRoomPasswordHash,
+		"member_count":       0,
 	}).Err(); err != nil {
 		return err
 	}
@@ -3167,6 +3275,7 @@ func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, mem
 	roomName := normalizeRoomName(meta["name"])
 	createdAt, _ := strconv.ParseInt(strings.TrimSpace(meta["created_at"]), 10, 64)
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
+	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
 	h.broadcastBreakMetadataUpdate(
 		parentRoomID,
 		originMessageID,
@@ -3175,6 +3284,7 @@ func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, mem
 		memberCount,
 		createdAt,
 		expiresAt,
+		requiresPassword,
 	)
 	return nil
 }
@@ -3187,6 +3297,7 @@ func (h *RoomHandler) broadcastBreakMetadataUpdate(
 	memberCount int,
 	createdAt int64,
 	expiresAt int64,
+	requiresPassword bool,
 ) {
 	normalizedParentRoomID := normalizeRoomID(parentRoomID)
 	normalizedOriginMessageID := strings.TrimSpace(originMessageID)
@@ -3211,6 +3322,8 @@ func (h *RoomHandler) broadcastBreakMetadataUpdate(
 		"break_join_count":  memberCount,
 		"breakRoomName":     normalizedBreakRoomName,
 		"break_room_name":   normalizedBreakRoomName,
+		"requiresPassword":  requiresPassword,
+		"requires_password": requiresPassword,
 		"parentRoomId":      normalizedParentRoomID,
 		"parent_room_id":    normalizedParentRoomID,
 		"serverNow":         serverNow,
@@ -3252,17 +3365,19 @@ func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string
 	createdAt, _ := strconv.ParseInt(meta["created_at"], 10, 64)
 	memberCount64, _ := strconv.ParseInt(meta["member_count"], 10, 64)
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
+	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
 
 	return SidebarRoom{
-		RoomID:          roomID,
-		RoomName:        name,
-		Status:          status,
-		ParentRoomID:    normalizeRoomID(meta["parent_room_id"]),
-		OriginMessageID: strings.TrimSpace(meta["origin_message_id"]),
-		TreeNumber:      0,
-		MemberCount:     int(memberCount64),
-		CreatedAt:       createdAt,
-		ExpiresAt:       expiresAt,
+		RoomID:           roomID,
+		RoomName:         name,
+		Status:           status,
+		ParentRoomID:     normalizeRoomID(meta["parent_room_id"]),
+		OriginMessageID:  strings.TrimSpace(meta["origin_message_id"]),
+		TreeNumber:       0,
+		MemberCount:      int(memberCount64),
+		CreatedAt:        createdAt,
+		ExpiresAt:        expiresAt,
+		RequiresPassword: requiresPassword,
 	}, true, nil
 }
 

@@ -743,15 +743,21 @@
 <style>
 	.composer {
 		position: relative;
-		border-top: 1px solid var(--border-default);
-		background: linear-gradient(180deg, var(--surface-secondary) 0%, var(--bg-secondary) 100%);
+		border-top: 1px solid #bcc9da;
+		background: linear-gradient(180deg, #edf3fa 0%, #e5edf7 100%);
 		padding: 0.72rem 0.78rem 0.82rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.48rem;
 		flex-shrink: 0;
-		box-shadow: 0 -10px 24px var(--overlay-soft);
+		box-shadow: 0 -12px 24px rgba(15, 23, 42, 0.14);
 		backdrop-filter: blur(8px);
+	}
+
+	.composer[data-mode='dark'] {
+		border-top-color: #33465f;
+		background: linear-gradient(180deg, #121d2e 0%, #0f1828 100%);
+		box-shadow: 0 -14px 26px rgba(2, 8, 23, 0.42);
 	}
 
 	.composer::before {
@@ -1165,13 +1171,39 @@
 		grid-template-columns: 2.2rem minmax(0, 1fr) 2.2rem;
 		gap: 0.42rem;
 		align-items: center;
-		border: 1px solid var(--border-default);
-		background: var(--surface-primary);
+		border: 1px solid #bac8da;
+		background: #f7fbff;
 		border-radius: 16px;
 		padding: 0.32rem 0.34rem;
 		box-shadow:
-			0 7px 18px var(--overlay-soft),
-			inset 0 1px 0 var(--surface-secondary);
+			0 7px 18px rgba(15, 23, 42, 0.1),
+			inset 0 1px 0 rgba(255, 255, 255, 0.95);
+		transition:
+			border-color 140ms ease,
+			box-shadow 140ms ease,
+			background 140ms ease;
+	}
+
+	.composer[data-mode='dark'] .composer-row {
+		border-color: #3c506b;
+		background: #132033;
+		box-shadow:
+			0 8px 18px rgba(2, 8, 23, 0.36),
+			inset 0 1px 0 rgba(148, 163, 184, 0.08);
+	}
+
+	.composer-row:focus-within {
+		border-color: #8ca3c3;
+		box-shadow:
+			0 10px 22px rgba(15, 23, 42, 0.14),
+			0 0 0 2px rgba(92, 128, 177, 0.2);
+	}
+
+	.composer[data-mode='dark'] .composer-row:focus-within {
+		border-color: #5f7aa2;
+		box-shadow:
+			0 10px 22px rgba(2, 8, 23, 0.44),
+			0 0 0 2px rgba(96, 129, 178, 0.22);
 	}
 
 	.hidden-file-input {
@@ -1196,6 +1228,11 @@
 		cursor: pointer;
 		color: var(--text-secondary);
 		padding: 0;
+		transition:
+			background 140ms ease,
+			border-color 140ms ease,
+			transform 140ms ease,
+			color 140ms ease;
 	}
 
 	.attach-button:disabled,
@@ -1209,6 +1246,8 @@
 	.mic-button:hover:not(:disabled),
 	.send-button:hover:not(:disabled) {
 		background: var(--surface-hover);
+		border-color: var(--border-strong);
+		transform: translateY(-1px);
 	}
 
 	.mic-button.recording {
@@ -1272,15 +1311,20 @@
 		font-size: 0.9rem;
 		line-height: 1.32;
 		font-family: inherit;
-		background: var(--surface-primary);
+		background: transparent;
 		color: var(--text-primary);
 		box-sizing: border-box;
 	}
 
 	.composer-row textarea:focus {
 		outline: none;
-		border-color: var(--border-focus);
-		background: var(--surface-secondary);
+		border-color: #9ab0cc;
+		background: rgba(255, 255, 255, 0.58);
+	}
+
+	.composer[data-mode='dark'] .composer-row textarea:focus {
+		border-color: #5f7aa2;
+		background: rgba(148, 163, 184, 0.08);
 	}
 
 	.composer-row textarea::placeholder {

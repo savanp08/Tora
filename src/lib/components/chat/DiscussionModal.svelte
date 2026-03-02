@@ -38,12 +38,15 @@
 	let previousNotesStorageKey = '';
 	let expandedRepliesByParent: Record<string, boolean> = {};
 	let visibleRepliesByParent: Record<string, number> = {};
+	let expandedCommentBodyById: Record<string, boolean> = {};
 	let notes: string[] = [];
 	let noteDraft = '';
 	const MAX_REPLY_DEPTH = 4;
 	const REPLIES_PAGE_SIZE = 5;
 	const MAX_NOTES = 5;
 	const NOTES_STORAGE_PREFIX = 'converse:pinned-notes:v1';
+	const COMMENT_PREVIEW_MAX_LENGTH = 360;
+	const COMMENT_PREVIEW_MAX_LINES = 7;
 
 	const dispatch = createEventDispatcher<{
 		close: void;
@@ -86,6 +89,7 @@
 		replyTargetId = '';
 		expandedRepliesByParent = {};
 		visibleRepliesByParent = {};
+		expandedCommentBodyById = {};
 		notes = loadStoredNotes(activeNotesStorageKey);
 		noteDraft = '';
 		previousPinnedMessageId = normalizedPinnedMessageId;
@@ -381,6 +385,36 @@
 		return (comment.content || '').trim() || 'Message';
 	}
 
+	function shouldCollapseCommentPreview(content: string) {
+		if (!content) {
+			return false;
+		}
+		if (content.length > COMMENT_PREVIEW_MAX_LENGTH) {
+			return true;
+		}
+		const lineCount = content.split('\n').length;
+		return lineCount > COMMENT_PREVIEW_MAX_LINES;
+	}
+
+	function isCommentBodyExpanded(commentId: string) {
+		const normalized = normalizeMessageID(commentId);
+		if (!normalized) {
+			return false;
+		}
+		return Boolean(expandedCommentBodyById[normalized]);
+	}
+
+	function toggleCommentBody(commentId: string) {
+		const normalized = normalizeMessageID(commentId);
+		if (!normalized) {
+			return;
+		}
+		expandedCommentBodyById = {
+			...expandedCommentBodyById,
+			[normalized]: !expandedCommentBodyById[normalized]
+		};
+	}
+
 	function startReply(comment: ChatMessage) {
 		if (!canReplyToComment(comment, commentDepthById)) {
 			return;
@@ -647,7 +681,9 @@
 									<time>{formatPinnedTimestamp(pinnedMessage.createdAt)}</time>
 								</div>
 								<div class="pinned-label">{pinnedContentLabel(pinnedMessage)}</div>
-								<p>{(pinnedMessage.content || '').trim() || 'No message body'}</p>
+								<div class="pinned-body-scroll">
+									<p>{(pinnedMessage.content || '').trim() || 'No message body'}</p>
+								</div>
 								{#if pinnedMessage.mediaUrl}
 									<a href={pinnedMessage.mediaUrl} target="_blank" rel="noreferrer">Open attachment</a>
 								{/if}
@@ -718,7 +754,21 @@
 											📌
 										</button>
 									</div>
-									<p>{getCommentPreview(thread.parent)}</p>
+										<p
+											class:collapsed={shouldCollapseCommentPreview(getCommentPreview(thread.parent)) &&
+												!isCommentBodyExpanded(thread.parent.id)}
+										>
+											{getCommentPreview(thread.parent)}
+										</p>
+										{#if shouldCollapseCommentPreview(getCommentPreview(thread.parent))}
+											<button
+												type="button"
+												class="comment-show-more"
+												on:click={() => toggleCommentBody(thread.parent.id)}
+										>
+											{isCommentBodyExpanded(thread.parent.id) ? 'Show less' : 'Show more'}
+										</button>
+									{/if}
 									<div class="comment-actions">
 										{#if thread.canReply}
 											<button type="button" on:click={() => startReply(thread.parent)}>Reply</button>
@@ -778,7 +828,21 @@
 													📌
 												</button>
 											</div>
-											<p>{getCommentPreview(reply.comment)}</p>
+												<p
+													class:collapsed={shouldCollapseCommentPreview(getCommentPreview(reply.comment)) &&
+														!isCommentBodyExpanded(reply.comment.id)}
+												>
+													{getCommentPreview(reply.comment)}
+												</p>
+												{#if shouldCollapseCommentPreview(getCommentPreview(reply.comment))}
+													<button
+														type="button"
+														class="comment-show-more"
+														on:click={() => toggleCommentBody(reply.comment.id)}
+												>
+													{isCommentBodyExpanded(reply.comment.id) ? 'Show less' : 'Show more'}
+												</button>
+											{/if}
 											<div class="comment-actions">
 												{#if reply.canReply}
 													<button type="button" on:click={() => startReply(reply.comment)}>Reply</button>
@@ -967,6 +1031,12 @@
 		color: var(--text-primary);
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+	.pinned-body-scroll {
+		max-height: 10.5rem;
+		overflow-y: auto;
+		padding-right: 0.18rem;
 	}
 
 	.pinned-message-block a {
@@ -1163,6 +1233,30 @@
 		color: var(--text-primary);
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+		.comment-body p.collapsed {
+			display: -webkit-box;
+			line-clamp: 7;
+			-webkit-line-clamp: 7;
+			-webkit-box-orient: vertical;
+			overflow: hidden;
+			white-space: normal;
+	}
+
+	.comment-show-more {
+		align-self: flex-start;
+		border: none;
+		background: transparent;
+		color: var(--text-link);
+		font-size: 0.7rem;
+		font-weight: 600;
+		padding: 0;
+		cursor: pointer;
+	}
+
+	.comment-show-more:hover {
+		text-decoration: underline;
 	}
 
 	.pin-badge {

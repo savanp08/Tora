@@ -1705,6 +1705,13 @@
 
 	.gutter-action-btn:hover {
 		transform: translateY(-1px);
+		background: #dfe7f3;
+		border-color: #aebcd1;
+	}
+
+	.message-row.mine .gutter-action-btn:hover {
+		background: rgba(104, 120, 145, 0.96);
+		border-color: rgba(171, 188, 214, 0.62);
 	}
 
 	.gutter-action-btn:focus-visible {
@@ -1945,7 +1952,8 @@
 	}
 
 	.reply-snippet:hover {
-		background: #dde5f0;
+		background: #d9e3f1;
+		border-color: #b9c7da;
 	}
 
 	.messages-shell.theme-dark .reply-snippet:hover {
@@ -1986,12 +1994,28 @@
 		padding: 0.08rem 0.33rem;
 		font-size: 0.68rem;
 		cursor: pointer;
+		transition:
+			background 140ms ease,
+			border-color 140ms ease,
+			color 140ms ease,
+			transform 140ms ease;
 	}
 
 	.messages-shell.theme-dark .break-indicator {
 		border-color: #334155;
 		background: #0f172a;
 		color: #dbe7ff;
+	}
+
+	.break-indicator:hover {
+		background: #dfe7f3;
+		border-color: #aebed3;
+		transform: translateY(-1px);
+	}
+
+	.messages-shell.theme-dark .break-indicator:hover {
+		background: #1a263c;
+		border-color: #506182;
 	}
 
 	.break-indicator-count {
@@ -2221,6 +2245,11 @@
 		cursor: pointer;
 	}
 
+	.read-more-btn:hover {
+		color: #1b2f4a;
+		text-decoration: underline;
+	}
+
 	.messages-shell.theme-dark .read-more-btn {
 		color: #c9d5e8;
 	}
@@ -2383,6 +2412,10 @@
 
 	.messages-shell.theme-dark .read-more-btn {
 		color: #d0d0d9;
+	}
+
+	.messages-shell.theme-dark .read-more-btn:hover {
+		color: #f0f0f5;
 	}
 
 	.messages-shell.theme-dark .bubble.mine .read-more-btn {

@@ -123,6 +123,7 @@
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
 	const DISCUSSION_MAX_REPLY_DEPTH = 4;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
+	const PROTECTED_ROOM_PREVIEW_TEXT = 'Protected room. Join with password to preview messages.';
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
@@ -412,6 +413,10 @@
 
 	function normalizeRoomPasswordValue(value: string) {
 		return (value || '').trim().slice(0, 32);
+	}
+
+	function normalizeRoomAccessPasswordValue(value: string) {
+		return (value || '').trim().slice(0, 64);
 	}
 
 	function normalizeAdminCodeValue(value: unknown) {
@@ -802,6 +807,9 @@
 			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 			const joinedIsAdmin = toBool(data.isAdmin ?? data.is_admin);
 			const joinedAdminCode = normalizeAdminCodeValue(data.adminCode ?? data.admin_code);
+			const joinedRequiresPassword = toBool(
+				data.requiresPassword ?? data.requires_password ?? false
+			);
 
 			ensureRoomThread(joinedRoomId, joinedName, 'joined');
 			roomThreads = sortThreads(
@@ -812,7 +820,8 @@
 								status: 'joined',
 								name: joinedName,
 								isAdmin: joinedIsAdmin,
-								adminCode: joinedIsAdmin ? joinedAdminCode : ''
+								adminCode: joinedIsAdmin ? joinedAdminCode : '',
+								requiresPassword: joinedRequiresPassword
 							}
 						: thread
 				)
@@ -1049,6 +1058,23 @@
 		return normalizeRoomPasswordValue(rawValue);
 	}
 
+	async function openRoomAccessPasswordDialog(initialValue = '') {
+		const rawValue = await openPromptDialog({
+			title: 'Room Access Password',
+			message: 'This break room is protected. Enter the room password to join.',
+			initialValue: normalizeRoomAccessPasswordValue(initialValue),
+			placeholder: 'Room password',
+			maxLength: 64,
+			confirmLabel: 'Join',
+			cancelLabel: 'Cancel',
+			multiline: false
+		});
+		if (rawValue === null) {
+			return null;
+		}
+		return normalizeRoomAccessPasswordValue(rawValue);
+	}
+
 	function setMessageActionMode(mode: MessageActionMode) {
 		messageActionMode = mode;
 		isSelectionMode = mode !== 'none';
@@ -1241,6 +1267,10 @@
 				(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
 					(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
 			);
+			const joinedRequiresPassword = toBool(
+				(data as { requiresPassword?: unknown; requires_password?: unknown }).requiresPassword ??
+					(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password
+			);
 			ensureRoomThread(normalizedRoomId, joinedName, 'joined');
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
@@ -1248,7 +1278,8 @@
 						? {
 								...thread,
 								isAdmin: joinedIsAdmin,
-								adminCode: joinedIsAdmin ? joinedAdminCode : ''
+								adminCode: joinedIsAdmin ? joinedAdminCode : '',
+								requiresPassword: joinedRequiresPassword
 							}
 						: thread
 				)
@@ -1294,6 +1325,7 @@
 				}
 
 				const prev = existing.get(roomID);
+				const roomRecord = room as unknown as Record<string, unknown>;
 				const createdAt = normalizeEpoch(Number(room.createdAt ?? 0));
 				const expiresAt = parseOptionalTimestamp(room.expiresAt);
 				if (createdAt > 0 || expiresAt > 0) {
@@ -1304,6 +1336,13 @@
 					room.status === 'joined' ? 'joined' : room.status === 'left' ? 'left' : 'discoverable';
 				const nextIsAdmin = toBool(room.isAdmin ?? prev?.isAdmin ?? false);
 				const nextAdminCode = normalizeAdminCodeValue(room.adminCode ?? (nextIsAdmin ? prev?.adminCode : ''));
+				const nextRequiresPassword = toBool(
+					roomRecord.requiresPassword ??
+						roomRecord.requires_password ??
+						prev?.requiresPassword ??
+						false
+				);
+				const shouldMaskPreview = roomStatus !== 'joined' && nextRequiresPassword;
 
 				const next: ChatThread = {
 					id: roomID,
@@ -1311,7 +1350,7 @@
 						normalizeRoomNameValue(toStringValue(room.roomName)) ||
 						prev?.name ||
 						formatRoomName(roomID),
-					lastMessage: prev?.lastMessage || '',
+					lastMessage: shouldMaskPreview ? PROTECTED_ROOM_PREVIEW_TEXT : (prev?.lastMessage || ''),
 					lastActivity: prev?.lastActivity || createdAt || Date.now(),
 					unread: prev?.unread || 0,
 					status: roomStatus,
@@ -1321,7 +1360,8 @@
 						toStringValue(room.originMessageId) || prev?.originMessageId || undefined,
 					treeNumber: toInt(room.treeNumber ?? prev?.treeNumber ?? 0),
 					isAdmin: nextIsAdmin,
-					adminCode: nextIsAdmin ? nextAdminCode : ''
+					adminCode: nextIsAdmin ? nextAdminCode : '',
+					requiresPassword: nextRequiresPassword
 				};
 
 				acc.push(next);
@@ -1662,6 +1702,12 @@
 				source.expiresAt ??
 				source.expires_at
 		);
+		const breakRequiresPassword = toBool(
+			payload.requiresPassword ??
+				payload.requires_password ??
+				source.requiresPassword ??
+				source.requires_password
+		);
 
 		const roomMessages = messagesByRoom[parentRoomID] ?? [];
 		let messageUpdated = false;
@@ -1702,12 +1748,18 @@
 						: thread.status === 'left'
 							? 'left'
 							: 'discoverable';
+				const nextRequiresPassword = breakRequiresPassword || Boolean(thread.requiresPassword);
+				const shouldMaskPreview = nextStatus !== 'joined' && nextRequiresPassword;
 				return {
 					...thread,
 					name: fallbackRoomName || thread.name,
 					status: nextStatus,
 					parentRoomId: parentRoomID || thread.parentRoomId,
-					originMessageId: originMessageID || thread.originMessageId
+					originMessageId: originMessageID || thread.originMessageId,
+					requiresPassword: nextRequiresPassword,
+					lastMessage: shouldMaskPreview
+						? PROTECTED_ROOM_PREVIEW_TEXT
+						: (thread.lastMessage || '')
 				};
 			})
 		);
@@ -3130,6 +3182,10 @@
 				(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
 					(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
 			);
+			const nextRequiresPassword = toBool(
+				(data as { requiresPassword?: unknown; requires_password?: unknown }).requiresPassword ??
+					(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password
+			);
 
 			ensureRoomThread(nextRoomId, nextRoomName, 'joined');
 			roomThreads = sortThreads(
@@ -3138,7 +3194,8 @@
 						? {
 								...thread,
 								isAdmin: nextIsAdmin,
-								adminCode: nextIsAdmin ? nextAdminCode : ''
+								adminCode: nextIsAdmin ? nextAdminCode : '',
+								requiresPassword: nextRequiresPassword
 							}
 						: thread
 				)
@@ -3173,71 +3230,96 @@
 		if (!roomId) {
 			return;
 		}
-		const roomPassword = await openOptionalRoomPasswordDialog($activeRoomPassword);
-		if (roomPassword === null) {
-			return;
-		}
-		activeRoomPassword.set(roomPassword);
+		let roomAccessPassword = '';
+		let shouldPromptForAccessPassword = Boolean(activeThread?.requiresPassword);
 		try {
-			const res = await fetch(`${API_BASE}/api/rooms/join`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					roomId,
-					username: currentUsername,
-					userId: normalizeIdentifier(currentUserId),
-					mode: 'join'
-				})
-			});
-			const data = await res.json();
-			if (!res.ok) {
-				throw new Error(data.error || 'Unable to join room');
-			}
-			syncServerClock(
-				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
-					(data as { serverNow?: unknown; server_now?: unknown }).server_now
-			);
+			while (true) {
+				if (shouldPromptForAccessPassword) {
+					const enteredPassword = await openRoomAccessPasswordDialog(roomAccessPassword);
+					if (enteredPassword === null) {
+						return;
+					}
+					roomAccessPassword = enteredPassword;
+				}
 
-			const joinedName =
-				normalizeRoomNameValue(toStringValue(data.roomName)) ||
-				activeThread.name ||
-				formatRoomName(roomId);
-			const joinedCreatedAt = toTimestamp(data.createdAt);
-			const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
-			const joinedIsAdmin = toBool(
-				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
-					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
-			);
-			const joinedAdminCode = normalizeAdminCodeValue(
-				(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
-					(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
-			);
-			ensureRoomThread(roomId, joinedName, 'joined');
-			markRoomMembershipSynced(roomId);
-			ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
-			roomThreads = sortThreads(
-				roomThreads.map((thread) =>
-					thread.id === roomId
-						? {
-								...thread,
-								status: 'joined',
-								name: joinedName,
-								isAdmin: joinedIsAdmin,
-								adminCode: joinedIsAdmin ? joinedAdminCode : ''
-							}
-						: thread
-				)
-			);
+				const res = await fetch(`${API_BASE}/api/rooms/join`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						roomId,
+						roomPassword: roomAccessPassword,
+						username: currentUsername,
+						userId: normalizeIdentifier(currentUserId),
+						mode: 'join'
+					})
+				});
+				const data = await res.json().catch(() => ({}));
+				const requiresPassword = toBool(
+					(data as { requiresPassword?: unknown; requires_password?: unknown }).requiresPassword ??
+						(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password
+				);
+				if (!res.ok) {
+					if (requiresPassword) {
+						if (shouldPromptForAccessPassword) {
+							showErrorToast('Incorrect room password');
+						}
+						shouldPromptForAccessPassword = true;
+						roomAccessPassword = '';
+						continue;
+					}
+					throw new Error(
+						toStringValue((data as { error?: unknown }).error) || 'Unable to join room'
+					);
+				}
+				syncServerClock(
+					(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+						(data as { serverNow?: unknown; server_now?: unknown }).server_now
+				);
 
-			const params = new URLSearchParams({ name: joinedName, member: '1' });
-			if (joinedCreatedAt > 0) {
-				params.set('createdAt', String(joinedCreatedAt));
+				const joinedName =
+					normalizeRoomNameValue(toStringValue(data.roomName)) ||
+					activeThread.name ||
+					formatRoomName(roomId);
+				const joinedCreatedAt = toTimestamp(data.createdAt);
+				const joinedExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+				const joinedIsAdmin = toBool(
+					(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
+						(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
+				);
+				const joinedAdminCode = normalizeAdminCodeValue(
+					(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
+						(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
+				);
+				const joinedRequiresPassword = requiresPassword;
+				ensureRoomThread(roomId, joinedName, 'joined');
+				markRoomMembershipSynced(roomId);
+				ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
+				roomThreads = sortThreads(
+					roomThreads.map((thread) =>
+						thread.id === roomId
+							? {
+									...thread,
+									status: 'joined',
+									name: joinedName,
+									isAdmin: joinedIsAdmin,
+									adminCode: joinedIsAdmin ? joinedAdminCode : '',
+									requiresPassword: joinedRequiresPassword
+								}
+							: thread
+					)
+				);
+
+				const params = new URLSearchParams({ name: joinedName, member: '1' });
+				if (joinedCreatedAt > 0) {
+					params.set('createdAt', String(joinedCreatedAt));
+				}
+				if (joinedExpiresAt > 0) {
+					params.set('expiresAt', String(joinedExpiresAt));
+				}
+				const passwordHash = buildRoomPasswordHash($activeRoomPassword);
+				await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}${passwordHash}`);
+				return;
 			}
-			if (joinedExpiresAt > 0) {
-				params.set('expiresAt', String(joinedExpiresAt));
-			}
-			const passwordHash = buildRoomPasswordHash(roomPassword);
-			await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}${passwordHash}`);
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Unable to join room');
 		}
@@ -3415,8 +3497,12 @@
 				Number.isFinite(oldest.createdAt) && oldest.createdAt > 0
 					? `&beforeCreatedAt=${encodeURIComponent(String(oldest.createdAt))}`
 					: '';
+			const normalizedUserID = normalizeIdentifier(currentUserId);
+			const userIdQuery = normalizedUserID
+				? `&userId=${encodeURIComponent(normalizedUserID)}`
+				: '';
 			const res = await fetch(
-				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/messages?before=${before}${beforeCreatedAt}&limit=50`
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/messages?before=${before}${beforeCreatedAt}${userIdQuery}&limit=50`
 			);
 			const data = await res.json().catch(() => ({}));
 			if (!res.ok) {
@@ -3826,6 +3912,27 @@
 	}
 
 	async function createBreakRoom(message: ChatMessage) {
+		const shouldProtectBreakRoom = await openConfirmDialog({
+			title: 'Break Room Password',
+			message:
+				'Do you want to require a room password before others can preview and join this break room?',
+			confirmLabel: 'Set Password',
+			cancelLabel: 'No Password'
+		});
+
+		let breakRoomAccessPassword = '';
+		if (shouldProtectBreakRoom) {
+			const enteredPassword = await openRoomAccessPasswordDialog('');
+			if (enteredPassword === null) {
+				return false;
+			}
+			if (!enteredPassword) {
+				showErrorToast('Room password cannot be empty');
+				return false;
+			}
+			breakRoomAccessPassword = enteredPassword;
+		}
+
 		try {
 			const res = await fetch(`${API_BASE}/api/rooms/break`, {
 				method: 'POST',
@@ -3833,6 +3940,7 @@
 				body: JSON.stringify({
 					parentRoomId: roomId,
 					originMessageId: message.id,
+					roomPassword: breakRoomAccessPassword,
 					userId: normalizeIdentifier(currentUserId),
 					username: currentUsername
 				})
@@ -3860,6 +3968,11 @@
 				normalizeMessageID(toStringValue(data.originMessageId ?? data.origin_message_id)) ||
 				message.id;
 			const breakTreeNumber = toInt(data.treeNumber ?? data.tree_number);
+			const breakRequiresPassword = toBool(
+				(data as { requiresPassword?: unknown; requires_password?: unknown }).requiresPassword ??
+					(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password ??
+					Boolean(breakRoomAccessPassword)
+			);
 
 			messagesByRoom = {
 				...messagesByRoom,
@@ -3884,7 +3997,8 @@
 								status: 'joined',
 								parentRoomId: breakParentRoomId || undefined,
 								originMessageId: breakOriginMessageId || undefined,
-								treeNumber: breakTreeNumber > 0 ? breakTreeNumber : (thread.treeNumber ?? 0)
+								treeNumber: breakTreeNumber > 0 ? breakTreeNumber : (thread.treeNumber ?? 0),
+								requiresPassword: breakRequiresPassword
 							}
 						: thread
 				)

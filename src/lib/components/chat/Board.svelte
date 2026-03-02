@@ -4453,6 +4453,7 @@
 	.insert-wrap {
 		position: relative;
 		display: inline-flex;
+		align-items: center;
 	}
 
 	.insert-toggle {
@@ -4465,24 +4466,29 @@
 		position: absolute;
 		top: calc(100% + 6px);
 		left: 0;
-		z-index: 25;
+		z-index: 35;
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
-		gap: 0.35rem;
-		padding: 0.4rem;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.4rem;
+		padding: 0.45rem;
 		border-radius: 9px;
 		border: 1px solid var(--border-subtle);
 		background: var(--bg-secondary);
 		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
+		min-width: max-content;
 	}
 
 	.shape-icon-button {
-		width: 34px;
-		height: 34px;
-		padding: 0;
+		width: 36px;
+		height: 36px;
+		min-width: 36px;
+		min-height: 36px;
+		padding: 0 !important;
+		margin: 0;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
+		line-height: 1;
 	}
 
 	.board-details-wrap {
@@ -5006,6 +5012,22 @@
 		.insert-toggle {
 			gap: 0.25rem;
 			padding: 0.28rem 0.46rem;
+		}
+
+		.insert-menu {
+			left: 50%;
+			right: auto;
+			transform: translateX(-50%);
+			gap: 0.32rem;
+			padding: 0.38rem;
+		}
+
+		.insert-menu .shape-icon-button {
+			width: 32px;
+			height: 32px;
+			min-width: 32px;
+			min-height: 32px;
+			padding: 0 !important;
 		}
 
 		.clear-tool-button {

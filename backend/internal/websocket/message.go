@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -21,8 +22,11 @@ import (
 const (
 	messageQueueKey            = "msg_queue"
 	roomHistoryPrefix          = "room:history:"
+	roomTaskHistoryPrefix      = "room:history:task:"
 	roomHistoryTTL             = 21600
 	roomHistorySize            = 50
+	roomTaskHistorySize        = 4
+	roomHistoryBackfillLimit   = roomHistorySize * 5
 	scyllaMessageTTL           = 15 * 24 * 60 * 60
 	messageBreakMeta           = "message:break:"
 	roomKeyPrefix              = "room:"
@@ -172,9 +176,6 @@ func (s *MessageService) CacheRecentMessage(ctx context.Context, msg models.Mess
 	if s.Redis == nil || s.Redis.Client == nil {
 		return fmt.Errorf("redis client is not configured")
 	}
-	if strings.EqualFold(strings.TrimSpace(msg.Type), "task") {
-		return nil
-	}
 
 	payload, err := json.Marshal(msg)
 	if err != nil {
@@ -184,9 +185,14 @@ func (s *MessageService) CacheRecentMessage(ctx context.Context, msg models.Mess
 	historyTTLSeconds := s.resolveRoomTTLSeconds(ctx, msg.RoomID)
 	historyTTL := time.Duration(historyTTLSeconds) * time.Second
 	historyKey := roomHistoryPrefix + msg.RoomID
+	historySize := roomHistorySize
+	if isTaskHistoryMessage(msg) {
+		historyKey = roomTaskHistoryPrefix + msg.RoomID
+		historySize = roomTaskHistorySize
+	}
 	pipe := s.Redis.Client.TxPipeline()
 	pipe.RPush(ctx, historyKey, payload)
-	pipe.LTrim(ctx, historyKey, -roomHistorySize, -1)
+	pipe.LTrim(ctx, historyKey, int64(-historySize), -1)
 	pipe.Expire(ctx, historyKey, historyTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("cache recent message: %w", err)
@@ -210,6 +216,102 @@ func (s *MessageService) resolveRoomTTLSeconds(ctx context.Context, roomID strin
 		return 1
 	}
 	return seconds
+}
+
+func isTaskHistoryMessage(msg models.Message) bool {
+	return strings.EqualFold(strings.TrimSpace(msg.Type), "task")
+}
+
+func historyMessageKey(msg models.Message) string {
+	normalizedID := normalizeMessageID(msg.ID)
+	if normalizedID != "" {
+		return normalizedID
+	}
+	return fmt.Sprintf(
+		"%s|%s|%s|%d",
+		strings.TrimSpace(msg.RoomID),
+		strings.TrimSpace(msg.SenderID),
+		strings.TrimSpace(msg.Content),
+		msg.CreatedAt.UTC().UnixNano(),
+	)
+}
+
+func historyMessageLess(left, right models.Message) bool {
+	if left.CreatedAt.Equal(right.CreatedAt) {
+		return historyMessageKey(left) < historyMessageKey(right)
+	}
+	return left.CreatedAt.Before(right.CreatedAt)
+}
+
+func trimHistoryBucket(messages []models.Message, limit int, includeTask bool) []models.Message {
+	if limit <= 0 || len(messages) == 0 {
+		return []models.Message{}
+	}
+
+	filtered := make([]models.Message, 0, len(messages))
+	for _, message := range messages {
+		if isTaskHistoryMessage(message) == includeTask {
+			filtered = append(filtered, message)
+		}
+	}
+	if len(filtered) == 0 {
+		return []models.Message{}
+	}
+
+	sort.SliceStable(filtered, func(i, j int) bool {
+		return historyMessageLess(filtered[i], filtered[j])
+	})
+
+	seen := make(map[string]struct{}, len(filtered))
+	dedupedDescending := make([]models.Message, 0, len(filtered))
+	for index := len(filtered) - 1; index >= 0; index-- {
+		key := historyMessageKey(filtered[index])
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		dedupedDescending = append(dedupedDescending, filtered[index])
+	}
+
+	deduped := make([]models.Message, 0, len(dedupedDescending))
+	for index := len(dedupedDescending) - 1; index >= 0; index-- {
+		deduped = append(deduped, dedupedDescending[index])
+	}
+	if len(deduped) > limit {
+		deduped = deduped[len(deduped)-limit:]
+	}
+	return deduped
+}
+
+func mergeRecentHistory(normalMessages, taskMessages []models.Message) []models.Message {
+	merged := make([]models.Message, 0, len(normalMessages)+len(taskMessages))
+	merged = append(merged, normalMessages...)
+	merged = append(merged, taskMessages...)
+	if len(merged) == 0 {
+		return merged
+	}
+
+	sort.SliceStable(merged, func(i, j int) bool {
+		return historyMessageLess(merged[i], merged[j])
+	})
+
+	seen := make(map[string]struct{}, len(merged))
+	deduped := make([]models.Message, 0, len(merged))
+	for _, message := range merged {
+		key := historyMessageKey(message)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, message)
+	}
+	return deduped
 }
 
 func isBoardEventType(eventType string) bool {
@@ -860,57 +962,39 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 		return []models.Message{}, nil
 	}
 
-	redisMessages := make([]models.Message, 0, roomHistorySize)
+	normalMessages := make([]models.Message, 0, roomHistorySize)
+	taskMessages := make([]models.Message, 0, roomTaskHistorySize)
 	if s.Redis != nil && s.Redis.Client != nil {
-		historyKey := roomHistoryPrefix + roomID
-		cached, err := s.Redis.Client.LRange(ctx, historyKey, 0, -1).Result()
+		cachedNormal, err := s.Redis.Client.LRange(ctx, roomHistoryPrefix+roomID, 0, -1).Result()
 		if err != nil {
-			return nil, fmt.Errorf("load cached history: %w", err)
+			return nil, fmt.Errorf("load cached normal history: %w", err)
+		}
+		cachedTasks, taskErr := s.Redis.Client.LRange(ctx, roomTaskHistoryPrefix+roomID, 0, -1).Result()
+		if taskErr != nil {
+			return nil, fmt.Errorf("load cached task history: %w", taskErr)
 		}
 
-		redisMessages = decodeCachedMessages(cached)
-		if len(redisMessages) > roomHistorySize {
-			redisMessages = redisMessages[len(redisMessages)-roomHistorySize:]
-		}
+		normalMessages = trimHistoryBucket(decodeCachedMessages(cachedNormal), roomHistorySize, false)
+		taskMessages = trimHistoryBucket(decodeCachedMessages(cachedTasks), roomTaskHistorySize, true)
 	}
 
-	if len(redisMessages) >= roomHistorySize {
-		s.enrichBreakMetadata(ctx, redisMessages)
-		s.enrichPinMetadata(ctx, roomID, redisMessages)
-		return redisMessages, nil
-	}
-
-	needed := roomHistorySize - len(redisMessages)
 	if s.Scylla == nil || s.Scylla.Session == nil {
-		s.enrichBreakMetadata(ctx, redisMessages)
-		s.enrichPinMetadata(ctx, roomID, redisMessages)
-		return redisMessages, nil
+		combined := mergeRecentHistory(normalMessages, taskMessages)
+		s.enrichBreakMetadata(ctx, combined)
+		s.enrichPinMetadata(ctx, roomID, combined)
+		return combined, nil
 	}
 
-	var before *time.Time
-	if len(redisMessages) > 0 && !redisMessages[0].CreatedAt.IsZero() {
-		oldestCached := redisMessages[0].CreatedAt
-		before = &oldestCached
+	if len(normalMessages) < roomHistorySize || len(taskMessages) < roomTaskHistorySize {
+		scyllaMessagesDesc, err := s.queryScyllaMessages(roomID, roomHistoryBackfillLimit, nil)
+		if err != nil {
+			return nil, err
+		}
+		normalMessages = trimHistoryBucket(append(normalMessages, scyllaMessagesDesc...), roomHistorySize, false)
+		taskMessages = trimHistoryBucket(append(taskMessages, scyllaMessagesDesc...), roomTaskHistorySize, true)
 	}
 
-	scyllaMessagesDesc, err := s.queryScyllaMessages(roomID, needed, before)
-	if err != nil && before != nil {
-		log.Printf("[message-service] scoped scylla query failed room=%s err=%v", roomID, err)
-		scyllaMessagesDesc, err = s.queryScyllaMessages(roomID, needed, nil)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	for left, right := 0, len(scyllaMessagesDesc)-1; left < right; left, right = left+1, right-1 {
-		scyllaMessagesDesc[left], scyllaMessagesDesc[right] = scyllaMessagesDesc[right], scyllaMessagesDesc[left]
-	}
-
-	combined := append(scyllaMessagesDesc, redisMessages...)
-	combined = dedupeChronological(combined)
-	if len(combined) > roomHistorySize {
-		combined = combined[len(combined)-roomHistorySize:]
-	}
+	combined := mergeRecentHistory(normalMessages, taskMessages)
 	s.enrichBreakMetadata(ctx, combined)
 	s.enrichPinMetadata(ctx, roomID, combined)
 
@@ -1896,15 +1980,44 @@ func (s *MessageService) upsertCachedMessage(
 		return nil
 	}
 
-	historyKey := roomHistoryPrefix + roomID
+	_, normalErr := s.upsertCachedMessageInKey(
+		ctx,
+		roomID,
+		roomHistoryPrefix+roomID,
+		roomHistorySize,
+		messageID,
+		mutate,
+	)
+	if normalErr != nil {
+		return normalErr
+	}
+	_, taskErr := s.upsertCachedMessageInKey(
+		ctx,
+		roomID,
+		roomTaskHistoryPrefix+roomID,
+		roomTaskHistorySize,
+		messageID,
+		mutate,
+	)
+	return taskErr
+}
+
+func (s *MessageService) upsertCachedMessageInKey(
+	ctx context.Context,
+	roomID, historyKey string,
+	historyLimit int,
+	messageID string,
+	mutate func(*models.Message),
+) (bool, error) {
 	entries, err := s.Redis.Client.LRange(ctx, historyKey, 0, -1).Result()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(entries) == 0 {
-		return nil
+		return false, nil
 	}
 
+	normalizedMessageID := normalizeMessageID(messageID)
 	updated := false
 	serialized := make([]string, 0, len(entries))
 	for _, raw := range entries {
@@ -1913,7 +2026,7 @@ func (s *MessageService) upsertCachedMessage(
 			serialized = append(serialized, raw)
 			continue
 		}
-		if !updated && normalizeMessageID(msg.ID) == messageID {
+		if !updated && normalizeMessageID(msg.ID) == normalizedMessageID {
 			mutate(&msg)
 			updated = true
 		}
@@ -1924,9 +2037,8 @@ func (s *MessageService) upsertCachedMessage(
 		}
 		serialized = append(serialized, string(encoded))
 	}
-
 	if !updated {
-		return nil
+		return false, nil
 	}
 
 	ttl := s.resolveRoomTTLSeconds(ctx, roomID)
@@ -1934,9 +2046,12 @@ func (s *MessageService) upsertCachedMessage(
 	pipe.Del(ctx, historyKey)
 	if len(serialized) > 0 {
 		pipe.RPush(ctx, historyKey, serialized)
-		pipe.LTrim(ctx, historyKey, -roomHistorySize, -1)
+		pipe.LTrim(ctx, historyKey, int64(-historyLimit), -1)
 		pipe.Expire(ctx, historyKey, time.Duration(ttl)*time.Second)
 	}
 	_, execErr := pipe.Exec(ctx)
-	return execErr
+	if execErr != nil {
+		return false, execErr
+	}
+	return true, nil
 }

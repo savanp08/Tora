@@ -29,7 +29,8 @@ export function createThread(
 		lastActivity: Date.now(),
 		unread: 0,
 		status,
-		isAdmin: false
+		isAdmin: false,
+		requiresPassword: false
 	};
 }
 

@@ -96,6 +96,7 @@ export type ChatThread = {
 	treeNumber?: number;
 	isAdmin?: boolean;
 	adminCode?: string;
+	requiresPassword?: boolean;
 };
 
 export type OnlineMember = {
@@ -123,6 +124,7 @@ export type SidebarRoom = {
 	expiresAt?: number;
 	isAdmin?: boolean;
 	adminCode?: string;
+	requiresPassword?: boolean;
 };
 
 export type ReplyTarget = {

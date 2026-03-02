@@ -35,5 +35,47 @@
 	color: var(--text-primary);
 }
 
+.instant-tooltip {
+	position: fixed;
+	z-index: 12000;
+	max-width: min(32rem, calc(100vw - 1.5rem));
+	padding: 0.4rem 0.6rem;
+	border-radius: 0.55rem;
+	border: 1px solid var(--border-default);
+	background: var(--surface-secondary);
+	color: var(--text-primary);
+	font-size: 0.74rem;
+	font-weight: 500;
+	line-height: 1.35;
+	letter-spacing: 0.005em;
+	box-shadow: var(--shadow-lg);
+	pointer-events: none;
+	opacity: 0;
+	white-space: normal;
+	transform: translate(-50%, calc(-100% - 2px)) scale(0.98);
+	transition: opacity 0.08s ease-out, transform 0.12s ease-out;
+}
+
+.instant-tooltip.visible {
+	opacity: 1;
+}
+
+.instant-tooltip.placement-bottom {
+	transform: translate(-50%, 2px) scale(0.98);
+}
+
+.instant-tooltip.visible.placement-top {
+	transform: translate(-50%, -100%) scale(1);
+}
+
+.instant-tooltip.visible.placement-bottom {
+	transform: translate(-50%, 0) scale(1);
+}
+
+@media (max-width: 640px) {
+	.instant-tooltip {
+		max-width: calc(100vw - 1rem);
+	}
+}
 
 

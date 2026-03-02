@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/monitor"
 )
@@ -579,6 +580,11 @@ func (h *Hub) broadcastToLocal(msg models.Message) {
 	}
 
 	for client := range clients {
+		if !client.canWriteToRoom(msg.RoomID) && h.isRoomPasswordProtected(msg.RoomID) {
+			delete(clients, client)
+			client.unsubscribeFromRoom(msg.RoomID)
+			continue
+		}
 		if client.canWriteToRoom(msg.RoomID) && !h.isClientRoomMember(client.UserID, msg.RoomID) {
 			client.subscribeToRoom(msg.RoomID, false)
 			continue
@@ -613,10 +619,27 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 		}
 		seen[roomID] = struct{}{}
 
+		canWrite := h.isClientRoomMember(client.UserID, roomID)
+		if h.isRoomPasswordProtected(roomID) && !canWrite {
+			select {
+			case client.Send <- map[string]interface{}{
+				"type":   "room_access_required",
+				"roomId": roomID,
+				"payload": map[string]interface{}{
+					"requiresPassword": true,
+				},
+			}:
+			default:
+				h.removeClientFromAllRooms(client, true)
+				client.closeSendChannel()
+				return
+			}
+			continue
+		}
+
 		if _, ok := h.rooms[roomID]; !ok {
 			h.rooms[roomID] = make(map[*Client]bool)
 		}
-		canWrite := h.isClientRoomMember(client.UserID, roomID)
 		alreadySubscribed := h.rooms[roomID][client]
 		alreadyWritable := client.canWriteToRoom(roomID)
 		if alreadySubscribed && alreadyWritable == canWrite {
@@ -1511,4 +1534,27 @@ func (h *Hub) isClientRoomMember(userID, roomID string) bool {
 		return false
 	}
 	return isMember
+}
+
+func (h *Hub) isRoomPasswordProtected(roomID string) bool {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return false
+	}
+	if h == nil || h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return false
+	}
+	passwordHash, err := h.msgService.Redis.Client.HGet(
+		context.Background(),
+		roomKeyPrefix+roomID,
+		"room_password_hash",
+	).Result()
+	if err == redis.Nil {
+		return false
+	}
+	if err != nil {
+		log.Printf("[ws] room password lookup failed room=%s err=%v", roomID, err)
+		return false
+	}
+	return strings.TrimSpace(passwordHash) != ""
 }

@@ -693,6 +693,9 @@
 									<span class="room-name-wrap">
 										<span class="status-dot green"></span>
 										<span class="room-name">{thread.name}</span>
+										{#if thread.requiresPassword}
+											<span class="room-lock" title="Password protected room">🔒</span>
+										{/if}
 									</span>
 									<span class="room-time">{formatClock(thread.lastActivity)}</span>
 								</span>
@@ -761,6 +764,9 @@
 									<span class="room-name-wrap">
 										<span class="status-dot orange"></span>
 										<span class="room-name">{thread.name}</span>
+										{#if thread.requiresPassword}
+											<span class="room-lock" title="Password protected room">🔒</span>
+										{/if}
 									</span>
 									<span class="room-time">{formatClock(thread.lastActivity)}</span>
 								</span>
@@ -829,6 +835,9 @@
 									<span class="room-name-wrap">
 										<span class="status-dot gray"></span>
 										<span class="room-name">{thread.name}</span>
+										{#if thread.requiresPassword}
+											<span class="room-lock" title="Password protected room">🔒</span>
+										{/if}
 									</span>
 									<span class="room-time">{formatClock(thread.lastActivity)}</span>
 								</span>
@@ -918,6 +927,9 @@
 												: 'orange'}"
 									></span>
 									<span class="room-name">{thread.name}</span>
+									{#if thread.requiresPassword}
+										<span class="room-lock" title="Password protected room">🔒</span>
+									{/if}
 								</span>
 								<span class="room-time">{formatClock(thread.lastActivity)}</span>
 							</span>
@@ -1159,7 +1171,9 @@
 		transition:
 			background 140ms ease,
 			color 140ms ease,
-			border-color 140ms ease;
+			border-color 140ms ease,
+			box-shadow 140ms ease,
+			transform 140ms ease;
 		box-sizing: border-box;
 		overflow: hidden;
 	}
@@ -1171,13 +1185,16 @@
 	}
 
 	.room-item:hover {
-		background: #e7edf5;
-		border-color: #bdc8d7;
+		background: #dee7f2;
+		border-color: #aebed1;
+		transform: translateY(-1px);
+		box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
 	}
 
 	.room-list.theme-dark .room-item:hover {
-		background: #192742;
-		border-color: #3b4b67;
+		background: #20304d;
+		border-color: #4b5f82;
+		box-shadow: 0 8px 20px rgba(2, 8, 23, 0.5);
 	}
 
 	.room-item.related-child {
@@ -1205,13 +1222,15 @@
 	}
 
 	.room-item.selected {
-		background: #53627c;
-		border-color: #53627c;
+		background: #4a5d7a;
+		border-color: #3f526e;
+		box-shadow: 0 10px 22px rgba(63, 82, 110, 0.34);
 	}
 
 	.room-list.theme-dark .room-item.selected {
-		background: #1e293b;
-		border-color: #334155;
+		background: #26344a;
+		border-color: #3e5474;
+		box-shadow: 0 10px 22px rgba(8, 13, 24, 0.58);
 	}
 
 	.room-list.theme-dark .room-item.related-child.selected {
@@ -1336,8 +1355,20 @@
 		white-space: nowrap;
 	}
 
+	.room-lock {
+		font-size: 0.74rem;
+		line-height: 1;
+		opacity: 0.9;
+		color: #a16207;
+		flex-shrink: 0;
+	}
+
 	.room-list.theme-dark .room-name {
 		color: #e6eefc;
+	}
+
+	.room-list.theme-dark .room-lock {
+		color: #fbbf24;
 	}
 
 	.room-time {
@@ -1445,6 +1476,11 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
+		transition:
+			background 140ms ease,
+			border-color 140ms ease,
+			color 140ms ease,
+			transform 140ms ease;
 	}
 
 	.room-list.theme-dark .icon-button {
@@ -1456,6 +1492,17 @@
 	.icon-button:disabled {
 		opacity: 0.55;
 		cursor: not-allowed;
+	}
+
+	.icon-button:hover:not(:disabled) {
+		background: #dfe8f4;
+		border-color: #aebfd4;
+		transform: translateY(-1px);
+	}
+
+	.room-list.theme-dark .icon-button:hover:not(:disabled) {
+		background: #22324f;
+		border-color: #41587d;
 	}
 
 	.map-icon-button {
