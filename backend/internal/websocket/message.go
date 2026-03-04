@@ -150,25 +150,6 @@ func (s *MessageService) SaveToScylla(msg models.Message) error {
 	}
 	s.panicFailures.Store(0)
 
-	if strings.EqualFold(strings.TrimSpace(msg.Type), "task") {
-		pinsTable := s.Scylla.Table("room_pins")
-		pinQuery := fmt.Sprintf(
-			`INSERT INTO %s (room_id, created_at, message_id, type) VALUES (?, ?, ?, ?) USING TTL %d`,
-			pinsTable,
-			ttlSeconds,
-		)
-		if err := safeExecScyllaQuery(
-			s.Scylla.Session,
-			pinQuery,
-			msg.RoomID,
-			msg.CreatedAt,
-			msg.ID,
-			"task",
-		); err != nil {
-			return fmt.Errorf("save task pin index: %w", err)
-		}
-	}
-
 	return nil
 }
 

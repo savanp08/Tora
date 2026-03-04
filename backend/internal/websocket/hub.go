@@ -1192,10 +1192,9 @@ func (h *Hub) BroadcastToRoom(roomID string, payload map[string]interface{}) {
 		RoomID:  normalizedRoomID,
 		Payload: body,
 	}
-	select {
-	case h.roomEvent <- event:
-	case <-time.After(200 * time.Millisecond):
-	}
+	// Route through the shared room-event publisher so every hub instance
+	// (not just this process) receives and broadcasts the update.
+	h.publishRoomEvent(event)
 }
 
 func (h *Hub) publishRoomEvent(event RoomEvent) {

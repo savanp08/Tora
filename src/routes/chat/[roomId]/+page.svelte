@@ -42,7 +42,6 @@
 		normalizeRoomNameValue,
 		normalizeUsernameValue,
 		parseOptionalTimestamp,
-		parseTimestampParam,
 		resolveRoomMembership,
 		toBool,
 		toInt,
@@ -85,8 +84,7 @@
 	import {
 		getRemainingHoursLabel as getRemainingHoursLabelState,
 		getRoomCreatedAt as getRoomCreatedAtState,
-		getRoomExpiry as getRoomExpiryState,
-		getRoomRemainingMs as getRoomRemainingMsState
+		getRoomExpiry as getRoomExpiryState
 	} from '$lib/utils/chat/roomTiming';
 	import { createTypingController } from '$lib/utils/chat/typingController';
 	import {
@@ -151,6 +149,14 @@
 	const DISCUSSION_MAX_REPLY_DEPTH = 4;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const PROTECTED_ROOM_PREVIEW_TEXT = 'Protected room. Join with password to preview messages.';
+	const LEGACY_ROOM_TIME_QUERY_KEYS = [
+		'createdAt',
+		'expiresAt',
+		'serverNow',
+		'created_at',
+		'expires_at',
+		'server_now'
+	] as const;
 
 	type CanvasPresenceUser = {
 		id: string;
@@ -243,6 +249,9 @@
 	let identityReady = !browser;
 	let roomExpiryTickMs = Date.now();
 	let activeRoomRemainingMs = 0;
+	let activeRoomCreatedAtMs = 0;
+	let activeRoomExpiresAtMs = 0;
+	let activeRemainingLabel = '--';
 	let isRoomExpired = false;
 	let serverClockOffsetMs = 0;
 	let serverNowAnchorMs = 0;
@@ -283,6 +292,7 @@
 		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
 	} | null = null;
 	let lastHandledPasswordRouteSignature = '';
+	let lastLegacyTimingParamCleanupSignature = '';
 	let skipPasswordResetForPath = '';
 
 	$: roomId = normalizeRoomIDValue(decodeURIComponent($page.params.roomId ?? ''));
@@ -291,12 +301,19 @@
 		lastHandledPasswordRouteSignature = roomRouteSignature;
 		syncActiveRoomPasswordFromHash();
 	}
+	$: if (browser && roomRouteSignature !== lastLegacyTimingParamCleanupSignature) {
+		lastLegacyTimingParamCleanupSignature = roomRouteSignature;
+		const sanitized = new URLSearchParams($page.url.searchParams.toString());
+		if (removeLegacyRoomTimeQueryParams(sanitized)) {
+			const nextQuery = sanitized.toString();
+			const nextURL = `${$page.url.pathname}${nextQuery ? `?${nextQuery}` : ''}${$page.url.hash}`;
+			void goto(nextURL, { replaceState: true, noScroll: true, keepFocus: true });
+		}
+	}
 	$: activeRoomId = roomId;
 	$: roomNameFromURL = normalizeRoomNameValue(
 		decodeURIComponent($page.url.searchParams.get('name') ?? '').trim()
 	);
-	$: roomCreatedAtFromURL = parseTimestampParam($page.url.searchParams.get('createdAt'));
-	$: roomExpiresAtFromURL = parseTimestampParam($page.url.searchParams.get('expiresAt'));
 	$: focusMessageIdFromURL = normalizeMessageID($page.url.searchParams.get('focusMsg') ?? '');
 	$: roomMemberHint = $page.url.searchParams.get('member');
 	$: currentUserId = $currentUser?.id ?? 'guest';
@@ -339,7 +356,10 @@
 					return comment.createdAt > discussionOpenedAtMs;
 				}).length
 			: 0;
-	$: currentOnlineMembers = onlineByRoom[roomId] ?? [];
+	$: currentOnlineMembers = prioritizeOnlineMembersForViewer(
+		onlineByRoom[roomId] ?? [],
+		currentUserId
+	);
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: canModerateBoard = isMember && !isRoomExpired && isActiveRoomAdmin;
@@ -348,8 +368,19 @@
 	$: activeLastReadTimestamp = getLastReadTimestamp(roomId);
 	$: activeTypingUsers = getActiveTypingUsers(roomId);
 	$: typingIndicatorText = formatTypingIndicator(activeTypingUsers);
-	$: activeRoomRemainingMs = roomId ? getRoomRemainingMs(roomId, roomExpiryTickMs) : 0;
-	$: isRoomExpired = roomId ? getRoomExpiry(roomId) > 0 && activeRoomRemainingMs <= 0 : false;
+	$: activeRoomCreatedAtMs = roomId ? (roomMetaById[roomId]?.createdAt ?? 0) : 0;
+	$: activeRoomExpiresAtMs = roomId ? (roomMetaById[roomId]?.expiresAt ?? 0) : 0;
+	$: activeRoomRemainingMs =
+		activeRoomExpiresAtMs > 0
+			? activeRoomExpiresAtMs - getApproxServerNowMs(roomExpiryTickMs)
+			: Number.POSITIVE_INFINITY;
+	$: isRoomExpired = activeRoomExpiresAtMs > 0 && activeRoomRemainingMs <= 0;
+	$: activeRemainingLabel = getRemainingHoursLabelState(
+		roomMetaById,
+		roomId,
+		roomExpiryTickMs,
+		getApproxServerNowMs
+	);
 	$: isLoadingOlderHistory = historyLoadingByRoom[roomId] ?? false;
 	$: hasMoreOlderHistory = historyHasMoreByRoom[roomId] ?? true;
 	$: myRooms = filterThreadsByStatus(roomThreads, 'joined');
@@ -370,10 +401,13 @@
 			ensureRoomThread(roomId, roomNameFromURL || undefined, existingRoom.status);
 			ensureOnlineSeed(roomId);
 		}
-		ensureRoomMeta(roomId, roomCreatedAtFromURL, roomExpiresAtFromURL);
 	}
 	$: if (browser && identityReady && roomId && isMember) {
 		void syncRoomMembership(roomId);
+	}
+	$: if (browser && identityReady && roomId && roomId !== lastRoomMetaSyncRoomId) {
+		lastRoomMetaSyncRoomId = roomId;
+		void refreshRoomMetaFromServer(roomId);
 	}
 	$: if (browser && identityReady) {
 		initGlobalSocket(currentUserId, currentUsername);
@@ -465,6 +499,9 @@
 		roomExpiryTickMs = Date.now();
 		roomExpiryTicker = setInterval(() => {
 			roomExpiryTickMs = Date.now();
+			if (identityReady && roomId) {
+				void refreshRoomMetaFromServer(roomId);
+			}
 			processKnownExpiredRooms();
 		}, 60000);
 		return () => {
@@ -514,6 +551,18 @@
 			return;
 		}
 		activeRoomPassword.set('');
+	}
+
+	function removeLegacyRoomTimeQueryParams(params: URLSearchParams) {
+		let changed = false;
+		for (const key of LEGACY_ROOM_TIME_QUERY_KEYS) {
+			if (!params.has(key)) {
+				continue;
+			}
+			params.delete(key);
+			changed = true;
+		}
+		return changed;
 	}
 
 	async function encryptMessageContent(content: string) {
@@ -772,14 +821,9 @@
 			ensureOnlineSeed(joinedRoomId);
 
 			const params = new URLSearchParams($page.url.searchParams.toString());
+			removeLegacyRoomTimeQueryParams(params);
 			params.set('member', '1');
 			params.set('name', joinedName);
-			if (joinedCreatedAt > 0) {
-				params.set('createdAt', String(joinedCreatedAt));
-			}
-			if (joinedExpiresAt > 0) {
-				params.set('expiresAt', String(joinedExpiresAt));
-			}
 			await goto(`/chat/${encodeURIComponent(joinedRoomId)}?${params.toString()}`, {
 				replaceState: true,
 				noScroll: true,
@@ -1151,6 +1195,41 @@
 		}
 	}
 
+	let lastRoomMetaSyncRoomId = '';
+	async function refreshRoomMetaFromServer(targetRoomId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		if (!browser || !identityReady || !normalizedRoomID || !normalizedUserID) {
+			return;
+		}
+		try {
+			const res = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}?userId=${encodeURIComponent(normalizedUserID)}`
+			);
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) {
+				return;
+			}
+			syncServerClock(
+				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+					(data as { serverNow?: unknown; server_now?: unknown }).server_now
+			);
+			const createdAt = toTimestamp((data as { createdAt?: unknown }).createdAt);
+			const expiresAt = parseOptionalTimestamp(
+				(data as { expiresAt?: unknown; expires_at?: unknown }).expiresAt ??
+					(data as { expiresAt?: unknown; expires_at?: unknown }).expires_at
+			);
+			if (createdAt > 0 || expiresAt > 0) {
+				ensureRoomMeta(normalizedRoomID, createdAt, expiresAt);
+			}
+		} catch (error) {
+			clientLog('api-room-details-error', {
+				roomId: normalizedRoomID,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
+
 	async function refreshSidebarRooms(userIdOverride?: string) {
 		const userID = normalizeIdentifier(userIdOverride || currentUserId);
 		if (!browser || !userID) {
@@ -1188,7 +1267,9 @@
 				const roomStatus: ThreadStatus =
 					room.status === 'joined' ? 'joined' : room.status === 'left' ? 'left' : 'discoverable';
 				const nextIsAdmin = toBool(room.isAdmin ?? prev?.isAdmin ?? false);
-				const nextAdminCode = normalizeAdminCodeValue(room.adminCode ?? (nextIsAdmin ? prev?.adminCode : ''));
+				const nextAdminCode = normalizeAdminCodeValue(
+					room.adminCode ?? (nextIsAdmin ? prev?.adminCode : '')
+				);
 				const nextRequiresPassword = toBool(
 					roomRecord.requiresPassword ??
 						roomRecord.requires_password ??
@@ -1203,7 +1284,7 @@
 						normalizeRoomNameValue(toStringValue(room.roomName)) ||
 						prev?.name ||
 						formatRoomName(roomID),
-					lastMessage: shouldMaskPreview ? PROTECTED_ROOM_PREVIEW_TEXT : (prev?.lastMessage || ''),
+					lastMessage: shouldMaskPreview ? PROTECTED_ROOM_PREVIEW_TEXT : prev?.lastMessage || '',
 					lastActivity: prev?.lastActivity || createdAt || Date.now(),
 					unread: prev?.unread || 0,
 					status: roomStatus,
@@ -1297,14 +1378,6 @@
 			params.set('member', '1');
 		} else {
 			params.set('member', '0');
-		}
-		const createdAt = getRoomCreatedAt(normalizedTargetRoomId);
-		if (createdAt > 0) {
-			params.set('createdAt', String(createdAt));
-		}
-		const expiresAt = roomMetaById[normalizedTargetRoomId]?.expiresAt ?? 0;
-		if (expiresAt > 0) {
-			params.set('expiresAt', String(expiresAt));
 		}
 		const normalizedFocus = normalizeMessageID(focusMsgID);
 		if (normalizedFocus) {
@@ -1422,10 +1495,7 @@
 		}
 	}
 
-	async function handleDiscussionCommentEnvelope(
-		envelope: SocketEnvelope,
-		targetRoomId: string
-	) {
+	async function handleDiscussionCommentEnvelope(envelope: SocketEnvelope, targetRoomId: string) {
 		const targetRoomID = normalizeRoomIDValue(targetRoomId);
 		const activeRoomID = normalizeRoomIDValue(roomId);
 		if (!targetRoomID || targetRoomID !== activeRoomID) {
@@ -1560,9 +1630,7 @@
 					parentRoomId: parentRoomID || thread.parentRoomId,
 					originMessageId: originMessageID || thread.originMessageId,
 					requiresPassword: nextRequiresPassword,
-					lastMessage: shouldMaskPreview
-						? PROTECTED_ROOM_PREVIEW_TEXT
-						: (thread.lastMessage || '')
+					lastMessage: shouldMaskPreview ? PROTECTED_ROOM_PREVIEW_TEXT : thread.lastMessage || ''
 				};
 			})
 		);
@@ -1607,6 +1675,11 @@
 			return;
 		}
 
+		if (kind === 'message_pin_updated' && targetRoomId) {
+			applyMessagePinState(targetRoomId, payload);
+			return;
+		}
+
 		if (kind === 'message_break_updated' && targetRoomId) {
 			handleMessageBreakUpdatedEnvelope(envelope, targetRoomId);
 			return;
@@ -1633,6 +1706,12 @@
 		}
 
 		if (kind === 'room_extended' && targetRoomId) {
+			syncServerClock(
+				payload.serverNow ??
+					payload.server_now ??
+					(envelope as Record<string, unknown>).serverNow ??
+					(envelope as Record<string, unknown>).server_now
+			);
 			const nextExpiresAt = parseOptionalTimestamp(
 				payload.expiresAt ??
 					payload.expires_at ??
@@ -1642,6 +1721,7 @@
 			if (nextExpiresAt > 0) {
 				ensureRoomMeta(targetRoomId, getRoomCreatedAt(targetRoomId), nextExpiresAt);
 			}
+			void refreshRoomMetaFromServer(targetRoomId);
 			return;
 		}
 
@@ -1982,6 +2062,56 @@
 		queueOfflineCachePersist(targetRoomId);
 	}
 
+	function applyMessagePinState(targetRoomId: string, payload: unknown) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID || !payload || typeof payload !== 'object') {
+			return;
+		}
+		const source = payload as Record<string, unknown>;
+		const messageId = normalizeMessageID(
+			toStringValue(source.messageId ?? source.message_id ?? source.id)
+		);
+		if (!messageId) {
+			return;
+		}
+		const isPinned = toBool(source.isPinned ?? source.is_pinned ?? true);
+		const pinnedBy = isPinned
+			? normalizeIdentifier(toStringValue(source.pinnedBy ?? source.pinned_by))
+			: '';
+		const pinnedByName = isPinned
+			? normalizeUsernameValue(toStringValue(source.pinnedByName ?? source.pinned_by_name))
+			: '';
+		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
+		let changed = false;
+		const nextRoomMessages = roomMessages.map((entry) => {
+			if (normalizeMessageID(entry.id) !== messageId) {
+				return entry;
+			}
+			if (
+				Boolean(entry.isPinned) === isPinned &&
+				(entry.pinnedBy || '') === pinnedBy &&
+				(entry.pinnedByName || '') === pinnedByName
+			) {
+				return entry;
+			}
+			changed = true;
+			return {
+				...entry,
+				isPinned,
+				pinnedBy,
+				pinnedByName
+			};
+		});
+		if (!changed) {
+			return;
+		}
+		messagesByRoom = {
+			...messagesByRoom,
+			[normalizedRoomID]: nextRoomMessages
+		};
+		queueOfflineCachePersist(normalizedRoomID);
+	}
+
 	function markRoomAsRead(targetRoomId: string) {
 		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
 		roomThreads = markRoomAsReadState(roomThreads, normalizedRoomID);
@@ -2050,6 +2180,26 @@
 
 	function dedupeMembers(members: OnlineMember[]) {
 		return dedupeMembersState(members);
+	}
+
+	function prioritizeOnlineMembersForViewer(members: OnlineMember[], viewerId: string) {
+		if (!members.length) {
+			return members;
+		}
+		const normalizedViewerId = normalizeIdentifier(viewerId);
+		return [...members].sort((left, right) => {
+			const leftIsViewer = normalizeIdentifier(left.id) === normalizedViewerId ? 0 : 1;
+			const rightIsViewer = normalizeIdentifier(right.id) === normalizedViewerId ? 0 : 1;
+			if (leftIsViewer !== rightIsViewer) {
+				return leftIsViewer - rightIsViewer;
+			}
+			const leftJoinedAt = parseOptionalTimestamp(left.joinedAt);
+			const rightJoinedAt = parseOptionalTimestamp(right.joinedAt);
+			if (leftJoinedAt !== rightJoinedAt) {
+				return leftJoinedAt - rightJoinedAt;
+			}
+			return left.name.localeCompare(right.name);
+		});
 	}
 
 	async function sendMessage(payload?: ComposerMediaPayload) {
@@ -2155,11 +2305,13 @@
 			return false;
 		}
 		try {
+			const normalizedUsername = normalizeUsernameValue(currentUsername) || 'User';
 			const res = await fetch(roomPinsEndpoint(API_BASE, roomId), {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					userId: normalizedUserID,
+					username: normalizedUsername,
 					messageId: normalizedMessageID
 				})
 			});
@@ -2167,22 +2319,12 @@
 			if (!res.ok) {
 				throw new Error(toStringValue(data.error) || 'Failed to pin message');
 			}
-			const normalizedTargetID = normalizeMessageID(message.id);
-			if (normalizedTargetID) {
-				const nextMessages = (messagesByRoom[roomId] ?? []).map((entry) => {
-					if (normalizeMessageID(entry.id) !== normalizedTargetID) {
-						return entry;
-					}
-					return {
-						...entry,
-						isPinned: true
-					};
-				});
-				messagesByRoom = {
-					...messagesByRoom,
-					[roomId]: nextMessages
-				};
-			}
+			applyMessagePinState(roomId, {
+				messageId: normalizedMessageID,
+				isPinned: toBool(data.isPinned ?? true),
+				pinnedBy: toStringValue(data.pinnedBy ?? normalizedUserID),
+				pinnedByName: toStringValue(data.pinnedByName ?? normalizedUsername)
+			});
 			return true;
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Failed to pin message');
@@ -2230,10 +2372,12 @@
 			if (!res.ok) {
 				throw new Error(toStringValue(data.error) || 'Failed to load discussion comments');
 			}
-			const parsedComments = (await parseIncomingMessagesWithE2EE(
-				Array.isArray(data.comments) ? data.comments : [],
-				targetRoomID
-			)).sort((left, right) => left.createdAt - right.createdAt);
+			const parsedComments = (
+				await parseIncomingMessagesWithE2EE(
+					Array.isArray(data.comments) ? data.comments : [],
+					targetRoomID
+				)
+			).sort((left, right) => left.createdAt - right.createdAt);
 			discussionCommentsCacheByTaskKey = writeDiscussionCommentsCache(
 				discussionCommentsCacheByTaskKey,
 				targetRoomID,
@@ -2750,6 +2894,7 @@
 
 			if (normalizedRoomID === roomId) {
 				const params = new URLSearchParams($page.url.searchParams.toString());
+				removeLegacyRoomTimeQueryParams(params);
 				params.set('name', savedName);
 				await goto(`/chat/${encodeURIComponent(normalizedRoomID)}?${params.toString()}`, {
 					replaceState: true,
@@ -2849,12 +2994,6 @@
 				name: nextRoomName,
 				member: '1'
 			});
-			if (nextCreatedAt > 0) {
-				params.set('createdAt', String(nextCreatedAt));
-			}
-			if (nextExpiresAt > 0) {
-				params.set('expiresAt', String(nextExpiresAt));
-			}
 			const passwordHash = buildRoomPasswordHash(roomPassword);
 			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}${passwordHash}`);
 		} catch (error) {
@@ -2952,12 +3091,6 @@
 				);
 
 				const params = new URLSearchParams({ name: joinedName, member: '1' });
-				if (joinedCreatedAt > 0) {
-					params.set('createdAt', String(joinedCreatedAt));
-				}
-				if (joinedExpiresAt > 0) {
-					params.set('expiresAt', String(joinedExpiresAt));
-				}
 				const passwordHash = buildRoomPasswordHash($activeRoomPassword);
 				await goto(`/chat/${encodeURIComponent(roomId)}?${params.toString()}${passwordHash}`);
 				return;
@@ -2990,10 +3123,13 @@
 			const expiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
 			const expiresInSeconds = toInt(data.expiresInSeconds ?? data.expires_in_seconds);
 			const createdAt = getRoomCreatedAt(targetRoomId);
+			let nextExpiresAt = 0;
 			if (expiresAt > 0) {
-				ensureRoomMeta(targetRoomId, createdAt, expiresAt);
+				nextExpiresAt = expiresAt;
+				ensureRoomMeta(targetRoomId, createdAt, nextExpiresAt);
 			} else if (expiresInSeconds > 0) {
-				ensureRoomMeta(targetRoomId, createdAt, getApproxServerNowMs() + expiresInSeconds * 1000);
+				nextExpiresAt = getApproxServerNowMs() + expiresInSeconds * 1000;
+				ensureRoomMeta(targetRoomId, createdAt, nextExpiresAt);
 			}
 			showErrorToast(data.message || 'Room extended for 24 hours');
 		} catch {
@@ -3140,9 +3276,7 @@
 					? `&beforeCreatedAt=${encodeURIComponent(String(oldest.createdAt))}`
 					: '';
 			const normalizedUserID = normalizeIdentifier(currentUserId);
-			const userIdQuery = normalizedUserID
-				? `&userId=${encodeURIComponent(normalizedUserID)}`
-				: '';
+			const userIdQuery = normalizedUserID ? `&userId=${encodeURIComponent(normalizedUserID)}` : '';
 			const res = await fetch(
 				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/messages?before=${before}${beforeCreatedAt}${userIdQuery}&limit=50`
 			);
@@ -3651,12 +3785,6 @@
 				name: breakRoomName,
 				member: '1'
 			});
-			if (breakCreatedAt > 0) {
-				params.set('createdAt', String(breakCreatedAt));
-			}
-			if (breakExpiresAt > 0) {
-				params.set('expiresAt', String(breakExpiresAt));
-			}
 			const passwordHash = buildRoomPasswordHash($activeRoomPassword);
 			await goto(`/chat/${encodeURIComponent(breakRoomId)}?${params.toString()}${passwordHash}`);
 			return true;
@@ -3686,14 +3814,6 @@
 
 	function getRoomExpiry(targetRoomId: string) {
 		return getRoomExpiryState(roomMetaById, targetRoomId);
-	}
-
-	function getRemainingHoursLabel(targetRoomId: string, tickMs: number) {
-		return getRemainingHoursLabelState(roomMetaById, targetRoomId, tickMs, getApproxServerNowMs);
-	}
-
-	function getRoomRemainingMs(targetRoomId: string, tickMs: number) {
-		return getRoomRemainingMsState(roomMetaById, targetRoomId, tickMs, getApproxServerNowMs);
 	}
 </script>
 
@@ -3746,121 +3866,121 @@
 	>
 		{#if !isCanvasFullscreen}
 			<section class="chat-window">
-			<ChatRoomHeader
-				roomName={activeThread.name}
-				onlineCount={currentOnlineMembers.length}
-				unreadCount={activeUnreadCount}
-				{isMember}
-				{isActiveRoomAdmin}
-				{isMobileView}
-				isDarkMode={$isDarkMode}
-				{messageActionMode}
-				{showRoomSearch}
-				isBoardView={showBoardView}
-				{isCanvasOpen}
-				remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
-				on:showMobileList={showMobileRoomList}
-				on:openRoomDetails={openRoomDetails}
-				on:toggleBoardView={toggleBoardView}
-				on:toggleCanvas={toggleCanvas}
-				on:toggleRoomSearch={toggleRoomSearch}
-				on:renameRoom={() => void renameRoom(roomId)}
-				on:toggleBreakSelectionMode={toggleBreakSelectionMode}
-				on:togglePinSelectionMode={togglePinSelectionMode}
-				on:toggleEditSelectionMode={toggleEditSelectionMode}
-				on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
-				on:markRead={() => markRoomAsRead(roomId)}
-				on:clearLocal={clearCurrentRoomMessages}
-				on:leaveRoom={() => void leaveCurrentRoom()}
-				on:deleteRoom={() => void deleteCurrentRoomAsAdmin()}
-				on:disconnect={() => void disconnectAndWipe()}
-			/>
-
-			{#if !showBoardView}
-				<ChatStatusBars
-					{typingIndicatorText}
-					{showTrustedDevicePrompt}
-					{isSelectionMode}
-					{messageActionMode}
-					selectedDeleteCount={selectedDeleteMessageIds.length}
-					{showRoomSearch}
-					bind:roomMessageSearch
+				<ChatRoomHeader
+					roomName={activeThread.name}
+					onlineCount={currentOnlineMembers.length}
+					unreadCount={activeUnreadCount}
+					{isMember}
+					{isActiveRoomAdmin}
+					{isMobileView}
 					isDarkMode={$isDarkMode}
-					on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
-					on:cancelSelection={cancelSelectionMode}
-					on:deleteSelected={deleteSelectedMessagesBatch}
+					{messageActionMode}
+					{showRoomSearch}
+					isBoardView={showBoardView}
+					{isCanvasOpen}
+					remainingLabel={activeRemainingLabel}
+					on:showMobileList={showMobileRoomList}
+					on:openRoomDetails={openRoomDetails}
+					on:toggleBoardView={toggleBoardView}
+					on:toggleCanvas={toggleCanvas}
+					on:toggleRoomSearch={toggleRoomSearch}
+					on:renameRoom={() => void renameRoom(roomId)}
+					on:toggleBreakSelectionMode={toggleBreakSelectionMode}
+					on:togglePinSelectionMode={togglePinSelectionMode}
+					on:toggleEditSelectionMode={toggleEditSelectionMode}
+					on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
+					on:markRead={() => markRoomAsRead(roomId)}
+					on:clearLocal={clearCurrentRoomMessages}
+					on:leaveRoom={() => void leaveCurrentRoom()}
+					on:deleteRoom={() => void deleteCurrentRoomAsAdmin()}
+					on:disconnect={() => void disconnectAndWipe()}
 				/>
-			{/if}
 
-			<div class="chat-window-shell" class:is-expired={isRoomExpired}>
-				{#if showBoardView}
-					<Board
-						{roomId}
-						messages={currentMessages}
-						isDarkMode={$isDarkMode}
-						canEdit={isMember && !isRoomExpired}
-						{canModerateBoard}
-						{currentUserId}
-						{currentUsername}
-					/>
-				{:else}
-					<ChatWindow
-						bind:this={chatWindowRef}
-						{roomId}
-						isVisible={!isMobileView || mobilePane === 'chat'}
-						messages={currentMessages}
-						{currentUserId}
-						unreadCount={activeUnreadCount}
-						firstUnreadMessageId={activeFirstUnreadMessageId}
-						lastReadTimestamp={activeLastReadTimestamp}
-						{roomMessageSearch}
-						{expandedMessages}
-						{isMember}
+				{#if !showBoardView}
+					<ChatStatusBars
+						{typingIndicatorText}
+						{showTrustedDevicePrompt}
 						{isSelectionMode}
-						isDarkMode={$isDarkMode}
 						{messageActionMode}
-						selectedMessageId={selectedActionMessageId}
-						{deleteMultiEnabled}
-						{selectedDeleteMessageIds}
-						{focusMessageId}
-						isLoadingOlder={isLoadingOlderHistory}
-						hasMoreOlder={hasMoreOlderHistory}
-						on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
-						on:joinBreakRoom={onJoinBreakRoom}
-						on:joinRoom={() => void joinCurrentRoom()}
-						on:messageSelect={onMessageSelected}
-						on:openPinnedDiscussion={onPinnedDiscussionOpen}
-						on:reply={onReplyRequest}
-						on:editMessage={onEditMessageRequest}
-						on:deleteMessage={onDeleteMessageRequest}
-						on:editSelected={onSelectedMessageEdit}
-						on:deleteSelected={onSelectedMessageDelete}
-						on:requestOlder={onRequestOlderHistory}
-						on:focusHandled={onFocusHandled}
-						on:readProgress={onChatReadProgress}
-						on:toggleTask={onTaskToggle}
-						on:addTask={onTaskAdd}
+						selectedDeleteCount={selectedDeleteMessageIds.length}
+						{showRoomSearch}
+						bind:roomMessageSearch
+						isDarkMode={$isDarkMode}
+						on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
+						on:cancelSelection={cancelSelectionMode}
+						on:deleteSelected={deleteSelectedMessagesBatch}
 					/>
 				{/if}
-			</div>
 
-			{#if isMember && !showBoardView}
-				<ChatComposer
-					bind:draftMessage
-					bind:attachedFile
-					{roomId}
-					disabled={isRoomExpired}
-					{activeReply}
-					isDarkMode={$isDarkMode}
-					{currentUsername}
-					messageLimit={MESSAGE_TEXT_MAX_BYTES}
-					on:send={(event) => void sendMessage(event.detail)}
-					on:typing={onComposerTyping}
-					on:attach={handleComposerAttach}
-					on:removeAttachment={handleComposerRemoveAttachment}
-					on:cancelReply={clearReplyTarget}
-				/>
-			{/if}
+				<div class="chat-window-shell" class:is-expired={isRoomExpired}>
+					{#if showBoardView}
+						<Board
+							{roomId}
+							messages={currentMessages}
+							isDarkMode={$isDarkMode}
+							canEdit={isMember && !isRoomExpired}
+							{canModerateBoard}
+							{currentUserId}
+							{currentUsername}
+						/>
+					{:else}
+						<ChatWindow
+							bind:this={chatWindowRef}
+							{roomId}
+							isVisible={!isMobileView || mobilePane === 'chat'}
+							messages={currentMessages}
+							{currentUserId}
+							unreadCount={activeUnreadCount}
+							firstUnreadMessageId={activeFirstUnreadMessageId}
+							lastReadTimestamp={activeLastReadTimestamp}
+							{roomMessageSearch}
+							{expandedMessages}
+							{isMember}
+							{isSelectionMode}
+							isDarkMode={$isDarkMode}
+							{messageActionMode}
+							selectedMessageId={selectedActionMessageId}
+							{deleteMultiEnabled}
+							{selectedDeleteMessageIds}
+							{focusMessageId}
+							isLoadingOlder={isLoadingOlderHistory}
+							hasMoreOlder={hasMoreOlderHistory}
+							on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+							on:joinBreakRoom={onJoinBreakRoom}
+							on:joinRoom={() => void joinCurrentRoom()}
+							on:messageSelect={onMessageSelected}
+							on:openPinnedDiscussion={onPinnedDiscussionOpen}
+							on:reply={onReplyRequest}
+							on:editMessage={onEditMessageRequest}
+							on:deleteMessage={onDeleteMessageRequest}
+							on:editSelected={onSelectedMessageEdit}
+							on:deleteSelected={onSelectedMessageDelete}
+							on:requestOlder={onRequestOlderHistory}
+							on:focusHandled={onFocusHandled}
+							on:readProgress={onChatReadProgress}
+							on:toggleTask={onTaskToggle}
+							on:addTask={onTaskAdd}
+						/>
+					{/if}
+				</div>
+
+				{#if isMember && !showBoardView}
+					<ChatComposer
+						bind:draftMessage
+						bind:attachedFile
+						{roomId}
+						disabled={isRoomExpired}
+						{activeReply}
+						isDarkMode={$isDarkMode}
+						{currentUsername}
+						messageLimit={MESSAGE_TEXT_MAX_BYTES}
+						on:send={(event) => void sendMessage(event.detail)}
+						on:typing={onComposerTyping}
+						on:attach={handleComposerAttach}
+						on:removeAttachment={handleComposerRemoveAttachment}
+						on:cancelReply={clearReplyTarget}
+					/>
+				{/if}
 			</section>
 		{/if}
 
@@ -3919,7 +4039,7 @@
 					</div>
 				</header>
 				<div class="canvas-pane-body">
-					<CodeCanvas roomId={roomId} currentUser={canvasUser} />
+					<CodeCanvas {roomId} currentUser={canvasUser} />
 				</div>
 			</section>
 		{/if}
@@ -3957,8 +4077,8 @@
 	{roomId}
 	roomName={activeThread.name}
 	roomAdminCode={activeThread.adminCode || ''}
-	createdLabel={formatDateTime(getRoomCreatedAt(roomId))}
-	expiresLabel={formatDateTime(getRoomExpiry(roomId))}
+	createdLabel={formatDateTime(activeRoomCreatedAtMs)}
+	expiresLabel={formatDateTime(activeRoomExpiresAtMs)}
 	{isExtendingRoom}
 	{currentOnlineMembers}
 	{isActiveRoomAdmin}

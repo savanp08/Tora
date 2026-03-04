@@ -1,21 +1,35 @@
 import { browser } from '$app/environment';
 import LightningFS from '@isomorphic-git/lightning-fs';
 
-/** @type {any | null} */
-let fsInstance = null;
+/** @type {Map<string, any>} */
+let fsInstances = new Map();
 
-function ensureFSInstance() {
+/** @param {string | null | undefined} namespace */
+function normalizeNamespace(namespace) {
+	const value = String(namespace || 'tora-canvas-fs').trim();
+	if (!value) {
+		return 'tora-canvas-fs';
+	}
+	return `tora-canvas-fs-${value.replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
+}
+
+/** @param {string | null | undefined} namespace */
+function ensureFSInstance(namespace) {
 	if (!browser) {
 		return null;
 	}
-	if (!fsInstance) {
-		fsInstance = new LightningFS('tora-canvas-fs');
+	const key = normalizeNamespace(namespace);
+	let instance = fsInstances.get(key) ?? null;
+	if (!instance) {
+		instance = new LightningFS(key);
+		fsInstances.set(key, instance);
 	}
-	return fsInstance;
+	return instance;
 }
 
-export async function createInitialFiles() {
-	const activeFS = ensureFSInstance();
+/** @param {string | null | undefined} namespace */
+export async function createInitialFiles(namespace) {
+	const activeFS = ensureFSInstance(namespace);
 	if (!activeFS) {
 		return null;
 	}
@@ -27,15 +41,20 @@ export async function createInitialFiles() {
 	return activeFS;
 }
 
-export async function initFileSystem() {
-	const activeFS = ensureFSInstance();
+/** @param {string | null | undefined} namespace */
+export async function initFileSystem(namespace) {
+	const activeFS = ensureFSInstance(namespace);
 	if (!activeFS) {
 		return null;
 	}
-	await createInitialFiles();
+	await createInitialFiles(namespace);
 	return activeFS;
 }
 
-export function getFS() {
-	return fsInstance;
+/** @param {string | null | undefined} namespace */
+export function getFS(namespace) {
+	if (!browser) {
+		return null;
+	}
+	return fsInstances.get(normalizeNamespace(namespace)) ?? null;
 }

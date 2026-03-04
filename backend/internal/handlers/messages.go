@@ -34,14 +34,18 @@ type RoomMessagesResponse struct {
 
 type RoomPinUpsertRequest struct {
 	UserID    string `json:"userId"`
+	Username  string `json:"username,omitempty"`
 	MessageID string `json:"messageId"`
 }
 
 type RoomPinUpsertResponse struct {
-	RoomID    string `json:"roomId"`
-	MessageID string `json:"messageId"`
-	CreatedAt int64  `json:"createdAt"`
-	Type      string `json:"type"`
+	RoomID       string `json:"roomId"`
+	MessageID    string `json:"messageId"`
+	CreatedAt    int64  `json:"createdAt"`
+	MessageType  string `json:"messageType"`
+	IsPinned     bool   `json:"isPinned"`
+	PinnedBy     string `json:"pinnedBy,omitempty"`
+	PinnedByName string `json:"pinnedByName,omitempty"`
 }
 
 type RoomPinNavigateResponse struct {
@@ -220,6 +224,7 @@ func (h *RoomHandler) UpsertRoomPin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := normalizeIdentifier(req.UserID)
+	username := normalizeUsername(req.Username)
 	messageID := normalizeMessageID(req.MessageID)
 	if userID == "" || messageID == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -271,6 +276,9 @@ func (h *RoomHandler) UpsertRoomPin(w http.ResponseWriter, r *http.Request) {
 	if messageType == "" {
 		messageType = "message"
 	}
+	if username == "" {
+		username = "User"
+	}
 
 	roomPinsTable := h.scylla.Table("room_pins")
 	insertQuery := fmt.Sprintf(
@@ -291,12 +299,24 @@ func (h *RoomHandler) UpsertRoomPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.broadcastRoomEvent(roomID, "message_pin_updated", map[string]interface{}{
+		"messageId":    messageID,
+		"createdAt":    createdAt.UTC().UnixMilli(),
+		"messageType":  messageType,
+		"isPinned":     true,
+		"pinnedBy":     userID,
+		"pinnedByName": username,
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(RoomPinUpsertResponse{
-		RoomID:    roomID,
-		MessageID: messageID,
-		CreatedAt: createdAt.UTC().UnixMilli(),
-		Type:      messageType,
+		RoomID:       roomID,
+		MessageID:    messageID,
+		CreatedAt:    createdAt.UTC().UnixMilli(),
+		MessageType:  messageType,
+		IsPinned:     true,
+		PinnedBy:     userID,
+		PinnedByName: username,
 	})
 }
 

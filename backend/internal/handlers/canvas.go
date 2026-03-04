@@ -17,6 +17,8 @@ const (
 	canvasRoomMaxClients = 50
 )
 
+var canvasAwarenessQueryPayload = []byte{3}
+
 var canvasUpgrader = websocket.Upgrader{
 	ReadBufferSize:    1024,
 	WriteBufferSize:   1024,
@@ -117,6 +119,14 @@ func (h *CanvasHub) Run() {
 			}
 			h.clientsMu.Lock()
 			h.clients[client] = struct{}{}
+			for connectedClient := range h.clients {
+				select {
+				case connectedClient.send <- canvasAwarenessQueryPayload:
+				default:
+					delete(h.clients, connectedClient)
+					close(connectedClient.send)
+				}
+			}
 			h.clientsMu.Unlock()
 
 		case client := <-h.unregister:

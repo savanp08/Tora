@@ -49,7 +49,7 @@
 		"@isomorphic-git/lightning-fs": "^4.6.2",
 		"browser-image-compression": "^2.0.2",
 		"emoji-picker-element": "^1.29.0",
-		"isomorphic-git": "^1.37.2",
+		"fflate": "^0.8.2",
 		"monaco-editor": "^0.55.1",
 		"y-monaco": "^0.1.6",
 		"y-websocket": "^3.0.0",
