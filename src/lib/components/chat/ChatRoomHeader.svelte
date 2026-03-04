@@ -14,10 +14,12 @@
 	export let remainingLabel = '--';
 	export let isBoardView = false;
 	export let isCanvasOpen = false;
+	export let lastWorkspaceTool: 'board' | 'canvas' = 'board';
 
 	const dispatch = createEventDispatcher<{
 		showMobileList: void;
 		openRoomDetails: void;
+		activateLastWorkspaceTool: void;
 		toggleBoardView: void;
 		toggleCanvas: void;
 		toggleRoomSearch: void;
@@ -54,6 +56,9 @@
 
 	function closeMenuThen(
 		eventName:
+			| 'activateLastWorkspaceTool'
+			| 'toggleBoardView'
+			| 'toggleCanvas'
 			| 'toggleRoomSearch'
 			| 'renameRoom'
 			| 'toggleBreakSelectionMode'
@@ -68,6 +73,10 @@
 	) {
 		showRoomMenu = false;
 		dispatch(eventName);
+	}
+
+	function isQuickToolActive() {
+		return lastWorkspaceTool === 'canvas' ? isCanvasOpen : isBoardView;
 	}
 </script>
 
@@ -104,25 +113,30 @@
 	<div class="header-actions" bind:this={headerActionsEl}>
 		<button
 			type="button"
-			class="canvas-toggle-button"
-			class:active={isCanvasOpen}
-			on:click|stopPropagation={() => dispatch('toggleCanvas')}
-			title={isCanvasOpen ? 'Hide code canvas' : 'Show code canvas'}
-			aria-label={isCanvasOpen ? 'Hide code canvas' : 'Show code canvas'}
+			class="workspace-quick-button"
+			class:active={isQuickToolActive()}
+			on:click|stopPropagation={() => dispatch('activateLastWorkspaceTool')}
+			title={lastWorkspaceTool === 'canvas'
+				? isCanvasOpen
+					? 'Hide code canvas'
+					: 'Show code canvas'
+				: isBoardView
+					? 'Switch to chat view'
+					: 'Switch to board view'}
+			aria-label={lastWorkspaceTool === 'canvas'
+				? isCanvasOpen
+					? 'Hide code canvas'
+					: 'Show code canvas'
+				: isBoardView
+					? 'Switch to chat view'
+					: 'Switch to board view'}
 		>
-			{isCanvasOpen ? 'Canvas On' : 'Canvas Off'}
-		</button>
-		<button
-			type="button"
-			class="board-toggle-button"
-			class:active={isBoardView}
-			on:click|stopPropagation={() => dispatch('toggleBoardView')}
-			title={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
-			aria-label={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
-		>
-			{#if isBoardView}
-				<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5 6.5h14a1 1 0 0 1 1 1V17a1 1 0 0 1-1 1H9l-4 3V7.5a1 1 0 0 1 1-1Z" />
+			{#if lastWorkspaceTool === 'canvas'}
+				<svg class="workspace-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<path
+						d="M5.5 6.5h13a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-4.5L9 21v-3.5H5.5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"
+					/>
+					<path d="M8.5 10.5h7M8.5 14h4.5" />
 				</svg>
 			{:else}
 				<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -150,6 +164,35 @@
 		</button>
 		{#if showRoomMenu}
 			<div class="room-menu">
+				<div class="room-menu-tools" role="group" aria-label="Workspace tools">
+					<button
+						type="button"
+						class="room-menu-tool-button"
+						class:active={isBoardView}
+						on:click|stopPropagation={() => closeMenuThen('toggleBoardView')}
+					>
+						<svg class="room-menu-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+							<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
+							<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
+						</svg>
+						<span>{isBoardView ? 'Close board' : 'Open board'}</span>
+					</button>
+					<button
+						type="button"
+						class="room-menu-tool-button"
+						class:active={isCanvasOpen}
+						on:click|stopPropagation={() => closeMenuThen('toggleCanvas')}
+					>
+						<svg class="room-menu-tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								d="M5.5 6.5h13a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-4.5L9 21v-3.5H5.5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"
+							/>
+							<path d="M8.5 10.5h7M8.5 14h4.5" />
+						</svg>
+						<span>{isCanvasOpen ? 'Close canvas' : 'Open canvas'}</span>
+					</button>
+				</div>
+				<div class="room-menu-divider"></div>
 				<button type="button" on:click|stopPropagation={() => closeMenuThen('toggleRoomSearch')}>
 					{showRoomSearch ? 'Hide search' : 'Search messages'}
 				</button>
@@ -361,7 +404,7 @@
 		color: #314057;
 	}
 
-	.board-toggle-button {
+	.workspace-quick-button {
 		border: 1px solid #c7d0dc;
 		background: #ebf1f8;
 		border-radius: 6px;
@@ -376,27 +419,9 @@
 		justify-content: center;
 	}
 
-	.canvas-toggle-button {
-		border: 1px solid #c7d0dc;
-		background: #ebf1f8;
-		border-radius: 6px;
-		height: 1.85rem;
-		padding: 0 0.55rem;
-		cursor: pointer;
-		color: #314057;
-		font-size: 0.75rem;
-		font-weight: 700;
-		letter-spacing: 0.01em;
-		white-space: nowrap;
-	}
-
-	.canvas-toggle-button.active {
-		border-color: #2563eb;
-		background: #dbeafe;
-		color: #1e3a8a;
-	}
-
-	.board-toggle-icon {
+	.workspace-tool-icon,
+	.board-toggle-icon,
+	.room-menu-tool-icon {
 		width: 0.92rem;
 		height: 0.92rem;
 		stroke: currentColor;
@@ -406,31 +431,19 @@
 		stroke-linejoin: round;
 	}
 
-	.board-toggle-button.active {
+	.workspace-quick-button.active {
 		border-color: #0f9d58;
 		background: #dcfce7;
 		color: #166534;
 	}
 
-	.theme-dark .board-toggle-button {
+	.theme-dark .workspace-quick-button {
 		border-color: #3a3a40;
 		background: #18181b;
 		color: #eeeef4;
 	}
 
-	.theme-dark .canvas-toggle-button {
-		border-color: #3a3a40;
-		background: #18181b;
-		color: #eeeef4;
-	}
-
-	.theme-dark .canvas-toggle-button.active {
-		border-color: #3b82f6;
-		background: rgba(37, 99, 235, 0.35);
-		color: #dbeafe;
-	}
-
-	.theme-dark .board-toggle-button.active {
+	.theme-dark .workspace-quick-button.active {
 		border-color: #22c55e;
 		background: #14532d;
 		color: #dcfce7;
@@ -455,13 +468,63 @@
 		z-index: 100;
 	}
 
+	.room-menu-divider {
+		height: 1px;
+		background: #d7dfea;
+		margin: 0.1rem 0;
+	}
+
 	.theme-dark .room-menu {
 		background: #161619;
 		border-color: #34343a;
 		box-shadow: 0 14px 28px rgba(0, 0, 0, 0.5);
 	}
 
-	.room-menu button {
+	.theme-dark .room-menu-divider {
+		background: #2e2e35;
+	}
+
+	.room-menu-tools {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.45rem;
+		padding: 0.6rem 0.75rem 0.5rem;
+	}
+
+	.room-menu-tool-button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.35rem;
+		border: 1px solid #cad3df;
+		background: #edf3f9;
+		border-radius: 0.7rem;
+		padding: 0.5rem 0.45rem;
+		color: #314057;
+		font-size: 0.75rem;
+		font-weight: 700;
+		line-height: 1.1;
+	}
+
+	.room-menu-tool-button.active {
+		border-color: #0f9d58;
+		background: #dcfce7;
+		color: #166534;
+	}
+
+	.theme-dark .room-menu-tool-button {
+		border-color: #3a3a40;
+		background: #1b1b20;
+		color: #eeeef4;
+	}
+
+	.theme-dark .room-menu-tool-button.active {
+		border-color: #22c55e;
+		background: #14532d;
+		color: #dcfce7;
+	}
+
+	.room-menu button:not(.room-menu-tool-button) {
 		width: 100%;
 		border: none;
 		background: #f3f7fc;
@@ -471,16 +534,16 @@
 		cursor: pointer;
 	}
 
-	.theme-dark .room-menu button {
+	.theme-dark .room-menu button:not(.room-menu-tool-button) {
 		background: #161619;
 		color: #e9e9ef;
 	}
 
-	.room-menu button:hover {
+	.room-menu button:not(.room-menu-tool-button):hover {
 		background: #e6edf6;
 	}
 
-	.theme-dark .room-menu button:hover {
+	.theme-dark .room-menu button:not(.room-menu-tool-button):hover {
 		background: #222226;
 	}
 
@@ -502,15 +565,9 @@
 			height: 1.75rem;
 		}
 
-		.board-toggle-button {
+		.workspace-quick-button {
 			width: 1.75rem;
 			height: 1.65rem;
-		}
-
-		.canvas-toggle-button {
-			height: 1.65rem;
-			padding: 0 0.45rem;
-			font-size: 0.7rem;
 		}
 	}
 </style>

@@ -21,7 +21,7 @@
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 	const BOARD_WIDTH = 3840;
 	const BOARD_HEIGHT = 2560;
-	const MIN_ZOOM = 0.08;
+	const MIN_ZOOM = 0.04;
 	const MAX_ZOOM = 4;
 	const DOUBLE_TAP_MS = 340;
 	const TAP_MOVE_TOLERANCE = 8;
@@ -699,8 +699,16 @@
 		const scaledBoardHeight = BOARD_HEIGHT * zoom;
 		const minTranslateX = Math.min(0, viewportWidth - scaledBoardWidth);
 		const minTranslateY = Math.min(0, viewportHeight - scaledBoardHeight);
-		viewport[4] = Math.min(0, Math.max(minTranslateX, toNumber(viewport[4], 0)));
-		viewport[5] = Math.min(0, Math.max(minTranslateY, toNumber(viewport[5], 0)));
+		if (scaledBoardWidth <= viewportWidth) {
+			viewport[4] = (viewportWidth - scaledBoardWidth) / 2;
+		} else {
+			viewport[4] = Math.min(0, Math.max(minTranslateX, toNumber(viewport[4], 0)));
+		}
+		if (scaledBoardHeight <= viewportHeight) {
+			viewport[5] = (viewportHeight - scaledBoardHeight) / 2;
+		} else {
+			viewport[5] = Math.min(0, Math.max(minTranslateY, toNumber(viewport[5], 0)));
+		}
 		fabricCanvas.setViewportTransform?.(viewport);
 		markViewportForRender();
 	}
@@ -2013,7 +2021,9 @@
 		};
 	}
 
-	async function parseBoardElementRecordDecrypted(value: unknown): Promise<BoardElementWire | null> {
+	async function parseBoardElementRecordDecrypted(
+		value: unknown
+	): Promise<BoardElementWire | null> {
 		const parsed = parseBoardElementRecord(value);
 		if (!parsed || !parsed.content) {
 			return parsed;
@@ -3875,7 +3885,9 @@
 				title="Free draw"
 			>
 				<svg class="tool-icon" viewBox="0 0 24 24">
-					<path d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z" />
+					<path
+						d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z"
+					/>
 				</svg>
 			</button>
 			{#if isWidthControlVisible}
@@ -3984,7 +3996,14 @@
 							title="Circle"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-								<circle cx="12" cy="12" r="6.5" fill="none" stroke="currentColor" stroke-width="2" />
+								<circle
+									cx="12"
+									cy="12"
+									r="6.5"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+								/>
 							</svg>
 						</button>
 					</div>
@@ -4000,7 +4019,13 @@
 				disabled={!canModerateBoardActions || !canUndoLocalAction}
 				title="Undo"
 			>
-				<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<svg
+					class="tool-icon"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+				>
 					<path d="M3 7v6h6" />
 					<path d="M3 13a9 9 0 0 1 15-6.7L21 9" />
 				</svg>
@@ -4012,7 +4037,13 @@
 				disabled={!canModerateBoardActions || !canRedoLocalAction}
 				title="Redo"
 			>
-				<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+				<svg
+					class="tool-icon"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+				>
 					<path d="M21 7v6h-6" />
 					<path d="M21 13A9 9 0 0 0 6 6.3L3 9" />
 				</svg>
@@ -4035,7 +4066,13 @@
 					title="More tools"
 					aria-label="More tools"
 				>
-					<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<svg
+						class="tool-icon"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+					>
 						<path d="M4 6h16M4 12h16M4 18h16" />
 					</svg>
 				</button>
@@ -4048,7 +4085,6 @@
 			class:menu-mode={shouldUseToolbarMenu}
 			bind:this={toolbarSecondaryEl}
 		>
-
 			<button
 				type="button"
 				class="tool-icon-button"
@@ -4057,7 +4093,9 @@
 				title="Eraser"
 			>
 				<svg class="tool-icon" viewBox="0 0 24 24">
-					<path d="M3.6 14.5 11.9 6a1.7 1.7 0 0 1 2.4 0l6.1 6.1a1.7 1.7 0 0 1 0 2.4l-4.1 4.1a1.7 1.7 0 0 1-1.2.5H8.8a1.7 1.7 0 0 1-1.2-.5l-4-4a1.7 1.7 0 0 1 0-2.4Zm7.7-6.8L5.2 13.8l3.5 3.5h3.1l5.2-5.2-5.7-5.4Z" />
+					<path
+						d="M3.6 14.5 11.9 6a1.7 1.7 0 0 1 2.4 0l6.1 6.1a1.7 1.7 0 0 1 0 2.4l-4.1 4.1a1.7 1.7 0 0 1-1.2.5H8.8a1.7 1.7 0 0 1-1.2-.5l-4-4a1.7 1.7 0 0 1 0-2.4Zm7.7-6.8L5.2 13.8l3.5 3.5h3.1l5.2-5.2-5.7-5.4Z"
+					/>
 				</svg>
 			</button>
 
@@ -4120,7 +4158,8 @@
 						</div>
 						<div class="board-detail-row">
 							<span>Access</span>
-							<strong>{canManageAllBoardElements ? 'Admin full access' : 'Owner-only edits'}</strong>
+							<strong>{canManageAllBoardElements ? 'Admin full access' : 'Owner-only edits'}</strong
+							>
 						</div>
 						<div class="board-detail-note">
 							Drag empty board to pan. Double-tap empty space to attach.

@@ -61,9 +61,11 @@ export function createChatDialogController({
 		placeholder?: string;
 		maxLength?: number;
 		confirmLabel?: string;
+		emptyConfirmLabel?: string;
 		cancelLabel?: string;
 		danger?: boolean;
 		multiline?: boolean;
+		allowEmptySubmit?: boolean;
 	}) {
 		resolveActiveUiDialog(null);
 		setDialog(buildPromptDialog(config));

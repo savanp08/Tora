@@ -62,6 +62,8 @@
 		reject: ((reason?: unknown) => void) | null;
 	};
 
+	type MobileCanvasPane = 'explorer' | 'editor';
+
 	const DEFAULT_PROJECT_FILE_NAME = 'main.js';
 	const DEFAULT_PROJECT_FILE_CONTENT = "console.log('Hello from Converse canvas');\n";
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
@@ -115,8 +117,12 @@
 		resolve: null,
 		reject: null
 	};
+	let deleteConfirmTarget: ProjectFileEntry | null = null;
+	let isCompactCanvasLayout = false;
+	let mobileCanvasPane: MobileCanvasPane = 'explorer';
 	let remotePresenceStyleElement: HTMLStyleElement | null = null;
 	let removeGlobalContextHandlers: (() => void) | null = null;
+	let removeCanvasViewportListener: (() => void) | null = null;
 	const presenceSessionId = createPresenceSessionId();
 
 	// Automatically detect language from the file extension
@@ -681,6 +687,56 @@
 			event.preventDefault();
 			cancelPrompt();
 		}
+	}
+
+	function syncCanvasViewportState(matches: boolean) {
+		isCompactCanvasLayout = matches;
+		if (!matches) {
+			return;
+		}
+		mobileCanvasPane = currentFile ? 'editor' : 'explorer';
+	}
+
+	function showExplorerPane() {
+		mobileCanvasPane = 'explorer';
+	}
+
+	function showEditorPane() {
+		mobileCanvasPane = 'editor';
+	}
+
+	function openDeleteConfirmation(entry: ProjectFileEntry) {
+		deleteConfirmTarget = entry;
+	}
+
+	function closeDeleteConfirmation() {
+		deleteConfirmTarget = null;
+	}
+
+	function getDeleteConfirmationTitle(entry: ProjectFileEntry | null) {
+		if (!entry) {
+			return 'Delete item?';
+		}
+		return entry.isDir ? 'Delete folder?' : 'Delete file?';
+	}
+
+	function getDeleteConfirmationMessage(entry: ProjectFileEntry | null) {
+		if (!entry) {
+			return '';
+		}
+		if (entry.isDir) {
+			return `Delete "${entry.name}" and everything inside it? This cannot be undone.`;
+		}
+		return `Delete "${entry.name}"? This cannot be undone.`;
+	}
+
+	async function confirmDeleteTarget() {
+		const target = deleteConfirmTarget;
+		if (!target) {
+			return;
+		}
+		closeDeleteConfirmation();
+		await deleteEntry(target);
 	}
 
 	function escapeCSSContent(value: string) {
@@ -1299,7 +1355,7 @@
 	async function importFromGitHub() {
 		const parsed = parseGitHubRepositoryURL(githubRepoURL);
 		if (!parsed) {
-			fileExplorerError = 'Enter a valid GitHub URL like https://github.com/owner/repo';
+			fileExplorerError = 'Enter a valid GitHub URL like https://github.com/user/repo';
 			return;
 		}
 		isImportingRepo = true;
@@ -1551,6 +1607,9 @@
 			awareness.setLocalStateField('currentFile', '');
 			awareness.setLocalStateField('selection', null);
 		}
+		if (isCompactCanvasLayout) {
+			showExplorerPane();
+		}
 	}
 
 	async function closeTab(fileName: string) {
@@ -1583,6 +1642,9 @@
 		const normalized = normalizeProjectName(fileName);
 		if (!normalized) {
 			return;
+		}
+		if (isCompactCanvasLayout) {
+			showEditorPane();
 		}
 		ensureTabOpen(normalized);
 		expandedDirectories = ensureExpandedDirectoriesForPath(normalized);
@@ -1949,7 +2011,7 @@
 		if (!target) {
 			return;
 		}
-		await deleteEntry(target);
+		openDeleteConfirmation(target);
 	}
 
 	async function contextHistory() {
@@ -2021,6 +2083,10 @@
 			closeContextMenu();
 		};
 		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape' && deleteConfirmTarget) {
+				closeDeleteConfirmation();
+				return;
+			}
 			if (event.key === 'Escape') {
 				closeContextMenu();
 			}
@@ -2040,6 +2106,20 @@
 
 	onMount(async () => {
 		removeGlobalContextHandlers = registerGlobalContextHandlers();
+		const compactCanvasMediaQuery = window.matchMedia('(max-width: 900px)');
+		const handleCompactCanvasChange = (event: MediaQueryListEvent) => {
+			syncCanvasViewportState(event.matches);
+		};
+		syncCanvasViewportState(compactCanvasMediaQuery.matches);
+		if (typeof compactCanvasMediaQuery.addEventListener === 'function') {
+			compactCanvasMediaQuery.addEventListener('change', handleCompactCanvasChange);
+			removeCanvasViewportListener = () =>
+				compactCanvasMediaQuery.removeEventListener('change', handleCompactCanvasChange);
+		} else {
+			compactCanvasMediaQuery.addListener(handleCompactCanvasChange);
+			removeCanvasViewportListener = () =>
+				compactCanvasMediaQuery.removeListener(handleCompactCanvasChange);
+		}
 		vfs = await initLightningFS(roomId);
 		if (!vfs) {
 			fileExplorerError = 'File system is unavailable in this environment';
@@ -2191,7 +2271,12 @@
 			removeGlobalContextHandlers();
 			removeGlobalContextHandlers = null;
 		}
+		if (removeCanvasViewportListener) {
+			removeCanvasViewportListener();
+			removeCanvasViewportListener = null;
+		}
 		closeContextMenu();
+		closeDeleteConfirmation();
 		if (promptState.reject) {
 			promptState.reject(new Error(PROMPT_CANCELLED_ERROR));
 		}
@@ -2220,7 +2305,12 @@
 	});
 </script>
 
-<div class="canvas-shell">
+<div
+	class="canvas-shell"
+	class:is-compact-layout={isCompactCanvasLayout}
+	class:show-mobile-explorer={isCompactCanvasLayout && mobileCanvasPane === 'explorer'}
+	class:show-mobile-editor={isCompactCanvasLayout && mobileCanvasPane === 'editor'}
+>
 	{#if showReadOnlyWarning}
 		<div class="canvas-readonly-warning" role="status" aria-live="polite">
 			Max 5 editors reached. You are in read-only mode.
@@ -2284,7 +2374,7 @@
 			<input
 				type="url"
 				class="github-import-input"
-				placeholder="https://github.com/owner/repo"
+				placeholder="https://github.com/user/repo"
 				bind:value={githubRepoURL}
 				on:keydown={(event) => {
 					if (event.key === 'Enter') {
@@ -2401,42 +2491,70 @@
 								/>
 							</svg>
 						</button>
-						
+						<button
+							type="button"
+							class="file-entry-delete"
+							title={`Delete ${entry.name}`}
+							aria-label={`Delete ${entry.name}`}
+							on:click|stopPropagation={() => openDeleteConfirmation(entry)}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M4.5 7.5h15" />
+								<path d="M9.5 7.5v-2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2" />
+								<path d="M7.5 7.5l.8 11a1.5 1.5 0 0 0 1.5 1.4h4.4a1.5 1.5 0 0 0 1.5-1.4l.8-11" />
+								<path d="M10 11v5.5M14 11v5.5" />
+							</svg>
+						</button>
 					</div>
 				{/each}
 			{/if}
 		</div>
 	</aside>
 	<div class="canvas-editor">
-		<div class="editor-tabs" role="tablist" aria-label="Open files">
-			{#if openTabs.length === 0}
-				<div class="editor-tabs-empty">No open files</div>
-			{:else}
-				{#each openTabs as tab (tab)}
-					<div class="editor-tab" class:active={tab === currentFile}>
-						<button
-							type="button"
-							class="editor-tab-trigger"
-							role="tab"
-							aria-selected={tab === currentFile}
-							title={tab}
-							on:click={() => void switchToFile(tab)}
-						>
-							{getTabLabel(tab)}
-						</button>
-						<button
-							type="button"
-							class="editor-tab-close"
-							aria-label={`Close ${getTabLabel(tab)} tab`}
-							on:click|stopPropagation={() => void closeTab(tab)}
-						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M6 6l12 12M18 6 6 18" />
-							</svg>
-						</button>
-					</div>
-				{/each}
+		<div class="editor-tabs-bar">
+			{#if isCompactCanvasLayout}
+				<button
+					type="button"
+					class="editor-mobile-back"
+					on:click={showExplorerPane}
+					aria-label="Back to Explorer"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M15 6l-6 6 6 6" />
+					</svg>
+					<span>Explorer</span>
+				</button>
 			{/if}
+			<div class="editor-tabs" role="tablist" aria-label="Open files">
+				{#if openTabs.length === 0}
+					<div class="editor-tabs-empty">No open files</div>
+				{:else}
+					{#each openTabs as tab (tab)}
+						<div class="editor-tab" class:active={tab === currentFile}>
+							<button
+								type="button"
+								class="editor-tab-trigger"
+								role="tab"
+								aria-selected={tab === currentFile}
+								title={tab}
+								on:click={() => void switchToFile(tab)}
+							>
+								{getTabLabel(tab)}
+							</button>
+							<button
+								type="button"
+								class="editor-tab-close"
+								aria-label={`Close ${getTabLabel(tab)} tab`}
+								on:click|stopPropagation={() => void closeTab(tab)}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M6 6l12 12M18 6 6 18" />
+								</svg>
+							</button>
+						</div>
+					{/each}
+				{/if}
+			</div>
 		</div>
 		<div class="canvas-editor-body" class:is-empty={openTabs.length === 0}>
 			<div class="code-canvas" bind:this={editorContainer}></div>
@@ -2447,6 +2565,36 @@
 			{/if}
 		</div>
 	</div>
+	{#if deleteConfirmTarget}
+		<div class="canvas-delete-overlay" role="presentation" on:click|self={closeDeleteConfirmation}>
+			<div
+				class="canvas-delete-dialog"
+				role="alertdialog"
+				aria-modal="true"
+				aria-labelledby="canvas-delete-title"
+				aria-describedby="canvas-delete-description"
+			>
+				<form on:submit|preventDefault={() => void confirmDeleteTarget()}>
+					<div class="canvas-delete-title" id="canvas-delete-title">
+						{getDeleteConfirmationTitle(deleteConfirmTarget)}
+					</div>
+					<p class="canvas-delete-description" id="canvas-delete-description">
+						{getDeleteConfirmationMessage(deleteConfirmTarget)}
+					</p>
+					<div class="canvas-delete-actions">
+						<button
+							type="button"
+							class="canvas-prompt-button secondary"
+							on:click={closeDeleteConfirmation}
+						>
+							Cancel
+						</button>
+						<button type="submit" class="canvas-prompt-button danger">Delete</button>
+					</div>
+				</form>
+			</div>
+		</div>
+	{/if}
 </div>
 
 {#if contextMenuOpen}
@@ -2761,7 +2909,7 @@
 
 	.file-entry-row {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) auto auto;
 		align-items: center;
 		gap: 0.28rem;
 		border-radius: 0.36rem;
@@ -2937,6 +3085,38 @@
 		background: rgba(109, 26, 26, 0.86);
 	}
 
+	.editor-mobile-back {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+		border-radius: 0.4rem;
+		min-height: 1.7rem;
+		padding: 0.36rem 0.5rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.28rem;
+		cursor: pointer;
+		flex: 0 0 auto;
+		font-size: 0.72rem;
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	.editor-mobile-back:hover {
+		border-color: rgba(139, 168, 211, 0.68);
+		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.editor-mobile-back svg {
+		width: 0.9rem;
+		height: 0.9rem;
+		stroke: currentColor;
+		stroke-width: 2;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
 	.canvas-editor {
 		display: flex;
 		flex: 1;
@@ -2945,7 +3125,7 @@
 		min-height: 0;
 	}
 
-	.editor-tabs {
+	.editor-tabs-bar {
 		display: flex;
 		align-items: center;
 		gap: 0.22rem;
@@ -2953,6 +3133,15 @@
 		padding: 0.34rem 0.4rem;
 		border-bottom: 1px solid rgba(120, 134, 160, 0.35);
 		background: rgba(16, 23, 36, 0.84);
+		min-width: 0;
+	}
+
+	.editor-tabs {
+		display: flex;
+		align-items: center;
+		gap: 0.22rem;
+		min-width: 0;
+		flex: 1;
 		overflow-x: auto;
 		overflow-y: hidden;
 	}
@@ -2962,6 +3151,7 @@
 		color: rgba(216, 228, 246, 0.76);
 		padding: 0 0.3rem;
 		white-space: nowrap;
+		flex: 0 0 auto;
 	}
 
 	.editor-tab {
@@ -3112,6 +3302,53 @@
 		background: rgba(123, 141, 172, 0.34);
 	}
 
+	.canvas-delete-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 6;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+		background: rgba(6, 11, 18, 0.66);
+		backdrop-filter: blur(4px);
+	}
+
+	.canvas-delete-dialog {
+		width: min(25rem, 100%);
+		padding: 0.95rem;
+		border-radius: 0.6rem;
+		border: 1px solid rgba(118, 139, 177, 0.42);
+		background: rgba(14, 21, 34, 0.98);
+		box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+	}
+
+	.canvas-delete-dialog form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.72rem;
+	}
+
+	.canvas-delete-title {
+		color: #f1f5ff;
+		font-size: 0.88rem;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+	}
+
+	.canvas-delete-description {
+		margin: 0;
+		color: rgba(219, 230, 248, 0.84);
+		font-size: 0.76rem;
+		line-height: 1.45;
+	}
+
+	.canvas-delete-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.45rem;
+	}
+
 	.canvas-prompt-overlay {
 		position: fixed;
 		inset: 0;
@@ -3147,7 +3384,6 @@
 	}
 
 	.canvas-prompt-input {
-		width: 100%;
 		min-width: 0;
 		border: 1px solid rgba(103, 125, 160, 0.52);
 		background: rgba(18, 27, 42, 0.86);
@@ -3203,6 +3439,17 @@
 		background: rgba(49, 88, 156, 0.96);
 	}
 
+	.canvas-prompt-button.danger {
+		border-color: rgba(183, 82, 82, 0.76);
+		background: rgba(131, 35, 35, 0.94);
+		color: #fff3f3;
+	}
+
+	.canvas-prompt-button.danger:hover {
+		border-color: rgba(231, 138, 138, 0.82);
+		background: rgba(154, 42, 42, 0.98);
+	}
+
 	@media (max-width: 900px) {
 		.canvas-shell {
 			flex-direction: column;
@@ -3210,10 +3457,24 @@
 
 		.canvas-sidebar {
 			width: 100%;
-			flex: 0 0 auto;
-			max-height: 36%;
+			flex: 1 1 auto;
+			max-height: none;
 			border-right: none;
-			border-bottom: 1px solid rgba(120, 134, 160, 0.35);
+			border-bottom: none;
+		}
+
+		.canvas-shell.show-mobile-explorer .canvas-editor {
+			display: none;
+		}
+
+		.canvas-shell.show-mobile-editor .canvas-sidebar {
+			display: none;
+		}
+
+		.canvas-shell.show-mobile-explorer .canvas-sidebar,
+		.canvas-shell.show-mobile-editor .canvas-editor {
+			flex: 1 1 auto;
+			min-height: 0;
 		}
 
 		.editor-tab {

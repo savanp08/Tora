@@ -164,6 +164,8 @@
 		color: string;
 	};
 
+	type WorkspaceTool = 'board' | 'canvas';
+
 	function getCanvasPresenceColor(user: { color?: unknown } | null | undefined) {
 		if (typeof user?.color === 'string') {
 			const normalized = user.color.trim();
@@ -203,6 +205,7 @@
 	let showBoardView = false;
 	let isCanvasOpen = false;
 	let isCanvasFullscreen = false;
+	let lastWorkspaceTool: WorkspaceTool = 'board';
 	let canvasUser: CanvasPresenceUser = { id: 'guest', name: 'Guest', color: '#3b82f6' };
 	let themePreference: ThemePreference = 'system';
 	let removeSystemThemeListener: (() => void) | null = null;
@@ -472,7 +475,8 @@
 	}
 	$: roomActionSubmitDisabled =
 		uiDialog.kind === 'roomAction' ? normalizeRoomNameValue(uiDialog.roomName) === '' : false;
-	$: promptSubmitDisabled = uiDialog.kind === 'prompt' ? uiDialog.value.trim() === '' : false;
+	$: promptSubmitDisabled =
+		uiDialog.kind === 'prompt' ? !uiDialog.allowEmptySubmit && uiDialog.value.trim() === '' : false;
 
 	onDestroy(() => {
 		clientLog('component-destroy', { roomId });
@@ -946,8 +950,10 @@
 			placeholder: 'Optional password',
 			maxLength: 32,
 			confirmLabel: 'Continue',
+			emptyConfirmLabel: 'Skip',
 			cancelLabel: 'Cancel',
-			multiline: false
+			multiline: false,
+			allowEmptySubmit: true
 		});
 		if (rawValue === null) {
 			return null;
@@ -1404,6 +1410,7 @@
 	}
 
 	function toggleBoardView() {
+		lastWorkspaceTool = 'board';
 		showBoardView = !showBoardView;
 		if (showBoardView) {
 			setMessageActionMode('none');
@@ -1413,6 +1420,7 @@
 	}
 
 	function toggleCanvas() {
+		lastWorkspaceTool = 'canvas';
 		if (isCanvasOpen) {
 			isCanvasOpen = false;
 			isCanvasFullscreen = false;
@@ -1423,10 +1431,19 @@
 	}
 
 	function toggleCanvasFullscreen() {
+		lastWorkspaceTool = 'canvas';
 		if (!isCanvasOpen) {
 			isCanvasOpen = true;
 		}
 		isCanvasFullscreen = !isCanvasFullscreen;
+	}
+
+	function activateLastWorkspaceTool() {
+		if (lastWorkspaceTool === 'canvas') {
+			toggleCanvas();
+			return;
+		}
+		toggleBoardView();
 	}
 
 	function exitCanvasFullscreen() {
@@ -3878,9 +3895,11 @@
 					{showRoomSearch}
 					isBoardView={showBoardView}
 					{isCanvasOpen}
+					{lastWorkspaceTool}
 					remainingLabel={activeRemainingLabel}
 					on:showMobileList={showMobileRoomList}
 					on:openRoomDetails={openRoomDetails}
+					on:activateLastWorkspaceTool={activateLastWorkspaceTool}
 					on:toggleBoardView={toggleBoardView}
 					on:toggleCanvas={toggleCanvas}
 					on:toggleRoomSearch={toggleRoomSearch}

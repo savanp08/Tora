@@ -32,6 +32,16 @@
 		);
 	}
 
+	function getConfirmLabel() {
+		if (dialog.kind === 'prompt' && dialog.allowEmptySubmit && dialog.value.trim() === '') {
+			return dialog.emptyConfirmLabel;
+		}
+		if (dialog.kind === 'none') {
+			return '';
+		}
+		return dialog.confirmLabel;
+	}
+
 	function onBackdropClick() {
 		dispatch('close');
 	}
@@ -160,7 +170,7 @@
 				on:click={onConfirm}
 				disabled={isConfirmDisabled()}
 			>
-				{dialog.confirmLabel}
+				{getConfirmLabel()}
 			</button>
 		</footer>
 	</div>

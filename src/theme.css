@@ -135,6 +135,18 @@ body {
 	margin: 0px;
 	
 }
+html, body {
+    height: 100dvh;
+    width: 100vw;
+    margin: 0;
+    padding: 0;
+    /* This completely stops the bouncy scroll cycle! */
+    overflow: hidden; 
+}
+
+@media (max-width: 600px) {
+	
+}
 
 * {
 	transition-property: background-color, border-color, color;

@@ -21,9 +21,11 @@ export type UiDialogState =
 			placeholder: string;
 			maxLength: number;
 			confirmLabel: string;
+			emptyConfirmLabel: string;
 			cancelLabel: string;
 			danger: boolean;
 			multiline: boolean;
+			allowEmptySubmit: boolean;
 	  }
 	| {
 			kind: 'roomAction';

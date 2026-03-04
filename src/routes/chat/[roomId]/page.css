@@ -1,7 +1,7 @@
 .chat-shell {
 	--panel-border: #cbd4e1;
 	--panel-shadow: 0 10px 24px rgba(15, 23, 42, 0.1);
-	height: calc(98vh);
+	height: calc(100dvh);
 	min-height: 620px;
 	width: 100%;
 	max-width: 100%;
@@ -200,6 +200,8 @@
 @media (max-width: 1199px) {
 	.chat-shell {
 		grid-template-columns: 290px minmax(0, 1fr);
+		
+		
 	}
 
 	.sidebar-pane {
@@ -263,5 +265,11 @@
 	.sidebar-pane {
 		align-self: stretch;
 		height: 100%;
+	}
+
+	@media (max-height: 500px){
+		.chat-shell{
+			height: calc(91vh);
+		}
 	}
 }

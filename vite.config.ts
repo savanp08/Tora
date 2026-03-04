@@ -11,13 +11,16 @@ const monacoPluginFactory =
 export default defineConfig({
 	plugins: [
 		monacoPluginFactory({
-			// Keep editor base worker + TS worker (required for JavaScript language mode),
-			// plus common built-ins used by Monaco.
+			
 			languageWorkers: ['editorWorkerService', 'typescript', 'json', 'html', 'css']
 		}),
 		tailwindcss(),
 		sveltekit()
 	],
+	server: {
+		// host: true  // Enable this if you want to access the dev server from other devices on the network
+	},
+
 	test: {
 		expect: { requireAssertions: true },
 		projects: [

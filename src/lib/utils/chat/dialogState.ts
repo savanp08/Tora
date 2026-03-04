@@ -15,9 +15,11 @@ type PromptDialogConfig = {
 	placeholder?: string;
 	maxLength?: number;
 	confirmLabel?: string;
+	emptyConfirmLabel?: string;
 	cancelLabel?: string;
 	danger?: boolean;
 	multiline?: boolean;
+	allowEmptySubmit?: boolean;
 };
 
 export function buildConfirmDialog(config: ConfirmDialogConfig): UiDialogState {
@@ -40,9 +42,11 @@ export function buildPromptDialog(config: PromptDialogConfig): UiDialogState {
 		placeholder: config.placeholder ?? '',
 		maxLength: Math.max(1, config.maxLength ?? 2000),
 		confirmLabel: config.confirmLabel || 'Save',
+		emptyConfirmLabel: config.emptyConfirmLabel || config.confirmLabel || 'Save',
 		cancelLabel: config.cancelLabel || 'Cancel',
 		danger: Boolean(config.danger),
-		multiline: Boolean(config.multiline)
+		multiline: Boolean(config.multiline),
+		allowEmptySubmit: Boolean(config.allowEmptySubmit)
 	};
 }
 
@@ -100,7 +104,10 @@ export function updatePromptDialogValue(dialog: UiDialogState, value: string): U
 	};
 }
 
-export function updateRoomActionDialogMode(dialog: UiDialogState, mode: RoomMenuMode): UiDialogState {
+export function updateRoomActionDialogMode(
+	dialog: UiDialogState,
+	mode: RoomMenuMode
+): UiDialogState {
 	if (dialog.kind !== 'roomAction') {
 		return dialog;
 	}
