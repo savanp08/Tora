@@ -78,4 +78,38 @@
 	}
 }
 
+/* The vertical cursor line */
+.yRemoteSelectionHead {
+	position: absolute;
+	border-left: 2px solid;
+	height: 100%;
+	box-sizing: border-box;
+	z-index: 99;
+}
+
+/* The floating name tag */
+.yRemoteSelectionHead::after {
+	position: absolute;
+	content: attr(data-client-name);
+	border: 1px solid;
+	border-color: inherit;
+	background-color: inherit;
+	color: white; /* Or black, depending on contrast */
+	font-family: 'Inter', sans-serif;
+	font-size: 11px;
+	font-weight: 600;
+	padding: 2px 6px;
+	top: -20px;
+	left: -2px;
+	border-radius: 4px;
+	white-space: nowrap;
+	pointer-events: none;
+	user-select: none;
+}
+
+/* The highlighted text selection */
+.yRemoteSelection {
+	background-color: inherit;
+	opacity: 0.3;
+}
 

@@ -13,13 +13,15 @@
 	export let showRoomSearch = false;
 	export let remainingLabel = '--';
 	export let isBoardView = false;
+	export let isCanvasOpen = false;
 
 	const dispatch = createEventDispatcher<{
 		showMobileList: void;
 		openRoomDetails: void;
 		toggleBoardView: void;
+		toggleCanvas: void;
 		toggleRoomSearch: void;
-		renameRoom: void; 
+		renameRoom: void;
 		toggleBreakSelectionMode: void;
 		togglePinSelectionMode: void;
 		toggleEditSelectionMode: void;
@@ -99,29 +101,39 @@
 		</span>
 	</button>
 
-		<div class="header-actions" bind:this={headerActionsEl}>
-			<button
-				type="button"
-				class="board-toggle-button"
-				class:active={isBoardView}
-				on:click|stopPropagation={() => dispatch('toggleBoardView')}
-				title={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
-				aria-label={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
-			>
-				{#if isBoardView}
-					<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M5 6.5h14a1 1 0 0 1 1 1V17a1 1 0 0 1-1 1H9l-4 3V7.5a1 1 0 0 1 1-1Z" />
-					</svg>
-				{:else}
-					<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
-						<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
-						<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
-					</svg>
-				{/if}
-			</button>
-			<button
-				type="button"
-				class="expiry-pill"
+	<div class="header-actions" bind:this={headerActionsEl}>
+		<button
+			type="button"
+			class="canvas-toggle-button"
+			class:active={isCanvasOpen}
+			on:click|stopPropagation={() => dispatch('toggleCanvas')}
+			title={isCanvasOpen ? 'Hide code canvas' : 'Show code canvas'}
+			aria-label={isCanvasOpen ? 'Hide code canvas' : 'Show code canvas'}
+		>
+			{isCanvasOpen ? 'Canvas On' : 'Canvas Off'}
+		</button>
+		<button
+			type="button"
+			class="board-toggle-button"
+			class:active={isBoardView}
+			on:click|stopPropagation={() => dispatch('toggleBoardView')}
+			title={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
+			aria-label={isBoardView ? 'Switch to chat view' : 'Switch to board view'}
+		>
+			{#if isBoardView}
+				<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M5 6.5h14a1 1 0 0 1 1 1V17a1 1 0 0 1-1 1H9l-4 3V7.5a1 1 0 0 1 1-1Z" />
+				</svg>
+			{:else}
+				<svg class="board-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
+					<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
+				</svg>
+			{/if}
+		</button>
+		<button
+			type="button"
+			class="expiry-pill"
 			on:click|stopPropagation={() => dispatch('openRoomDetails')}
 			title="Remaining room lifetime"
 			aria-label="Open room lifetime details"
@@ -168,8 +180,6 @@
 				>
 					{messageActionMode === 'delete' ? 'Cancel Delete Mode' : 'Delete Messages'}
 				</button>
-				
-				
 				{#if isMember}
 					<button type="button" on:click|stopPropagation={() => closeMenuThen('leaveRoom')}>
 						Leave Room
@@ -180,7 +190,6 @@
 						Delete Room
 					</button>
 				{/if}
-				
 			</div>
 		{/if}
 	</div>
@@ -367,6 +376,26 @@
 		justify-content: center;
 	}
 
+	.canvas-toggle-button {
+		border: 1px solid #c7d0dc;
+		background: #ebf1f8;
+		border-radius: 6px;
+		height: 1.85rem;
+		padding: 0 0.55rem;
+		cursor: pointer;
+		color: #314057;
+		font-size: 0.75rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
+		white-space: nowrap;
+	}
+
+	.canvas-toggle-button.active {
+		border-color: #2563eb;
+		background: #dbeafe;
+		color: #1e3a8a;
+	}
+
 	.board-toggle-icon {
 		width: 0.92rem;
 		height: 0.92rem;
@@ -387,6 +416,18 @@
 		border-color: #3a3a40;
 		background: #18181b;
 		color: #eeeef4;
+	}
+
+	.theme-dark .canvas-toggle-button {
+		border-color: #3a3a40;
+		background: #18181b;
+		color: #eeeef4;
+	}
+
+	.theme-dark .canvas-toggle-button.active {
+		border-color: #3b82f6;
+		background: rgba(37, 99, 235, 0.35);
+		color: #dbeafe;
 	}
 
 	.theme-dark .board-toggle-button.active {
@@ -464,6 +505,12 @@
 		.board-toggle-button {
 			width: 1.75rem;
 			height: 1.65rem;
+		}
+
+		.canvas-toggle-button {
+			height: 1.65rem;
+			padding: 0 0.45rem;
+			font-size: 0.7rem;
 		}
 	}
 </style>

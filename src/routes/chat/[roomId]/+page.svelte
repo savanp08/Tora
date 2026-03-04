@@ -4,6 +4,7 @@
 	import { page } from '$app/stores';
 	import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
 	import Board from '$lib/components/chat/Board.svelte';
+	import CodeCanvas from '$lib/components/canvas/CodeCanvas.svelte';
 	import DiscussionModal from '$lib/components/chat/DiscussionModal.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
 	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
@@ -49,11 +50,45 @@
 		toTimestamp
 	} from '$lib/utils/chat/core';
 	import {
+		applyReadProgress as applyReadProgressState,
+		getLastReadTimestamp as getLastReadTimestampState,
+		getUnreadStartMessageId as getUnreadStartMessageIdState
+	} from '$lib/utils/chat/readProgress';
+	import {
+		buildRoomPasswordHash,
+		normalizeAdminCodeValue,
+		normalizeRoomAccessPasswordValue,
+		normalizeRoomPasswordValue
+	} from '$lib/utils/chat/security';
+	import {
 		addTaskItem,
 		parseTaskMessagePayload,
 		stringifyTaskMessagePayload,
 		toggleTaskItem
 	} from '$lib/utils/chat/task';
+	import {
+		buildDiscussionCommentMap,
+		discussionCommentsEndpoint,
+		readDiscussionCommentsCache,
+		resolveDiscussionCommentDepth,
+		roomPinsEndpoint,
+		upsertDiscussionCommentList,
+		writeDiscussionCommentsCache
+	} from '$lib/utils/chat/discussion';
+	import {
+		isEnvelope,
+		resolveDiscussionPinMessageID,
+		resolveEnvelopePayloadRecord,
+		resolveEnvelopeRoomID,
+		resolveEnvelopeTargetUserID
+	} from '$lib/utils/chat/envelope';
+	import {
+		getRemainingHoursLabel as getRemainingHoursLabelState,
+		getRoomCreatedAt as getRoomCreatedAtState,
+		getRoomExpiry as getRoomExpiryState,
+		getRoomRemainingMs as getRoomRemainingMsState
+	} from '$lib/utils/chat/roomTiming';
+	import { createTypingController } from '$lib/utils/chat/typingController';
 	import {
 		buildReplySnippet,
 		DELETED_MESSAGE_PLACEHOLDER,
@@ -83,16 +118,7 @@
 		upsertMessageState,
 		upsertOnlineMember as upsertOnlineMemberState
 	} from '$lib/utils/chat/pageState';
-	import {
-		buildConfirmDialog,
-		buildPromptDialog,
-		buildRoomActionDialog,
-		resolveCloseDialogValue,
-		resolveConfirmDialogValue,
-		updatePromptDialogValue,
-		updateRoomActionDialogMode,
-		updateRoomActionDialogName
-	} from '$lib/utils/chat/dialogState';
+	import { createChatDialogController } from '$lib/utils/chat/dialogController';
 	import {
 		getTrustedDevicePreference,
 		isOfflineCacheSupported,
@@ -114,6 +140,7 @@
 		subscribeToRooms
 	} from '$lib/ws';
 	import { onDestroy, onMount, tick } from 'svelte';
+	import './page.css';
 
 	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
@@ -124,6 +151,22 @@
 	const DISCUSSION_MAX_REPLY_DEPTH = 4;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const PROTECTED_ROOM_PREVIEW_TEXT = 'Protected room. Join with password to preview messages.';
+
+	type CanvasPresenceUser = {
+		id: string;
+		name: string;
+		color: string;
+	};
+
+	function getCanvasPresenceColor(user: { color?: unknown } | null | undefined) {
+		if (typeof user?.color === 'string') {
+			const normalized = user.color.trim();
+			if (normalized) {
+				return normalized;
+			}
+		}
+		return '#3b82f6';
+	}
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
@@ -152,12 +195,11 @@
 	let showRoomSearch = false;
 	let showRoomDetails = false;
 	let showBoardView = false;
+	let isCanvasOpen = false;
+	let isCanvasFullscreen = false;
+	let canvasUser: CanvasPresenceUser = { id: 'guest', name: 'Guest', color: '#3b82f6' };
 	let themePreference: ThemePreference = 'system';
 	let removeSystemThemeListener: (() => void) | null = null;
-	let typingStopTimer: ReturnType<typeof setTimeout> | null = null;
-	let typingIsActive = false;
-	let typingLastPingAt = 0;
-	let typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	let cachePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	let showToast = false;
 	let toastMessage = '';
@@ -206,7 +248,36 @@
 	let serverNowAnchorMs = 0;
 	let serverNowAnchorPerfMs = 0;
 	let uiDialog: UiDialogState = { kind: 'none' };
-	let uiDialogResolver: ((value: unknown) => void) | null = null;
+	const dialogController = createChatDialogController({
+		getDialog: () => uiDialog,
+		setDialog: (next) => {
+			uiDialog = next;
+		},
+		normalizeRoomNameValue
+	});
+	const {
+		closeUiDialog,
+		onUiDialogConfirm,
+		openConfirmDialog,
+		openPromptDialog,
+		openRoomActionDialog,
+		updateUiPromptValue,
+		updateRoomActionMode,
+		updateRoomActionName
+	} = dialogController;
+	const typingController = createTypingController({
+		getRoomId: () => roomId,
+		getIsMember: () => isMember,
+		getTypingUsersByRoom: () => typingUsersByRoom,
+		setTypingUsersByRoom: (next) => {
+			typingUsersByRoom = next;
+		},
+		normalizeIdentifier,
+		sendSocketPayload,
+		typingPingIntervalMs: TYPING_PING_INTERVAL_MS,
+		typingStopDelayMs: TYPING_STOP_DELAY_MS,
+		typingSafetyTimeoutMs: TYPING_SAFETY_TIMEOUT_MS
+	});
 	let chatWindowRef: {
 		capturePrependAnchor?: () => { scrollTop: number; scrollHeight: number } | null;
 		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
@@ -230,6 +301,11 @@
 	$: roomMemberHint = $page.url.searchParams.get('member');
 	$: currentUserId = $currentUser?.id ?? 'guest';
 	$: currentUsername = normalizeUsernameValue($currentUser?.username ?? 'Guest') || 'Guest';
+	$: canvasUser = {
+		id: currentUserId,
+		name: currentUsername,
+		color: getCanvasPresenceColor($currentUser as { color?: unknown } | null)
+	} satisfies CanvasPresenceUser;
 	$: activeThread =
 		roomThreads.find((thread) => thread.id === roomId) ??
 		createThread(
@@ -350,6 +426,7 @@
 		messageActionMode = 'none';
 		isSelectionMode = false;
 		selectedActionMessageId = '';
+		isCanvasFullscreen = false;
 	}
 	$: if (isDiscussionOpen && !activeDiscussionTask) {
 		isDiscussionOpen = false;
@@ -365,8 +442,7 @@
 
 	onDestroy(() => {
 		clientLog('component-destroy', { roomId });
-		clearTypingStopTimer();
-		clearAllTypingSafetyTimers();
+		typingController.destroy();
 		clearAllCachePersistTimers();
 		clearSidebarRefreshTimer();
 		clearRoomExpiryTicker();
@@ -409,23 +485,6 @@
 		if (!isMobileView) {
 			mobilePane = 'chat';
 		}
-	}
-
-	function normalizeRoomPasswordValue(value: string) {
-		return (value || '').trim().slice(0, 32);
-	}
-
-	function normalizeRoomAccessPasswordValue(value: string) {
-		return (value || '').trim().slice(0, 64);
-	}
-
-	function normalizeAdminCodeValue(value: unknown) {
-		return toStringValue(value).trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
-	}
-
-	function buildRoomPasswordHash(password: string) {
-		const normalizedPassword = normalizeRoomPasswordValue(password);
-		return normalizedPassword ? `#key=${encodeURIComponent(normalizedPassword)}` : '';
 	}
 
 	function syncActiveRoomPasswordFromHash() {
@@ -500,70 +559,12 @@
 		return parsed.filter((entry): entry is ChatMessage => Boolean(entry));
 	}
 
-	function clearTypingStopTimer() {
-		if (typingStopTimer) {
-			clearTimeout(typingStopTimer);
-			typingStopTimer = null;
-		}
-	}
-
-	function sendTypingStart() {
-		if (!roomId || !isMember) {
-			return;
-		}
-		const now = Date.now();
-		if (typingIsActive && now - typingLastPingAt < TYPING_PING_INTERVAL_MS) {
-			return;
-		}
-		typingIsActive = true;
-		typingLastPingAt = now;
-		sendSocketPayload({
-			type: 'typing_start',
-			roomId
-		});
-	}
-
 	function sendTypingStop() {
-		if (!typingIsActive || !roomId || !isMember) {
-			clearTypingStopTimer();
-			typingIsActive = false;
-			return;
-		}
-		typingIsActive = false;
-		typingLastPingAt = 0;
-		clearTypingStopTimer();
-		sendSocketPayload({
-			type: 'typing_stop',
-			roomId
-		});
-	}
-
-	function scheduleTypingStop() {
-		clearTypingStopTimer();
-		typingStopTimer = setTimeout(() => {
-			sendTypingStop();
-		}, TYPING_STOP_DELAY_MS);
+		typingController.sendTypingStop();
 	}
 
 	function onComposerTyping(event: CustomEvent<{ value: string }>) {
-		const value = (event.detail?.value || '').trim();
-		if (!value) {
-			sendTypingStop();
-			return;
-		}
-		sendTypingStart();
-		scheduleTypingStop();
-	}
-
-	function clearAllTypingSafetyTimers() {
-		for (const timer of typingSafetyTimers.values()) {
-			clearTimeout(timer);
-		}
-		typingSafetyTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	}
-
-	function typingTimerKey(targetRoomId: string, userId: string) {
-		return `${targetRoomId}:${userId}`;
+		typingController.onComposerTyping((event.detail?.value || '').trim());
 	}
 
 	function setTypingIndicator(
@@ -572,75 +573,15 @@
 		userName: string,
 		expiresAt: number = Date.now() + TYPING_SAFETY_TIMEOUT_MS
 	) {
-		if (!targetRoomId || !userId) {
-			return;
-		}
-		const roomIndicators = typingUsersByRoom[targetRoomId] ?? {};
-		typingUsersByRoom = {
-			...typingUsersByRoom,
-			[targetRoomId]: {
-				...roomIndicators,
-				[userId]: {
-					name: userName || 'User',
-					expiresAt
-				}
-			}
-		};
-
-		const key = typingTimerKey(targetRoomId, userId);
-		const existing = typingSafetyTimers.get(key);
-		if (existing) {
-			clearTimeout(existing);
-		}
-		const timer = setTimeout(() => {
-			clearTypingIndicator(targetRoomId, userId);
-		}, TYPING_SAFETY_TIMEOUT_MS);
-		typingSafetyTimers.set(key, timer);
+		typingController.setTypingIndicator(targetRoomId, userId, userName, expiresAt);
 	}
 
 	function clearTypingIndicator(targetRoomId: string, userId: string) {
-		if (!targetRoomId || !userId) {
-			return;
-		}
-		const roomIndicators = typingUsersByRoom[targetRoomId];
-		if (!roomIndicators || !roomIndicators[userId]) {
-			return;
-		}
-
-		const nextRoomIndicators = { ...roomIndicators };
-		delete nextRoomIndicators[userId];
-		const nextTypingByRoom = { ...typingUsersByRoom };
-		if (Object.keys(nextRoomIndicators).length === 0) {
-			delete nextTypingByRoom[targetRoomId];
-		} else {
-			nextTypingByRoom[targetRoomId] = nextRoomIndicators;
-		}
-		typingUsersByRoom = nextTypingByRoom;
-
-		const key = typingTimerKey(targetRoomId, userId);
-		const existing = typingSafetyTimers.get(key);
-		if (existing) {
-			clearTimeout(existing);
-			typingSafetyTimers.delete(key);
-		}
+		typingController.clearTypingIndicator(targetRoomId, userId);
 	}
 
 	function getActiveTypingUsers(targetRoomId: string) {
-		if (!targetRoomId) {
-			return [];
-		}
-		const roomIndicators = typingUsersByRoom[targetRoomId] ?? {};
-		const now = Date.now();
-		const active = Object.entries(roomIndicators)
-			.filter(([userId, entry]) => {
-				if (!entry || entry.expiresAt <= now) {
-					clearTypingIndicator(targetRoomId, userId);
-					return false;
-				}
-				return normalizeIdentifier(userId) !== normalizeIdentifier(currentUserId);
-			})
-			.map(([, entry]) => entry.name);
-		return active;
+		return typingController.getActiveTypingUsers(targetRoomId, currentUserId);
 	}
 
 	function formatTypingIndicator(names: string[]) {
@@ -950,94 +891,6 @@
 		toastTimer = setTimeout(() => {
 			showToast = false;
 		}, 3000);
-	}
-
-	function resolveActiveUiDialog(value: unknown) {
-		const resolver = uiDialogResolver;
-		uiDialogResolver = null;
-		uiDialog = { kind: 'none' };
-		if (resolver) {
-			resolver(value);
-		}
-	}
-
-	function closeUiDialog() {
-		resolveActiveUiDialog(resolveCloseDialogValue(uiDialog));
-	}
-
-	function openConfirmDialog(config: {
-		title: string;
-		message: string;
-		confirmLabel?: string;
-		cancelLabel?: string;
-		danger?: boolean;
-	}) {
-		resolveActiveUiDialog(false);
-		uiDialog = buildConfirmDialog(config);
-		return new Promise<boolean>((resolve) => {
-			uiDialogResolver = (value) => resolve(Boolean(value));
-		});
-	}
-
-	function openPromptDialog(config: {
-		title: string;
-		message: string;
-		initialValue?: string;
-		placeholder?: string;
-		maxLength?: number;
-		confirmLabel?: string;
-		cancelLabel?: string;
-		danger?: boolean;
-		multiline?: boolean;
-	}) {
-		resolveActiveUiDialog(null);
-		uiDialog = buildPromptDialog(config);
-		return new Promise<string | null>((resolve) => {
-			uiDialogResolver = (value) => {
-				if (typeof value === 'string') {
-					resolve(value);
-					return;
-				}
-				resolve(null);
-			};
-		});
-	}
-
-	function openRoomActionDialog(initialName = '') {
-		resolveActiveUiDialog(null);
-		uiDialog = buildRoomActionDialog(initialName, normalizeRoomNameValue);
-		return new Promise<{ mode: RoomMenuMode; roomName: string } | null>((resolve) => {
-			uiDialogResolver = (value) => {
-				if (
-					value &&
-					typeof value === 'object' &&
-					'mode' in value &&
-					'roomName' in value &&
-					typeof (value as { mode?: unknown }).mode === 'string'
-				) {
-					const parsed = value as { mode: RoomMenuMode; roomName: string };
-					resolve(parsed);
-					return;
-				}
-				resolve(null);
-			};
-		});
-	}
-
-	function onUiDialogConfirm() {
-		resolveActiveUiDialog(resolveConfirmDialogValue(uiDialog));
-	}
-
-	function updateUiPromptValue(value: string) {
-		uiDialog = updatePromptDialogValue(uiDialog, value);
-	}
-
-	function updateRoomActionMode(mode: RoomMenuMode) {
-		uiDialog = updateRoomActionDialogMode(uiDialog, mode);
-	}
-
-	function updateRoomActionName(value: string) {
-		uiDialog = updateRoomActionDialogName(uiDialog, value);
 	}
 
 	async function openOptionalRoomPasswordDialog(initialValue = '') {
@@ -1486,6 +1339,27 @@
 		}
 	}
 
+	function toggleCanvas() {
+		if (isCanvasOpen) {
+			isCanvasOpen = false;
+			isCanvasFullscreen = false;
+			return;
+		}
+		isCanvasOpen = true;
+		isCanvasFullscreen = false;
+	}
+
+	function toggleCanvasFullscreen() {
+		if (!isCanvasOpen) {
+			isCanvasOpen = true;
+		}
+		isCanvasFullscreen = !isCanvasFullscreen;
+	}
+
+	function exitCanvasFullscreen() {
+		isCanvasFullscreen = false;
+	}
+
 	function onJumpToBreakOrigin(
 		event: CustomEvent<{
 			parentRoomId: string;
@@ -1546,77 +1420,6 @@
 		if (single) {
 			addIncomingMessage(single);
 		}
-	}
-
-	function isEnvelope(value: unknown): value is SocketEnvelope {
-		return Boolean(
-			value &&
-			typeof value === 'object' &&
-			'type' in value &&
-			'payload' in value &&
-			typeof (value as { type?: unknown }).type === 'string'
-		);
-	}
-
-	function resolveEnvelopeRoomID(envelope: SocketEnvelope) {
-		const directRoomID = normalizeRoomIDValue(toStringValue(envelope.roomId ?? envelope.room_id));
-		if (directRoomID) {
-			return directRoomID;
-		}
-		if (envelope.payload && typeof envelope.payload === 'object') {
-			const payload = envelope.payload as Record<string, unknown>;
-			return normalizeRoomIDValue(toStringValue(payload.roomId ?? payload.room_id));
-		}
-		return '';
-	}
-
-	function resolveEnvelopePayloadRecord(envelope: SocketEnvelope): Record<string, unknown> {
-		if (
-			!envelope.payload ||
-			typeof envelope.payload !== 'object' ||
-			Array.isArray(envelope.payload)
-		) {
-			return {};
-		}
-		return envelope.payload as Record<string, unknown>;
-	}
-
-	function resolveEnvelopeTargetUserID(envelope: SocketEnvelope) {
-		const source = envelope as Record<string, unknown>;
-		const payload = resolveEnvelopePayloadRecord(envelope);
-		return normalizeIdentifier(
-			toStringValue(
-				source.targetUserId ??
-					source.target_user_id ??
-					payload.targetUserId ??
-					payload.target_user_id
-			)
-		);
-	}
-
-	function resolveDiscussionPinMessageID(envelope: SocketEnvelope) {
-		const source = envelope as Record<string, unknown>;
-		const directPinID = normalizeMessageID(
-			toStringValue(source.pinMessageId ?? source.pin_message_id)
-		);
-		if (directPinID) {
-			return directPinID;
-		}
-		if (envelope.payload && typeof envelope.payload === 'object') {
-			const payload = envelope.payload as Record<string, unknown>;
-			const payloadPinID = normalizeMessageID(
-				toStringValue(
-					payload.pinMessageId ??
-						payload.pin_message_id ??
-						payload.replyToMessageId ??
-						payload.reply_to_message_id
-				)
-			);
-			if (payloadPinID) {
-				return payloadPinID;
-			}
-		}
-		return '';
 	}
 
 	async function handleDiscussionCommentEnvelope(
@@ -2190,151 +1993,36 @@
 	}
 
 	function getLastReadTimestamp(targetRoomId: string) {
-		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
-		if (!normalizedRoomID) {
-			return Date.now();
-		}
-		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
-		if (roomMessages.length === 0) {
-			return Date.now();
-		}
-		const unread = roomThreads.find((thread) => thread.id === normalizedRoomID)?.unread ?? 0;
-		if (unread <= 0) {
-			return roomMessages[roomMessages.length - 1]?.createdAt ?? Date.now();
-		}
-		const anchorMessageID = getUnreadStartMessageId(normalizedRoomID);
-		if (anchorMessageID) {
-			const anchorIndex = roomMessages.findIndex(
-				(message) => normalizeMessageID(message.id) === normalizeMessageID(anchorMessageID)
-			);
-			if (anchorIndex <= 0) {
-				return 0;
-			}
-			return roomMessages[anchorIndex - 1]?.createdAt ?? 0;
-		}
-		const firstUnreadIndex = Math.max(0, roomMessages.length - unread);
-		if (firstUnreadIndex <= 0) {
-			return 0;
-		}
-		return roomMessages[firstUnreadIndex - 1]?.createdAt ?? 0;
-	}
-
-	function findUnreadAnchorFromTail(
-		roomMessages: ChatMessage[],
-		unreadCount: number,
-		normalizedCurrentUserID: string
-	) {
-		if (!Array.isArray(roomMessages) || roomMessages.length === 0 || unreadCount <= 0) {
-			return '';
-		}
-		let remainingUnread = unreadCount;
-		for (let index = roomMessages.length - 1; index >= 0; index -= 1) {
-			const candidate = roomMessages[index];
-			const isOwnMessage =
-				normalizedCurrentUserID !== '' &&
-				normalizeIdentifier(candidate.senderId) === normalizedCurrentUserID;
-			if (isOwnMessage) {
-				continue;
-			}
-			remainingUnread -= 1;
-			if (remainingUnread <= 0) {
-				return candidate.id;
-			}
-		}
-		return roomMessages[0]?.id ?? '';
+		return getLastReadTimestampState({
+			targetRoomId,
+			roomThreads,
+			messagesByRoom,
+			currentUserId
+		});
 	}
 
 	function getUnreadStartMessageId(targetRoomId: string) {
-		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
-		if (!normalizedRoomID) {
-			return '';
-		}
-		const unread = roomThreads.find((thread) => thread.id === normalizedRoomID)?.unread ?? 0;
-		if (unread <= 0) {
-			return '';
-		}
-		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
-		if (roomMessages.length === 0) {
-			return '';
-		}
-		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
-		return findUnreadAnchorFromTail(roomMessages, unread, normalizedCurrentUserID);
+		return getUnreadStartMessageIdState({
+			targetRoomId,
+			roomThreads,
+			messagesByRoom,
+			currentUserId
+		});
 	}
 
 	function applyReadProgress(targetRoomId: string, lastSeenMessageId: string) {
-		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
-		if (!normalizedRoomID) {
+		const next = applyReadProgressState(lastSeenMessageId, {
+			targetRoomId,
+			roomThreads,
+			messagesByRoom,
+			unreadAnchorByRoom,
+			currentUserId
+		});
+		if (!next.changed) {
 			return;
 		}
-		const thread = roomThreads.find((entry) => entry.id === normalizedRoomID);
-		const unread = thread?.unread ?? 0;
-		if (unread <= 0) {
-			return;
-		}
-
-		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
-		if (roomMessages.length === 0) {
-			return;
-		}
-
-		const anchorMessageID = getUnreadStartMessageId(normalizedRoomID);
-		if (!anchorMessageID) {
-			return;
-		}
-		const anchorIndex = roomMessages.findIndex(
-			(message) => normalizeMessageID(message.id) === normalizeMessageID(anchorMessageID)
-		);
-		if (anchorIndex < 0) {
-			return;
-		}
-
-		const seenIndex = roomMessages.findIndex(
-			(message) => normalizeMessageID(message.id) === normalizeMessageID(lastSeenMessageId)
-		);
-		if (seenIndex < anchorIndex) {
-			return;
-		}
-		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
-		let seenUnreadCount = 0;
-		for (let index = anchorIndex; index <= seenIndex; index += 1) {
-			const candidate = roomMessages[index];
-			const isOwnMessage =
-				normalizedCurrentUserID !== '' &&
-				normalizeIdentifier(candidate.senderId) === normalizedCurrentUserID;
-			if (!isOwnMessage) {
-				seenUnreadCount += 1;
-			}
-		}
-		const seenCount = Math.min(unread, seenUnreadCount);
-		if (seenCount <= 0) {
-			return;
-		}
-
-		const nextUnread = Math.max(0, unread - seenCount);
-		roomThreads = sortThreads(
-			roomThreads.map((entry) =>
-				entry.id === normalizedRoomID ? { ...entry, unread: nextUnread } : entry
-			)
-		);
-
-		if (nextUnread <= 0) {
-			const nextUnreadAnchors = { ...unreadAnchorByRoom };
-			delete nextUnreadAnchors[normalizedRoomID];
-			unreadAnchorByRoom = nextUnreadAnchors;
-			return;
-		}
-
-		const nextAnchorMessageId = findUnreadAnchorFromTail(
-			roomMessages,
-			nextUnread,
-			normalizedCurrentUserID
-		);
-		if (nextAnchorMessageId) {
-			unreadAnchorByRoom = {
-				...unreadAnchorByRoom,
-				[normalizedRoomID]: nextAnchorMessageId
-			};
-		}
+		roomThreads = next.roomThreads;
+		unreadAnchorByRoom = next.unreadAnchorByRoom;
 	}
 
 	function onChatReadProgress(
@@ -2457,49 +2145,6 @@
 		activeReply = null;
 	}
 
-	function roomPinsEndpoint() {
-		return `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/pins`;
-	}
-
-	function discussionCommentsEndpoint(targetRoomId: string, pinnedMessageId: string) {
-		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
-		const normalizedPinnedMessageID = normalizeMessageID(pinnedMessageId);
-		return `${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/pins/${encodeURIComponent(normalizedPinnedMessageID)}/discussion/comments`;
-	}
-
-	function getDiscussionCommentsCacheKey(targetRoomId: string, pinnedMessageId: string) {
-		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
-		const normalizedPinnedMessageID = normalizeMessageID(pinnedMessageId);
-		if (!normalizedRoomID || !normalizedPinnedMessageID) {
-			return '';
-		}
-		return `${normalizedRoomID}::${normalizedPinnedMessageID}`;
-	}
-
-	function readDiscussionCommentsCache(targetRoomId: string, pinnedMessageId: string) {
-		const key = getDiscussionCommentsCacheKey(targetRoomId, pinnedMessageId);
-		if (!key || !Object.prototype.hasOwnProperty.call(discussionCommentsCacheByTaskKey, key)) {
-			return null;
-		}
-		const cached = discussionCommentsCacheByTaskKey[key] ?? [];
-		return [...cached];
-	}
-
-	function writeDiscussionCommentsCache(
-		targetRoomId: string,
-		pinnedMessageId: string,
-		comments: ChatMessage[]
-	) {
-		const key = getDiscussionCommentsCacheKey(targetRoomId, pinnedMessageId);
-		if (!key) {
-			return;
-		}
-		discussionCommentsCacheByTaskKey = {
-			...discussionCommentsCacheByTaskKey,
-			[key]: [...comments].sort((left, right) => left.createdAt - right.createdAt)
-		};
-	}
-
 	async function ensureMessagePinned(message: ChatMessage) {
 		if (!roomId || !isMember) {
 			return false;
@@ -2510,7 +2155,7 @@
 			return false;
 		}
 		try {
-			const res = await fetch(roomPinsEndpoint(), {
+			const res = await fetch(roomPinsEndpoint(API_BASE, roomId), {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
@@ -2549,17 +2194,15 @@
 		comment: ChatMessage,
 		pinnedMessageId = activeDiscussionTaskId
 	) {
-		const normalizedID = normalizeMessageID(comment.id);
-		if (!normalizedID) {
-			return;
-		}
-		const next = [
-			...discussionComments.filter((entry) => normalizeMessageID(entry.id) !== normalizedID),
-			comment
-		].sort((left, right) => left.createdAt - right.createdAt);
+		const next = upsertDiscussionCommentList(discussionComments, comment);
 		discussionComments = next;
 		if (roomId && normalizeMessageID(pinnedMessageId)) {
-			writeDiscussionCommentsCache(roomId, pinnedMessageId, next);
+			discussionCommentsCacheByTaskKey = writeDiscussionCommentsCache(
+				discussionCommentsCacheByTaskKey,
+				roomId,
+				pinnedMessageId,
+				next
+			);
 		}
 	}
 
@@ -2576,7 +2219,11 @@
 			return;
 		}
 
-		const requestURL = `${discussionCommentsEndpoint(targetRoomID, normalizedPinnedMessageID)}?userId=${encodeURIComponent(normalizedUserID)}&limit=50`;
+		const requestURL = `${discussionCommentsEndpoint(
+			API_BASE,
+			targetRoomID,
+			normalizedPinnedMessageID
+		)}?userId=${encodeURIComponent(normalizedUserID)}&limit=50`;
 		try {
 			const res = await fetch(requestURL);
 			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -2587,17 +2234,30 @@
 				Array.isArray(data.comments) ? data.comments : [],
 				targetRoomID
 			)).sort((left, right) => left.createdAt - right.createdAt);
-			writeDiscussionCommentsCache(targetRoomID, normalizedPinnedMessageID, parsedComments);
+			discussionCommentsCacheByTaskKey = writeDiscussionCommentsCache(
+				discussionCommentsCacheByTaskKey,
+				targetRoomID,
+				normalizedPinnedMessageID,
+				parsedComments
+			);
 
 			if (normalizeMessageID(activeDiscussionTaskId) !== normalizedPinnedMessageID) {
 				return;
 			}
 			discussionComments =
-				readDiscussionCommentsCache(targetRoomID, normalizedPinnedMessageID) ?? parsedComments;
+				readDiscussionCommentsCache(
+					discussionCommentsCacheByTaskKey,
+					targetRoomID,
+					normalizedPinnedMessageID
+				) ?? parsedComments;
 		} catch (error) {
 			if (normalizeMessageID(activeDiscussionTaskId) === normalizedPinnedMessageID) {
 				discussionComments =
-					readDiscussionCommentsCache(targetRoomID, normalizedPinnedMessageID) ?? [];
+					readDiscussionCommentsCache(
+						discussionCommentsCacheByTaskKey,
+						targetRoomID,
+						normalizedPinnedMessageID
+					) ?? [];
 			}
 			showErrorToast(error instanceof Error ? error.message : 'Failed to load discussion comments');
 		}
@@ -2621,7 +2281,11 @@
 		if (!normalizedTaskID) {
 			return;
 		}
-		const cachedComments = readDiscussionCommentsCache(roomId, normalizedTaskID);
+		const cachedComments = readDiscussionCommentsCache(
+			discussionCommentsCacheByTaskKey,
+			roomId,
+			normalizedTaskID
+		);
 		if (cachedComments) {
 			discussionTaskTracker = normalizedTaskID;
 			discussionComments = cachedComments;
@@ -2729,37 +2393,6 @@
 		await commitTaskPayloadUpdate(messageId, nextContent);
 	}
 
-	function buildDiscussionCommentMap(items: ChatMessage[]) {
-		const map = new Map<string, ChatMessage>();
-		for (const item of items) {
-			const normalizedId = normalizeMessageID(item.id);
-			if (!normalizedId) {
-				continue;
-			}
-			map.set(normalizedId, item);
-		}
-		return map;
-	}
-
-	function resolveDiscussionCommentDepth(commentId: string, commentMap: Map<string, ChatMessage>) {
-		let depth = 1;
-		let currentId = normalizeMessageID(commentId);
-		const seen = new Set<string>();
-		while (currentId && commentMap.has(currentId) && depth <= DISCUSSION_MAX_REPLY_DEPTH + 2) {
-			if (seen.has(currentId)) {
-				break;
-			}
-			seen.add(currentId);
-			const parentId = normalizeMessageID(commentMap.get(currentId)?.replyToMessageId || '');
-			if (!parentId || !commentMap.has(parentId)) {
-				break;
-			}
-			depth += 1;
-			currentId = parentId;
-		}
-		return depth;
-	}
-
 	async function onDiscussionCommentSubmit(
 		event: CustomEvent<{ content: string; replyToMessageId?: string }>
 	) {
@@ -2787,7 +2420,11 @@
 			requestedReplyID && allowedReplyIDs.has(requestedReplyID) ? requestedReplyID : '';
 		if (parentCommentId) {
 			const discussionCommentMap = buildDiscussionCommentMap(discussionComments);
-			const parentDepth = resolveDiscussionCommentDepth(parentCommentId, discussionCommentMap);
+			const parentDepth = resolveDiscussionCommentDepth(
+				parentCommentId,
+				discussionCommentMap,
+				DISCUSSION_MAX_REPLY_DEPTH
+			);
 			if (parentDepth >= DISCUSSION_MAX_REPLY_DEPTH) {
 				showErrorToast('Reply nesting limit reached (max 4 levels)');
 				return;
@@ -2813,7 +2450,7 @@
 	}
 
 	async function onDiscussionCommentEditRequest(
-		event: CustomEvent<{ messageId: string; content: string }>
+		event: CustomEvent<{ messageId: string; content: string; skipPrompt?: boolean }>
 	) {
 		if (!roomId || !activeDiscussionTask || !isMember) {
 			return;
@@ -2834,21 +2471,26 @@
 			return;
 		}
 
-		const nextContentRaw = await openPromptDialog({
-			title: 'Edit Comment',
-			message: 'Update your discussion comment.',
-			initialValue: (event.detail.content || '').trim(),
-			placeholder: 'Comment',
-			maxLength: 2000,
-			confirmLabel: 'Save',
-			cancelLabel: 'Cancel',
-			multiline: true
-		});
-		if (nextContentRaw === null) {
-			return;
+		const inlineContent = (event.detail.content || '').trim();
+		const currentContent = (currentComment.content || '').trim();
+		let nextContent = inlineContent;
+		if (!event.detail.skipPrompt) {
+			const nextContentRaw = await openPromptDialog({
+				title: 'Edit Comment',
+				message: 'Update your discussion comment.',
+				initialValue: currentContent,
+				placeholder: 'Comment',
+				maxLength: 2000,
+				confirmLabel: 'Save',
+				cancelLabel: 'Cancel',
+				multiline: true
+			});
+			if (nextContentRaw === null) {
+				return;
+			}
+			nextContent = nextContentRaw.trim();
 		}
-		const nextContent = nextContentRaw.trim();
-		if (!nextContent || nextContent === (event.detail.content || '').trim()) {
+		if (!nextContent || nextContent === currentContent) {
 			return;
 		}
 		if (getUTF8ByteLength(nextContent) > MESSAGE_TEXT_MAX_BYTES) {
@@ -2864,7 +2506,7 @@
 		try {
 			const encryptedContent = await encryptMessageContent(nextContent);
 			const res = await fetch(
-				`${discussionCommentsEndpoint(roomId, normalizedTaskID)}/${encodeURIComponent(commentId)}`,
+				`${discussionCommentsEndpoint(API_BASE, roomId, normalizedTaskID)}/${encodeURIComponent(commentId)}`,
 				{
 					method: 'PUT',
 					headers: { 'Content-Type': 'application/json' },
@@ -2926,7 +2568,7 @@
 		}
 		try {
 			const res = await fetch(
-				`${discussionCommentsEndpoint(roomId, normalizedTaskID)}/${encodeURIComponent(commentId)}`,
+				`${discussionCommentsEndpoint(API_BASE, roomId, normalizedTaskID)}/${encodeURIComponent(commentId)}`,
 				{
 					method: 'DELETE',
 					headers: { 'Content-Type': 'application/json' },
@@ -4039,48 +3681,19 @@
 	}
 
 	function getRoomCreatedAt(targetRoomId: string) {
-		return roomMetaById[targetRoomId]?.createdAt ?? 0;
+		return getRoomCreatedAtState(roomMetaById, targetRoomId);
 	}
 
 	function getRoomExpiry(targetRoomId: string) {
-		const meta = roomMetaById[targetRoomId];
-		if (!meta) {
-			return 0;
-		}
-		if (meta.expiresAt > 0) {
-			return meta.expiresAt;
-		}
-		return 0;
+		return getRoomExpiryState(roomMetaById, targetRoomId);
 	}
 
 	function getRemainingHoursLabel(targetRoomId: string, tickMs: number) {
-		const remainingMs = getRoomRemainingMs(targetRoomId, tickMs);
-		if (!Number.isFinite(remainingMs) || remainingMs === Number.POSITIVE_INFINITY) {
-			return '--';
-		}
-		if (remainingMs <= 0) {
-			return 'Expired';
-		}
-		const ceilToSingleDecimal = (value: number) => Math.ceil(value * 10) / 10;
-		if (remainingMs < 60 * 60 * 1000) {
-			const minutes = ceilToSingleDecimal(remainingMs / 60000);
-			return `${minutes.toFixed(1)}m`;
-		}
-		if (remainingMs < 24 * 60 * 60 * 1000) {
-			const hours = ceilToSingleDecimal(remainingMs / 3600000);
-			return `${hours.toFixed(1)}h`;
-		}
-		const days = ceilToSingleDecimal(remainingMs / 86400000);
-		return `${days.toFixed(1)}d`;
+		return getRemainingHoursLabelState(roomMetaById, targetRoomId, tickMs, getApproxServerNowMs);
 	}
 
 	function getRoomRemainingMs(targetRoomId: string, tickMs: number) {
-		const expiry = getRoomExpiry(targetRoomId);
-		if (!expiry) {
-			return Number.POSITIVE_INFINITY;
-		}
-		const now = getApproxServerNowMs(tickMs);
-		return expiry - now;
+		return getRoomRemainingMsState(roomMetaById, targetRoomId, tickMs, getApproxServerNowMs);
 	}
 </script>
 
@@ -4126,121 +3739,191 @@
 		/>
 	</div>
 
-	<section class="chat-window">
-		<ChatRoomHeader
-			roomName={activeThread.name}
-			onlineCount={currentOnlineMembers.length}
-			unreadCount={activeUnreadCount}
-			{isMember}
-			{isActiveRoomAdmin}
-			{isMobileView}
-			isDarkMode={$isDarkMode}
-			{messageActionMode}
-			{showRoomSearch}
-			isBoardView={showBoardView}
-			remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
-			on:showMobileList={showMobileRoomList}
-			on:openRoomDetails={openRoomDetails}
-			on:toggleBoardView={toggleBoardView}
-			on:toggleRoomSearch={toggleRoomSearch}
-			on:renameRoom={() => void renameRoom(roomId)}
-			on:toggleBreakSelectionMode={toggleBreakSelectionMode}
-			on:togglePinSelectionMode={togglePinSelectionMode}
-			on:toggleEditSelectionMode={toggleEditSelectionMode}
-			on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
-			on:markRead={() => markRoomAsRead(roomId)}
-			on:clearLocal={clearCurrentRoomMessages}
-			on:leaveRoom={() => void leaveCurrentRoom()}
-			on:deleteRoom={() => void deleteCurrentRoomAsAdmin()}
-			on:disconnect={() => void disconnectAndWipe()}
-		/>
-
-		{#if !showBoardView}
-			<ChatStatusBars
-				{typingIndicatorText}
-				{showTrustedDevicePrompt}
-				{isSelectionMode}
-				{messageActionMode}
-				selectedDeleteCount={selectedDeleteMessageIds.length}
-				{showRoomSearch}
-				bind:roomMessageSearch
+	<div
+		class="room-workspace"
+		class:canvas-open={isCanvasOpen}
+		class:canvas-fullscreen={isCanvasOpen && isCanvasFullscreen}
+	>
+		{#if !isCanvasFullscreen}
+			<section class="chat-window">
+			<ChatRoomHeader
+				roomName={activeThread.name}
+				onlineCount={currentOnlineMembers.length}
+				unreadCount={activeUnreadCount}
+				{isMember}
+				{isActiveRoomAdmin}
+				{isMobileView}
 				isDarkMode={$isDarkMode}
-				on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
-				on:cancelSelection={cancelSelectionMode}
-				on:deleteSelected={deleteSelectedMessagesBatch}
+				{messageActionMode}
+				{showRoomSearch}
+				isBoardView={showBoardView}
+				{isCanvasOpen}
+				remainingLabel={getRemainingHoursLabel(roomId, roomExpiryTickMs)}
+				on:showMobileList={showMobileRoomList}
+				on:openRoomDetails={openRoomDetails}
+				on:toggleBoardView={toggleBoardView}
+				on:toggleCanvas={toggleCanvas}
+				on:toggleRoomSearch={toggleRoomSearch}
+				on:renameRoom={() => void renameRoom(roomId)}
+				on:toggleBreakSelectionMode={toggleBreakSelectionMode}
+				on:togglePinSelectionMode={togglePinSelectionMode}
+				on:toggleEditSelectionMode={toggleEditSelectionMode}
+				on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
+				on:markRead={() => markRoomAsRead(roomId)}
+				on:clearLocal={clearCurrentRoomMessages}
+				on:leaveRoom={() => void leaveCurrentRoom()}
+				on:deleteRoom={() => void deleteCurrentRoomAsAdmin()}
+				on:disconnect={() => void disconnectAndWipe()}
 			/>
-		{/if}
 
-		<div class="chat-window-shell" class:is-expired={isRoomExpired}>
-			{#if showBoardView}
-				<Board
-					{roomId}
-					messages={currentMessages}
-					isDarkMode={$isDarkMode}
-					canEdit={isMember && !isRoomExpired}
-					{canModerateBoard}
-					{currentUserId}
-					{currentUsername}
-				/>
-			{:else}
-				<ChatWindow
-					bind:this={chatWindowRef}
-					{roomId}
-					isVisible={!isMobileView || mobilePane === 'chat'}
-					messages={currentMessages}
-					{currentUserId}
-					unreadCount={activeUnreadCount}
-					firstUnreadMessageId={activeFirstUnreadMessageId}
-					lastReadTimestamp={activeLastReadTimestamp}
-					{roomMessageSearch}
-					{expandedMessages}
-					{isMember}
+			{#if !showBoardView}
+				<ChatStatusBars
+					{typingIndicatorText}
+					{showTrustedDevicePrompt}
 					{isSelectionMode}
-					isDarkMode={$isDarkMode}
 					{messageActionMode}
-					selectedMessageId={selectedActionMessageId}
-					{deleteMultiEnabled}
-					{selectedDeleteMessageIds}
-					{focusMessageId}
-					isLoadingOlder={isLoadingOlderHistory}
-					hasMoreOlder={hasMoreOlderHistory}
-					on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
-					on:joinBreakRoom={onJoinBreakRoom}
-					on:joinRoom={() => void joinCurrentRoom()}
-					on:messageSelect={onMessageSelected}
-					on:openPinnedDiscussion={onPinnedDiscussionOpen}
-					on:reply={onReplyRequest}
-					on:editMessage={onEditMessageRequest}
-					on:deleteMessage={onDeleteMessageRequest}
-					on:editSelected={onSelectedMessageEdit}
-					on:deleteSelected={onSelectedMessageDelete}
-					on:requestOlder={onRequestOlderHistory}
-					on:focusHandled={onFocusHandled}
-					on:readProgress={onChatReadProgress}
-					on:toggleTask={onTaskToggle}
-					on:addTask={onTaskAdd}
+					selectedDeleteCount={selectedDeleteMessageIds.length}
+					{showRoomSearch}
+					bind:roomMessageSearch
+					isDarkMode={$isDarkMode}
+					on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
+					on:cancelSelection={cancelSelectionMode}
+					on:deleteSelected={deleteSelectedMessagesBatch}
 				/>
 			{/if}
-		</div>
 
-		{#if isMember && !showBoardView}
-			<ChatComposer
-				bind:draftMessage
-				bind:attachedFile
-				{roomId}
-				disabled={isRoomExpired}
-				{activeReply}
-				isDarkMode={$isDarkMode}
-				{currentUsername}
-				messageLimit={MESSAGE_TEXT_MAX_BYTES}
-				on:send={(event) => void sendMessage(event.detail)}
-				on:typing={onComposerTyping}
-				on:attach={handleComposerAttach}
-				on:removeAttachment={handleComposerRemoveAttachment}
-				on:cancelReply={clearReplyTarget}
-			/>
+			<div class="chat-window-shell" class:is-expired={isRoomExpired}>
+				{#if showBoardView}
+					<Board
+						{roomId}
+						messages={currentMessages}
+						isDarkMode={$isDarkMode}
+						canEdit={isMember && !isRoomExpired}
+						{canModerateBoard}
+						{currentUserId}
+						{currentUsername}
+					/>
+				{:else}
+					<ChatWindow
+						bind:this={chatWindowRef}
+						{roomId}
+						isVisible={!isMobileView || mobilePane === 'chat'}
+						messages={currentMessages}
+						{currentUserId}
+						unreadCount={activeUnreadCount}
+						firstUnreadMessageId={activeFirstUnreadMessageId}
+						lastReadTimestamp={activeLastReadTimestamp}
+						{roomMessageSearch}
+						{expandedMessages}
+						{isMember}
+						{isSelectionMode}
+						isDarkMode={$isDarkMode}
+						{messageActionMode}
+						selectedMessageId={selectedActionMessageId}
+						{deleteMultiEnabled}
+						{selectedDeleteMessageIds}
+						{focusMessageId}
+						isLoadingOlder={isLoadingOlderHistory}
+						hasMoreOlder={hasMoreOlderHistory}
+						on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
+						on:joinBreakRoom={onJoinBreakRoom}
+						on:joinRoom={() => void joinCurrentRoom()}
+						on:messageSelect={onMessageSelected}
+						on:openPinnedDiscussion={onPinnedDiscussionOpen}
+						on:reply={onReplyRequest}
+						on:editMessage={onEditMessageRequest}
+						on:deleteMessage={onDeleteMessageRequest}
+						on:editSelected={onSelectedMessageEdit}
+						on:deleteSelected={onSelectedMessageDelete}
+						on:requestOlder={onRequestOlderHistory}
+						on:focusHandled={onFocusHandled}
+						on:readProgress={onChatReadProgress}
+						on:toggleTask={onTaskToggle}
+						on:addTask={onTaskAdd}
+					/>
+				{/if}
+			</div>
+
+			{#if isMember && !showBoardView}
+				<ChatComposer
+					bind:draftMessage
+					bind:attachedFile
+					{roomId}
+					disabled={isRoomExpired}
+					{activeReply}
+					isDarkMode={$isDarkMode}
+					{currentUsername}
+					messageLimit={MESSAGE_TEXT_MAX_BYTES}
+					on:send={(event) => void sendMessage(event.detail)}
+					on:typing={onComposerTyping}
+					on:attach={handleComposerAttach}
+					on:removeAttachment={handleComposerRemoveAttachment}
+					on:cancelReply={clearReplyTarget}
+				/>
+			{/if}
+			</section>
 		{/if}
-	</section>
+
+		{#if isCanvasOpen}
+			<section class="canvas-pane" class:fullscreen={isCanvasFullscreen}>
+				<header class="canvas-pane-header">
+					<span class="canvas-pane-title">Code Canvas</span>
+					<div class="canvas-pane-actions">
+						{#if isCanvasFullscreen}
+							<button
+								type="button"
+								class="canvas-pane-icon-button"
+								on:click={exitCanvasFullscreen}
+								title="Back to split view"
+								aria-label="Back to split view"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M15.5 19.5 8 12l7.5-7.5" />
+								</svg>
+							</button>
+							<button
+								type="button"
+								class="canvas-pane-icon-button"
+								on:click={toggleCanvas}
+								title="Minimize canvas"
+								aria-label="Minimize canvas"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M6 12h12" />
+								</svg>
+							</button>
+						{:else}
+							<button
+								type="button"
+								class="canvas-pane-icon-button"
+								on:click={toggleCanvasFullscreen}
+								title="Fullscreen canvas"
+								aria-label="Fullscreen canvas"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M20 20h-5v-5" />
+								</svg>
+							</button>
+							<button
+								type="button"
+								class="canvas-pane-icon-button"
+								on:click={toggleCanvas}
+								title="Minimize canvas"
+								aria-label="Minimize canvas"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M6 12h12" />
+								</svg>
+							</button>
+						{/if}
+					</div>
+				</header>
+				<div class="canvas-pane-body">
+					<CodeCanvas roomId={roomId} currentUser={canvasUser} />
+				</div>
+			</section>
+		{/if}
+	</div>
 
 	<div class="online-pane">
 		<OnlinePanel members={currentOnlineMembers} isDarkMode={$isDarkMode} />
@@ -4286,154 +3969,3 @@
 	on:removeMember={(event) => void removeMemberFromRoom(event.detail.memberId)}
 	on:promoted={(event) => void onRoomPromoted(event)}
 />
-
-<style>
-	.chat-shell {
-		--panel-border: #cbd4e1;
-		--panel-shadow: 0 10px 24px rgba(15, 23, 42, 0.1);
-		height: calc(98vh);
-		min-height: 620px;
-		width: 100%;
-		max-width: 100%;
-		display: grid;
-		grid-template-columns: 330px minmax(0, 1fr) 280px;
-		gap: 0.75rem;
-		padding: 0.75rem;
-		box-sizing: border-box;
-		background:
-			radial-gradient(1400px 480px at -5% -30%, rgba(80, 116, 255, 0.06) 0%, transparent 58%),
-			radial-gradient(1200px 420px at 110% 0%, rgba(20, 184, 166, 0.06) 0%, transparent 55%),
-			#dde4ee;
-		overflow: hidden;
-	}
-
-	.sidebar-pane,
-	.chat-window,
-	.online-pane {
-		min-height: 0;
-		min-width: 0;
-		border: 1px solid var(--panel-border);
-		border-radius: 16px;
-		box-shadow: var(--panel-shadow);
-		overflow: hidden;
-		background: #f1f5fa;
-	}
-
-	.sidebar-pane {
-		display: flex;
-		align-self: center;
-		height: 93%;
-	}
-
-	.chat-window {
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		background: linear-gradient(180deg, #f3f6fa 0%, #e9edf4 100%);
-	}
-
-	.chat-window-shell {
-		display: flex;
-		flex: 1;
-		min-height: 0;
-	}
-
-	.chat-window-shell.is-expired {
-		opacity: 0.5;
-		pointer-events: none;
-	}
-
-	.online-pane {
-		display: flex;
-		align-self: center;
-		height: 85%;
-		background: linear-gradient(180deg, #f1f5fa 0%, #e7ecf4 100%);
-	}
-
-	.chat-shell.theme-dark {
-		--panel-border: #2b2b2f;
-		--panel-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
-		background:
-			radial-gradient(1300px 460px at -10% -35%, rgba(255, 255, 255, 0.07) 0%, transparent 58%),
-			radial-gradient(1100px 400px at 110% 0%, rgba(255, 255, 255, 0.05) 0%, transparent 55%),
-			#070708;
-	}
-
-	.chat-shell.theme-dark .sidebar-pane,
-	.chat-shell.theme-dark .chat-window,
-	.chat-shell.theme-dark .online-pane {
-		background: #101012;
-		border-color: var(--panel-border);
-	}
-
-	.toast {
-		position: fixed;
-		top: 0.8rem;
-		left: 50%;
-		transform: translateX(-50%);
-		background: #111111;
-		color: #ffffff;
-		padding: 0.65rem 1rem;
-		border-radius: 999px;
-		font-size: 0.87rem;
-		font-weight: 600;
-		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
-		z-index: 500;
-		pointer-events: none;
-	}
-
-	@media (max-width: 1199px) {
-		.chat-shell {
-			grid-template-columns: 290px minmax(0, 1fr);
-		}
-
-		.sidebar-pane {
-			align-self: stretch;
-			height: 100%;
-		}
-
-		.online-pane {
-			display: none;
-		}
-	}
-
-	@media (max-height: 860px) {
-		.sidebar-pane {
-			align-self: stretch;
-			height: 100%;
-		}
-
-		.online-pane {
-			align-self: stretch;
-			height: 100%;
-		}
-	}
-
-	@media (max-width: 900px) {
-		.chat-shell {
-			grid-template-columns: 1fr;
-			height: calc(98vh);
-			min-height: 0;
-			gap: 0.55rem;
-			padding: 0.55rem;
-		}
-
-		.chat-shell.mobile-chat-only .sidebar-pane {
-			display: none;
-		}
-
-		.chat-shell.mobile-list-only .chat-window {
-			display: none;
-		}
-
-		.sidebar-pane,
-		.chat-window {
-			height: 100%;
-		}
-
-		.sidebar-pane {
-			align-self: stretch;
-			height: 100%;
-		}
-	}
-</style>

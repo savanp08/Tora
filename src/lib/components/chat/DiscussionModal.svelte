@@ -34,6 +34,8 @@
 
 	let draftComment = '';
 	let replyTargetId = '';
+	let editTargetId = '';
+	let isComposerOpen = false;
 	let previousPinnedMessageId = '';
 	let previousNotesStorageKey = '';
 	let expandedRepliesByParent: Record<string, boolean> = {};
@@ -55,7 +57,7 @@
 		toggleTask: { messageId: string; taskIndex: number };
 		addTask: { messageId: string; text: string };
 		submitComment: { content: string; replyToMessageId?: string };
-		editComment: { messageId: string; content: string };
+		editComment: { messageId: string; content: string; skipPrompt?: boolean };
 		deleteComment: { messageId: string };
 		toggleCommentPin: { messageId: string; isPinned: boolean };
 	}>();
@@ -76,6 +78,7 @@
 		)
 	);
 	$: replyTargetMessage = commentById.get(normalizeMessageID(replyTargetId)) ?? null;
+	$: editTargetMessage = commentById.get(normalizeMessageID(editTargetId)) ?? null;
 	$: isLimitReached = comments.length >= 50;
 	$: notesLimitReached = notes.length >= MAX_NOTES;
 	$: activeNotesStorageKey = buildNotesStorageKey(
@@ -87,6 +90,8 @@
 	$: if (normalizedPinnedMessageId !== previousPinnedMessageId) {
 		draftComment = '';
 		replyTargetId = '';
+		editTargetId = '';
+		isComposerOpen = false;
 		expandedRepliesByParent = {};
 		visibleRepliesByParent = {};
 		expandedCommentBodyById = {};
@@ -108,6 +113,25 @@
 		}
 	}
 
+	$: if (editTargetId) {
+		const target = commentById.get(normalizeMessageID(editTargetId));
+		if (
+			!target ||
+			!isOwnComment(target) ||
+			target.type === 'deleted' ||
+			Boolean(target.isDeleted)
+		) {
+			editTargetId = '';
+		}
+	}
+
+	$: if (!open) {
+		draftComment = '';
+		replyTargetId = '';
+		editTargetId = '';
+		isComposerOpen = false;
+	}
+
 	$: persistStoredNotes(activeNotesStorageKey, notes);
 
 	function closeModal() {
@@ -125,8 +149,8 @@
 			return;
 		}
 		event.preventDefault();
-		if (replyTargetId) {
-			replyTargetId = '';
+		if (isComposerOpen || replyTargetId || editTargetId) {
+			closeComposer();
 			return;
 		}
 		closeModal();
@@ -415,31 +439,67 @@
 		};
 	}
 
-	function startReply(comment: ChatMessage) {
-		if (!canReplyToComment(comment, commentDepthById)) {
-			return;
-		}
-		replyTargetId = normalizeMessageID(comment.id);
-	}
-
-	function cancelReply() {
-		replyTargetId = '';
-	}
-
-	function submitComment() {
+	function openComposerForComment() {
 		if (isLimitReached) {
 			return;
 		}
+		draftComment = '';
+		replyTargetId = '';
+		editTargetId = '';
+		isComposerOpen = true;
+	}
+
+	function startReply(comment: ChatMessage) {
+		if (isLimitReached) {
+			return;
+		}
+		if (!canReplyToComment(comment, commentDepthById)) {
+			return;
+		}
+		draftComment = '';
+		replyTargetId = normalizeMessageID(comment.id);
+		editTargetId = '';
+		isComposerOpen = true;
+	}
+
+	function cancelReply() {
+		closeComposer();
+	}
+
+	function closeComposer() {
+		draftComment = '';
+		replyTargetId = '';
+		editTargetId = '';
+		isComposerOpen = false;
+	}
+
+	function submitComment() {
 		const content = (draftComment || '').trim();
 		if (!content) {
+			return;
+		}
+		if (editTargetMessage) {
+			const existingContent = (editTargetMessage.content || '').trim();
+			if (content === existingContent) {
+				closeComposer();
+				return;
+			}
+			dispatch('editComment', {
+				messageId: editTargetMessage.id,
+				content,
+				skipPrompt: true
+			});
+			closeComposer();
+			return;
+		}
+		if (isLimitReached) {
 			return;
 		}
 		dispatch('submitComment', {
 			content,
 			replyToMessageId: normalizeMessageID(replyTargetId)
 		});
-		draftComment = '';
-		replyTargetId = '';
+		closeComposer();
 	}
 
 	function onComposerKeyDown(event: KeyboardEvent) {
@@ -448,9 +508,9 @@
 			submitComment();
 			return;
 		}
-		if (event.key === 'Escape' && replyTargetId) {
+		if (event.key === 'Escape' && (replyTargetId || editTargetId || isComposerOpen)) {
 			event.preventDefault();
-			cancelReply();
+			closeComposer();
 		}
 	}
 
@@ -458,10 +518,13 @@
 		if (!isOwnComment(comment)) {
 			return;
 		}
-		dispatch('editComment', {
-			messageId: comment.id,
-			content: comment.content || ''
-		});
+		if (comment.type === 'deleted' || comment.isDeleted) {
+			return;
+		}
+		editTargetId = normalizeMessageID(comment.id);
+		replyTargetId = '';
+		draftComment = (comment.content || '').trim();
+		isComposerOpen = true;
 	}
 
 	function requestDelete(comment: ChatMessage) {
@@ -655,44 +718,46 @@
 			tabindex="-1"
 			on:keydown={onDialogKeyDown}
 		>
-			<header class="modal-header-grid">
-				<section class="context-column">
-					<div class="column-title-row">
-						<h3>Pinned Message</h3>
+				<header class="modal-header-grid">
+					<section class="context-column">
+						<div class="column-title-row">
+							<h3>Pinned Message</h3>
 						{#if backgroundUnreadCount > 0}
 							<span class="chat-unread-pill">
 								{backgroundUnreadCount} new in chat
-							</span>
-						{/if}
-					</div>
-					{#if pinnedMessage}
-						{#if pinnedMessage.type === 'task'}
-							<TaskCard
-								message={pinnedMessage}
-								showAddTaskControl={canEditTask}
-								canEditTasks={canEditTask}
-								on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
-								on:addTask={(event) => dispatch('addTask', event.detail)}
-							/>
-						{:else}
-							<div class="pinned-message-block">
-								<div class="pinned-meta">
-									<strong>{pinnedMessage.senderName}</strong>
-									<time>{formatPinnedTimestamp(pinnedMessage.createdAt)}</time>
-								</div>
-								<div class="pinned-label">{pinnedContentLabel(pinnedMessage)}</div>
-								<div class="pinned-body-scroll">
-									<p>{(pinnedMessage.content || '').trim() || 'No message body'}</p>
-								</div>
-								{#if pinnedMessage.mediaUrl}
-									<a href={pinnedMessage.mediaUrl} target="_blank" rel="noreferrer">Open attachment</a>
+								</span>
+							{/if}
+						</div>
+						<div class="context-body-scroll">
+							{#if pinnedMessage}
+								{#if pinnedMessage.type === 'task'}
+									<TaskCard
+										message={pinnedMessage}
+										showAddTaskControl={canEditTask}
+										canEditTasks={canEditTask}
+										on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
+										on:addTask={(event) => dispatch('addTask', event.detail)}
+									/>
+								{:else}
+									<div class="pinned-message-block">
+										<div class="pinned-meta">
+											<strong>{pinnedMessage.senderName}</strong>
+											<time>{formatPinnedTimestamp(pinnedMessage.createdAt)}</time>
+										</div>
+										<div class="pinned-label">{pinnedContentLabel(pinnedMessage)}</div>
+										<div class="pinned-body-scroll">
+											<p>{(pinnedMessage.content || '').trim() || 'No message body'}</p>
+										</div>
+										{#if pinnedMessage.mediaUrl}
+											<a href={pinnedMessage.mediaUrl} target="_blank" rel="noreferrer">Open attachment</a>
+										{/if}
+									</div>
 								{/if}
-							</div>
-						{/if}
-					{:else}
-						<div class="empty-pinned-message">No pinned message selected.</div>
-					{/if}
-				</section>
+							{:else}
+								<div class="empty-pinned-message">No pinned message selected.</div>
+							{/if}
+						</div>
+					</section>
 
 				<section class="notes-column">
 					<div class="column-title-row">
@@ -725,8 +790,18 @@
 			</header>
 
 			<section class="discussion-comments" aria-label="Threaded comments">
+				<div class="discussion-comment-trigger-row">
+					<button
+						type="button"
+						class="discussion-comment-trigger"
+						disabled={isLimitReached}
+						on:click={openComposerForComment}
+					>
+						{isLimitReached ? 'Discussion limit reached (50/50)' : 'Add a comment...'}
+					</button>
+				</div>
 				{#if threadEntries.length === 0}
-					<div class="discussion-empty">No comments yet. Start the first comment below.</div>
+					<div class="discussion-empty">No comments yet. Start the first comment above.</div>
 				{:else}
 					{#each threadEntries as thread (thread.parent.id)}
 						<article class="comment-card parent">
@@ -885,26 +960,40 @@
 				{/if}
 			</section>
 
-			<footer class="discussion-composer">
-				{#if replyTargetMessage}
-					<div class="reply-target">
-						<span>Replying to @{replyTargetMessage.senderName}</span>
-						<button type="button" on:click={cancelReply}>Cancel</button>
+			{#if isComposerOpen}
+				<footer class="discussion-composer">
+					{#if editTargetMessage}
+						<div class="reply-target editing">
+							<span>Editing your comment</span>
+							<button type="button" on:click={closeComposer}>Cancel</button>
+						</div>
+					{:else if replyTargetMessage}
+						<div class="reply-target">
+							<span>Replying to @{replyTargetMessage.senderName}</span>
+							<button type="button" on:click={cancelReply}>Cancel</button>
+						</div>
+					{/if}
+					<textarea
+						bind:value={draftComment}
+						rows="2"
+						placeholder={editTargetMessage
+							? 'Edit your comment... (Ctrl/Cmd + Enter to save)'
+							: 'Write a comment... (Ctrl/Cmd + Enter to send)'}
+						disabled={!editTargetMessage && isLimitReached}
+						on:keydown={onComposerKeyDown}
+					></textarea>
+					<div class="composer-actions">
+						<button
+							type="button"
+							class="send-comment"
+							on:click={submitComment}
+							disabled={!editTargetMessage && isLimitReached}
+						>
+							{editTargetMessage ? 'Save' : 'Comment'}
+						</button>
 					</div>
-				{/if}
-				<textarea
-					bind:value={draftComment}
-					rows="2"
-					placeholder={isLimitReached ? 'Discussion limit reached (50/50)' : 'Write a comment... (Ctrl/Cmd + Enter to send)'}
-					disabled={isLimitReached}
-					on:keydown={onComposerKeyDown}
-				></textarea>
-				<div class="composer-actions">
-					<button type="button" class="send-comment" on:click={submitComment} disabled={isLimitReached}>
-						Comment
-					</button>
-				</div>
-			</footer>
+				</footer>
+			{/if}
 		</div>
 	</div>
 {/if}
@@ -945,14 +1034,29 @@
 		padding: 1.5rem;
 		border-bottom: 1px solid var(--border-default);
 		background: var(--surface-secondary);
+		flex-shrink: 0;
+		max-height: min(40vh, 24rem);
 	}
 
 	.context-column,
 	.notes-column {
 		min-width: 0;
+		min-height: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 0.75rem;
+	}
+
+	.context-body-scroll {
+		min-height: 0;
+		overflow-y: auto;
+		padding-right: 0.18rem;
+		max-height: min(30vh, 17.5rem);
+	}
+
+	.context-body-scroll :global(.task-card) {
+		max-height: min(28vh, 16.5rem);
+		overflow-y: auto;
 	}
 
 	.column-title-row {
@@ -1034,7 +1138,7 @@
 	}
 
 	.pinned-body-scroll {
-		max-height: 10.5rem;
+		max-height: 8.5rem;
 		overflow-y: auto;
 		padding-right: 0.18rem;
 	}
@@ -1124,6 +1228,42 @@
 		flex-direction: column;
 		gap: 0.72rem;
 		background: var(--bg-secondary);
+	}
+
+	.discussion-comment-trigger-row {
+		position: sticky;
+		top: 0;
+		z-index: 5;
+		padding-bottom: 0.3rem;
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--bg-secondary) 96%, transparent 4%) 0%,
+			color-mix(in srgb, var(--bg-secondary) 92%, transparent 8%) 70%,
+			transparent 100%
+		);
+	}
+
+	.discussion-comment-trigger {
+		width: 100%;
+		text-align: left;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-secondary);
+		border-radius: 10px;
+		padding: 0.5rem 0.65rem;
+		font-size: 0.8rem;
+		font-weight: 500;
+		cursor: pointer;
+	}
+
+	.discussion-comment-trigger:hover:not(:disabled) {
+		background: var(--surface-hover);
+		color: var(--text-primary);
+	}
+
+	.discussion-comment-trigger:disabled {
+		opacity: 0.58;
+		cursor: not-allowed;
 	}
 
 	.discussion-empty {
@@ -1347,6 +1487,7 @@
 		flex-direction: column;
 		gap: 0.48rem;
 		background: var(--surface-secondary);
+		flex-shrink: 0;
 	}
 
 	.reply-target {
@@ -1359,6 +1500,12 @@
 		padding: 0.3rem 0.48rem;
 		font-size: 0.72rem;
 		color: var(--text-secondary);
+	}
+
+	.reply-target.editing {
+		border-color: var(--state-info-border);
+		background: var(--state-info-bg);
+		color: var(--text-primary);
 	}
 
 	.reply-target button {
@@ -1466,6 +1613,7 @@
 
 		.modal-header-grid {
 			grid-template-columns: 1fr;
+			max-height: min(48vh, 27rem);
 		}
 	}
 
