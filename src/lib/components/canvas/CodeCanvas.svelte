@@ -80,8 +80,7 @@
 	const QUERY_AWARENESS_MESSAGE_TYPE = 3;
 	const FILE_TREE_SYNC_ORIGIN = 'canvas-file-tree-sync';
 	const MODEL_SYNC_ORIGIN = 'canvas-model-sync';
-	const PROVIDER_SYNC_TIMEOUT_MS = 8000;
-	const SNAPSHOT_LOAD_TIMEOUT_MS = 5000;
+	const SNAPSHOT_LOAD_TIMEOUT_MS = 15000;
 	const PROMPT_CANCELLED_ERROR = 'canvas-prompt-cancelled';
 	const CANVAS_CLIENT_LOG_PREFIX = '[canvas-client]';
 	let currentFile = '';
@@ -434,7 +433,7 @@
 				canvasClientNarrative(`Room ${roomId} snapshot GET failed with non-OK status.`, {
 					status: response.status
 				});
-				return;
+				throw new Error('Failed to load snapshot from server: ' + response.status);
 			}
 			const snapshot = new Uint8Array(await response.arrayBuffer());
 			if (snapshot.length === 0) {
@@ -464,7 +463,7 @@
 					error: error instanceof Error ? error.message : String(error)
 				});
 			}
-			// Ignore transient snapshot load failures.
+			throw error;
 		} finally {
 			if (timeoutId !== null) {
 				window.clearTimeout(timeoutId);
@@ -983,43 +982,6 @@
 			return;
 		}
 		await clearActiveEditor();
-	}
-
-	function waitForInitialProviderSync() {
-		return new Promise<void>((resolve) => {
-			if (!provider || typeof provider.on !== 'function') {
-				canvasClientLog('provider-sync-skip-no-provider', { roomId });
-				resolve();
-				return;
-			}
-			canvasClientLog('provider-sync-wait-start', {
-				roomId,
-				timeoutMs: PROVIDER_SYNC_TIMEOUT_MS
-			});
-			let settled = false;
-			const finish = (reason: 'synced' | 'timeout') => {
-				if (settled) {
-					return;
-				}
-				settled = true;
-				if (typeof provider.off === 'function') {
-					provider.off('sync', handleSync);
-				}
-				window.clearTimeout(timeoutId);
-				canvasClientLog('provider-sync-wait-finish', { roomId, reason });
-				resolve();
-			};
-			const handleSync = (isSynced: boolean) => {
-				canvasClientLog('provider-sync-event', { roomId, isSynced });
-				if (isSynced) {
-					finish('synced');
-				}
-			};
-			const timeoutId = window.setTimeout(() => {
-				finish('timeout');
-			}, PROVIDER_SYNC_TIMEOUT_MS);
-			provider.on('sync', handleSync);
-		});
 	}
 
 	function resolveTargetDirectory(target: ProjectFileEntry | null) {
@@ -2937,47 +2899,7 @@
 				void saveCanvasSnapshotNow();
 			}, 15000);
 			yFileTree = ydoc.getMap('fileTree');
-			yFileTreeObserver = (event: any) => {
-				if (event.transaction.local) {
-					return;
-				}
-				void (async () => {
-					const deletions: string[] = [];
-					const upserts: Array<{ relativePath: string; entry: SharedFileTreeEntry | null }> = [];
-					for (const [key, change] of event.changes.keys.entries()) {
-						const relativePath = normalizeProjectName(String(key));
-						if (!relativePath) {
-							continue;
-						}
-						if (change.action === 'delete') {
-							deletions.push(relativePath);
-							continue;
-						}
-						upserts.push({
-							relativePath,
-							entry: normalizeSharedTreeEntry(yFileTree.get(relativePath))
-						});
-					}
-					deletions.sort((left, right) => right.split('/').length - left.split('/').length);
-					for (const relativePath of deletions) {
-						await applySharedTreeEntry(relativePath, null, 'delete');
-					}
-					upserts.sort((left, right) => {
-						const leftDepth = left.relativePath.split('/').length;
-						const rightDepth = right.relativePath.split('/').length;
-						if (left.entry?.isDir !== right.entry?.isDir) {
-							return left.entry?.isDir ? -1 : 1;
-						}
-						return leftDepth - rightDepth;
-					});
-					for (const update of upserts) {
-						await applySharedTreeEntry(update.relativePath, update.entry, 'add');
-					}
-					await refreshFileTree();
-					await syncOpenTabsWithFileTree();
-				})();
-			};
-			yFileTree.observe(yFileTreeObserver);
+			await loadPersistedCanvasSnapshotFromServer();
 			const wsURL = canvasWebSocketURL();
 			canvasClientLog('provider-create', { roomId, wsURL });
 			provider = new WebsocketProvider(wsURL, roomId, ydoc);
@@ -3022,17 +2944,51 @@
 			awareness.on('change', awarenessChangeHandler);
 			attachProviderTransportDebugListener();
 			attachProviderSnapshotListener();
+			yFileTreeObserver = (event: any) => {
+				if (event.transaction.local) {
+					return;
+				}
+				void (async () => {
+					const deletions: string[] = [];
+					const upserts: Array<{ relativePath: string; entry: SharedFileTreeEntry | null }> = [];
+					for (const [key, change] of event.changes.keys.entries()) {
+						const relativePath = normalizeProjectName(String(key));
+						if (!relativePath) {
+							continue;
+						}
+						if (change.action === 'delete') {
+							deletions.push(relativePath);
+							continue;
+						}
+						upserts.push({
+							relativePath,
+							entry: normalizeSharedTreeEntry(yFileTree.get(relativePath))
+						});
+					}
+					deletions.sort((left, right) => right.split('/').length - left.split('/').length);
+					for (const relativePath of deletions) {
+						await applySharedTreeEntry(relativePath, null, 'delete');
+					}
+					upserts.sort((left, right) => {
+						const leftDepth = left.relativePath.split('/').length;
+						const rightDepth = right.relativePath.split('/').length;
+						if (left.entry?.isDir !== right.entry?.isDir) {
+							return left.entry?.isDir ? -1 : 1;
+						}
+						return leftDepth - rightDepth;
+					});
+					for (const update of upserts) {
+						await applySharedTreeEntry(update.relativePath, update.entry, 'add');
+					}
+					await refreshFileTree();
+					await syncOpenTabsWithFileTree();
+				})();
+			};
+			yFileTree.observe(yFileTreeObserver);
 
 			// Keep type reference alive for dynamic import consistency.
 			void MonacoBinding;
 
-			await waitForInitialProviderSync();
-			if (yFileTree.size === 0) {
-				canvasClientNarrative(
-					`Room ${roomId} provider sync returned empty file tree; trying HTTP snapshot fallback.`
-				);
-				await loadPersistedCanvasSnapshotFromServer();
-			}
 			await initFileSystem({ createDefaultIfEmpty: yFileTree.size === 0 });
 			if (yFileTree.size > 0) {
 				await reconcileLocalFileSystemWithSharedTree();

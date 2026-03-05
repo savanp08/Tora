@@ -19,13 +19,18 @@ import (
 )
 
 const (
-	canvasWriteWait            = 10 * time.Second
-	canvasPongWait             = 60 * time.Second
-	canvasPingPeriod           = (canvasPongWait * 9) / 10
-	canvasMaxMessageSize       = 2 * 1024 * 1024
-	canvasRoomMaxClients       = 50
-	canvasSnapshotReadTimeout  = 15 * time.Second
-	canvasSnapshotWriteTimeout = 15 * time.Second
+	canvasWriteWait               = 10 * time.Second
+	canvasPongWait                = 60 * time.Second
+	canvasPingPeriod              = (canvasPongWait * 9) / 10
+	canvasMaxMessageSize          = 2 * 1024 * 1024
+	canvasRoomMaxClients          = 50
+	canvasSnapshotReadTimeout     = 15 * time.Second
+	canvasSnapshotWriteTimeout    = 15 * time.Second
+	canvasSnapshotMetadataTimeout = 4 * time.Second
+	canvasSnapshotRedisTimeout    = 1200 * time.Millisecond
+	canvasSnapshotR2Timeout       = 8 * time.Second
+	canvasRoomNameLookupTimeout   = 300 * time.Millisecond
+	canvasSnapshotStageSlack      = 100 * time.Millisecond
 
 	canvasMessageSync           = 0
 	canvasMessageQueryAwareness = 3
@@ -158,17 +163,16 @@ func roomNameFromRedisMeta(meta []interface{}) string {
 	return ""
 }
 
-func resolveCanvasRoomName(roomID string) string {
+func resolveCanvasRoomName(roomID string, redisStore *database.RedisStore) string {
 	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {
 		return roomID
 	}
-	redisStore, _, _ := DefaultCanvasManager.activeStores()
 	if redisStore == nil || redisStore.Client == nil {
 		return normalizedRoomID
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), canvasRoomNameLookupTimeout)
 	defer cancel()
 	meta, err := redisStore.Client.HMGet(ctx, roomKey(normalizedRoomID), "name", "name_lookup").Result()
 	if err != nil || len(meta) == 0 {
@@ -256,7 +260,7 @@ func (h *CanvasHub) currentSnapshotCopy() []byte {
 }
 
 func (h *CanvasHub) loadCurrentSnapshot() {
-	snapshot, _, err := loadCanvasSnapshotForRoom(h.roomID)
+	snapshot, _, err := loadCanvasSnapshotForRoom(context.Background(), h.roomID)
 	if err != nil {
 		log.Printf("Could not preload current canvas snapshot for room %s: %v", h.roomID, err)
 		return
@@ -578,24 +582,36 @@ func resolveCanvasRoomIDFromRequest(r *http.Request) string {
 	return normalizeRoomID(strings.TrimSpace(r.URL.Query().Get("room")))
 }
 
-func loadCanvasSnapshotForRoom(roomID string) ([]byte, canvasSnapshotLookupResult, error) {
-	lookup := canvasSnapshotLookupResult{
-		RoomName:         resolveCanvasRoomName(roomID),
-		RedisHadSnapshot: false,
-		R2FetchAttempted: false,
-		Source:           "none",
+func canvasSnapshotStageContext(parent context.Context, maxStageTimeout time.Duration) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		return context.WithTimeout(context.Background(), maxStageTimeout)
 	}
+	if deadline, hasDeadline := parent.Deadline(); hasDeadline {
+		remaining := time.Until(deadline) - canvasSnapshotStageSlack
+		if remaining <= 0 {
+			return context.WithTimeout(parent, time.Millisecond)
+		}
+		if remaining < maxStageTimeout {
+			return context.WithTimeout(parent, remaining)
+		}
+	}
+	return context.WithTimeout(parent, maxStageTimeout)
+}
+
+func loadCanvasSnapshotForRoom(ctx context.Context, roomID string) ([]byte, canvasSnapshotLookupResult, error) {
+	lookup := canvasSnapshotLookupResult{RoomName: roomID, RedisHadSnapshot: false, R2FetchAttempted: false, Source: "none"}
 	if roomID == "" {
 		return nil, lookup, nil
 	}
 
 	redisStore, scyllaStore, r2Client := DefaultCanvasManager.activeStores()
+	lookup.RoomName = resolveCanvasRoomName(roomID, redisStore)
 	if scyllaStore == nil || scyllaStore.Session == nil {
 		lookup.Source = "metadata_unavailable"
 		return nil, lookup, nil
 	}
 
-	metadataCtx, metadataCancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
+	metadataCtx, metadataCancel := canvasSnapshotStageContext(ctx, canvasSnapshotMetadataTimeout)
 	hasCanvasData, err := database.CheckCanvasHasData(metadataCtx, scyllaStore.Session, roomID)
 	metadataCancel()
 	if err != nil {
@@ -616,11 +632,11 @@ func loadCanvasSnapshotForRoom(roomID string) ([]byte, canvasSnapshotLookupResul
 	}
 
 	if redisStore != nil && redisStore.Client != nil {
-		redisCtx, redisCancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
+		redisCtx, redisCancel := canvasSnapshotStageContext(ctx, canvasSnapshotRedisTimeout)
 		redisSnapshot, redisErr := database.GetCanvasSnapshotFromRedis(redisCtx, redisStore.Client, roomID)
 		redisCancel()
 		if redisErr != nil {
-			log.Printf("Could not load canvas snapshot from Redis for room %s: %v", roomID, redisErr)
+			log.Printf("[canvas] Redis snapshot lookup skipped room=%s err=%v", roomID, redisErr)
 		} else if len(redisSnapshot) > 0 {
 			lookup.RedisHadSnapshot = true
 			lookup.Source = "redis"
@@ -633,7 +649,7 @@ func loadCanvasSnapshotForRoom(roomID string) ([]byte, canvasSnapshotLookupResul
 
 	if r2Client != nil && r2Client.Client != nil && strings.TrimSpace(r2Client.Bucket) != "" {
 		lookup.R2FetchAttempted = true
-		r2Ctx, r2Cancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+		r2Ctx, r2Cancel := canvasSnapshotStageContext(ctx, canvasSnapshotR2Timeout)
 		r2Snapshot, r2Err := storage.GetCanvasSnapshotFromR2(r2Ctx, r2Client.Client, r2Client.Bucket, roomID)
 		r2Cancel()
 		if r2Err != nil {
@@ -671,15 +687,31 @@ func HandleCanvasSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid room id", http.StatusBadRequest)
 		return
 	}
+	startedAt := time.Now()
+	requestCtx, requestCancel := context.WithTimeout(r.Context(), canvasSnapshotReadTimeout-canvasSnapshotStageSlack)
+	defer requestCancel()
 
-	snapshot, lookup, err := loadCanvasSnapshotForRoom(roomID)
+	snapshot, lookup, err := loadCanvasSnapshotForRoom(requestCtx, roomID)
 	if err != nil {
-		log.Printf("[canvas] Load failed room=%s err=%v", roomID, err)
+		log.Printf(
+			"[canvas] Load failed room=%s room_name=%q elapsed_ms=%d err=%v",
+			roomID,
+			lookup.RoomName,
+			time.Since(startedAt).Milliseconds(),
+			err,
+		)
 		http.Error(w, "failed to load snapshot", http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[canvas] Load success room=%s source=%s bytes=%d", roomID, lookup.Source, len(snapshot))
+	log.Printf(
+		"[canvas] Load success room=%s room_name=%q source=%s bytes=%d elapsed_ms=%d",
+		roomID,
+		lookup.RoomName,
+		lookup.Source,
+		len(snapshot),
+		time.Since(startedAt).Milliseconds(),
+	)
 
 	if len(snapshot) == 0 {
 		w.WriteHeader(http.StatusNoContent)
