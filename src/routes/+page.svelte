@@ -16,7 +16,8 @@
 	import { generateRoomName } from '$lib/utils/nameGenerator';
 	import { setSessionToken } from '$lib/utils/sessionToken';
 	import { onMount } from 'svelte';
-	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[home-client]';
 
 	let roomName = '';
@@ -181,7 +182,7 @@
 							placeholder="e.g. dizzy_panda"
 							bind:value={guestUsername}
 							maxlength="32"
-							pattern="[A-Za-z0-9 _-]+"
+							pattern="[-A-Za-z0-9 _]+"
 						/>
 						<small>Optional. Spaces and dashes are normalized to underscores.</small>
 					</div>

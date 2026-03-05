@@ -1,4 +1,5 @@
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
+const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 const MB = 1024 * 1024;
 const VIDEO_LIMIT_BYTES = 50 * MB;
 

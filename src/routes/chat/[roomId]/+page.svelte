@@ -141,7 +141,8 @@
 	import './page.css';
 
 	const CLIENT_LOG_PREFIX = '[chat-client]';
-	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
 	const TYPING_PING_INTERVAL_MS = 5000;
 	const TYPING_STOP_DELAY_MS = 5000;

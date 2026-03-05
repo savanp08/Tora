@@ -18,7 +18,8 @@
 	import imageCompression from 'browser-image-compression';
 	import { onDestroy, onMount } from 'svelte';
 
-	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const BOARD_WIDTH = 3840;
 	const BOARD_HEIGHT = 2560;
 	const MIN_ZOOM = 0.04;
@@ -236,6 +237,8 @@
 	let removeWindowPointerListener: (() => void) | null = null;
 	let removeWindowResizeListener: (() => void) | null = null;
 	let boardPermissionRefreshKey = '';
+	let lastAppliedBoardTheme = '';
+	let boardThemeRefreshToken = 0;
 
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: normalizedCurrentUserID = normalizeIdentifier(currentUserId);
@@ -255,8 +258,14 @@
 		})
 		.slice(0, 120);
 
+	$: boardThemeKey = isDarkMode ? 'dark' : 'light';
 	$: if (boardReady) {
-		updateBoardVisualTheme();
+		const didThemeChange = lastAppliedBoardTheme !== '' && lastAppliedBoardTheme !== boardThemeKey;
+		updateBoardVisualTheme(isDarkMode);
+		if (didThemeChange) {
+			void rebuildBoardObjectsForTheme();
+		}
+		lastAppliedBoardTheme = boardThemeKey;
 	}
 
 	$: if (boardReady && normalizedRoomId && normalizedRoomId !== initializedRoomId) {
@@ -376,6 +385,8 @@
 		zControlLeft = -9999;
 		zControlTop = -9999;
 		minimapRenderInProgress = false;
+		lastAppliedBoardTheme = '';
+		boardThemeRefreshToken = 0;
 	}
 
 	function registerWindowGuards() {
@@ -595,7 +606,7 @@
 		});
 		fabricCanvas.renderOnAddRemove = true;
 		ensureBoardBoundsObject();
-		updateBoardVisualTheme();
+		updateBoardVisualTheme(isDarkMode);
 		attachFabricListeners();
 		syncCanvasViewportSize(false);
 		captureHistorySnapshot();
@@ -654,17 +665,58 @@
 		boardBoundsRect.sendToBack?.();
 	}
 
-	function updateBoardVisualTheme() {
+	function updateBoardVisualTheme(darkModeEnabled: boolean) {
 		if (!fabricCanvas || !boardBoundsRect) {
 			return;
 		}
 		boardBoundsRect.set?.({
-			fill: isDarkMode ? '#101316' : '#ffffff',
-			stroke: isDarkMode ? '#2f3640' : '#cfd8e3'
+			fill: darkModeEnabled ? '#101316' : '#ffffff',
+			stroke: darkModeEnabled ? '#2f3640' : '#cfd8e3'
 		});
-		fabricCanvas.backgroundColor = isDarkMode ? '#080b0f' : '#edf2f8';
+		fabricCanvas.backgroundColor = darkModeEnabled ? '#080b0f' : '#edf2f8';
 		fabricCanvas.requestRenderAll?.();
 		applyToolMode(activeTool, false);
+	}
+
+	async function rebuildBoardObjectsForTheme() {
+		if (!fabricCanvas || boardLoading) {
+			return;
+		}
+		const refreshToken = ++boardThemeRefreshToken;
+		const objects = fabricCanvas.getObjects?.() ?? [];
+		const elements = objects
+			.filter((object: unknown) => object && object !== boardBoundsRect)
+			.map((object: unknown) => boardObjectToElement(object as FabricObjectLike))
+			.filter((element: BoardElementWire | null): element is BoardElementWire => Boolean(element))
+			.sort((left: BoardElementWire, right: BoardElementWire) => left.zIndex - right.zIndex);
+		const activeObject = fabricCanvas.getActiveObject?.() as FabricObjectLike | null;
+		const activeElementId = normalizeMessageID(
+			toStringValue((activeObject as Record<string, unknown> | null)?.elementId)
+		);
+		beginRemoteApply();
+		try {
+			fabricCanvas.clear();
+			ensureBoardBoundsObject();
+			updateBoardVisualTheme(isDarkMode);
+			zControlVisible = false;
+			for (const element of elements) {
+				if (!fabricCanvas || refreshToken !== boardThemeRefreshToken) {
+					return;
+				}
+				await addOrReplaceElementOnCanvas(element);
+			}
+			if (activeElementId) {
+				const restoredActiveObject = findObjectByElementId(activeElementId);
+				if (restoredActiveObject) {
+					fabricCanvas.setActiveObject?.(restoredActiveObject as any);
+				}
+			}
+			updateSelectionControlsPosition();
+			refreshBoardStats();
+			fabricCanvas.requestRenderAll?.();
+		} finally {
+			endRemoteApply();
+		}
 	}
 
 	function syncCanvasViewportSize(preserveViewport = true) {
@@ -1961,7 +2013,7 @@
 		}
 		fabricCanvas.clear();
 		ensureBoardBoundsObject();
-		updateBoardVisualTheme();
+		updateBoardVisualTheme(isDarkMode);
 		fabricCanvas.discardActiveObject?.();
 		pendingInsertElementId = '';
 		pendingShapeKind = null;

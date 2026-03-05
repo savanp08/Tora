@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { zipSync, unzipSync } from 'fflate';
 	import { initFileSystem as initLightningFS } from '$lib/utils/fs';
+	import { applyUpdate, encodeStateAsUpdate } from 'yjs';
 	import { onDestroy, onMount, tick } from 'svelte';
+	import 'xterm/css/xterm.css';
 
 	export let roomId: string;
 	export let currentUser: { id: string; name: string; color: string };
@@ -63,16 +65,25 @@
 	};
 
 	type MobileCanvasPane = 'explorer' | 'editor';
+	type CanvasSocketPayload = string | ArrayBufferLike | Blob | ArrayBufferView;
+	type CanvasDebugWebSocket = WebSocket & {
+		__canvasDebugOriginalSend?: (data: CanvasSocketPayload) => void;
+		__canvasDebugSendWrapped?: boolean;
+	};
 
 	const DEFAULT_PROJECT_FILE_NAME = 'main.js';
 	const DEFAULT_PROJECT_FILE_CONTENT = "console.log('Hello from Converse canvas');\n";
-	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const textEncoder = new TextEncoder();
 	const textDecoder = new TextDecoder();
 	const QUERY_AWARENESS_MESSAGE_TYPE = 3;
 	const FILE_TREE_SYNC_ORIGIN = 'canvas-file-tree-sync';
-	const PROVIDER_SYNC_TIMEOUT_MS = 1500;
+	const MODEL_SYNC_ORIGIN = 'canvas-model-sync';
+	const PROVIDER_SYNC_TIMEOUT_MS = 8000;
+	const SNAPSHOT_LOAD_TIMEOUT_MS = 5000;
 	const PROMPT_CANCELLED_ERROR = 'canvas-prompt-cancelled';
+	const CANVAS_CLIENT_LOG_PREFIX = '[canvas-client]';
 	let currentFile = '';
 	let openTabs: string[] = [];
 	let fileExplorerError = '';
@@ -84,13 +95,26 @@
 	let expandedDirectories: Record<string, boolean> = {};
 
 	let monacoApi: any = null;
+	let canvasEditorBodyElement: HTMLDivElement | null = null;
 	let editorContainer: HTMLDivElement;
 	let editor: any = null;
+	let terminalContainer: HTMLDivElement | null = null;
+	let terminal: any = null;
+	let terminalFitAddon: any = null;
+	let terminalResizeObserver: ResizeObserver | null = null;
+	let terminalHeight = 200;
+	let terminalResizeStartY = 0;
+	let terminalResizeStartHeight = 200;
 	let yjsApi: any = null;
 	let ydoc: any = null;
 	let yFileTree: any = null;
 	let yFileTreeObserver: ((event: any) => void) | null = null;
+	let ydocUpdateHandler: (() => void) | null = null;
 	let provider: any = null;
+	let providerSnapshotSocket: WebSocket | null = null;
+	let providerSnapshotMessageHandler: ((event: MessageEvent) => void) | null = null;
+	let providerTransportDebugSocket: CanvasDebugWebSocket | null = null;
+	let providerTransportDebugCleanup: (() => void) | null = null;
 	let binding: any = null;
 	let awareness: any = null;
 	let awarenessChangeHandler: (() => void) | null = null;
@@ -123,7 +147,476 @@
 	let remotePresenceStyleElement: HTMLStyleElement | null = null;
 	let removeGlobalContextHandlers: (() => void) | null = null;
 	let removeCanvasViewportListener: (() => void) | null = null;
+	let removeTerminalResizeListeners: (() => void) | null = null;
+	let removeBeforeUnloadListener: (() => void) | null = null;
+	let saveTimeout: number | null = null;
+	let filePersistTimeout: number | null = null;
+	let periodicSnapshotInterval: number | null = null;
+	let snapshotDirty = false;
 	const presenceSessionId = createPresenceSessionId();
+
+	function canvasClientLog(event: string, payload?: unknown) {
+		const timestamp = new Date().toISOString();
+		if (payload === undefined) {
+			console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
+			return;
+		}
+		console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
+	}
+
+	function canvasClientNarrative(message: string, payload?: unknown) {
+		const timestamp = new Date().toISOString();
+		if (payload === undefined) {
+			console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${message}`);
+			return;
+		}
+		console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${message}`, payload);
+	}
+
+	function describeSocketPayload(payload: unknown) {
+		if (typeof payload === 'string') {
+			return { kind: 'text', size: payload.length };
+		}
+		if (payload instanceof ArrayBuffer) {
+			return { kind: 'arraybuffer', size: payload.byteLength };
+		}
+		if (payload instanceof Uint8Array) {
+			return { kind: 'uint8array', size: payload.byteLength };
+		}
+		if (typeof Blob !== 'undefined' && payload instanceof Blob) {
+			return { kind: 'blob', size: payload.size };
+		}
+		if (ArrayBuffer.isView(payload)) {
+			return { kind: 'arraybuffer-view', size: payload.byteLength };
+		}
+		return { kind: typeof payload, size: 0 };
+	}
+
+	function syncCurrentModelIntoYText() {
+		if (!ydoc || !editor || !currentYText) {
+			return;
+		}
+		const model = editor.getModel?.();
+		if (!model) {
+			return;
+		}
+		const modelValue = model.getValue();
+		if (currentYText.toString() === modelValue) {
+			return;
+		}
+		ydoc.transact(() => {
+			syncYTextValue(currentYText, modelValue);
+		}, MODEL_SYNC_ORIGIN);
+	}
+
+	function createCanvasSnapshotBytes() {
+		if (!ydoc) {
+			return null;
+		}
+		syncCurrentModelIntoYText();
+		const snapshot = encodeStateAsUpdate(ydoc);
+		const snapshotBytes = new Uint8Array(snapshot.length);
+		snapshotBytes.set(snapshot);
+		return snapshotBytes;
+	}
+
+	function canvasSnapshotURL() {
+		return `${API_BASE}/api/canvas/${encodeURIComponent(roomId)}/snapshot`;
+	}
+
+	async function saveCanvasSnapshotNow(options?: { useBeacon?: boolean }) {
+		if (!roomId) {
+			return false;
+		}
+		const snapshotBytes = createCanvasSnapshotBytes();
+		if (!snapshotBytes) {
+			return false;
+		}
+		const url = canvasSnapshotURL();
+		if (
+			options?.useBeacon &&
+			typeof navigator !== 'undefined' &&
+			typeof navigator.sendBeacon === 'function'
+		) {
+			canvasClientNarrative(`Room ${roomId} sending snapshot with beacon.`, {
+				url,
+				bytes: snapshotBytes.byteLength
+			});
+			canvasClientLog('snapshot-save-beacon-request', {
+				roomId,
+				url,
+				bytes: snapshotBytes.byteLength
+			});
+			const beaconQueued = navigator.sendBeacon(
+				url,
+				new Blob([snapshotBytes], { type: 'application/octet-stream' })
+			);
+			canvasClientLog('snapshot-save-beacon-response', {
+				roomId,
+				queued: beaconQueued
+			});
+			canvasClientNarrative(`Room ${roomId} beacon snapshot queue result.`, {
+				queued: beaconQueued
+			});
+			if (beaconQueued) {
+				snapshotDirty = false;
+			}
+			return beaconQueued;
+		}
+		try {
+			const requestStartedAt = Date.now();
+			canvasClientNarrative(`Room ${roomId} sending snapshot with HTTP POST.`, {
+				url,
+				bytes: snapshotBytes.byteLength
+			});
+			canvasClientLog('snapshot-save-http-request', {
+				roomId,
+				url,
+				bytes: snapshotBytes.byteLength
+			});
+			const response = await fetch(url, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/octet-stream'
+				},
+				body: snapshotBytes
+			});
+			canvasClientLog('snapshot-save-http-response', {
+				roomId,
+				status: response.status,
+				ok: response.ok
+			});
+			canvasClientNarrative(`Room ${roomId} snapshot POST completed.`, {
+				status: response.status,
+				ok: response.ok,
+				elapsedMs: Date.now() - requestStartedAt
+			});
+			if (response.ok) {
+				snapshotDirty = false;
+			}
+			return response.ok;
+		} catch (error) {
+			canvasClientLog('snapshot-save-http-error', {
+				roomId,
+				error: error instanceof Error ? error.message : String(error)
+			});
+			canvasClientNarrative(`Room ${roomId} snapshot POST failed.`, {
+				error: error instanceof Error ? error.message : String(error)
+			});
+			return false;
+		}
+	}
+	function scheduleCanvasSnapshotSave() {
+		if (!ydoc || !roomId) {
+			return;
+		}
+		snapshotDirty = true;
+		if (saveTimeout) {
+			window.clearTimeout(saveTimeout);
+			saveTimeout = null;
+		}
+		saveTimeout = window.setTimeout(async () => {
+			await saveCanvasSnapshotNow();
+			saveTimeout = null;
+		}, 1500);
+	}
+
+	function scheduleCurrentFilePersistToFS() {
+		if (filePersistTimeout) {
+			window.clearTimeout(filePersistTimeout);
+			filePersistTimeout = null;
+		}
+		filePersistTimeout = window.setTimeout(() => {
+			void persistCurrentFileToFS();
+			filePersistTimeout = null;
+		}, 800);
+	}
+
+	function canvasWebSocketURL() {
+		try {
+			const baseURL = new URL(API_BASE, window.location.origin);
+			const wsProtocol = baseURL.protocol === 'https:' ? 'wss:' : 'ws:';
+			return `${wsProtocol}//${baseURL.host}/ws/canvas`;
+		} catch {
+			const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+			return `${wsProtocol}//${window.location.host}/ws/canvas`;
+		}
+	}
+
+	function registerBeforeUnloadPersistence() {
+		const persistWithBeacon = () => {
+			void persistCurrentFileToFS();
+			void saveCanvasSnapshotNow({ useBeacon: true });
+		};
+		const handleBeforeUnload = () => {
+			persistWithBeacon();
+		};
+		const handlePageHide = () => {
+			persistWithBeacon();
+		};
+		const handleVisibilityChange = () => {
+			if (document.visibilityState === 'hidden') {
+				persistWithBeacon();
+			}
+		};
+		window.addEventListener('beforeunload', handleBeforeUnload);
+		window.addEventListener('pagehide', handlePageHide);
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		return () => {
+			window.removeEventListener('beforeunload', handleBeforeUnload);
+			window.removeEventListener('pagehide', handlePageHide);
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+		};
+	}
+
+	async function loadPersistedCanvasSnapshotFromServer() {
+		if (!roomId || !ydoc) {
+			return;
+		}
+		let timeoutId: number | null = null;
+		try {
+			const url = `${API_BASE}/api/canvas/${encodeURIComponent(roomId)}/snapshot`;
+			const requestStartedAt = Date.now();
+			const controller = new AbortController();
+			timeoutId = window.setTimeout(() => {
+				controller.abort();
+			}, SNAPSHOT_LOAD_TIMEOUT_MS);
+			canvasClientNarrative(`Room ${roomId} requested full canvas snapshot from server.`, {
+				url,
+				timeoutMs: SNAPSHOT_LOAD_TIMEOUT_MS
+			});
+			canvasClientLog('snapshot-load-http-request', { roomId, url });
+			const response = await fetch(url, {
+				method: 'GET',
+				cache: 'no-store',
+				signal: controller.signal
+			});
+			canvasClientLog('snapshot-load-http-response', {
+				roomId,
+				status: response.status,
+				ok: response.ok
+			});
+			canvasClientNarrative(`Room ${roomId} snapshot GET completed.`, {
+				status: response.status,
+				ok: response.ok,
+				elapsedMs: Date.now() - requestStartedAt
+			});
+			if (response.status === 204 || response.status === 404) {
+				canvasClientLog('snapshot-load-empty', { roomId, status: response.status });
+				canvasClientNarrative(`Room ${roomId} has no snapshot on server.`, {
+					status: response.status
+				});
+				return;
+			}
+			if (!response.ok) {
+				canvasClientLog('snapshot-load-non-ok', { roomId, status: response.status });
+				canvasClientNarrative(`Room ${roomId} snapshot GET failed with non-OK status.`, {
+					status: response.status
+				});
+				return;
+			}
+			const snapshot = new Uint8Array(await response.arrayBuffer());
+			if (snapshot.length === 0) {
+				canvasClientLog('snapshot-load-zero-bytes', { roomId });
+				canvasClientNarrative(`Room ${roomId} snapshot response returned zero bytes.`);
+				return;
+			}
+			applyUpdate(ydoc, snapshot);
+			canvasClientLog('snapshot-load-applied', { roomId, bytes: snapshot.byteLength });
+			canvasClientNarrative(`Room ${roomId} snapshot applied to Yjs document.`, {
+				bytes: snapshot.byteLength
+			});
+		} catch (error) {
+			const isAbortError =
+				(error instanceof DOMException && error.name === 'AbortError') ||
+				(error instanceof Error && error.name === 'AbortError');
+			canvasClientLog('snapshot-load-http-error', {
+				roomId,
+				error: error instanceof Error ? error.message : String(error)
+			});
+			if (isAbortError) {
+				canvasClientNarrative(`Room ${roomId} snapshot GET timed out.`, {
+					timeoutMs: SNAPSHOT_LOAD_TIMEOUT_MS
+				});
+			} else {
+				canvasClientNarrative(`Room ${roomId} snapshot GET failed.`, {
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
+			// Ignore transient snapshot load failures.
+		} finally {
+			if (timeoutId !== null) {
+				window.clearTimeout(timeoutId);
+			}
+		}
+	}
+
+	async function configureMonacoWorkerEnvironment() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		const globalWindow = window as Window & {
+			MonacoEnvironment?: {
+				getWorker?: (moduleId: string, label: string) => Worker;
+			};
+		};
+		if (typeof globalWindow.MonacoEnvironment?.getWorker === 'function') {
+			return;
+		}
+		const [
+			{ default: EditorWorker },
+			{ default: JsonWorker },
+			{ default: CssWorker },
+			{ default: HtmlWorker },
+			{ default: TsWorker }
+		] = await Promise.all([
+			import('monaco-editor/esm/vs/editor/editor.worker?worker'),
+			import('monaco-editor/esm/vs/language/json/json.worker?worker'),
+			import('monaco-editor/esm/vs/language/css/css.worker?worker'),
+			import('monaco-editor/esm/vs/language/html/html.worker?worker'),
+			import('monaco-editor/esm/vs/language/typescript/ts.worker?worker')
+		]);
+		globalWindow.MonacoEnvironment = {
+			...(globalWindow.MonacoEnvironment || {}),
+			getWorker: (_moduleId: string, label: string) => {
+				switch (label) {
+					case 'json':
+						return new JsonWorker();
+					case 'css':
+					case 'scss':
+					case 'less':
+						return new CssWorker();
+					case 'html':
+					case 'handlebars':
+					case 'razor':
+						return new HtmlWorker();
+					case 'typescript':
+					case 'javascript':
+						return new TsWorker();
+					default:
+						return new EditorWorker();
+				}
+			}
+		};
+	}
+	function detachProviderSnapshotListener() {
+		if (providerSnapshotSocket && providerSnapshotMessageHandler) {
+			providerSnapshotSocket.removeEventListener('message', providerSnapshotMessageHandler);
+		}
+		providerSnapshotSocket = null;
+		providerSnapshotMessageHandler = null;
+	}
+
+	function detachProviderTransportDebugListener() {
+		if (providerTransportDebugCleanup) {
+			providerTransportDebugCleanup();
+			providerTransportDebugCleanup = null;
+		}
+		providerTransportDebugSocket = null;
+	}
+
+	function attachProviderTransportDebugListener() {
+		const socket = provider?.ws as CanvasDebugWebSocket | null;
+		if (!socket || providerTransportDebugSocket === socket) {
+			return;
+		}
+		detachProviderTransportDebugListener();
+		const onOpen = () => {
+			canvasClientLog('ws-open', { roomId });
+		};
+		const onClose = (event: CloseEvent) => {
+			canvasClientLog('ws-close', {
+				roomId,
+				code: event.code,
+				reason: event.reason,
+				wasClean: event.wasClean
+			});
+		};
+		const onError = () => {
+			canvasClientLog('ws-error', { roomId });
+		};
+		const onMessage = (event: MessageEvent) => {
+			canvasClientLog('ws-recv', { roomId, ...describeSocketPayload(event.data) });
+		};
+		socket.addEventListener('open', onOpen);
+		socket.addEventListener('close', onClose);
+		socket.addEventListener('error', onError);
+		socket.addEventListener('message', onMessage);
+		if (!socket.__canvasDebugSendWrapped) {
+			const originalSend = socket.send.bind(socket) as (data: CanvasSocketPayload) => void;
+			socket.__canvasDebugOriginalSend = originalSend;
+			socket.send = ((data: CanvasSocketPayload) => {
+				canvasClientLog('ws-send', { roomId, ...describeSocketPayload(data) });
+				originalSend(data);
+			}) as typeof socket.send;
+			socket.__canvasDebugSendWrapped = true;
+		}
+		providerTransportDebugSocket = socket;
+		providerTransportDebugCleanup = () => {
+			socket.removeEventListener('open', onOpen);
+			socket.removeEventListener('close', onClose);
+			socket.removeEventListener('error', onError);
+			socket.removeEventListener('message', onMessage);
+			if (socket.__canvasDebugSendWrapped && socket.__canvasDebugOriginalSend) {
+				socket.send = socket.__canvasDebugOriginalSend as typeof socket.send;
+				delete socket.__canvasDebugOriginalSend;
+				delete socket.__canvasDebugSendWrapped;
+			}
+		};
+		canvasClientLog('ws-debug-attached', { roomId });
+	}
+
+	function attachProviderSnapshotListener() {
+		const socket = provider?.ws as WebSocket | null;
+		if (!socket || providerSnapshotSocket === socket) {
+			return;
+		}
+		detachProviderSnapshotListener();
+		canvasClientLog('ws-snapshot-listener-attached', { roomId });
+		let shouldCaptureInitialBinaryMessage = true;
+		const handleMessage = (event: MessageEvent) => {
+			if (!shouldCaptureInitialBinaryMessage || !ydoc) {
+				return;
+			}
+			const applyInitialSnapshot = (payload: Uint8Array) => {
+				if (!shouldCaptureInitialBinaryMessage || !ydoc) {
+					return;
+				}
+				shouldCaptureInitialBinaryMessage = false;
+				try {
+					applyUpdate(ydoc, payload);
+					canvasClientLog('ws-initial-snapshot-applied', { roomId, bytes: payload.byteLength });
+				} catch {
+					canvasClientLog('ws-initial-snapshot-ignored', { roomId, bytes: payload.byteLength });
+					// Ignore non-snapshot binary protocol packets.
+				}
+			};
+			if (event.data instanceof ArrayBuffer) {
+				applyInitialSnapshot(new Uint8Array(event.data));
+				return;
+			}
+			if (event.data instanceof Blob) {
+				void event.data
+					.arrayBuffer()
+					.then((arrayBuffer) => {
+						applyInitialSnapshot(new Uint8Array(arrayBuffer));
+					})
+					.catch(() => {
+						shouldCaptureInitialBinaryMessage = false;
+						canvasClientLog('ws-initial-snapshot-blob-read-failed', { roomId });
+					});
+				return;
+			}
+			if (event.data instanceof Uint8Array) {
+				applyInitialSnapshot(event.data);
+				return;
+			}
+			shouldCaptureInitialBinaryMessage = false;
+		};
+		socket.addEventListener('message', handleMessage);
+		providerSnapshotSocket = socket;
+		providerSnapshotMessageHandler = handleMessage;
+	}
 
 	// Automatically detect language from the file extension
 	function getLanguageFromExtension(filename: string) {
@@ -474,11 +967,16 @@
 	function waitForInitialProviderSync() {
 		return new Promise<void>((resolve) => {
 			if (!provider || typeof provider.on !== 'function') {
+				canvasClientLog('provider-sync-skip-no-provider', { roomId });
 				resolve();
 				return;
 			}
+			canvasClientLog('provider-sync-wait-start', {
+				roomId,
+				timeoutMs: PROVIDER_SYNC_TIMEOUT_MS
+			});
 			let settled = false;
-			const finish = () => {
+			const finish = (reason: 'synced' | 'timeout') => {
 				if (settled) {
 					return;
 				}
@@ -487,14 +985,18 @@
 					provider.off('sync', handleSync);
 				}
 				window.clearTimeout(timeoutId);
+				canvasClientLog('provider-sync-wait-finish', { roomId, reason });
 				resolve();
 			};
 			const handleSync = (isSynced: boolean) => {
+				canvasClientLog('provider-sync-event', { roomId, isSynced });
 				if (isSynced) {
-					finish();
+					finish('synced');
 				}
 			};
-			const timeoutId = window.setTimeout(finish, PROVIDER_SYNC_TIMEOUT_MS);
+			const timeoutId = window.setTimeout(() => {
+				finish('timeout');
+			}, PROVIDER_SYNC_TIMEOUT_MS);
 			provider.on('sync', handleSync);
 		});
 	}
@@ -739,6 +1241,119 @@
 		await deleteEntry(target);
 	}
 
+	function scheduleTerminalFit() {
+		requestAnimationFrame(() => {
+			terminalFitAddon?.fit();
+		});
+	}
+
+	function writeTerminalLine(message: string) {
+		terminal?.writeln(message);
+	}
+
+	function clearTerminal() {
+		terminal?.clear();
+	}
+
+	function formatTerminalArg(value: unknown) {
+		if (typeof value === 'string') {
+			return value;
+		}
+		if (
+			typeof value === 'number' ||
+			typeof value === 'boolean' ||
+			value == null ||
+			typeof value === 'bigint'
+		) {
+			return String(value);
+		}
+		if (value instanceof Error) {
+			return value.stack || value.message;
+		}
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return String(value);
+		}
+	}
+
+	function getTerminalResizeBounds() {
+		const editorBodyHeight = canvasEditorBodyElement?.clientHeight ?? 0;
+		return {
+			min: 120,
+			max: Math.max(160, editorBodyHeight - 180)
+		};
+	}
+
+	function handleTerminalResizeMove(event: PointerEvent) {
+		const deltaY = terminalResizeStartY - event.clientY;
+		const { min, max } = getTerminalResizeBounds();
+		terminalHeight = Math.max(min, Math.min(max, terminalResizeStartHeight + deltaY));
+		scheduleTerminalFit();
+	}
+
+	function stopTerminalResize() {
+		document.body.style.removeProperty('cursor');
+		document.body.style.removeProperty('user-select');
+		if (removeTerminalResizeListeners) {
+			removeTerminalResizeListeners();
+			removeTerminalResizeListeners = null;
+		}
+	}
+
+	function startTerminalResize(event: PointerEvent) {
+		terminalResizeStartY = event.clientY;
+		terminalResizeStartHeight = terminalHeight;
+		document.body.style.cursor = 'row-resize';
+		document.body.style.userSelect = 'none';
+		const onPointerMove = (pointerEvent: PointerEvent) => {
+			handleTerminalResizeMove(pointerEvent);
+		};
+		const onPointerUp = () => {
+			stopTerminalResize();
+		};
+		window.addEventListener('pointermove', onPointerMove);
+		window.addEventListener('pointerup', onPointerUp);
+		removeTerminalResizeListeners = () => {
+			window.removeEventListener('pointermove', onPointerMove);
+			window.removeEventListener('pointerup', onPointerUp);
+		};
+		event.preventDefault();
+	}
+
+	async function initializeTerminal() {
+		if (!terminalContainer || terminal || typeof window === 'undefined') {
+			return;
+		}
+		const [{ Terminal }, { FitAddon }] = await Promise.all([
+			import('xterm'),
+			import('@xterm/addon-fit')
+		]);
+		terminal = new Terminal({
+			theme: {
+				background: '#1e1e1e',
+				foreground: '#d8e1f2',
+				cursor: '#7dd3fc',
+				selectionBackground: 'rgba(125, 211, 252, 0.22)'
+			},
+			convertEol: true,
+			fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+			fontSize: 12,
+			lineHeight: 1.25
+		});
+		terminalFitAddon = new FitAddon();
+		terminal.loadAddon(terminalFitAddon);
+		terminal.open(terminalContainer);
+		scheduleTerminalFit();
+		writeTerminalLine('\x1b[32mWelcome to Converse Terminal...\x1b[0m');
+		if (typeof ResizeObserver !== 'undefined') {
+			terminalResizeObserver = new ResizeObserver(() => {
+				scheduleTerminalFit();
+			});
+			terminalResizeObserver.observe(terminalContainer);
+		}
+	}
+
 	function escapeCSSContent(value: string) {
 		return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ');
 	}
@@ -765,6 +1380,25 @@
 			color: currentUser?.color || '#58a6ff',
 			sessionId: presenceSessionId
 		};
+	}
+
+	function isSelfPresenceState(clientId: number | string, state: any) {
+		if (!awareness) {
+			return false;
+		}
+		if (String(clientId) === String(awareness.clientID)) {
+			return true;
+		}
+		const localUserId = String(currentUser?.id || '');
+		const stateUserId = String(state?.user?.id || '');
+		if (localUserId && stateUserId && localUserId === stateUserId) {
+			return true;
+		}
+		const stateSessionId = String(state?.user?.sessionId || '');
+		if (stateSessionId && stateSessionId === presenceSessionId) {
+			return true;
+		}
+		return false;
 	}
 
 	function syncLocalPresenceMetadata() {
@@ -809,7 +1443,7 @@
 		}
 		const lines: string[] = [];
 		for (const [clientId, state] of awareness.getStates().entries()) {
-			if (String(clientId) === String(awareness.clientID)) {
+			if (isSelfPresenceState(clientId, state)) {
 				continue;
 			}
 			const color = resolvePresenceColor(state?.user?.color);
@@ -884,7 +1518,7 @@
 			};
 		}> = [];
 		for (const [clientId, state] of awareness.getStates().entries()) {
-			if (String(clientId) === String(awareness.clientID)) {
+			if (isSelfPresenceState(clientId, state)) {
 				continue;
 			}
 			if (state?.currentFile !== currentFile) {
@@ -988,6 +1622,40 @@
 
 	function firstFileEntry() {
 		return fileTree.find((entry) => !entry.isDir) ?? null;
+	}
+
+	async function ensureWorkspaceHasAtLeastOneFile() {
+		const existingFile = firstFileEntry();
+		if (existingFile) {
+			return false;
+		}
+		const bootstrapPath = `/project/${DEFAULT_PROJECT_FILE_NAME}`;
+		await ensureProjectDirectory();
+		await getActiveFS().promises.writeFile(bootstrapPath, DEFAULT_PROJECT_FILE_CONTENT);
+		await upsertSharedEntries([
+			{
+				relativePath: DEFAULT_PROJECT_FILE_NAME,
+				isDir: false,
+				content: DEFAULT_PROJECT_FILE_CONTENT
+			}
+		]);
+		await refreshFileTree();
+		return true;
+	}
+
+	function selectInitialFileFromTree() {
+		const firstEntry = firstFileEntry();
+		if (!firstEntry) {
+			return false;
+		}
+		const firstRelativePath = normalizeProjectName(firstEntry.relativePath || firstEntry.name);
+		if (!firstRelativePath) {
+			return false;
+		}
+		currentFile = firstRelativePath;
+		openTabs = [firstRelativePath];
+		expandedDirectories = ensureExpandedDirectoriesForPath(firstRelativePath);
+		return true;
 	}
 
 	async function initFileSystem(options?: { createDefaultIfEmpty?: boolean }) {
@@ -1148,8 +1816,8 @@
 		}
 		if (entry.isFile) {
 			const file = await readFileFromEntry(entry);
-			const text = await file.text();
-			await getActiveFS().promises.writeFile(targetPath, text);
+			const bytes = new Uint8Array(await file.arrayBuffer());
+			await getActiveFS().promises.writeFile(targetPath, bytes);
 			return;
 		}
 		await mkdirIfMissing(targetPath);
@@ -1178,10 +1846,14 @@
 				}
 				continue;
 			}
-			const textContent = String(
-				await getActiveFS().promises.readFile(fullPath, { encoding: 'utf8' })
-			);
-			zipEntries[`${relativePrefix}${name}`] = textEncoder.encode(textContent);
+			const rawContent = await getActiveFS().promises.readFile(fullPath);
+			if (typeof rawContent === 'string') {
+				zipEntries[`${relativePrefix}${name}`] = textEncoder.encode(rawContent);
+				continue;
+			}
+			const fileBytes =
+				rawContent instanceof Uint8Array ? rawContent : new Uint8Array(rawContent);
+			zipEntries[`${relativePrefix}${name}`] = new Uint8Array(fileBytes);
 		}
 		return zipEntries;
 	}
@@ -1370,7 +2042,20 @@
 			if (ref) {
 				searchParams.set('ref', ref);
 			}
-			const response = await fetch(`${API_BASE}/api/canvas/github-archive?${searchParams}`);
+			const githubArchiveURL = `${API_BASE}/api/canvas/github-archive?${searchParams}`;
+			canvasClientLog('github-archive-request', {
+				roomId,
+				owner,
+				repo,
+				ref: ref || '',
+				url: githubArchiveURL
+			});
+			const response = await fetch(githubArchiveURL);
+			canvasClientLog('github-archive-response', {
+				roomId,
+				status: response.status,
+				ok: response.ok
+			});
 			if (!response.ok) {
 				let errorMessage = `GitHub import failed (${response.status})`;
 				try {
@@ -1384,6 +2069,7 @@
 				throw new Error(errorMessage);
 			}
 			const zippedBytes = new Uint8Array(await response.arrayBuffer());
+			canvasClientLog('github-archive-bytes', { roomId, bytes: zippedBytes.byteLength });
 			const unzipped = unzipSync(zippedBytes);
 			await ensureProjectDirectory();
 			await writeUnzippedEntriesToProject(unzipped, { stripRootFolder: true });
@@ -1404,6 +2090,10 @@
 				await clearActiveEditor();
 			}
 		} catch (error) {
+			canvasClientLog('github-archive-error', {
+				roomId,
+				error: error instanceof Error ? error.message : String(error)
+			});
 			fileExplorerError = error instanceof Error ? error.message : 'Failed to import repository';
 		} finally {
 			isImportingRepo = false;
@@ -1881,25 +2571,58 @@
 		const target = entry && !entry.isDir ? entry : currentFileEntry();
 		if (!target || target.isDir) {
 			fileExplorerError = 'Select a file to run';
+			writeTerminalLine('\x1b[31mSelect a file to run.\x1b[0m');
 			return;
 		}
 		const extension = target.name.split('.').pop()?.toLowerCase() || '';
 		if (!['js', 'mjs', 'cjs'].includes(extension)) {
 			fileExplorerError = 'Run File currently supports JavaScript files (.js, .mjs, .cjs)';
+			writeTerminalLine(
+				'\x1b[33mRun File currently supports JavaScript files (.js, .mjs, .cjs).\x1b[0m'
+			);
 			return;
 		}
 		fileExplorerError = '';
 		try {
+			clearTerminal();
+			writeTerminalLine(`\x1b[36m> Executing ${target.name}...\x1b[0m`);
 			let source = '';
 			if (target.relativePath === currentFile && editor?.getModel?.()) {
 				source = String(editor.getModel().getValue() || '');
 			} else {
 				source = String(await getActiveFS().promises.readFile(target.path, { encoding: 'utf8' }));
 			}
-			const execute = new Function('console', `"use strict";\n${source}`);
-			execute(console);
+			const customConsole = {
+				log: (...args: unknown[]) =>
+					writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' ')),
+				info: (...args: unknown[]) =>
+					writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' ')),
+				warn: (...args: unknown[]) =>
+					writeTerminalLine(
+						`\x1b[33m${args.map((arg) => formatTerminalArg(arg)).join(' ')}\x1b[0m`
+					),
+				error: (...args: unknown[]) =>
+					writeTerminalLine(
+						`\x1b[31m${args.map((arg) => formatTerminalArg(arg)).join(' ')}\x1b[0m`
+					),
+				debug: (...args: unknown[]) =>
+					writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' ')),
+				clear: () => clearTerminal()
+			};
+			const customPrint = (...args: unknown[]) =>
+				writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' '));
+			const execute = new Function(
+				'console',
+				'print',
+				`"use strict";\nreturn (async () => {\n${source}\n})();`
+			) as (consoleObject: typeof customConsole, printFunction: typeof customPrint) => unknown;
+			await Promise.resolve(execute(customConsole, customPrint));
+			writeTerminalLine('\x1b[32m> Script finished.\x1b[0m');
 		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : 'Run failed';
 			fileExplorerError = error instanceof Error ? `Run failed: ${error.message}` : 'Run failed';
+			writeTerminalLine(`\x1b[31m${errorMessage}\x1b[0m`);
+			writeTerminalLine('\x1b[31m> Script failed.\x1b[0m');
 		}
 	}
 
@@ -2071,6 +2794,14 @@
 		isExplorerEntryVisible(entry, expandedDirectories)
 	);
 
+	$: if (canvasEditorBodyElement) {
+		const { min, max } = getTerminalResizeBounds();
+		const clampedHeight = Math.max(min, Math.min(max, terminalHeight));
+		if (clampedHeight !== terminalHeight) {
+			terminalHeight = clampedHeight;
+		}
+	}
+
 	function registerGlobalContextHandlers() {
 		const onPointerDown = (event: PointerEvent) => {
 			if (!contextMenuOpen) {
@@ -2105,160 +2836,219 @@
 	}
 
 	onMount(async () => {
-		removeGlobalContextHandlers = registerGlobalContextHandlers();
-		const compactCanvasMediaQuery = window.matchMedia('(max-width: 900px)');
-		const handleCompactCanvasChange = (event: MediaQueryListEvent) => {
-			syncCanvasViewportState(event.matches);
-		};
-		syncCanvasViewportState(compactCanvasMediaQuery.matches);
-		if (typeof compactCanvasMediaQuery.addEventListener === 'function') {
-			compactCanvasMediaQuery.addEventListener('change', handleCompactCanvasChange);
-			removeCanvasViewportListener = () =>
-				compactCanvasMediaQuery.removeEventListener('change', handleCompactCanvasChange);
-		} else {
-			compactCanvasMediaQuery.addListener(handleCompactCanvasChange);
-			removeCanvasViewportListener = () =>
-				compactCanvasMediaQuery.removeListener(handleCompactCanvasChange);
-		}
-		vfs = await initLightningFS(roomId);
-		if (!vfs) {
-			fileExplorerError = 'File system is unavailable in this environment';
-			return;
-		}
-
-		const monaco = await import('monaco-editor');
-		const Y = await import('yjs');
-		const { WebsocketProvider } = await import('y-websocket');
-		const { MonacoBinding } = await import('y-monaco');
-		monacoApi = monaco;
-		yjsApi = Y;
-
-		editor = monaco.editor.create(editorContainer, {
-			theme: 'vs-dark',
-			language: 'plaintext',
-			automaticLayout: true,
-			padding: { top: 16, bottom: 16 },
-			fontFamily: "'Fira Code', 'JetBrains Mono', monospace",
-			fontLigatures: true,
-			minimap: { enabled: false },
-			scrollbar: {
-				verticalScrollbarSize: 8,
-				horizontalScrollbarSize: 8
-			},
-			roundedSelection: true,
-			renderLineHighlight: 'all'
-		});
-
-		const model = editor.getModel();
-		if (!model) {
-			return;
-		}
-		cursorSelectionDisposable = editor.onDidChangeCursorSelection(() => {
-			syncLocalSelectionState();
-			renderRemoteSelections();
-		});
-		editorContentChangeDisposable = model.onDidChangeContent(() => {
-			renderRemoteSelections();
-		});
-
-		ydoc = new Y.Doc();
-		yFileTree = ydoc.getMap('fileTree');
-		yFileTreeObserver = (event: any) => {
-			if (event.transaction.local) {
+		try {
+			canvasClientLog('init-start', { roomId });
+			removeGlobalContextHandlers = registerGlobalContextHandlers();
+			removeBeforeUnloadListener = registerBeforeUnloadPersistence();
+			await initializeTerminal();
+			const compactCanvasMediaQuery = window.matchMedia('(max-width: 900px)');
+			const handleCompactCanvasChange = (event: MediaQueryListEvent) => {
+				syncCanvasViewportState(event.matches);
+			};
+			syncCanvasViewportState(compactCanvasMediaQuery.matches);
+			if (typeof compactCanvasMediaQuery.addEventListener === 'function') {
+				compactCanvasMediaQuery.addEventListener('change', handleCompactCanvasChange);
+				removeCanvasViewportListener = () =>
+					compactCanvasMediaQuery.removeEventListener('change', handleCompactCanvasChange);
+			} else {
+				compactCanvasMediaQuery.addListener(handleCompactCanvasChange);
+				removeCanvasViewportListener = () =>
+					compactCanvasMediaQuery.removeListener(handleCompactCanvasChange);
+			}
+			vfs = await initLightningFS(roomId);
+			if (!vfs) {
+				fileExplorerError = 'File system is unavailable in this environment';
+				canvasClientLog('init-fs-unavailable', { roomId });
 				return;
 			}
-			void (async () => {
-				const deletions: string[] = [];
-				const upserts: Array<{ relativePath: string; entry: SharedFileTreeEntry | null }> = [];
-				for (const [key, change] of event.changes.keys.entries()) {
-					const relativePath = normalizeProjectName(String(key));
-					if (!relativePath) {
-						continue;
+			canvasClientLog('init-fs-ready', { roomId });
+
+			await configureMonacoWorkerEnvironment();
+			const monaco = await import('monaco-editor');
+			const Y = await import('yjs');
+			const { WebsocketProvider } = await import('y-websocket');
+			const { MonacoBinding } = await import('y-monaco');
+			monacoApi = monaco;
+			yjsApi = Y;
+
+			editor = monaco.editor.create(editorContainer, {
+				theme: 'vs-dark',
+				language: 'plaintext',
+				automaticLayout: true,
+				padding: { top: 16, bottom: 16 },
+				fontFamily: "'Fira Code', 'JetBrains Mono', monospace",
+				fontLigatures: true,
+				minimap: { enabled: false },
+				scrollbar: {
+					verticalScrollbarSize: 8,
+					horizontalScrollbarSize: 8
+				},
+				roundedSelection: true,
+				renderLineHighlight: 'all'
+			});
+
+			const model = editor.getModel();
+			if (!model) {
+				return;
+			}
+			cursorSelectionDisposable = editor.onDidChangeCursorSelection(() => {
+				syncLocalSelectionState();
+				renderRemoteSelections();
+			});
+			editorContentChangeDisposable = model.onDidChangeContent(() => {
+				renderRemoteSelections();
+				scheduleCurrentFilePersistToFS();
+			});
+
+			ydoc = new Y.Doc();
+			ydocUpdateHandler = () => {
+				scheduleCanvasSnapshotSave();
+			};
+			ydoc.on('update', ydocUpdateHandler);
+			if (periodicSnapshotInterval) {
+				window.clearInterval(periodicSnapshotInterval);
+				periodicSnapshotInterval = null;
+			}
+			periodicSnapshotInterval = window.setInterval(() => {
+				if (!snapshotDirty) {
+					return;
+				}
+				void saveCanvasSnapshotNow();
+			}, 15000);
+			yFileTree = ydoc.getMap('fileTree');
+			yFileTreeObserver = (event: any) => {
+				if (event.transaction.local) {
+					return;
+				}
+				void (async () => {
+					const deletions: string[] = [];
+					const upserts: Array<{ relativePath: string; entry: SharedFileTreeEntry | null }> = [];
+					for (const [key, change] of event.changes.keys.entries()) {
+						const relativePath = normalizeProjectName(String(key));
+						if (!relativePath) {
+							continue;
+						}
+						if (change.action === 'delete') {
+							deletions.push(relativePath);
+							continue;
+						}
+						upserts.push({
+							relativePath,
+							entry: normalizeSharedTreeEntry(yFileTree.get(relativePath))
+						});
 					}
-					if (change.action === 'delete') {
-						deletions.push(relativePath);
-						continue;
+					deletions.sort((left, right) => right.split('/').length - left.split('/').length);
+					for (const relativePath of deletions) {
+						await applySharedTreeEntry(relativePath, null, 'delete');
 					}
-					upserts.push({
-						relativePath,
-						entry: normalizeSharedTreeEntry(yFileTree.get(relativePath))
+					upserts.sort((left, right) => {
+						const leftDepth = left.relativePath.split('/').length;
+						const rightDepth = right.relativePath.split('/').length;
+						if (left.entry?.isDir !== right.entry?.isDir) {
+							return left.entry?.isDir ? -1 : 1;
+						}
+						return leftDepth - rightDepth;
 					});
-				}
-				deletions.sort((left, right) => right.split('/').length - left.split('/').length);
-				for (const relativePath of deletions) {
-					await applySharedTreeEntry(relativePath, null, 'delete');
-				}
-				upserts.sort((left, right) => {
-					const leftDepth = left.relativePath.split('/').length;
-					const rightDepth = right.relativePath.split('/').length;
-					if (left.entry?.isDir !== right.entry?.isDir) {
-						return left.entry?.isDir ? -1 : 1;
+					for (const update of upserts) {
+						await applySharedTreeEntry(update.relativePath, update.entry, 'add');
 					}
-					return leftDepth - rightDepth;
-				});
-				for (const update of upserts) {
-					await applySharedTreeEntry(update.relativePath, update.entry, 'add');
+					await refreshFileTree();
+					await syncOpenTabsWithFileTree();
+				})();
+			};
+			yFileTree.observe(yFileTreeObserver);
+			const wsURL = canvasWebSocketURL();
+			canvasClientLog('provider-create', { roomId, wsURL });
+			provider = new WebsocketProvider(wsURL, roomId, ydoc);
+			awareness = provider.awareness;
+			syncLocalPresenceMetadata();
+			provider.on('status', (event: { status: string }) => {
+				canvasClientLog('provider-status', { roomId, status: event.status });
+				if (event.status === 'connected') {
+					attachProviderTransportDebugListener();
+					attachProviderSnapshotListener();
+					syncLocalPresenceMetadata();
+					syncLocalSelectionState();
 				}
+			});
+			provider.on('connection-error', () => {
+				canvasClientLog('provider-connection-error', { roomId });
+			});
+			provider.on('connection-close', (event: CloseEvent | null) => {
+				canvasClientLog('provider-connection-close', {
+					roomId,
+					code: event?.code ?? 0,
+					reason: event?.reason ?? '',
+					wasClean: event?.wasClean ?? false
+				});
+			});
+			const defaultQueryAwarenessHandler = provider.messageHandlers[QUERY_AWARENESS_MESSAGE_TYPE];
+			provider.messageHandlers[QUERY_AWARENESS_MESSAGE_TYPE] = (
+				encoder: unknown,
+				decoder: unknown,
+				wsProvider: unknown,
+				emitSynced: boolean,
+				messageType: number
+			) => {
+				canvasClientLog('provider-query-awareness', { roomId });
+				if (typeof defaultQueryAwarenessHandler === 'function') {
+					defaultQueryAwarenessHandler(encoder, decoder, wsProvider, emitSynced, messageType);
+				}
+			};
+			awarenessChangeHandler = () => {
+				void handleAwarenessChange();
+			};
+			awareness.on('change', awarenessChangeHandler);
+			attachProviderTransportDebugListener();
+			attachProviderSnapshotListener();
+
+			// Keep type reference alive for dynamic import consistency.
+			void MonacoBinding;
+
+			await waitForInitialProviderSync();
+			if (yFileTree.size === 0) {
+				canvasClientNarrative(
+					`Room ${roomId} provider sync returned empty file tree; trying HTTP snapshot fallback.`
+				);
+				await loadPersistedCanvasSnapshotFromServer();
+			}
+			await initFileSystem({ createDefaultIfEmpty: yFileTree.size === 0 });
+			if (yFileTree.size > 0) {
+				await reconcileLocalFileSystemWithSharedTree();
 				await refreshFileTree();
 				await syncOpenTabsWithFileTree();
-			})();
-		};
-		yFileTree.observe(yFileTreeObserver);
-		const websocketProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-		provider = new WebsocketProvider(
-			`${websocketProtocol}//${window.location.host}/ws/canvas`,
-			roomId,
-			ydoc
-		);
-		awareness = provider.awareness;
-		syncLocalPresenceMetadata();
-		provider.on('status', (event: { status: string }) => {
-			if (event.status === 'connected') {
-				syncLocalPresenceMetadata();
-				syncLocalSelectionState();
+			} else {
+				await upsertSharedEntries(
+					fileTree.map((entry) => ({
+						relativePath: entry.relativePath,
+						isDir: entry.isDir
+					}))
+				);
 			}
-		});
-		provider.messageHandlers[QUERY_AWARENESS_MESSAGE_TYPE] = (
-			_encoder: unknown,
-			_decoder: unknown,
-			wsProvider: { awareness: any },
-			_emitSynced: boolean,
-			_messageType: number
-		) => {
-			const localState = wsProvider.awareness?.getLocalState?.();
-			if (localState != null) {
-				wsProvider.awareness.setLocalState(localState);
+			await ensureWorkspaceHasAtLeastOneFile();
+			if (!currentFile) {
+				selectInitialFileFromTree();
 			}
-		};
-		awarenessChangeHandler = () => {
-			void handleAwarenessChange();
-		};
-		awareness.on('change', awarenessChangeHandler);
-
-		// Keep type reference alive for dynamic import consistency.
-		void MonacoBinding;
-
-		await waitForInitialProviderSync();
-		await initFileSystem({ createDefaultIfEmpty: yFileTree.size === 0 });
-		if (yFileTree.size > 0) {
-			await reconcileLocalFileSystemWithSharedTree();
-			await refreshFileTree();
-			await syncOpenTabsWithFileTree();
-		} else {
-			await upsertSharedEntries(
-				fileTree.map((entry) => ({
-					relativePath: entry.relativePath,
-					isDir: entry.isDir
-				}))
-			);
+			if (currentFile) {
+				await recreateBindingForCurrentFile();
+				updateEditorAccessMode();
+			} else {
+				await clearActiveEditor();
+			}
+			canvasClientLog('init-ready', {
+				roomId,
+				fileCount: fileTree.length,
+				currentFile: currentFile || ''
+			});
+			renderRemotePresenceStyles();
+		} catch (error) {
+			canvasClientLog('init-error', {
+				roomId,
+				error: error instanceof Error ? error.message : String(error)
+			});
+			fileExplorerError =
+				error instanceof Error ? error.message : 'Canvas failed to initialize';
 		}
-		if (currentFile) {
-			await recreateBindingForCurrentFile();
-			updateEditorAccessMode();
-		} else {
-			await clearActiveEditor();
-		}
-		renderRemotePresenceStyles();
 	});
 
 	onDestroy(() => {
@@ -2275,6 +3065,15 @@
 			removeCanvasViewportListener();
 			removeCanvasViewportListener = null;
 		}
+		if (removeBeforeUnloadListener) {
+			removeBeforeUnloadListener();
+			removeBeforeUnloadListener = null;
+		}
+		if (terminalResizeObserver) {
+			terminalResizeObserver.disconnect();
+			terminalResizeObserver = null;
+		}
+		stopTerminalResize();
 		closeContextMenu();
 		closeDeleteConfirmation();
 		if (promptState.reject) {
@@ -2287,6 +3086,25 @@
 		if (yFileTree && yFileTreeObserver) {
 			yFileTree.unobserve(yFileTreeObserver);
 		}
+		if (ydoc && ydocUpdateHandler) {
+			ydoc.off('update', ydocUpdateHandler);
+		}
+		ydocUpdateHandler = null;
+		detachProviderTransportDebugListener();
+		detachProviderSnapshotListener();
+		if (saveTimeout) {
+			window.clearTimeout(saveTimeout);
+			saveTimeout = null;
+		}
+		if (periodicSnapshotInterval) {
+			window.clearInterval(periodicSnapshotInterval);
+			periodicSnapshotInterval = null;
+		}
+		if (filePersistTimeout) {
+			window.clearTimeout(filePersistTimeout);
+			filePersistTimeout = null;
+		}
+		void saveCanvasSnapshotNow({ useBeacon: true });
 		if (remotePresenceStyleElement?.parentNode) {
 			remotePresenceStyleElement.parentNode.removeChild(remotePresenceStyleElement);
 		}
@@ -2302,6 +3120,9 @@
 		provider?.destroy();
 		ydoc?.destroy();
 		editor?.dispose();
+		terminal?.dispose();
+		terminal = null;
+		terminalFitAddon = null;
 	});
 </script>
 
@@ -2556,13 +3377,32 @@
 				{/if}
 			</div>
 		</div>
-		<div class="canvas-editor-body" class:is-empty={openTabs.length === 0}>
-			<div class="code-canvas" bind:this={editorContainer}></div>
-			{#if openTabs.length === 0}
-				<div class="canvas-blank-state" role="status" aria-live="polite">
-					Open a file from Explorer to start editing.
+		<div class="canvas-editor-body" bind:this={canvasEditorBodyElement}>
+			<div class="canvas-editor-pane" class:is-empty={openTabs.length === 0}>
+				<div class="code-canvas" bind:this={editorContainer}></div>
+				{#if openTabs.length === 0}
+					<div class="canvas-blank-state" role="status" aria-live="polite">
+						Open a file from Explorer to start editing.
+					</div>
+				{/if}
+			</div>
+			<div class="terminal-panel" style:height={`${terminalHeight}px`}>
+				<button
+					type="button"
+					class="terminal-resize-handle"
+					on:pointerdown={startTerminalResize}
+					aria-label="Resize terminal"
+				>
+					<span class="terminal-resize-grip" aria-hidden="true"></span>
+				</button>
+				<div class="terminal-header">
+					<span class="terminal-title">Terminal</span>
+					<button type="button" class="terminal-action-button" on:click={clearTerminal}>
+						Clear
+					</button>
 				</div>
-			{/if}
+				<div class="terminal-container" bind:this={terminalContainer}></div>
+			</div>
 		</div>
 	</div>
 	{#if deleteConfirmTarget}
@@ -3214,6 +4054,14 @@
 	}
 
 	.canvas-editor-body {
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-width: 0;
+		min-height: 0;
+	}
+
+	.canvas-editor-pane {
 		position: relative;
 		flex: 1;
 		min-width: 0;
@@ -3223,10 +4071,10 @@
 	.code-canvas {
 		width: 100%;
 		height: 100%;
-		min-height: 320px;
+		min-height: 220px;
 	}
 
-	.canvas-editor-body.is-empty .code-canvas {
+	.canvas-editor-pane.is-empty .code-canvas {
 		visibility: hidden;
 		pointer-events: none;
 	}
@@ -3242,6 +4090,98 @@
 		font-size: 0.86rem;
 		color: rgba(214, 227, 247, 0.82);
 		background: radial-gradient(circle at 28% 24%, rgba(67, 97, 148, 0.3), rgba(8, 12, 19, 0.88));
+	}
+
+	.terminal-panel {
+		position: relative;
+		flex: 0 0 auto;
+		min-height: 120px;
+		border-top: 1px solid rgba(103, 125, 160, 0.42);
+		background: linear-gradient(180deg, rgba(17, 22, 31, 0.98), rgba(12, 16, 24, 0.98)), #1e1e1e;
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+		overflow: hidden;
+	}
+
+	.terminal-resize-handle {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		height: 0.8rem;
+		border: none;
+		background: transparent;
+		cursor: row-resize;
+		padding: 0;
+		z-index: 2;
+	}
+
+	.terminal-resize-grip {
+		position: absolute;
+		top: 0.18rem;
+		left: 50%;
+		transform: translateX(-50%);
+		width: 3rem;
+		height: 0.18rem;
+		border-radius: 999px;
+		background: rgba(148, 163, 184, 0.46);
+	}
+
+	.terminal-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.72rem 0.9rem 0.48rem;
+		color: #dbe6f8;
+		font-size: 0.72rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+		border-bottom: 1px solid rgba(58, 73, 98, 0.68);
+		background: rgba(10, 14, 22, 0.72);
+	}
+
+	.terminal-title {
+		white-space: nowrap;
+	}
+
+	.terminal-action-button {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+		border-radius: 0.35rem;
+		padding: 0.22rem 0.48rem;
+		font-size: 0.66rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.terminal-action-button:hover {
+		border-color: rgba(139, 168, 211, 0.68);
+		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.terminal-container {
+		flex: 1;
+		min-height: 0;
+		padding: 0.65rem 0.72rem 0.72rem;
+		background: #1e1e1e;
+	}
+
+	.terminal-container :global(.xterm) {
+		height: 100%;
+	}
+
+	.terminal-container :global(.xterm-viewport) {
+		overflow-y: auto;
+		background: transparent;
+	}
+
+	.terminal-container :global(.xterm-screen),
+	.terminal-container :global(.xterm-helpers) {
+		width: 100% !important;
 	}
 
 	.canvas-readonly-warning {

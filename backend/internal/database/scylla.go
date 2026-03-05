@@ -132,6 +132,7 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		normalizedKeyspace = "converse"
 	}
 	boardElementsTable := normalizedKeyspace + ".board_elements"
+	canvasSnapshotsTable := normalizedKeyspace + ".canvas_snapshots"
 	roomsTable := normalizedKeyspace + ".rooms"
 
 	roomsQuery := fmt.Sprintf(
@@ -202,6 +203,17 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 			}
 			return err
 		}
+	}
+	canvasSnapshotsQuery := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+			room_id text PRIMARY KEY,
+			snapshot blob
+		)`,
+		canvasSnapshotsTable,
+	)
+	err = session.Query(canvasSnapshotsQuery).Exec()
+	if err != nil {
+		return err
 	}
 	return nil
 }

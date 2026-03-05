@@ -10,7 +10,8 @@
 	import type { ReplyTarget, TaskChecklistItem } from '$lib/types/chat';
 	import { stringifyTaskMessagePayload } from '$lib/utils/chat/task';
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
-	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;

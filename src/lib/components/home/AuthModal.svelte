@@ -2,7 +2,8 @@
 	import { createEventDispatcher } from 'svelte';
 	import toraLogo from '$lib/assets/tora-logo.svg';
 	import { normalizeUsernameInput } from '$lib/utils/homeJoin';
-	const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[auth-client]';
 
 	export let isOpen: boolean = false;

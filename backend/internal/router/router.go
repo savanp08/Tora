@@ -33,7 +33,6 @@ func New(
 	r.Use(websocket.CaptureOriginalRemoteAddr)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:5173", "https://tora.monokenos.com", "http://192.168.1.165:5173"},
@@ -50,6 +49,7 @@ func New(
 	authHandler := handlers.NewAuthHandler()
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
+	handlers.ConfigureCanvasPersistence(redisStore, scyllaStore)
 	promoteLimiter := security.NewLimiter(5, time.Minute, 5, time.Minute)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -106,8 +106,19 @@ func New(
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
 		websocket.ServeWs(hub, w, r)
 	})
+	r.Get("/ws/canvas/{roomId}", func(w http.ResponseWriter, r *http.Request) {
+		handlers.ServeCanvasWS(w, r, chi.URLParam(r, "roomId"))
+	})
+	r.Get("/ws/canvas", func(w http.ResponseWriter, r *http.Request) {
+		roomID := strings.TrimSpace(r.URL.Query().Get("roomId"))
+		if roomID == "" {
+			roomID = strings.TrimSpace(r.URL.Query().Get("room"))
+		}
+		handlers.ServeCanvasWS(w, r, roomID)
+	})
 
 	r.Route("/api", func(r chi.Router) {
+		r.Use(middleware.Timeout(60 * time.Second))
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
 		r.Post("/auth/anonymous", authHandler.Anonymous)
@@ -137,6 +148,10 @@ func New(
 		r.Post("/upload/presigned", uploadHandler.GenerateUploadURL)
 		r.Post("/upload", uploadHandler.UploadProxy)
 		r.Get("/upload/object/*", uploadHandler.ServeObject)
+		r.Get("/canvas/{roomId}/snapshot", handlers.HandleCanvasSnapshotLoad)
+		r.Post("/canvas/{roomId}/snapshot", handlers.HandleCanvasSnapshotSave)
+		r.Get("/canvas/snapshot", handlers.HandleCanvasSnapshotLoad)
+		r.Post("/canvas/snapshot", handlers.HandleCanvasSnapshotSave)
 		r.Get("/canvas/github-archive", handlers.ProxyGitHubRepoArchive)
 	})
 
