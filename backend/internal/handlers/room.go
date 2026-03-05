@@ -2306,6 +2306,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 		parent_room_id text,
 		origin_message_id text,
 		admin_code text,
+		canvas_has_data boolean,
 		created_at timestamp,
 		updated_at timestamp
 	)`, roomsTable)
@@ -2318,6 +2319,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 	alterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD canvas_has_data boolean`, roomsTable),
 	}
 	for _, query := range alterQueries {
 		if err := h.scylla.Session.Query(query).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {

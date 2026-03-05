@@ -149,7 +149,7 @@
 	let removeCanvasViewportListener: (() => void) | null = null;
 	let removeTerminalResizeListeners: (() => void) | null = null;
 	let removeBeforeUnloadListener: (() => void) | null = null;
-	let saveTimeout: number | null = null;
+	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let filePersistTimeout: number | null = null;
 	let periodicSnapshotInterval: number | null = null;
 	let snapshotDirty = false;
@@ -312,13 +312,35 @@
 		}
 		snapshotDirty = true;
 		if (saveTimeout) {
-			window.clearTimeout(saveTimeout);
+			clearTimeout(saveTimeout);
 			saveTimeout = null;
 		}
-		saveTimeout = window.setTimeout(async () => {
-			await saveCanvasSnapshotNow();
+		saveTimeout = setTimeout(async () => {
+			if (!ydoc || !roomId) {
+				saveTimeout = null;
+				return;
+			}
+			const snapshot = encodeStateAsUpdate(ydoc);
+			const snapshotBytes = new Uint8Array(snapshot);
+			try {
+				const response = await fetch(canvasSnapshotURL(), {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/octet-stream'
+					},
+					body: snapshotBytes
+				});
+				if (response.ok) {
+					snapshotDirty = false;
+				}
+			} catch (error) {
+				canvasClientLog('snapshot-save-http-error', {
+					roomId,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
 			saveTimeout = null;
-		}, 1500);
+		}, 5000);
 	}
 
 	function scheduleCurrentFilePersistToFS() {
@@ -344,28 +366,27 @@
 	}
 
 	function registerBeforeUnloadPersistence() {
-		const persistWithBeacon = () => {
-			void persistCurrentFileToFS();
-			void saveCanvasSnapshotNow({ useBeacon: true });
-		};
 		const handleBeforeUnload = () => {
-			persistWithBeacon();
-		};
-		const handlePageHide = () => {
-			persistWithBeacon();
-		};
-		const handleVisibilityChange = () => {
-			if (document.visibilityState === 'hidden') {
-				persistWithBeacon();
+			if (saveTimeout) {
+				clearTimeout(saveTimeout);
+				saveTimeout = null;
 			}
+			void persistCurrentFileToFS();
+			if (
+				!ydoc ||
+				!roomId ||
+				typeof navigator === 'undefined' ||
+				typeof navigator.sendBeacon !== 'function'
+			) {
+				return;
+			}
+			const snapshot = encodeStateAsUpdate(ydoc);
+			const snapshotBytes = new Uint8Array(snapshot);
+			navigator.sendBeacon(canvasSnapshotURL(), snapshotBytes);
 		};
 		window.addEventListener('beforeunload', handleBeforeUnload);
-		window.addEventListener('pagehide', handlePageHide);
-		document.addEventListener('visibilitychange', handleVisibilityChange);
 		return () => {
 			window.removeEventListener('beforeunload', handleBeforeUnload);
-			window.removeEventListener('pagehide', handlePageHide);
-			document.removeEventListener('visibilitychange', handleVisibilityChange);
 		};
 	}
 

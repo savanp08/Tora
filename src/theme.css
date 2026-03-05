@@ -141,7 +141,7 @@ html, body {
     margin: 0;
     padding: 0;
     /* This completely stops the bouncy scroll cycle! */
-    overflow: hidden; 
+    
 }
 
 @media (max-width: 600px) {

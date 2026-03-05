@@ -30,6 +30,14 @@ const (
 
 	maxGlobalWSConnections = int32(60000)
 	maxWSConnectionsPerIP  = int32(2000)
+
+	messageTypeCallInvite   = "call_invite"
+	messageTypeWebRTCOffer  = "webrtc_offer"
+	messageTypeWebRTCAnswer = "webrtc_answer"
+	messageTypeWebRTCIce    = "webrtc_ice"
+	messageTypeCallLog      = "call_log"
+	callTypeAudio           = "audio"
+	callTypeVideo           = "video"
 )
 
 var (
@@ -316,6 +324,10 @@ func (c *Client) readPump() {
 			}
 			continue
 		}
+		if signalingEvent, isSignalingEvent := parseSignalingPayload(raw); isSignalingEvent {
+			c.forwardSignalingEvent(signalingEvent)
+			continue
+		}
 
 		var msg models.Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
@@ -340,6 +352,17 @@ func (c *Client) readPump() {
 		}
 		if c.msgLimiter != nil && !c.msgLimiter.Allow() {
 			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(msg.Type), messageTypeCallLog) && strings.TrimSpace(msg.MediaType) == "" {
+			var envelopeMap map[string]interface{}
+			if err := json.Unmarshal(raw, &envelopeMap); err == nil {
+				msg.MediaType = strings.ToLower(strings.TrimSpace(readStringFromMap(envelopeMap, "callType", "call_type", "mediaType", "media_type")))
+				if msg.MediaType == "" {
+					if payloadMap, ok := envelopeMap["payload"].(map[string]interface{}); ok {
+						msg.MediaType = strings.ToLower(strings.TrimSpace(readStringFromMap(payloadMap, "callType", "call_type", "mediaType", "media_type")))
+					}
+				}
+			}
 		}
 		if !normalizeInboundMessage(&msg) {
 			continue
@@ -426,6 +449,48 @@ func (c *Client) handleBoardClear(event clientBoardEventPayload) {
 		payload["payload"] = map[string]interface{}{}
 	}
 	c.Hub.BroadcastToRoom(normalizedRoomID, payload)
+}
+
+func (c *Client) forwardSignalingEvent(event clientSignalingPayload) {
+	if c == nil || c.Hub == nil {
+		return
+	}
+	if !c.canProcessRoomBoardBroadcast(event.RoomID) {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type": event.Type,
+	}
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	payload["fromUserId"] = c.UserID
+	payload["fromUserName"] = c.Username
+	if event.TargetUserID != "" {
+		payload["targetUserId"] = event.TargetUserID
+	}
+
+	if nestedPayload, ok := payload["payload"].(map[string]interface{}); ok && nestedPayload != nil {
+		if _, exists := nestedPayload["fromUserId"]; !exists {
+			nestedPayload["fromUserId"] = c.UserID
+		}
+		if _, exists := nestedPayload["fromUserName"]; !exists {
+			nestedPayload["fromUserName"] = c.Username
+		}
+		if event.TargetUserID != "" {
+			if _, exists := nestedPayload["targetUserId"]; !exists {
+				nestedPayload["targetUserId"] = event.TargetUserID
+			}
+		}
+	} else if payload["payload"] == nil {
+		payload["payload"] = map[string]interface{}{
+			"fromUserId":   c.UserID,
+			"fromUserName": c.Username,
+		}
+	}
+
+	c.Hub.BroadcastToRoom(event.RoomID, payload)
 }
 
 func normalizeRoomID(raw string) string {
@@ -611,12 +676,30 @@ type boardEventEnvelope struct {
 	Payload    json.RawMessage `json:"payload"`
 }
 
+type signalingEnvelope struct {
+	Type          string          `json:"type"`
+	RoomID        string          `json:"roomId"`
+	RoomID2       string          `json:"room_id"`
+	TargetUserID  string          `json:"targetUserId"`
+	TargetUserID2 string          `json:"target_user_id"`
+	TargetUser    string          `json:"targetUser"`
+	TargetUser2   string          `json:"target_user"`
+	Payload       json.RawMessage `json:"payload"`
+}
+
 type clientBoardEventPayload struct {
 	Type      string
 	RoomID    string
 	Payload   map[string]interface{}
 	Element   *models.BoardElement
 	ElementID string
+}
+
+type clientSignalingPayload struct {
+	Type         string
+	RoomID       string
+	TargetUserID string
+	Payload      map[string]interface{}
 }
 
 func parseSubscribeRoomIDs(raw []byte) ([]string, bool) {
@@ -950,6 +1033,106 @@ func parseDiscussionCommentPinPayload(raw []byte) (clientDiscussionCommentPinPay
 		PinMessageID: pinMessageID,
 		CommentID:    commentID,
 		IsPinned:     isPinned,
+	}, true
+}
+
+func isTransientSignalingType(eventType string) bool {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case messageTypeCallInvite, messageTypeWebRTCOffer, messageTypeWebRTCAnswer, messageTypeWebRTCIce:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseSignalingPayload(raw []byte) (clientSignalingPayload, bool) {
+	if len(raw) == 0 {
+		return clientSignalingPayload{}, false
+	}
+
+	var envelope signalingEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientSignalingPayload{}, false
+	}
+	eventType := strings.ToLower(strings.TrimSpace(envelope.Type))
+	if !isTransientSignalingType(eventType) {
+		return clientSignalingPayload{}, false
+	}
+
+	var envelopeMap map[string]interface{}
+	if err := json.Unmarshal(raw, &envelopeMap); err != nil {
+		return clientSignalingPayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	if roomID == "" {
+		roomID = normalizeRoomID(readStringFromMap(envelopeMap, "roomId", "room_id"))
+	}
+	if roomID == "" {
+		if nestedPayload, ok := envelopeMap["payload"].(map[string]interface{}); ok {
+			roomID = normalizeRoomID(readStringFromMap(nestedPayload, "roomId", "room_id"))
+		}
+	}
+	if roomID == "" {
+		return clientSignalingPayload{}, false
+	}
+
+	targetCandidate := ""
+	for _, candidate := range []string{
+		envelope.TargetUserID,
+		envelope.TargetUserID2,
+		envelope.TargetUser,
+		envelope.TargetUser2,
+	} {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		targetCandidate = candidate
+		break
+	}
+	targetUserID := normalizeUsername(targetCandidate)
+	if targetUserID == "" {
+		targetUserID = normalizeUsername(
+			readStringFromMap(
+				envelopeMap,
+				"targetUserId",
+				"target_user_id",
+				"targetUser",
+				"target_user",
+			),
+		)
+	}
+	if targetUserID == "" {
+		if nestedPayload, ok := envelopeMap["payload"].(map[string]interface{}); ok {
+			targetUserID = normalizeUsername(
+				readStringFromMap(
+					nestedPayload,
+					"targetUserId",
+					"target_user_id",
+					"targetUser",
+					"target_user",
+				),
+			)
+		}
+	}
+
+	broadcastPayload := map[string]interface{}{}
+	for key, value := range envelopeMap {
+		loweredKey := strings.ToLower(strings.TrimSpace(key))
+		if loweredKey == "type" || loweredKey == "roomid" || loweredKey == "room_id" {
+			continue
+		}
+		broadcastPayload[key] = value
+	}
+
+	return clientSignalingPayload{
+		Type:         eventType,
+		RoomID:       roomID,
+		TargetUserID: targetUserID,
+		Payload:      broadcastPayload,
 	}, true
 }
 
@@ -1345,6 +1528,18 @@ func normalizeInboundMessage(msg *models.Message) bool {
 		return msg.Content != "" && len(msg.Content) <= maxTextChars
 	case "task":
 		return msg.Content != "" && len(msg.Content) <= maxTextChars
+	case messageTypeCallLog:
+		if msg.Content == "" || len(msg.Content) > maxTextChars {
+			return false
+		}
+		msg.MediaURL = ""
+		msg.FileName = ""
+		callType := strings.ToLower(strings.TrimSpace(msg.MediaType))
+		if callType != callTypeVideo {
+			callType = callTypeAudio
+		}
+		msg.MediaType = callType
+		return true
 	case "image", "video", "file", "audio":
 		if msg.Content == "" {
 			msg.Content = msg.MediaURL

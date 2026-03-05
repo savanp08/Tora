@@ -87,6 +87,7 @@
 		getRoomExpiry as getRoomExpiryState
 	} from '$lib/utils/chat/roomTiming';
 	import { createTypingController } from '$lib/utils/chat/typingController';
+	import { WebRTCManager, type CallType, type IncomingCallEvent } from '$lib/utils/chat/webrtc';
 	import {
 		buildReplySnippet,
 		DELETED_MESSAGE_PLACEHOLDER,
@@ -166,6 +167,10 @@
 	};
 
 	type WorkspaceTool = 'board' | 'canvas';
+	type CallStreamSlot = { userId: string; stream: MediaStream };
+
+	const CALL_SIGNAL_TYPES = new Set(['call_invite', 'webrtc_offer', 'webrtc_answer', 'webrtc_ice']);
+	const CALL_MAX_PARTICIPANTS = 5;
 
 	function getCanvasPresenceColor(user: { color?: unknown } | null | undefined) {
 		if (typeof user?.color === 'string') {
@@ -260,6 +265,20 @@
 	let serverClockOffsetMs = 0;
 	let serverNowAnchorMs = 0;
 	let serverNowAnchorPerfMs = 0;
+	let webrtcManager: WebRTCManager | null = null;
+	let activeCall = false;
+	let isRinging = false;
+	let incomingCall: IncomingCallEvent | null = null;
+	let callType: CallType = 'audio';
+	let localCallStream: MediaStream | null = null;
+	let remoteCallStreams: CallStreamSlot[] = [];
+	let isMuted = false;
+	let isCameraEnabled = true;
+	let callStartedAtMs = 0;
+	let callDurationLabel = '00:00';
+	let callDurationTicker: ReturnType<typeof setInterval> | null = null;
+	let ringtoneAudio: HTMLAudioElement | null = null;
+	let webrtcContextKey = '';
 	let uiDialog: UiDialogState = { kind: 'none' };
 	const dialogController = createChatDialogController({
 		getDialog: () => uiDialog,
@@ -409,6 +428,9 @@
 	$: if (browser && identityReady && roomId && isMember) {
 		void syncRoomMembership(roomId);
 	}
+	$: if (browser && identityReady && roomId && currentUserId) {
+		ensureWebRTCManager();
+	}
 	$: if (browser && identityReady && roomId && roomId !== lastRoomMetaSyncRoomId) {
 		lastRoomMetaSyncRoomId = roomId;
 		void refreshRoomMetaFromServer(roomId);
@@ -486,6 +508,13 @@
 		clearSidebarRefreshTimer();
 		clearRoomExpiryTicker();
 		clearToastTimer();
+		stopCallDurationTicker();
+		stopRingtone();
+		if (webrtcManager) {
+			const duration = webrtcManager.endCall();
+			clientLog('call-ended-on-destroy', { durationSeconds: duration });
+			webrtcManager = null;
+		}
 	});
 
 	onMount(() => {
@@ -898,6 +927,363 @@
 			return;
 		}
 		console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
+	}
+
+	function formatCallDuration(totalSeconds: number) {
+		const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+		const hours = Math.floor(safeSeconds / 3600);
+		const minutes = Math.floor((safeSeconds % 3600) / 60);
+		const seconds = safeSeconds % 60;
+		if (hours > 0) {
+			return `${hours}h ${minutes.toString().padStart(2, '0')}m ${seconds
+				.toString()
+				.padStart(2, '0')}s`;
+		}
+		return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
+	}
+
+	function refreshCallDurationLabel() {
+		if (!callStartedAtMs) {
+			callDurationLabel = '00:00';
+			return;
+		}
+		const elapsedSeconds = Math.max(0, Math.floor((Date.now() - callStartedAtMs) / 1000));
+		const minutes = Math.floor(elapsedSeconds / 60);
+		const seconds = elapsedSeconds % 60;
+		callDurationLabel = `${minutes.toString().padStart(2, '0')}:${seconds
+			.toString()
+			.padStart(2, '0')}`;
+	}
+
+	function startCallDurationTicker() {
+		stopCallDurationTicker();
+		refreshCallDurationLabel();
+		callDurationTicker = setInterval(() => {
+			refreshCallDurationLabel();
+		}, 1000);
+	}
+
+	function stopCallDurationTicker() {
+		if (callDurationTicker) {
+			clearInterval(callDurationTicker);
+			callDurationTicker = null;
+		}
+	}
+
+	function stopRingtone() {
+		if (!ringtoneAudio) {
+			return;
+		}
+		ringtoneAudio.pause();
+		ringtoneAudio.currentTime = 0;
+	}
+
+	function startRingtone() {
+		if (!browser) {
+			return;
+		}
+		if (!ringtoneAudio) {
+			ringtoneAudio = new Audio('/ringtone.wav');
+			ringtoneAudio.loop = true;
+			ringtoneAudio.preload = 'auto';
+		}
+		void ringtoneAudio.play().catch(() => {
+			// Browser autoplay policies may block ringtone until first user gesture.
+		});
+	}
+
+	function syncCallStreamsFromManager() {
+		if (!webrtcManager) {
+			localCallStream = null;
+			remoteCallStreams = [];
+			return;
+		}
+		localCallStream = webrtcManager.getLocalStream();
+		remoteCallStreams = webrtcManager.getRemoteStreamEntries();
+	}
+
+	function handleIncomingCallEvent(event: IncomingCallEvent) {
+		const fromUserId = normalizeIdentifier(event.fromUserId);
+		if (!fromUserId || fromUserId === normalizeIdentifier(currentUserId)) {
+			return;
+		}
+		incomingCall = event;
+		callType = event.callType;
+		if (activeCall) {
+			return;
+		}
+		isRinging = true;
+		startRingtone();
+	}
+
+	function resetCallUiState() {
+		activeCall = false;
+		isRinging = false;
+		incomingCall = null;
+		localCallStream = null;
+		remoteCallStreams = [];
+		isMuted = false;
+		isCameraEnabled = false;
+		callStartedAtMs = 0;
+		callDurationLabel = '00:00';
+		stopCallDurationTicker();
+		stopRingtone();
+	}
+
+	function ensureWebRTCManager() {
+		if (!browser || !roomId || !currentUserId) {
+			return;
+		}
+		const nextContextKey = `${normalizeRoomIDValue(roomId)}|${normalizeIdentifier(currentUserId)}`;
+		if (webrtcContextKey && webrtcContextKey !== nextContextKey) {
+			if (webrtcManager) {
+				webrtcManager.endCall();
+			}
+			resetCallUiState();
+		}
+
+		if (!webrtcManager) {
+			webrtcManager = new WebRTCManager({
+				roomId,
+				userId: currentUserId,
+				userName: currentUsername,
+				sendSignal: (payload) => {
+					sendSocketPayload(payload);
+				},
+				maxParticipants: CALL_MAX_PARTICIPANTS,
+				onIncomingCall: (event) => {
+					handleIncomingCallEvent(event);
+				},
+				onRemoteStream: () => {
+					syncCallStreamsFromManager();
+				},
+				onRemoteStreamRemoved: () => {
+					syncCallStreamsFromManager();
+				}
+			});
+		}
+
+		webrtcManager.updateContext(roomId, currentUserId, currentUsername);
+		webrtcContextKey = nextContextKey;
+		syncCallStreamsFromManager();
+	}
+
+	function getCallInviteTargetUserIds() {
+		if (!webrtcManager) {
+			return [];
+		}
+		const connected = new Set(webrtcManager.getPeerUserIds().map((entry) => normalizeIdentifier(entry)));
+		return currentOnlineMembers
+			.map((member) => normalizeIdentifier(member.id))
+			.filter((memberId) => {
+				if (!memberId) {
+					return false;
+				}
+				if (memberId === normalizeIdentifier(currentUserId)) {
+					return false;
+				}
+				return !connected.has(memberId);
+			});
+	}
+
+	function resolveCallUserName(userId: string) {
+		const normalizedUserId = normalizeIdentifier(userId);
+		if (!normalizedUserId) {
+			return 'User';
+		}
+		if (normalizedUserId === normalizeIdentifier(currentUserId)) {
+			return `${currentUsername} (You)`;
+		}
+		return (
+			currentOnlineMembers.find(
+				(member) => normalizeIdentifier(member.id) === normalizedUserId
+			)?.name || normalizedUserId
+		);
+	}
+
+	async function sendCallLogMessage(statusText: string, mode: CallType) {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const outgoing: ChatMessage = {
+			id: createMessageId(roomId),
+			roomId,
+			senderId: currentUserId,
+			senderName: currentUsername,
+			content: statusText.trim() || 'Missed Call',
+			type: 'call_log',
+			mediaType: mode,
+			mediaUrl: '',
+			fileName: '',
+			createdAt: Date.now(),
+			pending: true
+		};
+		upsertMessage(roomId, outgoing, false);
+		sendSocketPayload(toWireMessage(outgoing));
+		applyReadProgress(roomId, outgoing.id);
+	}
+
+	async function startOutgoingCall(mode: CallType) {
+		if (!roomId || !isMember || isRoomExpired) {
+			showErrorToast('Join an active room to start a call');
+			return;
+		}
+		ensureWebRTCManager();
+		if (!webrtcManager) {
+			return;
+		}
+
+		try {
+			await webrtcManager.startLocalStream(mode === 'video');
+			callType = mode;
+			activeCall = true;
+			isRinging = false;
+			incomingCall = null;
+			stopRingtone();
+			callStartedAtMs = Date.now();
+			startCallDurationTicker();
+			syncCallStreamsFromManager();
+			isMuted = false;
+			isCameraEnabled =
+				mode === 'video' && Boolean(localCallStream?.getVideoTracks().some((track) => track.enabled));
+
+			const targets = getCallInviteTargetUserIds().slice(0, webrtcManager.getAvailablePeerSlots());
+			webrtcManager.inviteToCall(mode, targets);
+			for (const targetUserId of targets) {
+				await webrtcManager.connectToPeer(targetUserId, mode);
+			}
+		} catch (error) {
+			resetCallUiState();
+			showErrorToast(error instanceof Error ? error.message : 'Unable to start call');
+		}
+	}
+
+	async function acceptIncomingCall() {
+		if (!incomingCall) {
+			return;
+		}
+		ensureWebRTCManager();
+		if (!webrtcManager) {
+			return;
+		}
+
+		try {
+			await webrtcManager.startLocalStream(incomingCall.callType === 'video');
+			callType = incomingCall.callType;
+			activeCall = true;
+			isRinging = false;
+			stopRingtone();
+			callStartedAtMs = Date.now();
+			startCallDurationTicker();
+			syncCallStreamsFromManager();
+			if (incomingCall.fromUserId) {
+				await webrtcManager.connectToPeer(incomingCall.fromUserId, incomingCall.callType);
+			}
+			incomingCall = null;
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Unable to accept call');
+		}
+	}
+
+	async function declineIncomingCall() {
+		if (!incomingCall) {
+			return;
+		}
+		const declinedType = incomingCall.callType;
+		incomingCall = null;
+		isRinging = false;
+		stopRingtone();
+		await sendCallLogMessage('Missed Call', declinedType);
+	}
+
+	async function hangUpCall() {
+		if (!webrtcManager) {
+			resetCallUiState();
+			return;
+		}
+		const elapsedFromManager = webrtcManager.endCall();
+		const fallbackSeconds = callStartedAtMs
+			? Math.max(0, Math.floor((Date.now() - callStartedAtMs) / 1000))
+			: 0;
+		const elapsedSeconds = Math.max(elapsedFromManager, fallbackSeconds);
+		const statusText = elapsedSeconds > 0 ? formatCallDuration(elapsedSeconds) : 'Missed Call';
+		await sendCallLogMessage(statusText, callType);
+		resetCallUiState();
+	}
+
+	function toggleCallMute() {
+		if (!webrtcManager) {
+			return;
+		}
+		isMuted = webrtcManager.toggleMute();
+	}
+
+	function toggleCallCamera() {
+		if (!webrtcManager) {
+			return;
+		}
+		isCameraEnabled = webrtcManager.toggleCamera();
+	}
+
+	async function inviteAnotherUserToCall() {
+		if (!activeCall || !webrtcManager) {
+			return;
+		}
+		const targets = getCallInviteTargetUserIds().slice(0, webrtcManager.getAvailablePeerSlots());
+		if (targets.length === 0) {
+			showErrorToast('No additional room members available to invite');
+			return;
+		}
+		webrtcManager.inviteToCall(callType, targets);
+		for (const targetUserId of targets) {
+			await webrtcManager.connectToPeer(targetUserId, callType);
+		}
+	}
+
+	async function handleCallSignalingEnvelope(
+		envelope: SocketEnvelope,
+		targetRoomId: string,
+		kind: string
+	) {
+		const normalizedTargetRoomId = normalizeRoomIDValue(targetRoomId || roomId);
+		if (!normalizedTargetRoomId || normalizedTargetRoomId !== roomId) {
+			return;
+		}
+		ensureWebRTCManager();
+		if (!webrtcManager) {
+			return;
+		}
+		try {
+			await webrtcManager.handleSignaling(envelope as unknown as Record<string, unknown>);
+			syncCallStreamsFromManager();
+			if (kind !== 'call_invite') {
+				activeCall = true;
+				if (!callStartedAtMs) {
+					callStartedAtMs = Date.now();
+					startCallDurationTicker();
+				}
+				isRinging = false;
+				incomingCall = null;
+				stopRingtone();
+			}
+		} catch (error) {
+			clientLog('call-signaling-handle-error', {
+				kind,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
+
+	function bindVideoStream(node: HTMLVideoElement, stream: MediaStream | null) {
+		node.srcObject = stream;
+		return {
+			update(nextStream: MediaStream | null) {
+				node.srcObject = nextStream;
+			},
+			destroy() {
+				node.srcObject = null;
+			}
+		};
 	}
 
 	function clearSidebarRefreshTimer() {
@@ -1662,6 +2048,10 @@
 		const targetRoomId = resolveEnvelopeRoomID(envelope);
 		const kind = toStringValue(envelope.type).toLowerCase();
 		const payload = resolveEnvelopePayloadRecord(envelope);
+		if (CALL_SIGNAL_TYPES.has(kind)) {
+			await handleCallSignalingEnvelope(envelope, targetRoomId || roomId, kind);
+			return;
+		}
 		if (kind === 'history' || kind === 'recent_messages' || kind === 'initial_messages') {
 			if (Array.isArray(envelope.payload)) {
 				const history = await parseIncomingMessagesWithE2EE(envelope.payload, targetRoomId);
@@ -3900,6 +4290,8 @@
 					remainingLabel={activeRemainingLabel}
 					on:showMobileList={showMobileRoomList}
 					on:openRoomDetails={openRoomDetails}
+					on:startAudioCall={() => void startOutgoingCall('audio')}
+					on:startVideoCall={() => void startOutgoingCall('video')}
 					on:activateLastWorkspaceTool={activateLastWorkspaceTool}
 					on:toggleBoardView={toggleBoardView}
 					on:toggleCanvas={toggleCanvas}
@@ -3930,6 +4322,72 @@
 						on:cancelSelection={cancelSelectionMode}
 						on:deleteSelected={deleteSelectedMessagesBatch}
 					/>
+				{/if}
+
+				{#if isRinging && incomingCall}
+					<div class="call-incoming-overlay" role="dialog" aria-modal="true">
+						<div class="call-incoming-card">
+							<div class="call-incoming-title">
+								Incoming {incomingCall.callType === 'video' ? 'Video' : 'Audio'} Call
+							</div>
+							<div class="call-incoming-subtitle">
+								from {resolveCallUserName(incomingCall.fromUserId)}
+							</div>
+							<div class="call-incoming-actions">
+								<button type="button" class="call-btn accept" on:click={() => void acceptIncomingCall()}
+									>Accept</button
+								>
+								<button type="button" class="call-btn decline" on:click={() => void declineIncomingCall()}
+									>Decline</button
+								>
+							</div>
+						</div>
+					</div>
+				{/if}
+
+				{#if activeCall}
+					<div class="call-active-overlay" role="region" aria-label="Active call">
+						<header class="call-active-header">
+							<div>
+								<strong>{callType === 'video' ? 'Video Call' : 'Voice Call'}</strong>
+								<span>{callDurationLabel}</span>
+							</div>
+							<span>{remoteCallStreams.length + (localCallStream ? 1 : 0)}/{CALL_MAX_PARTICIPANTS}</span>
+						</header>
+						<div class="call-video-grid">
+							{#if localCallStream}
+								<article class="call-video-tile local">
+									<video
+										autoplay
+										playsinline
+										muted
+										use:bindVideoStream={localCallStream}
+									></video>
+									<span class="call-video-label">{resolveCallUserName(currentUserId)}</span>
+								</article>
+							{/if}
+							{#each remoteCallStreams as remote (remote.userId)}
+								<article class="call-video-tile">
+									<video autoplay playsinline use:bindVideoStream={remote.stream}></video>
+									<span class="call-video-label">{resolveCallUserName(remote.userId)}</span>
+								</article>
+							{/each}
+						</div>
+						<div class="call-active-controls">
+							<button type="button" class="call-control-btn" on:click={toggleCallMute}>
+								{isMuted ? 'Unmute' : 'Mute'}
+							</button>
+							<button type="button" class="call-control-btn" on:click={toggleCallCamera}>
+								{isCameraEnabled ? 'Camera Off' : 'Camera On'}
+							</button>
+							<button type="button" class="call-control-btn" on:click={() => void inviteAnotherUserToCall()}>
+								Add User
+							</button>
+							<button type="button" class="call-control-btn hangup" on:click={() => void hangUpCall()}>
+								Hang Up
+							</button>
+						</div>
+					</div>
 				{/if}
 
 				<div class="chat-window-shell" class:is-expired={isRoomExpired}>

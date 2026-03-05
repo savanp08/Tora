@@ -55,6 +55,10 @@ export function getMessagePreviewText(message: ChatMessage) {
 		}
 		return 'Voice message';
 	}
+	if (message.type === 'call_log') {
+		const mode = (message.mediaType || '').trim().toLowerCase() === 'video' ? 'Video call' : 'Voice call';
+		return `${mode}: ${content || 'Call ended'}`;
+	}
 	return content;
 }
 
@@ -104,6 +108,13 @@ export function parseIncomingMessage(
 		hasBreakRoom ? 1 : 0
 	);
 
+	const normalizedCallType =
+		toStringValue(source.callType ?? source.call_type ?? source.mediaType ?? source.media_type)
+			.trim()
+			.toLowerCase() === 'video'
+			? 'video'
+			: 'audio';
+
 	return {
 		id:
 			toStringValue(
@@ -128,7 +139,10 @@ export function parseIncomingMessage(
 			(isMediaMessageType(nextType) && isLikelyMediaURL(rawText)
 				? toAbsoluteMediaURL(rawText, apiBase)
 				: ''),
-		mediaType: toStringValue(source.mediaType ?? source.media_type ?? source.type ?? nextType),
+		mediaType:
+			nextType === 'call_log'
+				? normalizedCallType
+				: toStringValue(source.mediaType ?? source.media_type ?? source.type ?? nextType),
 		fileName: toStringValue(source.fileName ?? source.file_name),
 		isEdited: toBool(source.isEdited ?? source.is_edited),
 		editedAt: parseOptionalTimestamp(source.editedAt ?? source.edited_at),
@@ -189,6 +203,10 @@ export function parseMember(value: unknown, fallbackIndex: number): OnlineMember
 }
 
 export function toWireMessage(message: ChatMessage) {
+	const normalizedType = (message.type || '').trim().toLowerCase();
+	const isCallLog = normalizedType === 'call_log';
+	const callType =
+		(message.mediaType || '').trim().toLowerCase() === 'video' ? 'video' : 'audio';
 	const mediaType = isMediaMessageType(message.type) ? message.type : '';
 	const mediaURL = mediaType
 		? (message.mediaUrl || '').trim() || (isLikelyMediaURL(message.content) ? message.content : '')
@@ -208,7 +226,9 @@ export function toWireMessage(message: ChatMessage) {
 		content: contentText,
 		type: message.type,
 		mediaUrl: mediaURL,
-		mediaType,
+		mediaType: isCallLog ? callType : mediaType,
+		callType: isCallLog ? callType : '',
+		call_type: isCallLog ? callType : '',
 		fileName: message.fileName ?? '',
 		replyToMessageId: normalizeMessageID(message.replyToMessageId ?? ''),
 		replyToSnippet: (message.replyToSnippet || '').trim(),

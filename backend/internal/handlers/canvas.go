@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/savanp08/converse/internal/database"
+	"github.com/savanp08/converse/internal/storage"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -23,8 +24,8 @@ const (
 	canvasPingPeriod           = (canvasPongWait * 9) / 10
 	canvasMaxMessageSize       = 2 * 1024 * 1024
 	canvasRoomMaxClients       = 50
-	canvasSnapshotReadTimeout  = 2 * time.Second
-	canvasSnapshotWriteTimeout = 10 * time.Second
+	canvasSnapshotReadTimeout  = 15 * time.Second
+	canvasSnapshotWriteTimeout = 15 * time.Second
 
 	canvasMessageSync           = 0
 	canvasMessageQueryAwareness = 3
@@ -44,7 +45,7 @@ var canvasUpgrader = websocket.Upgrader{
 }
 
 // DefaultCanvasManager is shared by the canvas websocket endpoint.
-var DefaultCanvasManager = NewCanvasManager(nil, nil)
+var DefaultCanvasManager = NewCanvasManager(nil, nil, nil)
 
 // CanvasManager tracks one isolated CanvasHub per room.
 type CanvasManager struct {
@@ -52,40 +53,46 @@ type CanvasManager struct {
 	hubs        map[string]*CanvasHub
 	redisStore  *database.RedisStore
 	scyllaStore *database.ScyllaStore
+	r2Client    *storage.R2Client
 }
 
 func NewCanvasManager(
 	redisStore *database.RedisStore,
 	scyllaStore *database.ScyllaStore,
+	r2Client *storage.R2Client,
 ) *CanvasManager {
 	return &CanvasManager{
 		hubs:        make(map[string]*CanvasHub),
 		redisStore:  redisStore,
 		scyllaStore: scyllaStore,
+		r2Client:    r2Client,
 	}
 }
 
 func ConfigureCanvasPersistence(
 	redisStore *database.RedisStore,
 	scyllaStore *database.ScyllaStore,
+	r2Client *storage.R2Client,
 ) {
-	DefaultCanvasManager.configureStores(redisStore, scyllaStore)
+	DefaultCanvasManager.configureStores(redisStore, scyllaStore, r2Client)
 }
 
 func (m *CanvasManager) configureStores(
 	redisStore *database.RedisStore,
 	scyllaStore *database.ScyllaStore,
+	r2Client *storage.R2Client,
 ) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.redisStore = redisStore
 	m.scyllaStore = scyllaStore
+	m.r2Client = r2Client
 }
 
-func (m *CanvasManager) activeStores() (*database.RedisStore, *database.ScyllaStore) {
+func (m *CanvasManager) activeStores() (*database.RedisStore, *database.ScyllaStore, *storage.R2Client) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.redisStore, m.scyllaStore
+	return m.redisStore, m.scyllaStore, m.r2Client
 }
 
 func (m *CanvasManager) getHub(roomID string) *CanvasHub {
@@ -124,6 +131,54 @@ func (m *CanvasManager) removeHub(roomID string, hub *CanvasHub) {
 	if current, ok := m.hubs[roomID]; ok && current == hub {
 		delete(m.hubs, roomID)
 	}
+}
+
+type canvasSnapshotLookupResult struct {
+	RoomName         string
+	RedisHadSnapshot bool
+	R2FetchAttempted bool
+	Source           string
+}
+
+func roomNameFromRedisMeta(meta []interface{}) string {
+	for _, candidate := range meta {
+		switch typed := candidate.(type) {
+		case string:
+			trimmed := strings.TrimSpace(typed)
+			if trimmed != "" {
+				return trimmed
+			}
+		case []byte:
+			trimmed := strings.TrimSpace(string(typed))
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func resolveCanvasRoomName(roomID string) string {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return roomID
+	}
+	redisStore, _, _ := DefaultCanvasManager.activeStores()
+	if redisStore == nil || redisStore.Client == nil {
+		return normalizedRoomID
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
+	defer cancel()
+	meta, err := redisStore.Client.HMGet(ctx, roomKey(normalizedRoomID), "name", "name_lookup").Result()
+	if err != nil || len(meta) == 0 {
+		return normalizedRoomID
+	}
+	roomName := roomNameFromRedisMeta(meta)
+	if roomName == "" {
+		return normalizedRoomID
+	}
+	return roomName
 }
 
 // CanvasHub is an isolated router for one room's binary Yjs updates.
@@ -201,98 +256,60 @@ func (h *CanvasHub) currentSnapshotCopy() []byte {
 }
 
 func (h *CanvasHub) loadCurrentSnapshot() {
-	redisStore, scyllaStore := h.manager.activeStores()
-	ctx, cancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
-	defer cancel()
-
-	if redisStore != nil && redisStore.Client != nil {
-		redisSnapshot, err := database.GetCanvasSnapshotFromRedis(ctx, redisStore.Client, h.roomID)
-		if err != nil {
-			log.Printf("[canvas-ws] redis snapshot load failed room=%s err=%v", h.roomID, err)
-		} else if len(redisSnapshot) > 0 {
-			log.Printf("[canvas-ws] event=load-current-snapshot source=redis room=%s bytes=%d", h.roomID, len(redisSnapshot))
-			h.setCurrentSnapshot(redisSnapshot)
-			return
-		}
+	snapshot, _, err := loadCanvasSnapshotForRoom(h.roomID)
+	if err != nil {
+		log.Printf("Could not preload current canvas snapshot for room %s: %v", h.roomID, err)
+		return
 	}
-
-	if scyllaStore != nil && scyllaStore.Session != nil {
-		astraSnapshot, err := database.GetCanvasSnapshotFromAstra(ctx, scyllaStore.Session, h.roomID)
-		if err != nil {
-			log.Printf("[canvas-ws] astra snapshot load failed room=%s err=%v", h.roomID, err)
-			return
-		}
-		if len(astraSnapshot) > 0 {
-			log.Printf("[canvas-ws] event=load-current-snapshot source=astra room=%s bytes=%d", h.roomID, len(astraSnapshot))
-			h.setCurrentSnapshot(astraSnapshot)
-			if redisStore != nil && redisStore.Client != nil {
-				snapshotCopy := append([]byte(nil), astraSnapshot...)
-				go func() {
-					hotCtx, hotCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
-					defer hotCancel()
-					if saveErr := database.SaveCanvasSnapshotToRedis(
-						hotCtx,
-						redisStore.Client,
-						h.roomID,
-						snapshotCopy,
-					); saveErr != nil {
-						log.Printf("[canvas-ws] redis warmup save failed room=%s err=%v", h.roomID, saveErr)
-					}
-				}()
-			}
-			return
-		}
+	if len(snapshot) == 0 {
+		log.Printf("No existing canvas snapshot was found when room %s started.", h.roomID)
+		return
 	}
-	log.Printf("[canvas-ws] event=load-current-snapshot source=none room=%s bytes=0", h.roomID)
+	h.setCurrentSnapshot(snapshot)
+	log.Printf("Preloaded canvas snapshot for room %s (%d bytes).", h.roomID, len(snapshot))
 }
 
 func (h *CanvasHub) flushSnapshotOnTeardown() {
-	redisStore, scyllaStore := h.manager.activeStores()
-	snapshot := []byte(nil)
-	log.Printf("[canvas-ws] event=flush-snapshot-start room=%s", h.roomID)
+	redisStore, _, r2Client := h.manager.activeStores()
+	log.Printf("Starting final canvas snapshot flush for room %s.", h.roomID)
 
-	// Redis is the hot snapshot source and should win when available.
-	if redisStore != nil && redisStore.Client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
-		redisSnapshot, err := database.GetCanvasSnapshotFromRedis(ctx, redisStore.Client, h.roomID)
-		cancel()
-		if err != nil {
-			log.Printf("[canvas-ws] redis snapshot lookup on teardown failed room=%s err=%v", h.roomID, err)
-		} else if len(redisSnapshot) > 0 {
-			snapshot = redisSnapshot
-		}
-	}
-	if len(snapshot) == 0 {
-		snapshot = h.currentSnapshotCopy()
-	}
-
-	if len(snapshot) == 0 {
-		log.Printf("[canvas-ws] event=flush-snapshot-skip room=%s reason=no-snapshot", h.roomID)
+	if redisStore == nil || redisStore.Client == nil {
+		log.Printf("Skipping final flush for room %s because Redis is unavailable.", h.roomID)
 		return
 	}
-	if scyllaStore == nil || scyllaStore.Session == nil {
-		log.Printf("[canvas-ws] event=flush-snapshot-skip room=%s reason=scylla-unavailable bytes=%d", h.roomID, len(snapshot))
+	if r2Client == nil || r2Client.Client == nil || strings.TrimSpace(r2Client.Bucket) == "" {
+		log.Printf("Skipping final flush for room %s because R2 is unavailable.", h.roomID)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
-	defer cancel()
 
-	if err := database.SaveCanvasSnapshotToAstra(
-		ctx,
-		scyllaStore.Session,
-		h.roomID,
-		snapshot,
-	); err != nil {
-		log.Printf("[canvas-ws] astra snapshot save failed room=%s err=%v", h.roomID, err)
+	readCtx, readCancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
+	redisSnapshot, err := database.GetCanvasSnapshotFromRedis(readCtx, redisStore.Client, h.roomID)
+	readCancel()
+	if err != nil {
+		log.Printf("Could not read Redis snapshot during teardown for room %s: %v", h.roomID, err)
 		return
 	}
-	log.Printf("[canvas-ws] event=flush-snapshot-commit room=%s bytes=%d", h.roomID, len(snapshot))
-
-	if redisStore != nil && redisStore.Client != nil {
-		if err := database.DeleteCanvasSnapshotFromRedis(ctx, redisStore.Client, h.roomID); err != nil {
-			log.Printf("[canvas-ws] redis snapshot delete failed room=%s err=%v", h.roomID, err)
-		}
+	if len(redisSnapshot) == 0 {
+		log.Printf("Skipping final flush for room %s because Redis has no snapshot.", h.roomID)
+		return
 	}
+
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+	err = storage.SaveCanvasSnapshotToR2(writeCtx, r2Client.Client, r2Client.Bucket, h.roomID, redisSnapshot)
+	writeCancel()
+	if err != nil {
+		log.Printf("Could not save final snapshot to R2 for room %s: %v", h.roomID, err)
+		return
+	}
+	log.Printf("Uploaded final snapshot for room %s to R2 (%d bytes).", h.roomID, len(redisSnapshot))
+
+	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+	defer deleteCancel()
+	if err := database.DeleteCanvasSnapshotFromRedis(deleteCtx, redisStore.Client, h.roomID); err != nil {
+		log.Printf("Could not delete Redis snapshot after R2 upload for room %s: %v", h.roomID, err)
+		return
+	}
+	log.Printf("Completed final snapshot flush for room %s (%d bytes).", h.roomID, len(redisSnapshot))
 }
 
 func (h *CanvasHub) Run() {
@@ -306,17 +323,17 @@ func (h *CanvasHub) Run() {
 			}
 			h.clientsMu.Lock()
 			h.clients[client] = struct{}{}
-			log.Printf("[canvas-ws] event=client-register room=%s client=%s clients=%d", h.roomID, client.debugID(), len(h.clients))
+			log.Printf("A canvas client joined room %s. Client ID: %s. Active clients: %d.", h.roomID, client.debugID(), len(h.clients))
 
 			if snapshot := h.currentSnapshotCopy(); len(snapshot) > 0 {
 				framedSnapshot := encodeCanvasSyncStep2Message(snapshot)
-				log.Printf("[canvas-ws] event=snapshot-seed-send room=%s client=%s bytes=%d", h.roomID, client.debugID(), len(framedSnapshot))
+				log.Printf("Sending initial snapshot to client %s in room %s (%d bytes).", client.debugID(), h.roomID, len(framedSnapshot))
 				select {
 				case client.send <- framedSnapshot:
 				default:
 					delete(h.clients, client)
 					close(client.send)
-					log.Printf("[canvas-ws] event=client-register-drop room=%s client=%s reason=seed-send-backpressure", h.roomID, client.debugID())
+					log.Printf("Dropped client %s from room %s because initial snapshot delivery was blocked.", client.debugID(), h.roomID)
 					h.clientsMu.Unlock()
 					continue
 				}
@@ -328,7 +345,7 @@ func (h *CanvasHub) Run() {
 				default:
 					delete(h.clients, connectedClient)
 					close(connectedClient.send)
-					log.Printf("[canvas-ws] event=awareness-query-drop room=%s client=%s", h.roomID, connectedClient.debugID())
+					log.Printf("Removed client %s from room %s because awareness sync was blocked.", connectedClient.debugID(), h.roomID)
 				}
 			}
 			h.clientsMu.Unlock()
@@ -341,7 +358,7 @@ func (h *CanvasHub) Run() {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
-				log.Printf("[canvas-ws] event=client-unregister room=%s client=%s clients=%d", h.roomID, client.debugID(), len(h.clients))
+				log.Printf("A canvas client left room %s. Client ID: %s. Active clients: %d.", h.roomID, client.debugID(), len(h.clients))
 			}
 			empty := len(h.clients) == 0
 			h.clientsMu.Unlock()
@@ -365,10 +382,10 @@ func (h *CanvasHub) Run() {
 				default:
 					delete(h.clients, client)
 					close(client.send)
-					log.Printf("[canvas-ws] event=broadcast-drop room=%s sender=%s target=%s reason=backpressure", h.roomID, sender.debugID(), client.debugID())
+					log.Printf("Dropped receiver %s in room %s because broadcast delivery was blocked (sender %s).", client.debugID(), h.roomID, sender.debugID())
 				}
 			}
-			log.Printf("[canvas-ws] event=broadcast room=%s sender=%s bytes=%d recipients=%d", h.roomID, sender.debugID(), len(payload), recipientCount)
+			log.Printf("Broadcasted canvas update in room %s. Sender: %s. Payload size: %d bytes. Recipients: %d.", h.roomID, sender.debugID(), len(payload), recipientCount)
 			empty := len(h.clients) == 0
 			h.clientsMu.Unlock()
 			if empty {
@@ -383,7 +400,7 @@ func (h *CanvasHub) Run() {
 func (h *CanvasHub) publishFrom(sender *CanvasClient, payload []byte) bool {
 	h.broadcastMu.Lock()
 	defer h.broadcastMu.Unlock()
-	log.Printf("[canvas-ws] event=publish-from room=%s sender=%s bytes=%d", h.roomID, sender.debugID(), len(payload))
+	log.Printf("Received canvas update from client %s in room %s (%d bytes).", sender.debugID(), h.roomID, len(payload))
 
 	select {
 	case <-h.done:
@@ -426,7 +443,7 @@ func (c *CanvasClient) readPump() {
 		c.requestUnregister()
 		_ = c.conn.Close()
 	}()
-	log.Printf("[canvas-ws] event=read-pump-start room=%s client=%s", c.hub.roomID, c.debugID())
+	log.Printf("Started reading canvas WebSocket messages for client %s in room %s.", c.debugID(), c.hub.roomID)
 
 	c.conn.SetReadLimit(canvasMaxMessageSize)
 	_ = c.conn.SetReadDeadline(time.Now().Add(canvasPongWait))
@@ -438,23 +455,23 @@ func (c *CanvasClient) readPump() {
 		messageType, payload, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[canvas-ws] read error room=%s err=%v", c.hub.roomID, err)
+				log.Printf("Unexpected canvas WebSocket read error in room %s: %v", c.hub.roomID, err)
 			}
-			log.Printf("[canvas-ws] event=read-pump-stop room=%s client=%s err=%v", c.hub.roomID, c.debugID(), err)
+			log.Printf("Stopped reading canvas WebSocket messages for client %s in room %s: %v", c.debugID(), c.hub.roomID, err)
 			return
 		}
 		if messageType != websocket.BinaryMessage {
-			log.Printf("[canvas-ws] event=read-skip-non-binary room=%s client=%s type=%d bytes=%d", c.hub.roomID, c.debugID(), messageType, len(payload))
+			log.Printf("Ignored a non-binary canvas message from client %s in room %s (type %d, %d bytes).", c.debugID(), c.hub.roomID, messageType, len(payload))
 			continue
 		}
 		if len(payload) == 0 {
-			log.Printf("[canvas-ws] event=read-skip-empty room=%s client=%s", c.hub.roomID, c.debugID())
+			log.Printf("Ignored an empty canvas message from client %s in room %s.", c.debugID(), c.hub.roomID)
 			continue
 		}
-		log.Printf("[canvas-ws] event=read-binary room=%s client=%s bytes=%d", c.hub.roomID, c.debugID(), len(payload))
+		log.Printf("Read a binary canvas message from client %s in room %s (%d bytes).", c.debugID(), c.hub.roomID, len(payload))
 		payloadCopy := append([]byte(nil), payload...)
 		if ok := c.hub.publishFrom(c, payloadCopy); !ok {
-			log.Printf("[canvas-ws] event=read-publish-failed room=%s client=%s bytes=%d", c.hub.roomID, c.debugID(), len(payloadCopy))
+			log.Printf("Could not publish canvas message from client %s in room %s (%d bytes).", c.debugID(), c.hub.roomID, len(payloadCopy))
 			return
 		}
 	}
@@ -467,7 +484,7 @@ func (c *CanvasClient) writePump() {
 		c.requestUnregister()
 		_ = c.conn.Close()
 	}()
-	log.Printf("[canvas-ws] event=write-pump-start room=%s client=%s", c.hub.roomID, c.debugID())
+	log.Printf("Started writing canvas WebSocket messages for client %s in room %s.", c.debugID(), c.hub.roomID)
 
 	for {
 		select {
@@ -475,22 +492,22 @@ func (c *CanvasClient) writePump() {
 			_ = c.conn.SetWriteDeadline(time.Now().Add(canvasWriteWait))
 			if !ok {
 				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				log.Printf("[canvas-ws] event=write-pump-stop room=%s client=%s reason=channel-closed", c.hub.roomID, c.debugID())
+				log.Printf("Stopped writing canvas messages for client %s in room %s because the send channel closed.", c.debugID(), c.hub.roomID)
 				return
 			}
-			log.Printf("[canvas-ws] event=write-binary room=%s client=%s bytes=%d", c.hub.roomID, c.debugID(), len(payload))
+			log.Printf("Sent a binary canvas message to client %s in room %s (%d bytes).", c.debugID(), c.hub.roomID, len(payload))
 			if err := c.conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
-				log.Printf("[canvas-ws] event=write-binary-error room=%s client=%s err=%v", c.hub.roomID, c.debugID(), err)
+				log.Printf("Could not send a canvas message to client %s in room %s: %v", c.debugID(), c.hub.roomID, err)
 				return
 			}
 
 		case <-ticker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(canvasWriteWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("[canvas-ws] event=write-ping-error room=%s client=%s err=%v", c.hub.roomID, c.debugID(), err)
+				log.Printf("Canvas ping failed for client %s in room %s: %v", c.debugID(), c.hub.roomID, err)
 				return
 			}
-			log.Printf("[canvas-ws] event=write-ping room=%s client=%s", c.hub.roomID, c.debugID())
+			log.Printf("Sent canvas ping to client %s in room %s.", c.debugID(), c.hub.roomID)
 		}
 	}
 }
@@ -498,9 +515,9 @@ func (c *CanvasClient) writePump() {
 // ServeCanvasWS upgrades and joins the caller into a room-isolated canvas hub.
 func ServeCanvasWS(w http.ResponseWriter, r *http.Request, roomID string) {
 	normalizedRoomID := normalizeRoomID(roomID)
-	log.Printf("[canvas-ws] event=serve-ws-request room=%s rawRoom=%s remote=%s", normalizedRoomID, roomID, r.RemoteAddr)
+	log.Printf("Canvas WebSocket request received. Normalized room ID: %s. Raw room ID: %s. Client: %s.", normalizedRoomID, roomID, r.RemoteAddr)
 	if normalizedRoomID == "" {
-		log.Printf("[canvas-ws] event=serve-ws-invalid-room rawRoom=%s remote=%s", roomID, r.RemoteAddr)
+		log.Printf("Rejected canvas WebSocket request with invalid room ID %q from %s.", roomID, r.RemoteAddr)
 		http.Error(w, "invalid room id", http.StatusBadRequest)
 		return
 	}
@@ -511,7 +528,7 @@ func ServeCanvasWS(w http.ResponseWriter, r *http.Request, roomID string) {
 		existingClients := len(existingHub.clients)
 		existingHub.clientsMu.RUnlock()
 		if existingClients >= canvasRoomMaxClients {
-			log.Printf("[canvas-ws] event=serve-ws-room-full room=%s clients=%d remote=%s", normalizedRoomID, existingClients, r.RemoteAddr)
+			log.Printf("Rejected canvas WebSocket request for room %s because it already has %d clients.", normalizedRoomID, existingClients)
 			http.Error(w, "Canvas is full (Max 50)", http.StatusForbidden)
 			return
 		}
@@ -519,10 +536,10 @@ func ServeCanvasWS(w http.ResponseWriter, r *http.Request, roomID string) {
 
 	conn, err := canvasUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[canvas-ws] upgrade failed room=%s err=%v", normalizedRoomID, err)
+		log.Printf("Could not upgrade canvas WebSocket for room %s: %v", normalizedRoomID, err)
 		return
 	}
-	log.Printf("[canvas-ws] event=serve-ws-upgrade-ok room=%s remote=%s", normalizedRoomID, r.RemoteAddr)
+	log.Printf("Canvas WebSocket upgrade succeeded for room %s from %s.", normalizedRoomID, r.RemoteAddr)
 
 	hub := DefaultCanvasManager.getOrCreateHub(normalizedRoomID)
 	client := &CanvasClient{
@@ -539,10 +556,10 @@ func ServeCanvasWS(w http.ResponseWriter, r *http.Request, roomID string) {
 			time.Now().Add(canvasWriteWait),
 		)
 		_ = conn.Close()
-		log.Printf("[canvas-ws] event=serve-ws-hub-unavailable room=%s remote=%s", normalizedRoomID, r.RemoteAddr)
+		log.Printf("Canvas room %s became unavailable during registration for client %s.", normalizedRoomID, r.RemoteAddr)
 		return
 	case hub.register <- client:
-		log.Printf("[canvas-ws] event=serve-ws-registered room=%s client=%s remote=%s", normalizedRoomID, client.debugID(), r.RemoteAddr)
+		log.Printf("Registered canvas client %s in room %s from %s.", client.debugID(), normalizedRoomID, r.RemoteAddr)
 	}
 
 	go client.writePump()
@@ -561,199 +578,122 @@ func resolveCanvasRoomIDFromRequest(r *http.Request) string {
 	return normalizeRoomID(strings.TrimSpace(r.URL.Query().Get("room")))
 }
 
-func loadCanvasSnapshotForRoom(roomID string) ([]byte, error) {
-	if roomID == "" {
-		return nil, nil
+func loadCanvasSnapshotForRoom(roomID string) ([]byte, canvasSnapshotLookupResult, error) {
+	lookup := canvasSnapshotLookupResult{
+		RoomName:         resolveCanvasRoomName(roomID),
+		RedisHadSnapshot: false,
+		R2FetchAttempted: false,
+		Source:           "none",
 	}
-	lookupStart := time.Now()
+	if roomID == "" {
+		return nil, lookup, nil
+	}
+
+	redisStore, scyllaStore, r2Client := DefaultCanvasManager.activeStores()
+	if scyllaStore == nil || scyllaStore.Session == nil {
+		lookup.Source = "metadata_unavailable"
+		return nil, lookup, nil
+	}
+
+	metadataCtx, metadataCancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
+	hasCanvasData, err := database.CheckCanvasHasData(metadataCtx, scyllaStore.Session, roomID)
+	metadataCancel()
+	if err != nil {
+		return nil, lookup, err
+	}
+	if !hasCanvasData {
+		lookup.Source = "metadata_empty"
+		return nil, lookup, nil
+	}
+
 	hub := DefaultCanvasManager.getHub(roomID)
-	// If there is an active hub, it is the freshest in-memory state.
 	if hub != nil {
-		log.Printf("[canvas-ws] Room %s snapshot lookup: checking active hub memory.", roomID)
 		hubSnapshot := hub.currentSnapshotCopy()
 		if len(hubSnapshot) > 0 {
-			log.Printf(
-				"[canvas-ws] Room %s snapshot lookup: found %d bytes in hub memory (elapsed=%s).",
-				roomID,
-				len(hubSnapshot),
-				time.Since(lookupStart).Round(time.Millisecond),
-			)
-			log.Printf("[canvas-ws] event=snapshot-load source=hub room=%s bytes=%d", roomID, len(hubSnapshot))
-			return hubSnapshot, nil
+			lookup.Source = "hub"
+			return hubSnapshot, lookup, nil
 		}
-		log.Printf("[canvas-ws] Room %s snapshot lookup: hub is active but has no cached snapshot yet.", roomID)
-	} else {
-		log.Printf("[canvas-ws] Room %s snapshot lookup: no active hub, checking persisted stores.", roomID)
 	}
 
-	redisStore, scyllaStore := DefaultCanvasManager.activeStores()
-
 	if redisStore != nil && redisStore.Client != nil {
-		log.Printf("[canvas-ws] Room %s snapshot lookup: requesting Redis hot snapshot.", roomID)
-		redisStarted := time.Now()
 		redisCtx, redisCancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
-		redisSnapshot, err := database.GetCanvasSnapshotFromRedis(redisCtx, redisStore.Client, roomID)
+		redisSnapshot, redisErr := database.GetCanvasSnapshotFromRedis(redisCtx, redisStore.Client, roomID)
 		redisCancel()
-		redisElapsed := time.Since(redisStarted).Round(time.Millisecond)
-		if err != nil {
-			log.Printf(
-				"[canvas-ws] Room %s snapshot lookup: Redis hot snapshot read failed after %s: %v",
-				roomID,
-				redisElapsed,
-				err,
-			)
-			log.Printf("[canvas-ws] redis snapshot load endpoint failed room=%s err=%v", roomID, err)
+		if redisErr != nil {
+			log.Printf("Could not load canvas snapshot from Redis for room %s: %v", roomID, redisErr)
 		} else if len(redisSnapshot) > 0 {
+			lookup.RedisHadSnapshot = true
+			lookup.Source = "redis"
 			if hub != nil {
 				hub.setCurrentSnapshot(redisSnapshot)
 			}
-			log.Printf(
-				"[canvas-ws] Room %s snapshot lookup: Redis returned %d bytes (elapsed=%s).",
-				roomID,
-				len(redisSnapshot),
-				redisElapsed,
-			)
-			log.Printf("[canvas-ws] event=snapshot-load source=redis room=%s bytes=%d", roomID, len(redisSnapshot))
-			return redisSnapshot, nil
-		} else {
-			log.Printf(
-				"[canvas-ws] Room %s snapshot lookup: Redis returned no snapshot (elapsed=%s).",
-				roomID,
-				redisElapsed,
-			)
+			return redisSnapshot, lookup, nil
 		}
-	} else {
-		log.Printf("[canvas-ws] Room %s snapshot lookup: Redis store is unavailable, skipping.", roomID)
 	}
 
-	if scyllaStore != nil && scyllaStore.Session != nil {
-		log.Printf("[canvas-ws] Room %s snapshot lookup: requesting Astra/Scylla persisted snapshot.", roomID)
-		astraStarted := time.Now()
-		astraCtx, astraCancel := context.WithTimeout(context.Background(), canvasSnapshotReadTimeout)
-		astraSnapshot, err := database.GetCanvasSnapshotFromAstra(astraCtx, scyllaStore.Session, roomID)
-		astraCancel()
-		astraElapsed := time.Since(astraStarted).Round(time.Millisecond)
-		if err != nil {
-			log.Printf(
-				"[canvas-ws] Room %s snapshot lookup: Astra/Scylla read failed after %s: %v",
-				roomID,
-				astraElapsed,
-				err,
-			)
-			return nil, err
+	if r2Client != nil && r2Client.Client != nil && strings.TrimSpace(r2Client.Bucket) != "" {
+		lookup.R2FetchAttempted = true
+		r2Ctx, r2Cancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+		r2Snapshot, r2Err := storage.GetCanvasSnapshotFromR2(r2Ctx, r2Client.Client, r2Client.Bucket, roomID)
+		r2Cancel()
+		if r2Err != nil {
+			return nil, lookup, r2Err
 		}
-		if len(astraSnapshot) > 0 {
+		if len(r2Snapshot) > 0 {
+			lookup.Source = "r2"
 			if hub != nil {
-				hub.setCurrentSnapshot(astraSnapshot)
+				hub.setCurrentSnapshot(r2Snapshot)
 			}
-			log.Printf(
-				"[canvas-ws] Room %s snapshot lookup: Astra/Scylla returned %d bytes (elapsed=%s).",
-				roomID,
-				len(astraSnapshot),
-				astraElapsed,
-			)
-			log.Printf("[canvas-ws] event=snapshot-load source=astra room=%s bytes=%d", roomID, len(astraSnapshot))
 			if redisStore != nil && redisStore.Client != nil {
-				snapshotCopy := append([]byte(nil), astraSnapshot...)
+				snapshotCopy := append([]byte(nil), r2Snapshot...)
 				go func() {
 					hotCtx, hotCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
 					defer hotCancel()
-					if saveErr := database.SaveCanvasSnapshotToRedis(
-						hotCtx,
-						redisStore.Client,
-						roomID,
-						snapshotCopy,
-					); saveErr != nil {
-						log.Printf("[canvas-ws] redis warmup save from astra failed room=%s err=%v", roomID, saveErr)
+					if saveErr := database.SaveCanvasSnapshotToRedis(hotCtx, redisStore.Client, roomID, snapshotCopy); saveErr != nil {
+						log.Printf("Could not warm Redis cache from R2 snapshot for room %s: %v", roomID, saveErr)
 					}
 				}()
 			}
-			return astraSnapshot, nil
+			return r2Snapshot, lookup, nil
 		}
-		log.Printf(
-			"[canvas-ws] Room %s snapshot lookup: Astra/Scylla returned no snapshot (elapsed=%s).",
-			roomID,
-			astraElapsed,
-		)
-	} else {
-		log.Printf("[canvas-ws] Room %s snapshot lookup: Astra/Scylla store is unavailable, skipping.", roomID)
 	}
 
-	log.Printf(
-		"[canvas-ws] Room %s snapshot lookup complete: no snapshot found (elapsed=%s).",
-		roomID,
-		time.Since(lookupStart).Round(time.Millisecond),
-	)
-	log.Printf("[canvas-ws] event=snapshot-load source=none room=%s bytes=0", roomID)
-	return nil, nil
+	if hasCanvasData {
+		return nil, lookup, fmt.Errorf("critical: scylladb indicates canvas has data, but it could not be retrieved from redis or r2")
+	}
+
+	return nil, lookup, nil
 }
 
 func HandleCanvasSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 	roomID := resolveCanvasRoomIDFromRequest(r)
-	requestStart := time.Now()
-	log.Printf(
-		"[canvas-ws] Room %s requested full canvas snapshot (remote=%s path=%s).",
-		roomID,
-		r.RemoteAddr,
-		r.URL.Path,
-	)
-	log.Printf("[canvas-ws] event=snapshot-load-request room=%s remote=%s", roomID, r.RemoteAddr)
 	if roomID == "" {
-		log.Printf("[canvas-ws] Snapshot load rejected: missing or invalid room id (remote=%s path=%s).", r.RemoteAddr, r.URL.Path)
 		http.Error(w, "invalid room id", http.StatusBadRequest)
 		return
 	}
 
-	snapshot, err := loadCanvasSnapshotForRoom(roomID)
+	snapshot, lookup, err := loadCanvasSnapshotForRoom(roomID)
 	if err != nil {
-		log.Printf(
-			"[canvas-ws] Room %s snapshot load failed; returning 500 (elapsed=%s): %v",
-			roomID,
-			time.Since(requestStart).Round(time.Millisecond),
-			err,
-		)
-		log.Printf("[canvas-ws] snapshot load failed room=%s err=%v", roomID, err)
+		log.Printf("[canvas] Load failed room=%s err=%v", roomID, err)
 		http.Error(w, "failed to load snapshot", http.StatusInternalServerError)
 		return
 	}
+
+	log.Printf("[canvas] Load success room=%s source=%s bytes=%d", roomID, lookup.Source, len(snapshot))
+
 	if len(snapshot) == 0 {
-		log.Printf(
-			"[canvas-ws] Room %s has no snapshot to send; returning %d (elapsed=%s).",
-			roomID,
-			http.StatusNoContent,
-			time.Since(requestStart).Round(time.Millisecond),
-		)
-		log.Printf("[canvas-ws] event=snapshot-load-response room=%s status=%d bytes=0", roomID, http.StatusNoContent)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
-	if _, writeErr := w.Write(snapshot); writeErr != nil {
-		log.Printf("[canvas-ws] Room %s snapshot write failed: %v", roomID, writeErr)
-		return
-	}
-	log.Printf(
-		"[canvas-ws] Room %s full snapshot sent successfully (%d bytes, elapsed=%s).",
-		roomID,
-		len(snapshot),
-		time.Since(requestStart).Round(time.Millisecond),
-	)
-	log.Printf("[canvas-ws] event=snapshot-load-response room=%s status=%d bytes=%d", roomID, http.StatusOK, len(snapshot))
+	_, _ = w.Write(snapshot)
 }
 
 func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 	roomID := resolveCanvasRoomIDFromRequest(r)
-	requestStart := time.Now()
-	log.Printf(
-		"[canvas-ws] Room %s requested snapshot save (remote=%s path=%s).",
-		roomID,
-		r.RemoteAddr,
-		r.URL.Path,
-	)
-	log.Printf("[canvas-ws] event=snapshot-save-request room=%s remote=%s", roomID, r.RemoteAddr)
 	if roomID == "" {
-		log.Printf("[canvas-ws] Snapshot save rejected: missing or invalid room id (remote=%s path=%s).", r.RemoteAddr, r.URL.Path)
 		http.Error(w, "invalid room id", http.StatusBadRequest)
 		return
 	}
@@ -764,77 +704,56 @@ func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 	defer bodyReader.Close()
 	snapshot, err := io.ReadAll(bodyReader)
 	if err != nil {
-		log.Printf("[canvas-ws] Room %s snapshot payload read failed: %v", roomID, err)
 		http.Error(w, "invalid snapshot payload", http.StatusBadRequest)
 		return
 	}
-	log.Printf(
-		"[canvas-ws] Room %s snapshot payload received (%d bytes, hubActive=%t).",
-		roomID,
-		len(snapshot),
-		hub != nil,
-	)
-	log.Printf("[canvas-ws] event=snapshot-save-payload room=%s bytes=%d hubActive=%t", roomID, len(snapshot), hub != nil)
+	log.Printf("[canvas] Save payload received room=%s bytes=%d hub_active=%t", roomID, len(snapshot), hub != nil)
+
 	if hub != nil {
 		hub.setCurrentSnapshot(snapshot)
 	}
 
-	redisStore, scyllaStore := DefaultCanvasManager.activeStores()
+	redisStore, scyllaStore, r2Client := DefaultCanvasManager.activeStores()
 	if redisStore != nil && redisStore.Client != nil {
-		redisStarted := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
-		saveErr := database.SaveCanvasSnapshotToRedis(ctx, redisStore.Client, roomID, snapshot)
-		cancel()
+		redisCtx, redisCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+		saveErr := database.SaveCanvasSnapshotToRedis(redisCtx, redisStore.Client, roomID, snapshot)
+		redisCancel()
 		if saveErr != nil {
-			log.Printf("[canvas-ws] Room %s snapshot save to Redis failed: %v", roomID, saveErr)
-			log.Printf("[canvas-ws] redis snapshot save failed room=%s err=%v", roomID, saveErr)
-		} else {
-			log.Printf(
-				"[canvas-ws] Room %s snapshot save to Redis completed (%d bytes, elapsed=%s).",
-				roomID,
-				len(snapshot),
-				time.Since(redisStarted).Round(time.Millisecond),
-			)
+			log.Printf("[canvas] Save to Redis failed room=%s err=%v", roomID, saveErr)
 		}
-	} else {
-		log.Printf("[canvas-ws] Room %s snapshot save skipped Redis because store is unavailable.", roomID)
 	}
 
-	// Persist a cold snapshot copy as well so data survives Redis eviction/restarts.
 	if scyllaStore != nil && scyllaStore.Session != nil {
-		if hub == nil {
-			log.Printf("[canvas-ws] Room %s has no active hub; scheduling Astra/Scylla snapshot save.", roomID)
-		} else {
-			log.Printf("[canvas-ws] Room %s has active hub; scheduling Astra/Scylla snapshot save for durability.", roomID)
-		}
+		go func() {
+			metaCtx, metaCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+			defer metaCancel()
+			if markErr := database.UpdateCanvasHasData(metaCtx, scyllaStore.Session, roomID); markErr != nil {
+				log.Printf("[canvas] Update canvas_has_data failed room=%s err=%v", roomID, markErr)
+			}
+		}()
+	}
+
+	if hub == nil && r2Client != nil && r2Client.Client != nil {
 		snapshotCopy := append([]byte(nil), snapshot...)
 		go func() {
-			astraStarted := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
-			defer cancel()
-			if saveErr := database.SaveCanvasSnapshotToAstra(ctx, scyllaStore.Session, roomID, snapshotCopy); saveErr != nil {
-				log.Printf("[canvas-ws] Room %s async Astra/Scylla snapshot save failed: %v", roomID, saveErr)
-				log.Printf("[canvas-ws] astra snapshot save without active hub failed room=%s err=%v", roomID, saveErr)
+			r2Ctx, r2Cancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+			saveErr := storage.SaveCanvasSnapshotToR2(r2Ctx, r2Client.Client, r2Client.Bucket, roomID, snapshotCopy)
+			r2Cancel()
+			if saveErr != nil {
+				log.Printf("[canvas] Rescue save to R2 failed room=%s err=%v", roomID, saveErr)
 				return
 			}
-			log.Printf(
-				"[canvas-ws] Room %s async Astra/Scylla snapshot save completed (%d bytes, elapsed=%s).",
-				roomID,
-				len(snapshotCopy),
-				time.Since(astraStarted).Round(time.Millisecond),
-			)
+			log.Printf("[canvas] Rescue save to R2 succeeded room=%s bytes=%d", roomID, len(snapshotCopy))
+
+			if redisStore != nil && redisStore.Client != nil {
+				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+				if deleteErr := database.DeleteCanvasSnapshotFromRedis(deleteCtx, redisStore.Client, roomID); deleteErr != nil {
+					log.Printf("[canvas] Redis cleanup after rescue failed room=%s err=%v", roomID, deleteErr)
+				}
+				deleteCancel()
+			}
 		}()
-	} else {
-		log.Printf("[canvas-ws] Room %s snapshot save skipped Astra/Scylla because store is unavailable.", roomID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-	log.Printf(
-		"[canvas-ws] Room %s snapshot save request completed (status=%d bytes=%d elapsed=%s).",
-		roomID,
-		http.StatusNoContent,
-		len(snapshot),
-		time.Since(requestStart).Round(time.Millisecond),
-	)
-	log.Printf("[canvas-ws] event=snapshot-save-response room=%s status=%d bytes=%d", roomID, http.StatusNoContent, len(snapshot))
 }

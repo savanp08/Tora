@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -143,6 +144,7 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 			parent_room_id text,
 			origin_message_id text,
 			admin_code text,
+			canvas_has_data boolean,
 			created_at timestamp,
 			updated_at timestamp
 		)`,
@@ -156,6 +158,7 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 	roomAlterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD canvas_has_data boolean`, roomsTable),
 	}
 	for _, alterQuery := range roomAlterQueries {
 		err := session.Query(alterQuery).Exec()
@@ -216,4 +219,40 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		return err
 	}
 	return nil
+}
+
+func UpdateCanvasHasData(ctx context.Context, session *gocql.Session, roomID string) error {
+	if session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	normalizedRoomID := strings.TrimSpace(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("room id is required")
+	}
+	query := `UPDATE rooms SET canvas_has_data = true WHERE room_id = ?`
+	return session.Query(query, normalizedRoomID).WithContext(ctx).Exec()
+}
+
+func CheckCanvasHasData(ctx context.Context, session *gocql.Session, roomID string) (bool, error) {
+	if session == nil {
+		return false, fmt.Errorf("scylla session is not configured")
+	}
+	normalizedRoomID := strings.TrimSpace(roomID)
+	if normalizedRoomID == "" {
+		return false, nil
+	}
+
+	query := `SELECT canvas_has_data FROM rooms WHERE room_id = ? LIMIT 1`
+	var hasData *bool
+	err := session.Query(query, normalizedRoomID).WithContext(ctx).Scan(&hasData)
+	if err != nil {
+		if errors.Is(err, gocql.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if hasData == nil {
+		return false, nil
+	}
+	return *hasData, nil
 }

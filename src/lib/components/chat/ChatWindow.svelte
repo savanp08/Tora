@@ -672,7 +672,24 @@
 		if (message.type === 'file') {
 			return getFileName(message);
 		}
+		if (message.type === 'call_log') {
+			return 'Call log';
+		}
 		return 'Message';
+	}
+
+	function isCallLogMessage(message: ChatMessage) {
+		return (message.type || '').trim().toLowerCase() === 'call_log';
+	}
+
+	function isMissedCallMessage(message: ChatMessage) {
+		const content = (message.content || '').trim().toLowerCase();
+		return content === 'missed call';
+	}
+
+	function getCallLogModeLabel(message: ChatMessage) {
+		const mode = (message.mediaType || '').trim().toLowerCase();
+		return mode === 'video' ? 'Video call' : 'Voice call';
 	}
 
 	function isLongMessage(content: string) {
@@ -1037,6 +1054,7 @@
 						? 'pending'
 						: ''} {isSelectionMode ? 'selectable' : ''}"
 					class:media-bubble={isMediaBubble(message)}
+					class:call-log-bubble={isCallLogMessage(message)}
 					class:deleted={isDeletedMessage(message)}
 					class:selected-target={selectedMessageId === message.id || isMultiDeleteSelected}
 					class:focused={focusedMessageId === message.id}
@@ -1201,6 +1219,22 @@
 								on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
 								on:addTask={(event) => dispatch('addTask', event.detail)}
 							/>
+						{:else if isCallLogMessage(message)}
+							<div class="call-log-entry">
+								<svg
+									class="call-log-icon {isMissedCallMessage(message) ? 'missed' : 'completed'}"
+									viewBox="0 0 24 24"
+									aria-hidden="true"
+								>
+									<path
+										d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
+									/>
+								</svg>
+								<div class="call-log-copy">
+									<div class="call-log-title">{getCallLogModeLabel(message)}</div>
+									<div class="call-log-status">{message.content}</div>
+								</div>
+							</div>
 						{:else if isCodeBlock(message.content)}
 							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
 						{:else}
@@ -2420,6 +2454,55 @@
 
 	.messages-shell.theme-dark .bubble.mine .read-more-btn {
 		color: #e8e8ef;
+	}
+
+	.bubble.call-log-bubble {
+		background: #e8ebf0;
+		border-color: #d4dae4;
+	}
+
+	.messages-shell.theme-dark .bubble.call-log-bubble {
+		background: #1c1d22;
+		border-color: #30313a;
+	}
+
+	.call-log-entry {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.call-log-icon {
+		width: 1rem;
+		height: 1rem;
+		stroke: currentColor;
+		stroke-width: 1.7;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.call-log-icon.missed {
+		color: #d1495b;
+	}
+
+	.call-log-icon.completed {
+		color: #2e9f5f;
+	}
+
+	.call-log-copy {
+		display: grid;
+		gap: 0.1rem;
+	}
+
+	.call-log-title {
+		font-weight: 600;
+		font-size: 0.78rem;
+	}
+
+	.call-log-status {
+		font-size: 0.74rem;
+		opacity: 0.85;
 	}
 
 	@media (max-width: 900px) {

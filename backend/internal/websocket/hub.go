@@ -1365,6 +1365,10 @@ func (h *Hub) broadcastRoomEventToLocal(event RoomEvent) {
 	if roomID == "" || eventType == "" {
 		return
 	}
+	if isTransientSignalingType(eventType) {
+		h.broadcastSignalingEventToLocal(eventType, roomID, event.Payload)
+		return
+	}
 	if isBoardEventType(eventType) {
 		h.broadcastBoardEventToLocal(RoomEvent{
 			Type:         eventType,
@@ -1391,6 +1395,126 @@ func (h *Hub) broadcastRoomEventToLocal(event RoomEvent) {
 	}
 
 	for roomClient := range clients {
+		select {
+		case roomClient.Send <- payload:
+		default:
+			h.removeClientFromAllRooms(roomClient, true)
+			roomClient.closeSendChannel()
+		}
+	}
+}
+
+func resolveSignalingTargetUserID(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	targetUserID := normalizeUsername(
+		readStringFromMap(
+			payload,
+			"targetUserId",
+			"target_user_id",
+			"targetUser",
+			"target_user",
+		),
+	)
+	if targetUserID != "" {
+		return targetUserID
+	}
+	if nestedPayload, ok := payload["payload"].(map[string]interface{}); ok && nestedPayload != nil {
+		return normalizeUsername(
+			readStringFromMap(
+				nestedPayload,
+				"targetUserId",
+				"target_user_id",
+				"targetUser",
+				"target_user",
+			),
+		)
+	}
+	return ""
+}
+
+func resolveSignalingOriginUserID(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	originUserID := normalizeUsername(
+		readStringFromMap(
+			payload,
+			"fromUserId",
+			"from_user_id",
+			"userId",
+			"user_id",
+			"senderId",
+			"sender_id",
+		),
+	)
+	if originUserID != "" {
+		return originUserID
+	}
+	if nestedPayload, ok := payload["payload"].(map[string]interface{}); ok && nestedPayload != nil {
+		return normalizeUsername(
+			readStringFromMap(
+				nestedPayload,
+				"fromUserId",
+				"from_user_id",
+				"userId",
+				"user_id",
+				"senderId",
+				"sender_id",
+			),
+		)
+	}
+	return ""
+}
+
+func (h *Hub) broadcastSignalingEventToLocal(eventType, roomID string, body map[string]interface{}) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedEventType := strings.ToLower(strings.TrimSpace(eventType))
+	if normalizedRoomID == "" || !isTransientSignalingType(normalizedEventType) {
+		return
+	}
+
+	clients, ok := h.rooms[normalizedRoomID]
+	if !ok {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type":   normalizedEventType,
+		"roomId": normalizedRoomID,
+	}
+	for key, value := range body {
+		loweredKey := strings.ToLower(strings.TrimSpace(key))
+		if loweredKey == "type" || loweredKey == "roomid" || loweredKey == "room_id" {
+			continue
+		}
+		payload[key] = value
+	}
+	if _, hasPayload := payload["payload"]; !hasPayload {
+		payload["payload"] = map[string]interface{}{}
+	}
+
+	targetUserID := resolveSignalingTargetUserID(payload)
+	originUserID := resolveSignalingOriginUserID(payload)
+
+	for roomClient := range clients {
+		if roomClient.canWriteToRoom(normalizedRoomID) && !h.isClientRoomMember(roomClient.UserID, normalizedRoomID) {
+			roomClient.subscribeToRoom(normalizedRoomID, false)
+			continue
+		}
+		if !roomClient.canWriteToRoom(normalizedRoomID) {
+			continue
+		}
+
+		normalizedClientUserID := normalizeUsername(roomClient.UserID)
+		if targetUserID != "" && normalizedClientUserID != targetUserID {
+			continue
+		}
+		if originUserID != "" && normalizedClientUserID == originUserID {
+			continue
+		}
+
 		select {
 		case roomClient.Send <- payload:
 		default:

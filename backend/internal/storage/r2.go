@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -190,4 +191,101 @@ func (r *R2Client) DeleteObjects(ctx context.Context, objectKeys []string) error
 		}
 	}
 	return firstErr
+}
+
+func canvasSnapshotObjectKey(roomID string) (string, error) {
+	normalizedRoomID := strings.TrimSpace(roomID)
+	if normalizedRoomID == "" {
+		return "", fmt.Errorf("room id is required")
+	}
+	return fmt.Sprintf("canvas/%s.yjs", normalizedRoomID), nil
+}
+
+func isR2ObjectNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	errorResponse := minio.ToErrorResponse(err)
+	switch strings.TrimSpace(errorResponse.Code) {
+	case "NoSuchKey", "NoSuchObject":
+		return true
+	default:
+		return false
+	}
+}
+
+func SaveCanvasSnapshotToR2(
+	ctx context.Context,
+	s3Client *minio.Client,
+	bucketName string,
+	roomID string,
+	snapshot []byte,
+) error {
+	if s3Client == nil {
+		return fmt.Errorf("r2 client is not configured")
+	}
+	normalizedBucketName := strings.TrimSpace(bucketName)
+	if normalizedBucketName == "" {
+		return fmt.Errorf("bucket name is required")
+	}
+	key, err := canvasSnapshotObjectKey(roomID)
+	if err != nil {
+		return err
+	}
+	_, err = s3Client.PutObject(
+		ctx,
+		normalizedBucketName,
+		key,
+		bytes.NewReader(snapshot),
+		int64(len(snapshot)),
+		minio.PutObjectOptions{ContentType: "application/octet-stream"},
+	)
+	if err != nil {
+		return fmt.Errorf("put canvas snapshot object: %w", err)
+	}
+	return nil
+}
+
+func GetCanvasSnapshotFromR2(
+	ctx context.Context,
+	s3Client *minio.Client,
+	bucketName string,
+	roomID string,
+) ([]byte, error) {
+	if s3Client == nil {
+		return nil, fmt.Errorf("r2 client is not configured")
+	}
+	normalizedBucketName := strings.TrimSpace(bucketName)
+	if normalizedBucketName == "" {
+		return nil, fmt.Errorf("bucket name is required")
+	}
+	key, err := canvasSnapshotObjectKey(roomID)
+	if err != nil {
+		return nil, err
+	}
+
+	object, err := s3Client.GetObject(ctx, normalizedBucketName, key, minio.GetObjectOptions{})
+	if err != nil {
+		if isR2ObjectNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get canvas snapshot object: %w", err)
+	}
+	defer object.Close()
+
+	if _, err := object.Stat(); err != nil {
+		if isR2ObjectNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("stat canvas snapshot object: %w", err)
+	}
+
+	snapshot, err := io.ReadAll(object)
+	if err != nil {
+		if isR2ObjectNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read canvas snapshot object: %w", err)
+	}
+	return snapshot, nil
 }

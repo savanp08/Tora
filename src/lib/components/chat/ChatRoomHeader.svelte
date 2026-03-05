@@ -19,6 +19,8 @@
 	const dispatch = createEventDispatcher<{
 		showMobileList: void;
 		openRoomDetails: void;
+		startAudioCall: void;
+		startVideoCall: void;
 		activateLastWorkspaceTool: void;
 		toggleBoardView: void;
 		toggleCanvas: void;
@@ -111,6 +113,31 @@
 	</button>
 
 	<div class="header-actions" bind:this={headerActionsEl}>
+		<button
+			type="button"
+			class="icon-button call-trigger"
+			on:click|stopPropagation={() => dispatch('startAudioCall')}
+			title="Start voice call"
+			aria-label="Start voice call"
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path
+					d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
+				/>
+			</svg>
+		</button>
+		<button
+			type="button"
+			class="icon-button call-trigger"
+			on:click|stopPropagation={() => dispatch('startVideoCall')}
+			title="Start video call"
+			aria-label="Start video call"
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
+				<path d="M15.5 10 21 7v10l-5.5-3"></path>
+			</svg>
+		</button>
 		<button
 			type="button"
 			class="workspace-quick-button"
@@ -402,6 +429,26 @@
 		font-size: 0.78rem;
 		cursor: pointer;
 		color: #314057;
+	}
+
+	.call-trigger {
+		width: 1.95rem;
+		height: 1.85rem;
+		padding: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		line-height: 0;
+	}
+
+	.call-trigger svg {
+		width: 0.9rem;
+		height: 0.9rem;
+		stroke: currentColor;
+		stroke-width: 1.7;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.workspace-quick-button {
