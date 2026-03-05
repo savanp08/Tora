@@ -3324,86 +3324,117 @@
 		if (!action) {
 			return;
 		}
-		const roomPassword = await openOptionalRoomPasswordDialog($activeRoomPassword);
-		if (roomPassword === null) {
-			return;
-		}
-		activeRoomPassword.set(roomPassword);
-
 		const requestedName = normalizeRoomNameValue(action.roomName);
 		if (!requestedName) {
 			showErrorToast('Room name cannot be empty');
 			return;
 		}
 		const roomMode: RoomMenuMode = action.mode;
+		let roomPassword = normalizeRoomPasswordValue($activeRoomPassword);
+		let roomAccessPassword = '';
+		let shouldPromptForAccessPassword = false;
+
+		if (roomMode === 'create') {
+			const enteredRoomPassword = await openOptionalRoomPasswordDialog($activeRoomPassword);
+			if (enteredRoomPassword === null) {
+				return;
+			}
+			roomPassword = enteredRoomPassword;
+			activeRoomPassword.set(roomPassword);
+		}
 
 		try {
-			const res = await fetch(`${API_BASE}/api/rooms/join`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
+			while (true) {
+				if (roomMode === 'join' && shouldPromptForAccessPassword) {
+					const enteredPassword = await openRoomAccessPasswordDialog(roomAccessPassword);
+					if (enteredPassword === null) {
+						return;
+					}
+					roomAccessPassword = enteredPassword;
+				}
+
+				const payload: Record<string, unknown> = {
 					roomName: requestedName,
 					username: currentUsername,
 					userId: normalizeIdentifier(currentUserId),
 					type: 'ephemeral',
 					mode: roomMode
-				})
-			});
-			const data = await res.json();
-			if (!res.ok) {
-				throw new Error(
-					data.error ||
-						(roomMode === 'join' ? 'Failed to join existing room' : 'Failed to create room')
+				};
+				if (roomMode === 'join' && roomAccessPassword) {
+					payload.roomPassword = roomAccessPassword;
+				}
+
+				const res = await fetch(`${API_BASE}/api/rooms/join`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(payload)
+				});
+				const data = await res.json().catch(() => ({}));
+				const requiresPassword = toBool(
+					(data as { requiresPassword?: unknown; requires_password?: unknown }).requiresPassword ??
+						(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password
 				);
+				if (!res.ok) {
+					if (roomMode === 'join' && requiresPassword) {
+						if (shouldPromptForAccessPassword) {
+							showErrorToast('Incorrect room password');
+						}
+						shouldPromptForAccessPassword = true;
+						roomAccessPassword = '';
+						continue;
+					}
+					throw new Error(
+						toStringValue((data as { error?: unknown }).error) ||
+							(roomMode === 'join' ? 'Failed to join existing room' : 'Failed to create room')
+					);
+				}
+				syncServerClock(
+					(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
+						(data as { serverNow?: unknown; server_now?: unknown }).server_now
+				);
+
+				const nextRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
+				if (!nextRoomId) {
+					throw new Error('Invalid room id returned from server');
+				}
+				const nextRoomName =
+					normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(nextRoomId);
+				const nextCreatedAt = toTimestamp(data.createdAt);
+				const nextExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
+				const nextIsAdmin = toBool(
+					(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
+						(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
+				);
+				const nextAdminCode = normalizeAdminCodeValue(
+					(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
+						(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
+				);
+				const nextRequiresPassword = requiresPassword;
+
+				ensureRoomThread(nextRoomId, nextRoomName, 'joined');
+				roomThreads = sortThreads(
+					roomThreads.map((thread) =>
+						thread.id === nextRoomId
+							? {
+									...thread,
+									isAdmin: nextIsAdmin,
+									adminCode: nextIsAdmin ? nextAdminCode : '',
+									requiresPassword: nextRequiresPassword
+								}
+							: thread
+					)
+				);
+				markRoomMembershipSynced(nextRoomId);
+				ensureRoomMeta(nextRoomId, nextCreatedAt, nextExpiresAt);
+
+				const params = new URLSearchParams({
+					name: nextRoomName,
+					member: '1'
+				});
+				const passwordHash = buildRoomPasswordHash(roomMode === 'create' ? roomPassword : $activeRoomPassword);
+				await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}${passwordHash}`);
+				return;
 			}
-			syncServerClock(
-				(data as { serverNow?: unknown; server_now?: unknown }).serverNow ??
-					(data as { serverNow?: unknown; server_now?: unknown }).server_now
-			);
-
-			const nextRoomId = normalizeRoomIDValue(toStringValue(data.roomId));
-			if (!nextRoomId) {
-				throw new Error('Invalid room id returned from server');
-			}
-			const nextRoomName =
-				normalizeRoomNameValue(toStringValue(data.roomName)) || formatRoomName(nextRoomId);
-			const nextCreatedAt = toTimestamp(data.createdAt);
-			const nextExpiresAt = parseOptionalTimestamp(data.expiresAt ?? data.expires_at);
-			const nextIsAdmin = toBool(
-				(data as { isAdmin?: unknown; is_admin?: unknown }).isAdmin ??
-					(data as { isAdmin?: unknown; is_admin?: unknown }).is_admin
-			);
-			const nextAdminCode = normalizeAdminCodeValue(
-				(data as { adminCode?: unknown; admin_code?: unknown }).adminCode ??
-					(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
-			);
-			const nextRequiresPassword = toBool(
-				(data as { requiresPassword?: unknown; requires_password?: unknown }).requiresPassword ??
-					(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password
-			);
-
-			ensureRoomThread(nextRoomId, nextRoomName, 'joined');
-			roomThreads = sortThreads(
-				roomThreads.map((thread) =>
-					thread.id === nextRoomId
-						? {
-								...thread,
-								isAdmin: nextIsAdmin,
-								adminCode: nextIsAdmin ? nextAdminCode : '',
-								requiresPassword: nextRequiresPassword
-							}
-						: thread
-				)
-			);
-			markRoomMembershipSynced(nextRoomId);
-			ensureRoomMeta(nextRoomId, nextCreatedAt, nextExpiresAt);
-
-			const params = new URLSearchParams({
-				name: nextRoomName,
-				member: '1'
-			});
-			const passwordHash = buildRoomPasswordHash(roomPassword);
-			await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}${passwordHash}`);
 		} catch (error) {
 			showErrorToast(
 				error instanceof Error

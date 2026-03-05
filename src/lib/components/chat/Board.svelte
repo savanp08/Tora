@@ -30,14 +30,29 @@
 	const REMOTE_CURSOR_STALE_MS = 8000;
 	const HISTORY_LIMIT = 80;
 	const BRUSH_WIDTH_PRESETS = [1.5, 3, 5, 8] as const;
+	const BOARD_COLOR_PRESETS = [
+		'#111827',
+		'#2563eb',
+		'#0ea5e9',
+		'#16a34a',
+		'#d97706',
+		'#dc2626',
+		'#7c3aed',
+		'#f8fafc'
+	] as const;
 	const FABRIC_VITE_ID_URL = '/@id/fabric';
 	const FABRIC_CDN_URL = 'https://cdn.jsdelivr.net/npm/fabric@6.5.3/+esm';
 	const DEFAULT_RECT_WIDTH = 180;
 	const DEFAULT_RECT_HEIGHT = 110;
 	const DEFAULT_CIRCLE_DIAMETER = 120;
+	const DEFAULT_ELLIPSE_WIDTH = 180;
+	const DEFAULT_ELLIPSE_HEIGHT = 116;
+	const DEFAULT_TRIANGLE_WIDTH = 190;
+	const DEFAULT_TRIANGLE_HEIGHT = 150;
 	const DEFAULT_LINE_LENGTH = 190;
 	const MIN_SHAPE_WIDTH = 96;
 	const MIN_SHAPE_HEIGHT = 72;
+	const MIN_SHAPE_POINTER_DELTA = 4;
 	const DEFAULT_MESSAGE_CARD_WIDTH = 340;
 	const DEFAULT_MEDIA_CARD_WIDTH = 360;
 	const MAX_IMAGE_PREVIEW_HEIGHT = 460;
@@ -54,7 +69,7 @@
 	const UTF8_ENCODER = new TextEncoder();
 
 	type ToolMode = 'select' | 'draw' | 'eraser' | 'duster';
-	type ShapeKind = 'line' | 'arrow' | 'rect' | 'circle';
+	type ShapeKind = 'line' | 'arrow' | 'rect' | 'circle' | 'ellipse' | 'triangle';
 	type BoardEventType =
 		| 'board_draw_start'
 		| 'board_cursor_move'
@@ -149,6 +164,7 @@
 	let mediaInputEl: HTMLInputElement | null = null;
 	let insertWrapEl: HTMLDivElement | null = null;
 	let widthMenuWrapEl: HTMLDivElement | null = null;
+	let colorMenuWrapEl: HTMLDivElement | null = null;
 	let contextMenuEl: HTMLDivElement | null = null;
 	let boardDetailsWrapEl: HTMLDivElement | null = null;
 
@@ -170,9 +186,14 @@
 	let messageSearch = '';
 	let isUploadingMedia = false;
 	let drawBrushWidth = 2.5;
+	let boardInkColor = '#111827';
+	let boardInkColorCustomized = false;
 	let showWidthMenu = false;
+	let showColorMenu = false;
 	let pendingShapeKind: ShapeKind | null = null;
 	let pendingInsertElementId = '';
+	let pendingShapeAnchorPoint: { x: number; y: number } | null = null;
+	let pendingShapePointerMoved = false;
 	let isInsertOperationActive = false;
 	let insertionHintLabel = '';
 	let isWidthControlVisible = false;
@@ -239,15 +260,22 @@
 	let boardPermissionRefreshKey = '';
 	let lastAppliedBoardTheme = '';
 	let boardThemeRefreshToken = 0;
+	let selectionCycleKey = '';
+	let selectionCycleCursor = 0;
 
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: normalizedCurrentUserID = normalizeIdentifier(currentUserId);
 	$: normalizedCurrentUsername = (currentUsername || '').trim();
+	$: if (!boardInkColorCustomized) {
+		boardInkColor = isDarkMode ? '#e5e7eb' : '#111827';
+	}
 	$: isInsertOperationActive = Boolean(pendingShapeKind || pendingInsertElementId);
 	$: insertionHintLabel = pendingShapeKind
 		? pendingInsertElementId
-			? 'Resize or move shape, then click once to place it'
-			: `Click board to place ${pendingShapeKind}`
+			? isLineShapeKind(pendingShapeKind)
+				? 'Move mouse to set the endpoint, then click once to place. Hold Shift for angle snap.'
+				: 'Move mouse to size the shape, then click once to place. Hold Shift for equal ratio.'
+			: `Click board to set the start point for ${describeShapeKind(pendingShapeKind)}`
 		: '';
 	$: filteredMessages = (messages ?? [])
 		.filter((entry) => normalizeMessageID(entry.id) !== '')
@@ -390,6 +418,27 @@
 	}
 
 	function registerWindowGuards() {
+		const isEditableDOMTarget = (target: EventTarget | null) => {
+			if (!(target instanceof HTMLElement)) {
+				return false;
+			}
+			const tagName = target.tagName.toLowerCase();
+			return tagName === 'input' || tagName === 'textarea' || target.isContentEditable;
+		};
+
+		const isFabricTextEditingActive = () => {
+			const activeObject = fabricCanvas?.getActiveObject?.() as Record<string, unknown> | null;
+			if (!activeObject) {
+				return false;
+			}
+			if (Boolean(activeObject.isEditing)) {
+				return true;
+			}
+			const hiddenTextarea =
+				(activeObject.hiddenTextarea as HTMLTextAreaElement | undefined) ?? null;
+			return Boolean(hiddenTextarea && document.activeElement === hiddenTextarea);
+		};
+
 		const onKeyDown = (event: KeyboardEvent) => {
 			if (event.key === 'Escape' && canCancelCurrentOperation) {
 				event.preventDefault();
@@ -397,6 +446,9 @@
 				return;
 			}
 			if ((event.key === 'Delete' || event.key === 'Backspace') && canEdit) {
+				if (isEditableDOMTarget(event.target) || isFabricTextEditingActive()) {
+					return;
+				}
 				const activeObject = fabricCanvas?.getActiveObject?.();
 				if (activeObject && canMutateBoardObject(activeObject as FabricObjectLike)) {
 					event.preventDefault();
@@ -416,6 +468,9 @@
 				if (widthMenuWrapEl && widthMenuWrapEl.contains(target)) {
 					return;
 				}
+				if (colorMenuWrapEl && colorMenuWrapEl.contains(target)) {
+					return;
+				}
 				if (contextMenuEl && contextMenuEl.contains(target)) {
 					return;
 				}
@@ -426,6 +481,7 @@
 			contextMenuOpen = false;
 			showInsertMenu = false;
 			showWidthMenu = false;
+			showColorMenu = false;
 			showBoardDetails = false;
 			isToolbarExpanded = false;
 		};
@@ -604,6 +660,8 @@
 			preserveObjectStacking: true,
 			selection: true
 		});
+		fabricCanvas.perPixelTargetFind = true;
+		fabricCanvas.targetFindTolerance = 6;
 		fabricCanvas.renderOnAddRemove = true;
 		ensureBoardBoundsObject();
 		updateBoardVisualTheme(isDarkMode);
@@ -1087,11 +1145,15 @@
 			return;
 		}
 		const containerWidth = Math.max(1, boardContainerEl.clientWidth || 1);
-		zControlLeft = Math.max(
-			6,
-			Math.min(containerWidth - 140, toNumber(bounds.left, 0) + toNumber(bounds.width, 0) + 8)
-		);
-		zControlTop = Math.max(8, toNumber(bounds.top, 0) - 36);
+		const containerHeight = Math.max(1, boardContainerEl.clientHeight || 1);
+		const controlWidth = Math.min(240, Math.max(160, containerWidth * 0.62));
+		const controlHeight = 44;
+		const leftNearObject = toNumber(bounds.left, 0) + toNumber(bounds.width, 0) + 8;
+		const topAboveObject = toNumber(bounds.top, 0) - controlHeight - 8;
+		const topBelowObject = toNumber(bounds.top, 0) + toNumber(bounds.height, 0) + 8;
+		const resolvedTop = topAboveObject >= 8 ? topAboveObject : topBelowObject;
+		zControlLeft = Math.max(6, Math.min(containerWidth - controlWidth - 6, leftNearObject));
+		zControlTop = Math.max(8, Math.min(containerHeight - controlHeight - 6, resolvedTop));
 		zControlVisible = true;
 	}
 
@@ -1103,7 +1165,12 @@
 		if (!activeObject || activeObject === boardBoundsRect || !canMutateBoardObject(activeObject)) {
 			return;
 		}
-		fabricCanvas.bringForward?.(activeObject as any);
+		const objects = fabricCanvas.getObjects?.() ?? [];
+		const currentIndex = toInt(objects.indexOf(activeObject as any));
+		if (currentIndex < 0 || currentIndex >= objects.length - 1) {
+			return;
+		}
+		fabricCanvas.moveTo?.(activeObject as any, currentIndex + 1);
 		emitBoardElementMove(activeObject);
 		fabricCanvas.requestRenderAll?.();
 		captureHistorySnapshot();
@@ -1118,7 +1185,13 @@
 		if (!activeObject || activeObject === boardBoundsRect || !canMutateBoardObject(activeObject)) {
 			return;
 		}
-		fabricCanvas.sendBackwards?.(activeObject as any);
+		const objects = fabricCanvas.getObjects?.() ?? [];
+		const currentIndex = toInt(objects.indexOf(activeObject as any));
+		const minIndex = boardBoundsRect ? 1 : 0;
+		if (currentIndex <= minIndex) {
+			return;
+		}
+		fabricCanvas.moveTo?.(activeObject as any, currentIndex - 1);
 		emitBoardElementMove(activeObject);
 		fabricCanvas.requestRenderAll?.();
 		captureHistorySnapshot();
@@ -1297,13 +1370,14 @@
 				fabricCanvas.freeDrawingBrush = new PencilBrushClass(fabricCanvas);
 			}
 			if (fabricCanvas.freeDrawingBrush) {
-				fabricCanvas.freeDrawingBrush.color = isDarkMode ? '#e5e7eb' : '#111827';
+				fabricCanvas.freeDrawingBrush.color = boardInkColor;
 				fabricCanvas.freeDrawingBrush.width = drawBrushWidth;
 			}
 		}
 		if (resetSelection) {
 			showInsertMenu = false;
 			showWidthMenu = false;
+			showColorMenu = false;
 		}
 		if (resetSelection && mode !== 'eraser') {
 			fabricCanvas.discardActiveObject?.();
@@ -1317,7 +1391,37 @@
 		}
 		showWidthMenu = !showWidthMenu;
 		if (showWidthMenu) {
+			showColorMenu = false;
 			showInsertMenu = false;
+			showBoardDetails = false;
+		}
+	}
+
+	function normalizeColorHex(value: string) {
+		const trimmed = toStringValue(value).trim();
+		if (/^#[0-9a-f]{6}$/i.test(trimmed)) {
+			return trimmed.toLowerCase();
+		}
+		return boardInkColor;
+	}
+
+	function setBoardInkColor(value: string) {
+		const nextColor = normalizeColorHex(value);
+		boardInkColor = nextColor;
+		boardInkColorCustomized = true;
+		if (fabricCanvas?.freeDrawingBrush) {
+			fabricCanvas.freeDrawingBrush.color = nextColor;
+		}
+	}
+
+	function toggleColorMenu() {
+		if (!canEdit) {
+			return;
+		}
+		showColorMenu = !showColorMenu;
+		if (showColorMenu) {
+			showInsertMenu = false;
+			showWidthMenu = false;
 			showBoardDetails = false;
 		}
 	}
@@ -1339,6 +1443,7 @@
 		}
 		applyToolMode('select');
 		contextMenuOpen = false;
+		showColorMenu = false;
 		showWidthMenu = false;
 		showBoardDetails = false;
 		showInsertMenu = !showInsertMenu;
@@ -1347,6 +1452,7 @@
 	function toggleBoardDetails() {
 		showBoardDetails = !showBoardDetails;
 		if (showBoardDetails) {
+			showColorMenu = false;
 			showInsertMenu = false;
 			showWidthMenu = false;
 		}
@@ -1358,6 +1464,49 @@
 		}
 		const rect = boardContainerEl.getBoundingClientRect();
 		return getBoardPointFromClientPosition(rect.left + rect.width / 2, rect.top + rect.height / 2);
+	}
+
+	function insertTextBox() {
+		if (!fabricCanvas || !canEdit) {
+			return;
+		}
+		const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
+		if (!TextboxClass) {
+			return;
+		}
+		const width = 240;
+		const height = 72;
+		const point = getBoardViewportCenter();
+		const textValue = 'Text';
+		const textBox = new TextboxClass(textValue, {
+			left: clampBoardX(point.x, width),
+			top: clampBoardY(point.y, height),
+			width,
+			height,
+			fontSize: 18,
+			lineHeight: 1.28,
+			fill: boardInkColor,
+			backgroundColor: 'transparent',
+			padding: 8
+		}) as FabricObjectLike;
+		ensureObjectIdentity(textBox, 'text_box');
+		textBox.set?.({
+			content: textValue
+		});
+		fabricCanvas.add(textBox);
+		applyObjectPermission(textBox);
+		fabricCanvas.setActiveObject?.(textBox);
+		fabricCanvas.requestRenderAll?.();
+		emitBoardElementAdd(textBox);
+		const addedElement = boardObjectToElement(textBox);
+		if (addedElement && !isApplyingLocalAction) {
+			recordLocalAction({
+				kind: 'add',
+				elementId: addedElement.elementId,
+				after: cloneBoardElement(addedElement)
+			});
+		}
+		captureHistorySnapshot();
 	}
 
 	function insertStickyNote() {
@@ -1422,6 +1571,55 @@
 		anchor.remove();
 	}
 
+	function describeShapeKind(kind: ShapeKind) {
+		if (kind === 'rect') {
+			return 'rectangle';
+		}
+		if (kind === 'circle') {
+			return 'circle';
+		}
+		if (kind === 'ellipse') {
+			return 'ellipse';
+		}
+		if (kind === 'triangle') {
+			return 'triangle';
+		}
+		if (kind === 'arrow') {
+			return 'arrow';
+		}
+		return 'line';
+	}
+
+	function isLineShapeKind(kind: ShapeKind | null): kind is 'line' | 'arrow' {
+		return kind === 'line' || kind === 'arrow';
+	}
+
+	function clampBoardPoint(point: { x: number; y: number }) {
+		return {
+			x: Math.max(0, Math.min(BOARD_WIDTH, point.x)),
+			y: Math.max(0, Math.min(BOARD_HEIGHT, point.y))
+		};
+	}
+
+	function resolveSnappedLineEndpoint(
+		anchor: { x: number; y: number },
+		endpoint: { x: number; y: number }
+	) {
+		const deltaX = endpoint.x - anchor.x;
+		const deltaY = endpoint.y - anchor.y;
+		const length = Math.hypot(deltaX, deltaY);
+		if (length < 0.01) {
+			return endpoint;
+		}
+		const angle = Math.atan2(deltaY, deltaX);
+		const snapStep = Math.PI / 4;
+		const snappedAngle = Math.round(angle / snapStep) * snapStep;
+		return clampBoardPoint({
+			x: anchor.x + Math.cos(snappedAngle) * length,
+			y: anchor.y + Math.sin(snappedAngle) * length
+		});
+	}
+
 	function beginShapeInsert(kind: ShapeKind) {
 		if (!fabricCanvas || !canEdit) {
 			return;
@@ -1436,7 +1634,8 @@
 		if (!fabricCanvas || !canEdit || !pendingShapeKind) {
 			return;
 		}
-		const shapeObject = createShapeObjectAtPoint(pendingShapeKind, point);
+		const anchor = clampBoardPoint(point);
+		const shapeObject = createShapeObjectAtPoint(pendingShapeKind, anchor);
 		if (!shapeObject) {
 			return;
 		}
@@ -1445,25 +1644,166 @@
 			pendingCommit: true
 		});
 		pendingInsertElementId = identity.elementId;
+		pendingShapeAnchorPoint = anchor;
+		pendingShapePointerMoved = false;
 		fabricCanvas.add(shapeObject);
 		applyObjectPermission(shapeObject);
 		fabricCanvas.setActiveObject?.(shapeObject);
+		updatePendingShapeGeometry(anchor);
 		fabricCanvas.requestRenderAll?.();
 		captureHistorySnapshot();
+	}
+
+	function updatePendingShapeGeometry(point: { x: number; y: number }, lockConstraint = false) {
+		if (!fabricCanvas || !pendingInsertElementId || !pendingShapeKind || !pendingShapeAnchorPoint) {
+			return;
+		}
+		const pendingObject = getPendingInsertObject();
+		if (!pendingObject) {
+			return;
+		}
+		const anchor = pendingShapeAnchorPoint;
+		let endPoint = clampBoardPoint(point);
+
+		if (isLineShapeKind(pendingShapeKind)) {
+			if (lockConstraint) {
+				endPoint = resolveSnappedLineEndpoint(anchor, endPoint);
+			}
+			pendingObject.set?.({
+				x1: anchor.x,
+				y1: anchor.y,
+				x2: endPoint.x,
+				y2: endPoint.y
+			});
+			pendingObject.setCoords?.();
+			fabricCanvas.requestRenderAll?.();
+			return;
+		}
+
+		const deltaX = endPoint.x - anchor.x;
+		const deltaY = endPoint.y - anchor.y;
+		let drawWidth = Math.max(2, Math.abs(deltaX));
+		let drawHeight = Math.max(2, Math.abs(deltaY));
+		if (lockConstraint || pendingShapeKind === 'circle') {
+			const fixedSize = Math.max(drawWidth, drawHeight);
+			drawWidth = fixedSize;
+			drawHeight = fixedSize;
+		}
+
+		const resolvedEndX = anchor.x + (deltaX >= 0 ? drawWidth : -drawWidth);
+		const resolvedEndY = anchor.y + (deltaY >= 0 ? drawHeight : -drawHeight);
+		const left = clampBoardX(Math.min(anchor.x, resolvedEndX), drawWidth);
+		const top = clampBoardY(Math.min(anchor.y, resolvedEndY), drawHeight);
+
+		if (pendingShapeKind === 'rect') {
+			pendingObject.set?.({
+				left,
+				top,
+				width: drawWidth,
+				height: drawHeight,
+				scaleX: 1,
+				scaleY: 1
+			});
+		} else if (pendingShapeKind === 'triangle') {
+			pendingObject.set?.({
+				left,
+				top,
+				width: drawWidth,
+				height: drawHeight,
+				scaleX: 1,
+				scaleY: 1
+			});
+		} else if (pendingShapeKind === 'ellipse') {
+			pendingObject.set?.({
+				left,
+				top,
+				rx: Math.max(1, drawWidth / 2),
+				ry: Math.max(1, drawHeight / 2),
+				scaleX: 1,
+				scaleY: 1
+			});
+		} else if (pendingShapeKind === 'circle') {
+			const diameter = Math.max(drawWidth, drawHeight);
+			pendingObject.set?.({
+				left: clampBoardX(left, diameter),
+				top: clampBoardY(top, diameter),
+				radius: Math.max(1, diameter / 2),
+				scaleX: 1,
+				scaleY: 1
+			});
+		}
+		pendingObject.setCoords?.();
+		fabricCanvas.requestRenderAll?.();
+	}
+
+	function updatePendingShapeFromPointer(event: PointerEvent) {
+		if (!pendingInsertElementId || !pendingShapeAnchorPoint) {
+			return;
+		}
+		const boardPoint = getBoardPointFromClientPosition(event.clientX, event.clientY);
+		const deltaX = Math.abs(boardPoint.x - pendingShapeAnchorPoint.x);
+		const deltaY = Math.abs(boardPoint.y - pendingShapeAnchorPoint.y);
+		if (deltaX >= MIN_SHAPE_POINTER_DELTA || deltaY >= MIN_SHAPE_POINTER_DELTA) {
+			pendingShapePointerMoved = true;
+		}
+		updatePendingShapeGeometry(boardPoint, event.shiftKey);
+	}
+
+	function ensurePendingShapeHasMinimumFootprint() {
+		if (!pendingShapeKind || !pendingShapeAnchorPoint || pendingShapePointerMoved) {
+			return;
+		}
+		const anchor = pendingShapeAnchorPoint;
+		if (isLineShapeKind(pendingShapeKind)) {
+			updatePendingShapeGeometry({ x: anchor.x + DEFAULT_LINE_LENGTH, y: anchor.y });
+			return;
+		}
+		if (pendingShapeKind === 'rect') {
+			updatePendingShapeGeometry({
+				x: anchor.x + DEFAULT_RECT_WIDTH,
+				y: anchor.y + DEFAULT_RECT_HEIGHT
+			});
+			return;
+		}
+		if (pendingShapeKind === 'circle') {
+			updatePendingShapeGeometry({
+				x: anchor.x + DEFAULT_CIRCLE_DIAMETER,
+				y: anchor.y + DEFAULT_CIRCLE_DIAMETER
+			});
+			return;
+		}
+		if (pendingShapeKind === 'ellipse') {
+			updatePendingShapeGeometry({
+				x: anchor.x + DEFAULT_ELLIPSE_WIDTH,
+				y: anchor.y + DEFAULT_ELLIPSE_HEIGHT
+			});
+			return;
+		}
+		if (pendingShapeKind === 'triangle') {
+			updatePendingShapeGeometry({
+				x: anchor.x + DEFAULT_TRIANGLE_WIDTH,
+				y: anchor.y + DEFAULT_TRIANGLE_HEIGHT
+			});
+		}
 	}
 
 	function commitPendingShapeInsert() {
 		if (!fabricCanvas || !pendingInsertElementId) {
 			pendingShapeKind = null;
 			pendingInsertElementId = '';
+			pendingShapeAnchorPoint = null;
+			pendingShapePointerMoved = false;
 			return;
 		}
 		const pendingObject = findObjectByElementId(pendingInsertElementId);
 		if (!pendingObject) {
 			pendingShapeKind = null;
 			pendingInsertElementId = '';
+			pendingShapeAnchorPoint = null;
+			pendingShapePointerMoved = false;
 			return;
 		}
+		ensurePendingShapeHasMinimumFootprint();
 		pendingObject.set?.({
 			pendingCommit: false
 		});
@@ -1479,6 +1819,8 @@
 		captureHistorySnapshot();
 		pendingShapeKind = null;
 		pendingInsertElementId = '';
+		pendingShapeAnchorPoint = null;
+		pendingShapePointerMoved = false;
 	}
 
 	function createShapeObjectAtPoint(
@@ -1489,22 +1831,20 @@
 			return null;
 		}
 		const sharedStyle = {
-			stroke: isDarkMode ? '#f3f4f6' : '#111827',
+			stroke: boardInkColor,
 			strokeWidth: 2,
 			fill: 'transparent'
 		};
 
 		if (kind === 'rect') {
 			const RectClass = getFabricClass('Rect');
-			const width = DEFAULT_RECT_WIDTH;
-			const height = DEFAULT_RECT_HEIGHT;
 			return RectClass
 				? (new RectClass({
 						...sharedStyle,
-						left: clampBoardX(point.x, width),
-						top: clampBoardY(point.y, height),
-						width,
-						height,
+						left: clampBoardX(point.x, 2),
+						top: clampBoardY(point.y, 2),
+						width: 2,
+						height: 2,
 						rx: 10,
 						ry: 10
 					}) as FabricObjectLike)
@@ -1512,13 +1852,36 @@
 		}
 		if (kind === 'circle') {
 			const CircleClass = getFabricClass('Circle');
-			const diameter = DEFAULT_CIRCLE_DIAMETER;
 			return CircleClass
 				? (new CircleClass({
 						...sharedStyle,
-						left: clampBoardX(point.x, diameter),
-						top: clampBoardY(point.y, diameter),
-						radius: diameter / 2
+						left: clampBoardX(point.x, 2),
+						top: clampBoardY(point.y, 2),
+						radius: 1
+					}) as FabricObjectLike)
+				: null;
+		}
+		if (kind === 'ellipse') {
+			const EllipseClass = getFabricClass('Ellipse');
+			return EllipseClass
+				? (new EllipseClass({
+						...sharedStyle,
+						left: clampBoardX(point.x, 2),
+						top: clampBoardY(point.y, 2),
+						rx: 1,
+						ry: 1
+					}) as FabricObjectLike)
+				: null;
+		}
+		if (kind === 'triangle') {
+			const TriangleClass = getFabricClass('Triangle');
+			return TriangleClass
+				? (new TriangleClass({
+						...sharedStyle,
+						left: clampBoardX(point.x, 2),
+						top: clampBoardY(point.y, 2),
+						width: 2,
+						height: 2
 					}) as FabricObjectLike)
 				: null;
 		}
@@ -1526,11 +1889,10 @@
 		if (!LineClass) {
 			return null;
 		}
-		const x1 = clampBoardX(point.x, DEFAULT_LINE_LENGTH);
-		const y1 = clampBoardY(point.y, MIN_SHAPE_HEIGHT);
-		return new LineClass([x1, y1, x1 + DEFAULT_LINE_LENGTH, y1], {
-			stroke: isDarkMode ? '#f3f4f6' : '#111827',
-			strokeWidth: 3
+		const anchor = clampBoardPoint(point);
+		return new LineClass([anchor.x, anchor.y, anchor.x + 1, anchor.y + 1], {
+			stroke: boardInkColor,
+			strokeWidth: kind === 'arrow' ? 4 : 3
 		}) as FabricObjectLike;
 	}
 
@@ -1576,6 +1938,14 @@
 		if (!object || object === boardBoundsRect) {
 			return;
 		}
+		const elementType = toStringValue((object as Record<string, unknown>).elementType)
+			.trim()
+			.toLowerCase();
+		const usePreciseHitTest =
+			elementType === 'stroke' ||
+			elementType === 'line' ||
+			elementType === 'arrow' ||
+			elementType === 'text_box';
 		const canMutate = canMutateBoardObject(object);
 		object.set?.({
 			selectable: canMutate,
@@ -1585,7 +1955,9 @@
 			lockMovementY: !canMutate,
 			lockScalingX: !canMutate,
 			lockScalingY: !canMutate,
-			lockRotation: !canMutate
+			lockRotation: !canMutate,
+			perPixelTargetFind: usePreciseHitTest,
+			padding: usePreciseHitTest ? 4 : 1
 		});
 		object.setCoords?.();
 	}
@@ -1776,6 +2148,8 @@
 		}
 		pendingInsertElementId = '';
 		pendingShapeKind = null;
+		pendingShapeAnchorPoint = null;
+		pendingShapePointerMoved = false;
 	}
 
 	function cancelCurrentOperation() {
@@ -1786,6 +2160,7 @@
 		stopDusterDrag();
 		showInsertMenu = false;
 		showWidthMenu = false;
+		showColorMenu = false;
 		contextMenuOpen = false;
 		messagePickerOpen = false;
 		showBoardDetails = false;
@@ -1916,12 +2291,17 @@
 		const rawHeight = toNumber((object as Record<string, unknown>).height, 0);
 		const width = Math.max(1, rawWidth * Math.abs(scaleX || 1));
 		const height = Math.max(1, rawHeight * Math.abs(scaleY || 1));
-		const zIndex = toInt(fabricCanvas?.getObjects?.().indexOf(object as any) ?? 0);
+		const absoluteIndex = toInt(fabricCanvas?.getObjects?.().indexOf(object as any) ?? 0);
+		const zIndexOffset = boardBoundsRect ? 1 : 0;
+		const zIndex = Math.max(0, absoluteIndex - zIndexOffset);
 		const createdAt =
 			parseOptionalTimestamp((object as Record<string, unknown>).createdAt) || Date.now();
 
 		let content = toStringValue((object as Record<string, unknown>).content);
 		if (!content) {
+			content = toStringValue((object as Record<string, unknown>).text);
+		}
+		if (elementType === 'text_box') {
 			content = toStringValue((object as Record<string, unknown>).text);
 		}
 		if (!content && elementType === 'stroke') {
@@ -2017,6 +2397,8 @@
 		fabricCanvas.discardActiveObject?.();
 		pendingInsertElementId = '';
 		pendingShapeKind = null;
+		pendingShapeAnchorPoint = null;
+		pendingShapePointerMoved = false;
 		pendingTransformSnapshotByElementId.clear();
 		localUndoStack = [];
 		localRedoStack = [];
@@ -2175,6 +2557,38 @@
 			}) as FabricObjectLike;
 		}
 
+		if (elementType === 'ellipse') {
+			const EllipseClass = getFabricClass('Ellipse');
+			if (!EllipseClass) {
+				return null;
+			}
+			return new EllipseClass({
+				left: element.x,
+				top: element.y,
+				rx: Math.max(1, element.width / 2),
+				ry: Math.max(1, element.height / 2),
+				stroke: strokeColor,
+				strokeWidth: 2,
+				fill: fillColor
+			}) as FabricObjectLike;
+		}
+
+		if (elementType === 'triangle') {
+			const TriangleClass = getFabricClass('Triangle');
+			if (!TriangleClass) {
+				return null;
+			}
+			return new TriangleClass({
+				left: element.x,
+				top: element.y,
+				width: element.width,
+				height: element.height,
+				stroke: strokeColor,
+				strokeWidth: 2,
+				fill: fillColor
+			}) as FabricObjectLike;
+		}
+
 		if (elementType === 'line' || elementType === 'arrow') {
 			const LineClass = getFabricClass('Line');
 			if (!LineClass) {
@@ -2230,6 +2644,24 @@
 			if (mediaObject) {
 				return mediaObject;
 			}
+		}
+
+		if (elementType === 'text_box') {
+			const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
+			if (!TextboxClass) {
+				return null;
+			}
+			return new TextboxClass(element.content || 'Text', {
+				left: clampBoardX(element.x, Math.max(140, element.width)),
+				top: clampBoardY(element.y, Math.max(48, element.height)),
+				width: Math.max(140, element.width),
+				height: Math.max(48, element.height),
+				fontSize: 18,
+				lineHeight: 1.28,
+				fill: boardInkColor,
+				backgroundColor: 'transparent',
+				padding: 8
+			}) as FabricObjectLike;
 		}
 
 		if (elementType === 'sticky_note') {
@@ -2915,6 +3347,13 @@
 					scaleY: movement.scaleY > 0 ? movement.scaleY : 1
 				});
 				target.setCoords?.();
+				if (movement.zIndex >= 0) {
+					const objects = fabricCanvas.getObjects?.() ?? [];
+					const minIndex = boardBoundsRect ? 1 : 0;
+					const maxIndex = Math.max(minIndex, objects.length - 1);
+					const targetIndex = Math.max(minIndex, Math.min(maxIndex, movement.zIndex + minIndex));
+					fabricCanvas.moveTo?.(target as any, targetIndex);
+				}
 				fabricCanvas.requestRenderAll?.();
 			} finally {
 				endRemoteApply();
@@ -3001,6 +3440,8 @@
 		if (pendingInsertElementId && pendingInsertElementId === targetElementId) {
 			pendingInsertElementId = '';
 			pendingShapeKind = null;
+			pendingShapeAnchorPoint = null;
+			pendingShapePointerMoved = false;
 		}
 	}
 
@@ -3089,6 +3530,7 @@
 		y: number;
 		scaleX: number;
 		scaleY: number;
+		zIndex: number;
 	} | null {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) {
 			return null;
@@ -3105,12 +3547,16 @@
 		if (!elementId) {
 			return null;
 		}
+		const hasZIndex =
+			Object.prototype.hasOwnProperty.call(source, 'zIndex') ||
+			Object.prototype.hasOwnProperty.call(source, 'z_index');
 		return {
 			elementId,
 			x: toNumber(source.x, 0),
 			y: toNumber(source.y, 0),
 			scaleX: toNumber(source.scaleX ?? source.scale_x, 1),
-			scaleY: toNumber(source.scaleY ?? source.scale_y, 1)
+			scaleY: toNumber(source.scaleY ?? source.scale_y, 1),
+			zIndex: hasZIndex ? toInt(source.zIndex ?? source.z_index) : -1
 		};
 	}
 
@@ -3159,6 +3605,8 @@
 		if (wasPendingInsert) {
 			pendingInsertElementId = '';
 			pendingShapeKind = null;
+			pendingShapeAnchorPoint = null;
+			pendingShapePointerMoved = false;
 		}
 		if (emitDelete && elementId && !wasPendingInsert) {
 			emitBoardElementDelete(elementId);
@@ -3402,6 +3850,21 @@
 			return;
 		}
 
+		if (!event.altKey) {
+			resetSelectionCycleState();
+		}
+		if (
+			activeTool === 'select' &&
+			event.altKey &&
+			!pendingShapeKind &&
+			!pendingInsertElementId &&
+			cycleSelectionFromPointer(event)
+		) {
+			event.preventDefault();
+			contextMenuOpen = false;
+			return;
+		}
+
 		if (pendingShapeKind && !pendingInsertElementId) {
 			event.preventDefault();
 			contextMenuOpen = false;
@@ -3414,10 +3877,8 @@
 			if (!pendingObject) {
 				pendingInsertElementId = '';
 				pendingShapeKind = null;
-				return;
-			}
-			const target = tryResolveFabricTargetFromPointer(event);
-			if (target && isPendingObject(target)) {
+				pendingShapeAnchorPoint = null;
+				pendingShapePointerMoved = false;
 				return;
 			}
 			event.preventDefault();
@@ -3447,8 +3908,102 @@
 		}
 	}
 
+	function resetSelectionCycleState() {
+		selectionCycleKey = '';
+		selectionCycleCursor = 0;
+	}
+
+	function getCycleElementID(object: FabricObjectLike, fallbackIndex = 0) {
+		const normalizedElementID = normalizeMessageID(
+			toStringValue((object as Record<string, unknown>).elementId)
+		);
+		if (normalizedElementID) {
+			return normalizedElementID;
+		}
+		return `anon_${fallbackIndex}`;
+	}
+
+	function collectPointerTargetStack(event: PointerEvent) {
+		if (!fabricCanvas) {
+			return [] as FabricObjectLike[];
+		}
+		const mutedTargets: Array<{
+			object: FabricObjectLike;
+			evented: unknown;
+		}> = [];
+		const seenIDs = new Set<string>();
+		const resolvedTargets: FabricObjectLike[] = [];
+
+		try {
+			for (let depth = 0; depth < 28; depth += 1) {
+				const target = tryResolveFabricTargetFromPointer(event);
+				if (!target || target === boardBoundsRect) {
+					break;
+				}
+				const targetID = getCycleElementID(target, depth);
+				if (seenIDs.has(targetID)) {
+					break;
+				}
+				seenIDs.add(targetID);
+				if (canMutateBoardObject(target)) {
+					resolvedTargets.push(target);
+				}
+				mutedTargets.push({
+					object: target,
+					evented: (target as Record<string, unknown>).evented
+				});
+				target.set?.({
+					evented: false
+				});
+				target.setCoords?.();
+			}
+		} finally {
+			for (const muted of mutedTargets) {
+				muted.object.set?.({
+					evented: muted.evented
+				});
+				muted.object.setCoords?.();
+			}
+		}
+
+		return resolvedTargets;
+	}
+
+	function cycleSelectionFromPointer(event: PointerEvent) {
+		if (!fabricCanvas) {
+			return false;
+		}
+		const targetStack = collectPointerTargetStack(event);
+		if (targetStack.length === 0) {
+			resetSelectionCycleState();
+			return false;
+		}
+		const roundedX = Math.round(event.clientX / 8);
+		const roundedY = Math.round(event.clientY / 8);
+		const stackKey = targetStack.map((target, index) => getCycleElementID(target, index)).join('|');
+		const cycleKey = `${roundedX}:${roundedY}:${stackKey}`;
+		if (selectionCycleKey !== cycleKey) {
+			selectionCycleKey = cycleKey;
+			selectionCycleCursor = 0;
+		} else {
+			selectionCycleCursor = (selectionCycleCursor + 1) % targetStack.length;
+		}
+		const targetObject = targetStack[selectionCycleCursor];
+		if (!targetObject) {
+			return false;
+		}
+		fabricCanvas.setActiveObject?.(targetObject as any);
+		fabricCanvas.requestRenderAll?.();
+		updateSelectionControlsPosition();
+		return true;
+	}
+
 	function onBoardPointerMove(event: PointerEvent) {
 		if (activeTool === 'duster') {
+			return;
+		}
+		if (pendingInsertElementId) {
+			updatePendingShapeFromPointer(event);
 			return;
 		}
 		if (!pendingTapGesture) {
@@ -3942,6 +4497,60 @@
 					/>
 				</svg>
 			</button>
+			<button
+				type="button"
+				class="tool-icon-button"
+				on:click={insertTextBox}
+				title="Insert text box"
+				aria-label="Insert text box"
+				disabled={!canEdit}
+			>
+				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M5 6h14v2H13v10h-2V8H5z" />
+				</svg>
+			</button>
+			<div class="color-menu-wrap" bind:this={colorMenuWrapEl}>
+				<button
+					type="button"
+					class="color-menu-toggle"
+					on:click={toggleColorMenu}
+					aria-haspopup="true"
+					aria-expanded={showColorMenu}
+					title="Ink color"
+					disabled={!canEdit}
+				>
+					<span class="color-swatch" style={`background:${boardInkColor};`}></span>
+					<span class="color-label">Color</span>
+				</button>
+				{#if showColorMenu}
+					<div class="color-menu-popover">
+						<div class="color-preset-grid" role="listbox" aria-label="Color presets">
+							{#each BOARD_COLOR_PRESETS as presetColor}
+								<button
+									type="button"
+									class="color-preset-button"
+									class:active={boardInkColor === presetColor}
+									style={`--swatch:${presetColor};`}
+									on:click={() => setBoardInkColor(presetColor)}
+									title={presetColor}
+								></button>
+							{/each}
+						</div>
+						<label class="color-picker-row">
+							<span>Custom</span>
+							<input
+								type="color"
+								value={boardInkColor}
+								on:input={(event) => {
+									const input = event.currentTarget as HTMLInputElement | null;
+									if (!input) return;
+									setBoardInkColor(input.value);
+								}}
+							/>
+						</label>
+					</div>
+				{/if}
+			</div>
 			{#if isWidthControlVisible}
 				<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
 					<button
@@ -4026,7 +4635,7 @@
 							type="button"
 							class="shape-icon-button"
 							on:click={() => beginShapeInsert('rect')}
-							title="Rect"
+							title="Rectangle"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<rect
@@ -4035,6 +4644,24 @@
 									width="14"
 									height="10"
 									rx="2"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+								/>
+							</svg>
+						</button>
+						<button
+							type="button"
+							class="shape-icon-button"
+							on:click={() => beginShapeInsert('ellipse')}
+							title="Ellipse"
+						>
+							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<ellipse
+									cx="12"
+									cy="12"
+									rx="7.5"
+									ry="5.2"
 									fill="none"
 									stroke="currentColor"
 									stroke-width="2"
@@ -4056,6 +4683,16 @@
 									stroke="currentColor"
 									stroke-width="2"
 								/>
+							</svg>
+						</button>
+						<button
+							type="button"
+							class="shape-icon-button"
+							on:click={() => beginShapeInsert('triangle')}
+							title="Triangle"
+						>
+							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M12 5.5 19 18H5z" fill="none" stroke="currentColor" stroke-width="2" />
 							</svg>
 						</button>
 					</div>
@@ -4214,7 +4851,8 @@
 							>
 						</div>
 						<div class="board-detail-note">
-							Drag empty board to pan. Double-tap empty space to attach.
+							Drag empty board to pan. Double-tap empty space to attach. Hold Alt and click to cycle
+							overlapping elements.
 						</div>
 					</div>
 				{/if}
@@ -4224,6 +4862,7 @@
 
 	<div
 		class="board-canvas-shell"
+		class:inserting-shape={isInsertOperationActive}
 		bind:this={boardContainerEl}
 		role="region"
 		aria-label="Spatial board canvas"
@@ -4277,6 +4916,9 @@
 		{/if}
 		{#if boardError}
 			<div class="board-overlay error">{boardError}</div>
+		{/if}
+		{#if insertionHintLabel}
+			<div class="board-insert-hint">{insertionHintLabel}</div>
 		{/if}
 		{#if contextMenuOpen}
 			<div
@@ -4541,6 +5183,88 @@
 		opacity: 0.95;
 	}
 
+	.color-menu-wrap {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+	}
+
+	.color-menu-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.24rem 0.45rem;
+	}
+
+	.color-swatch {
+		width: 14px;
+		height: 14px;
+		border-radius: 4px;
+		border: 1px solid rgba(148, 163, 184, 0.72);
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+	}
+
+	.color-label {
+		font-size: 0.74rem;
+		color: var(--text-muted);
+	}
+
+	.color-menu-popover {
+		position: absolute;
+		top: calc(100% + 6px);
+		left: 0;
+		z-index: 36;
+		display: flex;
+		flex-direction: column;
+		gap: 0.42rem;
+		padding: 0.45rem;
+		border-radius: 10px;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-secondary);
+		box-shadow: 0 14px 24px rgba(0, 0, 0, 0.22);
+		min-width: 170px;
+	}
+
+	.color-preset-grid {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 0.35rem;
+	}
+
+	.color-preset-button {
+		width: 28px;
+		height: 28px;
+		min-width: 28px;
+		min-height: 28px;
+		padding: 0 !important;
+		border-radius: 6px;
+		background: var(--swatch, #111827);
+		border: 1px solid rgba(148, 163, 184, 0.75);
+	}
+
+	.color-preset-button.active {
+		outline: 2px solid #38bdf8;
+		outline-offset: 1px;
+	}
+
+	.color-picker-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		font-size: 0.72rem;
+		color: var(--text-muted);
+	}
+
+	.color-picker-row input[type='color'] {
+		width: 34px;
+		height: 26px;
+		border: 1px solid var(--border-subtle);
+		border-radius: 6px;
+		padding: 0;
+		background: transparent;
+	}
+
 	.insert-wrap {
 		position: relative;
 		display: inline-flex;
@@ -4670,6 +5394,10 @@
 		background: var(--bg-secondary);
 	}
 
+	.board-canvas-shell.inserting-shape {
+		cursor: crosshair;
+	}
+
 	.board-canvas-shell :global(canvas) {
 		touch-action: none;
 	}
@@ -4712,7 +5440,9 @@
 		z-index: 22;
 		display: inline-flex;
 		gap: 0.3rem;
+		flex-wrap: wrap;
 		padding: 0.3rem;
+		max-width: min(240px, calc(100% - 12px));
 		border-radius: 10px;
 		border: 1px solid rgba(148, 163, 184, 0.45);
 		background: rgba(15, 23, 42, 0.9);
@@ -4805,6 +5535,23 @@
 
 	.board-overlay.error {
 		background: rgba(220, 38, 38, 0.85);
+	}
+
+	.board-insert-hint {
+		position: absolute;
+		top: 0.8rem;
+		right: 0.8rem;
+		max-width: min(340px, calc(100% - 1.6rem));
+		z-index: 24;
+		padding: 0.4rem 0.6rem;
+		border-radius: 10px;
+		border: 1px solid color-mix(in srgb, #38bdf8 45%, transparent);
+		background: color-mix(in srgb, #0f172a 88%, #38bdf8 12%);
+		color: #e2e8f0;
+		font-size: 0.72rem;
+		line-height: 1.3;
+		font-weight: 600;
+		pointer-events: none;
 	}
 
 	.board-context-menu {
@@ -5131,9 +5878,35 @@
 			padding: 0.22rem 0.38rem;
 		}
 
+		.color-menu-toggle {
+			gap: 0.22rem;
+			padding: 0.22rem 0.36rem;
+		}
+
+		.color-label {
+			display: none;
+		}
+
+		.color-menu-popover {
+			left: 50%;
+			transform: translateX(-50%);
+			min-width: 158px;
+		}
+
 		.brush-width-text {
 			min-width: 2.4rem;
 			font-size: 0.69rem;
+		}
+
+		.board-z-controls {
+			gap: 0.22rem;
+			padding: 0.24rem;
+			max-width: calc(100% - 10px);
+		}
+
+		.board-z-controls button {
+			font-size: 0.62rem;
+			padding: 0.18rem 0.34rem;
 		}
 	}
 </style>

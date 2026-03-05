@@ -115,16 +115,18 @@ func (m *CanvasManager) getOrCreateHub(roomID string) *CanvasHub {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	existing = m.hubs[roomID]
 	if existing != nil {
+		m.mu.Unlock()
 		return existing
 	}
 
 	hub := newCanvasHub(roomID, m)
-	hub.loadCurrentSnapshot()
 	m.hubs[roomID] = hub
+	m.mu.Unlock()
+
+	// Load after unlocking to avoid manager lock re-entry deadlocks.
+	hub.loadCurrentSnapshot()
 	go hub.Run()
 	return hub
 }
@@ -606,21 +608,6 @@ func loadCanvasSnapshotForRoom(ctx context.Context, roomID string) ([]byte, canv
 
 	redisStore, scyllaStore, r2Client := DefaultCanvasManager.activeStores()
 	lookup.RoomName = resolveCanvasRoomName(roomID, redisStore)
-	if scyllaStore == nil || scyllaStore.Session == nil {
-		lookup.Source = "metadata_unavailable"
-		return nil, lookup, nil
-	}
-
-	metadataCtx, metadataCancel := canvasSnapshotStageContext(ctx, canvasSnapshotMetadataTimeout)
-	hasCanvasData, err := database.CheckCanvasHasData(metadataCtx, scyllaStore.Session, roomID)
-	metadataCancel()
-	if err != nil {
-		return nil, lookup, err
-	}
-	if !hasCanvasData {
-		lookup.Source = "metadata_empty"
-		return nil, lookup, nil
-	}
 
 	hub := DefaultCanvasManager.getHub(roomID)
 	if hub != nil {
@@ -644,6 +631,27 @@ func loadCanvasSnapshotForRoom(ctx context.Context, roomID string) ([]byte, canv
 				hub.setCurrentSnapshot(redisSnapshot)
 			}
 			return redisSnapshot, lookup, nil
+		}
+	}
+
+	metadataKnown := false
+	metadataHasData := false
+	if scyllaStore == nil || scyllaStore.Session == nil {
+		lookup.Source = "metadata_unavailable"
+	} else {
+		metadataCtx, metadataCancel := canvasSnapshotStageContext(ctx, canvasSnapshotMetadataTimeout)
+		hasCanvasData, metadataErr := database.CheckCanvasHasData(metadataCtx, scyllaStore.Session, roomID)
+		metadataCancel()
+		if metadataErr != nil {
+			log.Printf("[canvas] Metadata check failed room=%s err=%v", roomID, metadataErr)
+			lookup.Source = "metadata_check_failed"
+		} else {
+			metadataKnown = true
+			metadataHasData = hasCanvasData
+			if !hasCanvasData {
+				lookup.Source = "metadata_empty"
+				return nil, lookup, nil
+			}
 		}
 	}
 
@@ -674,7 +682,7 @@ func loadCanvasSnapshotForRoom(ctx context.Context, roomID string) ([]byte, canv
 		}
 	}
 
-	if hasCanvasData {
+	if metadataKnown && metadataHasData {
 		return nil, lookup, fmt.Errorf("critical: scylladb indicates canvas has data, but it could not be retrieved from redis or r2")
 	}
 
