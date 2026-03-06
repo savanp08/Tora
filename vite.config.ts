@@ -18,7 +18,7 @@ export default defineConfig({
 		sveltekit()
 	],
 	server: {
-		// host: true  // Enable this if you want to access the dev server from other devices on the network
+		host: true  // Enable this if you want to access the dev server from other devices on the network
 	},
 
 	test: {

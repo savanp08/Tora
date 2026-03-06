@@ -177,7 +177,7 @@
 					type="button"
 					class="icon-button menu-trigger"
 					on:click|stopPropagation={toggleCallMenu}
-					title="Call options"
+					title=""
 					aria-label="Call options"
 					aria-expanded={showCallMenu}
 				>
@@ -187,6 +187,7 @@
 						/>
 						<path d="m16.5 4.2 1.3 1.3m-2.8.2 3.6 3.6" />
 					</svg>
+
 				</button>
 				{#if showCallMenu}
 					<div class="header-dropdown call-dropdown" role="menu" aria-label="Call options">
@@ -201,6 +202,7 @@
 								<path d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z" />
 								<path d="M6.5 10.8a5.5 5.5 0 0 0 11 0M12 16.3V20M9.3 20h5.4" />
 							</svg>
+							<span class="call-dropdown-option-label">Voice call</span>
 						</button>
 						<button
 							type="button"
@@ -213,6 +215,7 @@
 								<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
 								<path d="M15.5 10 21 7v10l-5.5-3"></path>
 							</svg>
+							<span class="call-dropdown-option-label">Video call</span>
 						</button>
 					</div>
 				{/if}
@@ -223,7 +226,7 @@
 				type="button"
 				class="icon-button menu-trigger"
 				on:click|stopPropagation={toggleWorkspaceMenu}
-				title="Workspace options"
+				title=""
 				aria-label="Workspace options"
 				aria-expanded={showWorkspaceMenu}
 			>
@@ -586,9 +589,10 @@
 	}
 
 	.call-dropdown {
-		min-width: 112px;
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		min-width: 120px;
+		display: flex;
+		flex-direction: row;
+		flex-wrap: wrap;
 		gap: 0.36rem;
 		padding: 0.36rem;
 	}
@@ -596,16 +600,27 @@
 	.call-dropdown-option {
 		display: inline-flex;
 		align-items: center;
-		justify-content: center;
+		justify-content: flex-start;
+		gap: 0.4rem;
+		flex: 1 1 9rem;
+		width: auto;
 		border: 1px solid #cad3df;
 		border-radius: 0.62rem;
-		padding: 0.5rem 0.45rem;
+		padding: 0.5rem 0.55rem;
 		background: #edf3f9;
 	}
 
 	.call-dropdown-option .dropdown-option-icon {
 		width: 1rem;
 		height: 1rem;
+		flex-shrink: 0;
+	}
+
+	.call-dropdown-option-label {
+		font-size: 0.78rem;
+		font-weight: 600;
+		line-height: 1.2;
+		white-space: nowrap;
 	}
 
 	.theme-dark .header-dropdown {

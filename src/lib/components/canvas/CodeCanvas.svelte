@@ -1,6 +1,11 @@
 <script lang="ts">
 	import { zipSync, unzipSync } from 'fflate';
 	import { initFileSystem as initLightningFS } from '$lib/utils/fs';
+	import {
+		ExecutionManager,
+		type ExecutionOutputLine,
+		type ExecutionRunHandle
+	} from '$lib/utils/executionManager';
 	import { applyUpdate, encodeStateAsUpdate } from 'yjs';
 	import { onDestroy, onMount, tick } from 'svelte';
 	import 'xterm/css/xterm.css';
@@ -152,6 +157,11 @@
 	let filePersistTimeout: number | null = null;
 	let periodicSnapshotInterval: number | null = null;
 	let snapshotDirty = false;
+	let executionManager: ExecutionManager | null = null;
+	let activeExecutionHandle: ExecutionRunHandle | null = null;
+	let removeExecutionOutputSubscription: (() => void) | null = null;
+	let isRunInProgress = false;
+	let runningFilePath = '';
 	const presenceSessionId = createPresenceSessionId();
 
 	function canvasClientLog(event: string, payload?: unknown) {
@@ -640,7 +650,7 @@
 
 	// Automatically detect language from the file extension
 	function getLanguageFromExtension(filename: string) {
-		const ext = filename.split('.').pop()?.toLowerCase() || '';
+		const ext = getFileExtension(filename);
 		const map: Record<string, string> = {
 			js: 'javascript',
 			mjs: 'javascript',
@@ -665,6 +675,69 @@
 			yml: 'yaml'
 		};
 		return map[ext] || 'plaintext';
+	}
+
+	function getFileExtension(filename: string) {
+		return normalizeProjectName(filename).split('.').pop()?.toLowerCase() || '';
+	}
+
+	function resolveExecutionLanguageForEntry(entry: ProjectFileEntry) {
+		const modelLanguageId =
+			entry.relativePath === currentFile ? editor?.getModel?.()?.getLanguageId?.() || '' : '';
+		const normalizedModelLanguage = (modelLanguageId || '').toLowerCase();
+		if (normalizedModelLanguage) {
+			return normalizedModelLanguage;
+		}
+		return getLanguageFromExtension(entry.name);
+	}
+
+	function writeExecutionLineToTerminal(output: ExecutionOutputLine) {
+		if (!terminal) {
+			return;
+		}
+		const content = output.line === '\x1bc' ? '\x1bc' : `${output.line}\r\n`;
+		if (output.stream === 'stderr' && content !== '\x1bc') {
+			terminal.write(`\x1b[31m${content}\x1b[0m`);
+			return;
+		}
+		terminal.write(content);
+	}
+
+	function resetExecutionState() {
+		if (removeExecutionOutputSubscription) {
+			removeExecutionOutputSubscription();
+			removeExecutionOutputSubscription = null;
+		}
+		activeExecutionHandle = null;
+		isRunInProgress = false;
+		runningFilePath = '';
+	}
+
+	function stopRunningCode() {
+		if (!executionManager || !activeExecutionHandle) {
+			return;
+		}
+		executionManager.stop(activeExecutionHandle.id);
+	}
+
+	async function executeCode(language: string, source: string, target: ProjectFileEntry) {
+		if (!executionManager) {
+			throw new Error('Execution manager is not ready');
+		}
+		if (isRunInProgress) {
+			throw new Error('Another execution is already running');
+		}
+		isRunInProgress = true;
+		runningFilePath = target.relativePath;
+		activeExecutionHandle = await executionManager.run(language, source, 30000);
+		removeExecutionOutputSubscription = activeExecutionHandle.subscribe((output) => {
+			writeExecutionLineToTerminal(output);
+		});
+		try {
+			await activeExecutionHandle.result;
+		} finally {
+			resetExecutionState();
+		}
 	}
 
 	function normalizeProjectName(value: string) {
@@ -1236,28 +1309,6 @@
 
 	function clearTerminal() {
 		terminal?.clear();
-	}
-
-	function formatTerminalArg(value: unknown) {
-		if (typeof value === 'string') {
-			return value;
-		}
-		if (
-			typeof value === 'number' ||
-			typeof value === 'boolean' ||
-			value == null ||
-			typeof value === 'bigint'
-		) {
-			return String(value);
-		}
-		if (value instanceof Error) {
-			return value.stack || value.message;
-		}
-		try {
-			return JSON.stringify(value);
-		} catch {
-			return String(value);
-		}
 	}
 
 	function getTerminalResizeBounds() {
@@ -2557,12 +2608,9 @@
 			writeTerminalLine('\x1b[31mSelect a file to run.\x1b[0m');
 			return;
 		}
-		const extension = target.name.split('.').pop()?.toLowerCase() || '';
-		if (!['js', 'mjs', 'cjs'].includes(extension)) {
-			fileExplorerError = 'Run File currently supports JavaScript files (.js, .mjs, .cjs)';
-			writeTerminalLine(
-				'\x1b[33mRun File currently supports JavaScript files (.js, .mjs, .cjs).\x1b[0m'
-			);
+		if (isRunInProgress) {
+			fileExplorerError = 'A run is already in progress';
+			writeTerminalLine('\x1b[33mA run is already in progress.\x1b[0m');
 			return;
 		}
 		fileExplorerError = '';
@@ -2575,31 +2623,8 @@
 			} else {
 				source = String(await getActiveFS().promises.readFile(target.path, { encoding: 'utf8' }));
 			}
-			const customConsole = {
-				log: (...args: unknown[]) =>
-					writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' ')),
-				info: (...args: unknown[]) =>
-					writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' ')),
-				warn: (...args: unknown[]) =>
-					writeTerminalLine(
-						`\x1b[33m${args.map((arg) => formatTerminalArg(arg)).join(' ')}\x1b[0m`
-					),
-				error: (...args: unknown[]) =>
-					writeTerminalLine(
-						`\x1b[31m${args.map((arg) => formatTerminalArg(arg)).join(' ')}\x1b[0m`
-					),
-				debug: (...args: unknown[]) =>
-					writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' ')),
-				clear: () => clearTerminal()
-			};
-			const customPrint = (...args: unknown[]) =>
-				writeTerminalLine(args.map((arg) => formatTerminalArg(arg)).join(' '));
-			const execute = new Function(
-				'console',
-				'print',
-				`"use strict";\nreturn (async () => {\n${source}\n})();`
-			) as (consoleObject: typeof customConsole, printFunction: typeof customPrint) => unknown;
-			await Promise.resolve(execute(customConsole, customPrint));
+			const language = resolveExecutionLanguageForEntry(target);
+			await executeCode(language, source, target);
 			writeTerminalLine('\x1b[32m> Script finished.\x1b[0m');
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : 'Run failed';
@@ -2819,6 +2844,7 @@
 	}
 
 	onMount(async () => {
+		executionManager = new ExecutionManager();
 		try {
 			canvasClientLog('init-start', { roomId });
 			removeGlobalContextHandlers = registerGlobalContextHandlers();
@@ -3030,6 +3056,12 @@
 
 	onDestroy(() => {
 		void persistCurrentFileToFS();
+		if (activeExecutionHandle && executionManager) {
+			executionManager.stop(activeExecutionHandle.id);
+		}
+		resetExecutionState();
+		executionManager?.dispose();
+		executionManager = null;
 		cursorSelectionDisposable?.dispose();
 		cursorSelectionDisposable = null;
 		editorContentChangeDisposable?.dispose();
@@ -3354,33 +3386,57 @@
 				{/if}
 			</div>
 		</div>
-		<div class="canvas-editor-body" bind:this={canvasEditorBodyElement}>
-			<div class="canvas-editor-pane" class:is-empty={openTabs.length === 0}>
-				<div class="code-canvas" bind:this={editorContainer}></div>
-				{#if openTabs.length === 0}
-					<div class="canvas-blank-state" role="status" aria-live="polite">
-						Open a file from Explorer to start editing.
-					</div>
-				{/if}
-			</div>
-			<div class="terminal-panel" style:height={`${terminalHeight}px`}>
-				<button
-					type="button"
-					class="terminal-resize-handle"
-					on:pointerdown={startTerminalResize}
-					aria-label="Resize terminal"
-				>
-					<span class="terminal-resize-grip" aria-hidden="true"></span>
-				</button>
-				<div class="terminal-header">
-					<span class="terminal-title">Terminal</span>
-					<button type="button" class="terminal-action-button" on:click={clearTerminal}>
-						Clear
-					</button>
+			<div class="canvas-editor-body" bind:this={canvasEditorBodyElement}>
+				<div class="canvas-editor-pane" class:is-empty={openTabs.length === 0}>
+					<div class="code-canvas" bind:this={editorContainer}></div>
+					{#if openTabs.length === 0}
+						<div class="canvas-blank-state" role="status" aria-live="polite">
+							Open a file from Explorer to start editing.
+						</div>
+					{/if}
 				</div>
-				<div class="terminal-container" bind:this={terminalContainer}></div>
+				<div class="terminal-panel" style:height={`${terminalHeight}px`}>
+					<button
+						type="button"
+						class="terminal-resize-handle"
+						on:pointerdown={startTerminalResize}
+						aria-label="Resize terminal"
+					>
+						<span class="terminal-resize-grip" aria-hidden="true"></span>
+					</button>
+					<div class="terminal-header">
+						<span class="terminal-title">
+							{#if isRunInProgress && runningFilePath}
+								Running {getTabLabel(runningFilePath)}
+							{:else}
+								Terminal
+							{/if}
+						</span>
+						<div class="terminal-action-group">
+							<button
+								type="button"
+								class="terminal-action-button terminal-action-run"
+								on:click={() => void runFile(currentFileEntry())}
+								disabled={isRunInProgress || !currentFileEntry()}
+							>
+								{isRunInProgress ? 'Running...' : 'Run'}
+							</button>
+							<button
+								type="button"
+								class="terminal-action-button terminal-action-stop"
+								on:click={stopRunningCode}
+								disabled={!isRunInProgress}
+							>
+								Stop
+							</button>
+							<button type="button" class="terminal-action-button" on:click={clearTerminal}>
+								Clear
+							</button>
+						</div>
+					</div>
+					<div class="terminal-container" bind:this={terminalContainer}></div>
+				</div>
 			</div>
-		</div>
 	</div>
 	{#if deleteConfirmTarget}
 		<div class="canvas-delete-overlay" role="presentation" on:click|self={closeDeleteConfirmation}>
@@ -3476,19 +3532,20 @@
 			on:click={() => void contextNewFile()}
 		>
 			New File
-		</button>
-		<div class="explorer-context-divider"></div>
-		<button
-			type="button"
-			class="explorer-context-action"
-			role="menuitem"
-			on:click={() => void contextRunFile()}
-		>
-			Run File
-		</button>
-		<button
-			type="button"
-			class="explorer-context-action"
+			</button>
+			<div class="explorer-context-divider"></div>
+			<button
+				type="button"
+				class="explorer-context-action"
+				role="menuitem"
+				on:click={() => void contextRunFile()}
+				disabled={isRunInProgress}
+			>
+				Run File
+			</button>
+			<button
+				type="button"
+				class="explorer-context-action"
 			role="menuitem"
 			on:click={() => void contextDelete()}
 			disabled={!contextMenuTarget}
@@ -4124,6 +4181,12 @@
 		white-space: nowrap;
 	}
 
+	.terminal-action-group {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.34rem;
+	}
+
 	.terminal-action-button {
 		border: 1px solid rgba(103, 125, 160, 0.52);
 		background: rgba(24, 35, 52, 0.88);
@@ -4135,9 +4198,29 @@
 		cursor: pointer;
 	}
 
+	.terminal-action-button:disabled {
+		opacity: 0.56;
+		cursor: not-allowed;
+	}
+
 	.terminal-action-button:hover {
 		border-color: rgba(139, 168, 211, 0.68);
 		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.terminal-action-button:disabled:hover {
+		border-color: rgba(103, 125, 160, 0.52);
+		background: rgba(24, 35, 52, 0.88);
+	}
+
+	.terminal-action-run {
+		border-color: rgba(72, 187, 120, 0.7);
+		background: rgba(16, 111, 78, 0.42);
+	}
+
+	.terminal-action-stop {
+		border-color: rgba(239, 68, 68, 0.72);
+		background: rgba(127, 29, 29, 0.45);
 	}
 
 	.terminal-container {

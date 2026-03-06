@@ -24,6 +24,18 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+  piston:
+    image: ghcr.io/engineer-man/piston
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:2000:2000"
+    environment:
+      PISTON_DISABLE_NETWORKING: "true"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "1.0"
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
