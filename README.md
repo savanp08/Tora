@@ -1,7 +1,7 @@
-# Converse
+# Tora
 
 <p align="center">
-  <img src="docs/logo.png" width="120" alt="Converse logo">
+  <img src="docs/logo.png" width="120" alt="Tora logo">
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/hero-demo.gif" width="900" alt="Converse hero demo">
+  <img src="docs/media/hero-demo.gif" width="900" alt="Tora hero demo">
 </p>
 
 <p align="center">
@@ -40,7 +40,7 @@
 
 ## Product Overview
 
-Converse is a session-based collaboration platform for fast, high-context sessions.
+Tora is a session-based collaboration platform for fast, high-context sessions.
 
 Teams create or join a session and collaborate across messaging, whiteboarding, coding, calls, and file exchange in one workspace.
 
@@ -56,13 +56,13 @@ Modern collaboration is often split across separate tools for messaging, whitebo
 
 That split introduces context loss and slows decision-making.
 
-Converse uses a temporary, session-centric model so teams can collaborate end-to-end without switching tools.
+Tora uses a temporary, session-centric model so teams can collaborate end-to-end without switching tools.
 
 ---
 
 ## Comparison
 
-| Feature | Converse | Slack | Discord |
+| Feature | Tora | Slack | Discord |
 |---|---|---|---|
 | Ephemeral sessions | ✅ | ❌ | ❌ |
 | Session branching | ✅ | ❌ | ❌ |
@@ -247,7 +247,7 @@ Execution
 
 ## Security & Privacy
 
-Converse includes practical controls for secure collaboration.
+Tora includes practical controls for secure collaboration.
 
 - Minimal identity requirements
 - Optional password-protected session access
@@ -341,7 +341,7 @@ http://localhost:5173
 
 ## Deployment
 
-Converse can run locally or in production with separate frontend, API, state, and storage layers.
+Tora can run locally or in production with separate frontend, API, state, and storage layers.
 
 Recommended production setup:
 
@@ -408,7 +408,7 @@ Potential improvements include:
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=savanp08/converse&type=Date)](https://star-history.com/#savanp08/converse&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=savanp08/tora&type=Date)](https://star-history.com/#savanp08/tora&Date)
 
 --- -->
 
