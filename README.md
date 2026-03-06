@@ -1,294 +1,291 @@
 # Converse
 
-[![SvelteKit](https://img.shields.io/badge/SvelteKit-5.x-ff3e00?logo=svelte&logoColor=white)](https://kit.svelte.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![Redis](https://img.shields.io/badge/Redis-7.x-dc382d?logo=redis&logoColor=white)](https://redis.io/)
-[![ScyllaDB](https://img.shields.io/badge/ScyllaDB-supported-6cd4ff)](https://www.scylladb.com/)
+<p align="center">
+  <img src="docs/logo.png" width="120" alt="Converse logo">
+</p>
 
-Converse is a real-time collaboration platform that combines ephemeral room-based chat, branching discussion flows, collaborative whiteboard, and a live code canvas with execution support.
+<p align="center">
+  <b>Real-time sessions for chat, code, whiteboarding, and calls.</b>
+</p>
 
-It is designed for fast team sessions where context, code, and conversation stay in one workspace.
+<p align="center">
+  A privacy-first collaboration workspace that keeps conversation, code, and context in one session.
+</p>
 
----
+<p align="center">
+  <img src="docs/media/hero-demo.gif" width="900" alt="Converse hero demo">
+</p>
 
-## Table of Contents
+<p align="center">
+  <sub>Replace <code>docs/media/hero-demo.gif</code> with a 10-20 second product demo.</sub>
+</p>
 
-- [Why Converse](#why-converse)
-- [Core Features](#core-features)
-  - [Room Lifecycle and Access Control](#room-lifecycle-and-access-control)
-  - [Real-Time Chat Engine](#real-time-chat-engine)
-  - [Message Workflows and Context Actions](#message-workflows-and-context-actions)
-  - [Snippet-to-Chat Workflow](#snippet-to-chat-workflow)
-  - [Collaborative Code Canvas](#collaborative-code-canvas)
-  - [Interactive Board Workspace](#interactive-board-workspace)
-  - [Media, File Uploads, and Storage](#media-file-uploads-and-storage)
-  - [Pinned Threads and Discussion Comments](#pinned-threads-and-discussion-comments)
-  - [Voice and Video Calling](#voice-and-video-calling)
-  - [Mobile UX and Long-Press Interaction Model](#mobile-ux-and-long-press-interaction-model)
-- [Architecture Overview](#architecture-overview)
-- [Tech Stack](#tech-stack)
-- [Repository Structure](#repository-structure)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [1) Install Dependencies](#1-install-dependencies)
-  - [2) Configure Environment Variables](#2-configure-environment-variables)
-  - [3) Start Infrastructure Services](#3-start-infrastructure-services)
-  - [4) Start Backend](#4-start-backend)
-  - [5) Start Frontend](#5-start-frontend)
-- [Environment Variables](#environment-variables)
-  - [Frontend](#frontend)
-  - [Backend](#backend)
-- [API Surface (High-Level)](#api-surface-high-level)
-- [Quality and Tooling](#quality-and-tooling)
-- [Deployment Notes](#deployment-notes)
-- [Security Notes](#security-notes)
-- [Roadmap Ideas](#roadmap-ideas)
-- [License](#license)
+<p align="center">
+  <a href="https://kit.svelte.dev/"><img src="https://img.shields.io/badge/SvelteKit-5.x-ff3e00?logo=svelte&logoColor=white" alt="SvelteKit"></a>
+  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white" alt="TypeScript"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
+  <a href="https://redis.io/"><img src="https://img.shields.io/badge/Redis-7.x-dc382d?logo=redis&logoColor=white" alt="Redis"></a>
+  <a href="https://www.scylladb.com/"><img src="https://img.shields.io/badge/ScyllaDB-supported-6cd4ff" alt="ScyllaDB"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
+
+<p align="center">
+  <a href="#getting-started">Quick Start</a> •
+  <a href="#features">Features</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#deployment">Deployment</a>
+</p>
 
 ---
 
-## Why Converse
+## Product Overview
 
-Most chat tools fragment collaboration across multiple tabs and tools. Converse keeps team communication, code collaboration, and visual ideation in a single room-centric flow:
+Converse is a session-based collaboration platform for fast, high-context sessions.
 
-- Ephemeral and branchable room model
-- Real-time messaging and room presence
-- In-room code canvas with execution pipeline
-- Shared visual board for non-linear collaboration
-- File/media workflow backed by object storage
+Teams create or join a session and collaborate across messaging, whiteboarding, coding, calls, and file exchange in one workspace.
+
+The goal is simple: reduce tool switching and keep discussions, artifacts, and execution context aligned.
 
 ---
 
-## Core Features
+## Why This Exists
 
-### Room Lifecycle and Access Control
+You can open a workspace without login friction, save information online, and return later with context intact.
 
-- Create or join rooms using room name or 6-digit code
-- Optional room password protection and member-aware routing
-- Expiry window support for temporary/disappearing collaboration sessions
-- Leave, extend, rename, delete, and promote-admin room operations
-- Parent/child room relationships for branch workflows
+Modern collaboration is often split across separate tools for messaging, whiteboarding, coding, and calls.
 
-**Media Placeholder**
+That split introduces context loss and slows decision-making.
 
-```md
-![Room Lifecycle Demo](docs/media/room-lifecycle.gif)
+Converse uses a temporary, session-centric model so teams can collaborate end-to-end without switching tools.
+
+---
+
+## Comparison
+
+| Feature | Converse | Slack | Discord |
+|---|---|---|---|
+| Ephemeral sessions | ✅ | ❌ | ❌ |
+| Session branching | ✅ | ❌ | ❌ |
+| Collaborative code canvas | ✅ | ❌ | ❌ |
+| Built-in drawboard workspace | ✅ | ❌ | ❌ |
+| No account required (guest-first flow) | ✅ | ❌ | ❌ |
+| In-session voice and video calls | ✅ | ✅ | ✅ |
+| File and media sharing | ✅ | ✅ | ✅ |
+
+Comparison reflects built-in capabilities for session-centric collaboration.
+
+---
+
+## Collaboration Tools
+
+Each session includes:
+
+- **Real-Time Chat:** messaging, presence, replies, and pinning.
+- **Drawboard Workspace:** shared board for diagrams, notes, and visual planning.
+- **Code Canvas:** collaborative editing with shared execution output.
+- **Voice and Video Calls:** built-in WebRTC calls inside each session.
+- **File and Media Sharing:** session-scoped uploads for files, media, and voice notes.
+- **Branchable Sessions:** split sessions into focused child sessions with shared context.
+
+---
+
+## Features
+
+Detailed feature breakdown.
+
+<sub>Media placeholders are embedded with each feature below. Replace files in <code>docs/media/</code> as needed.</sub>
+
+### Real-Time Chat
+
+Low-latency session messaging designed for active collaboration.
+
+- Instant session messaging
+- Typing indicators and online presence
+- Replies, pinning, and context-aware navigation
+- Session message history loading
+
+<p align="center">
+  <img src="docs/media/realtime-chat.gif" width="900" alt="Real-Time Chat">
+</p>
+
+### Drawboard Workspace
+
+Shared visual board for ideation and planning.
+
+- Infinite pan and zoom canvas
+- Free draw, shapes, text, and sticky notes
+- Cursor presence for collaborators
+- Embedded message and media cards on the board
+
+<p align="center">
+  <img src="docs/media/drawboard.gif" width="900" alt="Drawboard Workspace">
+</p>
+
+### Code Canvas
+
+Shared coding workspace with live collaborative editing.
+
+- Monaco editor with a project-style file tree
+- CRDT collaboration with Yjs
+- Shared execution output stream
+- Canvas snapshot save and load
+- Snippet-to-chat handoff
+
+Supported runtimes:
+
+- Python (Pyodide worker)
+- JavaScript (worker runtime)
+
+<p align="center">
+  <img src="docs/media/code-canvas.gif" width="900" alt="Code Canvas">
+</p>
+
+### Voice and Video Calls
+
+WebRTC calls built directly into each session.
+
+- Audio and video calls
+- Session header call invites
+- Minimized call state with restore
+- Call activity in the timeline
+
+<p align="center">
+  <img src="docs/media/video-call.gif" width="900" alt="Voice and Video Calls">
+</p>
+
+### File and Media Sharing
+
+Session-scoped upload and attachment workflow.
+
+- File and media attachments
+- Voice note recording
+- Presigned upload support
+- Object storage-backed retrieval
+
+<p align="center">
+  <img src="docs/media/uploads.gif" width="900" alt="File and Media Sharing">
+</p>
+
+### Branchable Sessions
+
+Split active conversations into focused child sessions while preserving context.
+
+- Parent and child session context
+- Temporary sub-session workflows
+- Parallel collaboration tracks per topic
+
+<p align="center">
+  <img src="docs/media/session-branch.gif" width="900" alt="Branchable Sessions">
+</p>
+
+---
+
+## Use Cases
+
+### Engineering Discussions
+
+Spin up a temporary session to debug incidents with chat, code, and calls in one workflow.
+
+### Architecture Brainstorming
+
+Sketch system flows on the drawboard while discussing tradeoffs in real time.
+
+### Pair Programming
+
+Write and run code together in the shared canvas.
+
+### Hackathons
+
+Create session-based collaboration spaces for teams working in parallel.
+
+### Study Groups
+
+Discuss problems, sketch diagrams, and exchange runnable snippets during sessions.
+
+---
+
+## Architecture
+
+```text
+Browser
+   │
+   ▼
+SvelteKit Frontend
+   │
+   ▼
+Go API Server
+   │
+ ┌─┴─────────────┐
+ ▼               ▼
+Redis        ScyllaDB / Astra
+(real-time)   (storage)
+   │
+   ▼
+Cloudflare R2
+(file storage)
 ```
-
----
-
-### Real-Time Chat Engine
-
-- WebSocket-based live messaging with automatic reconnect
-- Typing indicators and online member presence
-- Read progress and unread anchor handling
-- Message history loading and room subscription model
-- Sidebar room list with activity-aware sorting
-
-**Media Placeholder**
-
-```md
-![Real-Time Chat Demo](docs/media/realtime-chat.gif)
-```
-
----
-
-### Message Workflows and Context Actions
-
-- Message-level context actions: reply, edit, delete, pin, create branch
-- Inline reply preview and jump-to-source context
-- Task-style message cards with checklist interactions
-- Long message expansion behavior with read-more controls
-- Pinned state rendering and break-room jump affordances
-
-**Media Placeholder**
-
-```md
-![Message Actions Demo](docs/media/message-actions.gif)
-```
-
----
-
-### Snippet-to-Chat Workflow
-
-- Send code snippets from the canvas to chat as structured message payloads
-- Snippet + note composition flow before dispatch
-- Snippet rendering as dedicated chat card with code block and note section
-- Independent expand/collapse behavior for long code and long note content
-
-**Media Placeholder**
-
-```md
-![Snippet To Chat Demo](docs/media/snippet-to-chat.gif)
-```
-
----
-
-### Collaborative Code Canvas
-
-- Monaco editor workspace with project-like file tree
-- Room-shared code state synchronized via Yjs/y-websocket
-- Canvas snapshot load/save pipeline (Redis + optional R2 fallback)
-- Terminal-like execution output stream in the canvas UI
-- Runtime execution support using workers:
-  - Python via Pyodide worker
-  - JavaScript via dedicated JS worker
-
-**Media Placeholder**
-
-```md
-![Code Canvas Demo](docs/media/code-canvas.gif)
-```
-
----
-
-### Interactive Board Workspace
-
-- Spatial collaborative board with pan/zoom and minimap
-- Free draw, erase, shapes, text boxes, sticky notes
-- Insert message/media cards into board context
-- Cursor presence and board-level collaboration envelopes
-- Board details panel with usage and capacity indicators
-
-**Media Placeholder**
-
-```md
-![Board Workspace Demo](docs/media/board-workspace.gif)
-```
-
----
-
-### Media, File Uploads, and Storage
-
-- Media and file attachments in chat composer
-- Voice message recording and upload flow
-- Presigned upload endpoint and upload proxy support
-- R2 object retrieval route and room-scoped file indexing
-- Optional public base URL support for object delivery
-
-**Media Placeholder**
-
-```md
-![Media Upload Demo](docs/media/media-upload.gif)
-```
-
----
-
-### Pinned Threads and Discussion Comments
-
-- Pin messages inside a room
-- Navigate pinned anchors
-- Dedicated pinned discussion comment endpoints
-- Create, edit, delete comment workflows
-- Pin state propagation to room timelines
-
-**Media Placeholder**
-
-```md
-![Pinned Discussion Demo](docs/media/pinned-discussion.gif)
-```
-
----
-
-### Voice and Video Calling
-
-- Built-in room call actions from header menu
-- WebRTC signaling integrated into room channel flow
-- Audio/video call invite handling
-- Minimized-call state and restore controls
-- Call status represented in message timeline
-
-**Media Placeholder**
-
-```md
-![Voice Video Demo](docs/media/voice-video.gif)
-```
-
----
-
-### Mobile UX and Long-Press Interaction Model
-
-- Responsive split-pane behavior with mobile pane switching
-- Long-press support for context menus (messages and canvas file rows)
-- Native menu suppression strategies for touch interaction consistency
-- Header and sidebar controls optimized for compact viewports
-
-**Media Placeholder**
-
-```md
-![Mobile UX Demo](docs/media/mobile-ux.gif)
-```
-
----
-
-## Architecture Overview
 
 ```text
 SvelteKit Frontend
-  ├─ Chat UI / Sidebar / Composer / Board / Canvas
-  ├─ Global WebSocket Client
-  ├─ Monaco + Yjs collaboration
-  └─ Worker-based execution (Pyodide / JS)
+├ Chat UI / Drawboard / Code Canvas
+├ Monaco + Yjs collaboration
+├ Media upload components
+└ WebSocket client
 
-Go Backend (Chi Router)
-  ├─ Auth + Room + Message + Upload + Canvas APIs
-  ├─ WebSocket Hub (messages, presence, typing, room events)
-  ├─ Room expiry cleanup worker
-  └─ Usage / quota tracking
-
-State + Persistence
-  ├─ Redis (fast state, pub/sub, caches, expiry events)
-  ├─ ScyllaDB/Astra (durable room/message metadata)
-  └─ Cloudflare R2 (files + canvas snapshots fallback)
+Go Backend
+├ Auth + session lifecycle APIs
+├ Message + pin + upload APIs
+├ Canvas snapshot + board APIs
+└ WebSocket hub (presence, typing, events)
 
 Execution
-  └─ Optional Piston service (containerized runtime backend for extended execution scenarios)
+├ Python runtime worker (Pyodide)
+└ JavaScript runtime worker
 ```
+
+---
+
+## Security & Privacy
+
+Converse includes practical controls for secure collaboration.
+
+- Minimal identity requirements
+- Optional password-protected session access
+- Scoped session access
+- WebSocket authentication
+- Configurable usage and quota limits
+- Isolated object storage for uploads
+- HTTPS and WSS support in production
+
+Secrets and environment-specific credentials are managed through environment variables and should never be committed.
 
 ---
 
 ## Tech Stack
 
-**Frontend**
-- SvelteKit + TypeScript
-- Monaco Editor, xterm.js
-- Yjs + y-websocket + y-monaco
-- Web Workers (Pyodide and JavaScript runtime)
+### Frontend
 
-**Backend**
-- Go (Chi router + Gorilla WebSocket)
-- Redis (pub/sub, cache, expiry worker trigger)
-- ScyllaDB / Astra for durable data
-- Cloudflare R2 via MinIO client
+- **SvelteKit**
+- **TypeScript**
+- Monaco Editor
+- Yjs CRDT collaboration
+- xterm.js
+- Web Workers
 
-**Infra**
-- Docker Compose for service orchestration
-- Optional Caddy reverse proxy for API domain routing
+### Backend
 
----
+- **Go**
+- Chi router
+- Gorilla WebSocket
+- Redis
+- ScyllaDB / Astra DB
 
-## Repository Structure
+### Infrastructure
 
-```text
-.
-├─ src/                         # SvelteKit frontend
-│  ├─ lib/components/
-│  │  ├─ chat/
-│  │  └─ canvas/
-│  ├─ lib/workers/              # Pyodide + JavaScript workers
-│  └─ routes/
-├─ backend/
-│  ├─ cmd/server/               # Go server entrypoint
-│  └─ internal/
-│     ├─ handlers/
-│     ├─ websocket/
-│     ├─ database/
-│     ├─ storage/
-│     └─ router/
-├─ docker-compose.yml
-└─ Caddyfile
-```
+- Docker Compose
+- Cloudflare R2
+- Optional Piston runtime
+- Optional Caddy reverse proxy
 
 ---
 
@@ -297,209 +294,124 @@ Execution
 ### Prerequisites
 
 - Node.js 20+
-- npm 10+
 - Go 1.24+
-- Docker + Docker Compose (recommended for Redis/Piston/Caddy)
+- Docker and Docker Compose
 
-### 1) Install Dependencies
+### Install Dependencies
 
 ```bash
 npm install
-cd backend && go mod download && cd ..
+cd backend
+go mod download
+cd ..
 ```
 
-### 2) Configure Environment Variables
-
-Create a local `.env` in project root (or export variables in shell).
-
-Use the template in [Environment Variables](#environment-variables).
-
-### 3) Start Infrastructure Services
+### Start Infrastructure
 
 ```bash
 docker compose up -d redis piston
 ```
 
-Optional (reverse proxy / TLS API host):
-
-```bash
-docker compose up -d caddy
-```
-
-### 4) Start Backend
+### Start Backend
 
 ```bash
 cd backend
 go run ./cmd/server/main.go
 ```
 
-Backend default: `http://localhost:8080`
+Backend runs on:
 
-### 5) Start Frontend
+```text
+http://localhost:8080
+```
 
-In project root:
+### Start Frontend
 
 ```bash
 npm run dev
 ```
 
-Frontend default: `http://localhost:5173`
+Frontend runs on:
 
----
-
-## Environment Variables
-
-### Frontend
-
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `VITE_API_BASE` | Yes | `http://localhost:8080` | Base URL for REST API calls |
-| `VITE_WS_BASE` | No | derived from `VITE_API_BASE` | Explicit WebSocket base URL |
-| `VITE_CHAT_DEBUG` | No | `0` | Enables client-side debug traces when `1` |
-
-### Backend
-
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `APP_SECRET_KEY` | Yes | none | 32-char secret for app crypto/auth needs |
-| `PORT` | No | `8080` | Backend HTTP port |
-| `REDIS_ADDR` | No | `localhost:6379` | Redis host:port |
-| `REDIS_PASS` | No | empty | Redis password |
-| `TRUSTED_PROXIES` | No | empty | CSV of trusted proxy CIDRs/IPs |
-| `SCYLLA_HOSTS` | No | `127.0.0.1` | CSV host list for local Scylla |
-| `SCYLLA_KEYSPACE` | No | `converse` | Scylla keyspace |
-| `ASTRA_TOKEN` | No | empty | Astra token (cloud mode) |
-| `ASTRA_DB_ID` | No | empty | Astra database ID |
-| `ASTRA_API_URL` | No | auto | Astra API base |
-| `R2_ACCOUNT_ID` | No | auto-derivable | Cloudflare account id |
-| `R2_ACCESS_KEY` / `R2_S3_access_key_id` | No | empty | R2 access key |
-| `R2_SECRET_KEY` / `R2_S3_secret_access_key` | No | empty | R2 secret key |
-| `R2_BUCKET` / `R2_S3_bucket_name` | No | empty | R2 bucket |
-| `R2_PUBLIC_BASE_URL` | No | empty | Public URL base for uploaded objects |
-| `MAX_DAILY_REQUESTS` | No | `50000` | Usage guardrail |
-| `MAX_DAILY_UPLOAD_BYTES` | No | `2147483648` | Usage guardrail |
-| `MAX_DAILY_BANDWIDTH_BYTES` | No | `5368709120` | Usage guardrail |
-| `MAX_DAILY_MESSAGES` | No | `200000` | Usage guardrail |
-| `MAX_DAILY_WS_CONNECTIONS` | No | `15000` | Usage guardrail |
-| `MAX_DAILY_FILES_UPLOADED` | No | `3000` | Usage guardrail |
-
-Example `.env` template (replace values):
-
-```bash
-# Backend
-APP_SECRET_KEY=replace_with_exactly_32_chars
-PORT=8080
-REDIS_ADDR=localhost:6379
-REDIS_PASS=
-SCYLLA_HOSTS=127.0.0.1
-SCYLLA_KEYSPACE=converse
-TRUSTED_PROXIES=
-
-# Optional Astra
-ASTRA_TOKEN=
-ASTRA_DB_ID=
-ASTRA_API_URL=
-
-# Optional R2
-R2_ACCOUNT_ID=
-R2_ACCESS_KEY=
-R2_SECRET_KEY=
-R2_BUCKET=
-R2_PUBLIC_BASE_URL=
-
-# Frontend
-VITE_API_BASE=http://localhost:8080
-VITE_WS_BASE=
-VITE_CHAT_DEBUG=0
+```text
+http://localhost:5173
 ```
 
 ---
 
-## API Surface (High-Level)
+## Deployment
 
-**Auth**
-- `POST /api/auth/signup`
-- `POST /api/auth/login`
-- `POST /api/auth/anonymous`
+Converse can run locally or in production with separate frontend, API, state, and storage layers.
 
-**Rooms**
-- `POST /api/rooms`, `POST /api/rooms/join`, `POST /api/rooms/leave`
-- `POST /api/rooms/extend`, `POST /api/rooms/rename`, `POST /api/rooms/delete`
-- `POST /api/rooms/break`, `POST /api/rooms/remove-member`
-- `GET /api/rooms/sidebar`, `GET /api/rooms/{id}`
+Recommended production setup:
 
-**Messages and Pins**
-- `GET /api/rooms/{roomId}/messages`
-- `POST /api/rooms/{roomId}/pins`
-- `GET /api/rooms/{roomId}/pins/navigate`
-- `GET/POST/PUT/DELETE /api/rooms/{roomId}/pins/{pinMessageId}/discussion/comments[...]`
+```text
+Frontend
+↓
+Go API Server
+↓
+Redis + ScyllaDB
+↓
+Object Storage (Cloudflare R2)
+```
 
-**Board**
-- `GET /api/rooms/{id}/board`
-
-**Upload/Storage**
-- `POST /api/upload/presigned`
-- `POST /api/upload`
-- `GET /api/upload/object/*`
-
-**Canvas**
-- `GET/POST /api/canvas/{roomId}/snapshot`
-- `GET /api/canvas/github-archive`
-- `GET /ws/canvas/{roomId}`
-
-**WebSocket**
-- `GET /ws`
+Docker Compose is included for local infrastructure orchestration and development.
 
 ---
 
-## Quality and Tooling
+## Contributing
 
-Frontend:
+Contributions are welcome.
+
+1. Fork the repository.
+2. Create a feature branch.
+3. Commit your changes.
+4. Submit a pull request.
+
+Please ensure code passes checks before submitting:
 
 ```bash
+# Frontend
 npm run check
 npm run lint
 npm run test
-```
 
-Backend:
-
-```bash
+# Backend
 cd backend
 GOCACHE=/tmp/go-build-cache go test ./...
 ```
 
 ---
 
-## Deployment Notes
+## Community
 
-- Backend can run standalone (`go run` / built binary) or in Docker.
-- Redis is required for core real-time behavior.
-- Scylla/Astra is optional but recommended for durability.
-- R2 is optional but recommended for media and snapshot persistence.
-- Caddy config in this repo currently proxies `api-tora.monokenos.com` to backend.
+If you have questions, ideas, or issues:
 
----
-
-## Security Notes
-
-- Do not commit real secrets in `.env`.
-- Rotate any leaked credentials immediately.
-- Keep `APP_SECRET_KEY` exactly 32 chars.
-- Use HTTPS/WSS in production and lock down CORS origins.
-- Restrict trusted proxies via `TRUSTED_PROXIES` in production.
+- Open an issue
+- Start a discussion
+- Submit a feature request
 
 ---
 
-## Roadmap Ideas
+<!-- ## Roadmap
 
-- Add full API documentation (OpenAPI spec)
-- Add integration and end-to-end test suites
-- Add observability dashboards (metrics/traces/log correlation)
-- Package frontend + backend in a single production compose profile
+Potential improvements include:
+
+- OpenAPI documentation
+- End-to-end test suites
+- Observability dashboards
+- Distributed WebSocket scaling
+- Plugin architecture
+- AI collaboration assistants
 
 ---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=savanp08/converse&type=Date)](https://star-history.com/#savanp08/converse&Date)
+
+--- -->
 
 ## License
 
-Add your preferred license before publishing (for example, MIT/Apache-2.0/Proprietary) and include a `LICENSE` file.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
