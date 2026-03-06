@@ -7,7 +7,7 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    command: redis-server --maxmemory 6gb --maxmemory-policy allkeys-lru --appendonly no
+    command: redis-server --maxmemory 8gb --maxmemory-policy allkeys-lru --appendonly no
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
