@@ -56,7 +56,7 @@ const (
 
 var (
 	errRoomFull       = errors.New("room full")
-	CreateRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
+	roomCreateLimiter = security.NewLimiter(10, time.Minute, 3, 15*time.Minute)
 	JoinRoomLimiter   = security.NewLimiter(20, time.Minute, 20, 15*time.Minute)
 	ExtendRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
 )
@@ -538,9 +538,10 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 
 func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
-	if !CreateRoomLimiter.Allow(clientIP) {
+	if !roomCreateLimiter.Allow(clientIP) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Create room rate limit exceeded"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Create room rate limit exceeded"})
 		return
 	}
 
@@ -3589,9 +3590,10 @@ func toString(value interface{}) string {
 
 func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
-	if !CreateRoomLimiter.Allow(clientIP) {
+	if !roomCreateLimiter.Allow(clientIP) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Create room rate limit exceeded"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Create room rate limit exceeded"})
 		return
 	}
 

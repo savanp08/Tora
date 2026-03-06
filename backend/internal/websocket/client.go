@@ -202,7 +202,7 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		UserID:          userID,
 		Username:        username,
 		JoinedAt:        time.Now().UTC(),
-		msgLimiter:      rate.NewLimiter(rate.Every(250*time.Millisecond), 8),
+		msgLimiter:      rate.NewLimiter(rate.Every(200*time.Millisecond), 10),
 		clientIP:        clientIP,
 		subscribedRooms: make(map[string]RoomSubscription),
 		onDisconnect: func() {
@@ -233,6 +233,13 @@ func (c *Client) readPump() {
 				log.Printf("[ws] read unexpected close user=%s err=%v", c.UserID, err)
 			}
 			break
+		}
+		if c.msgLimiter != nil && !c.msgLimiter.Allow() {
+			c.sendRateLimitWarning()
+			continue
+		}
+		if c.Hub != nil && c.Hub.tracker != nil {
+			c.Hub.tracker.RecordWSMessage(int64(len(raw)))
 		}
 
 		if roomIDs, isSubscribe := parseSubscribeRoomIDs(raw); isSubscribe {
@@ -349,9 +356,6 @@ func (c *Client) readPump() {
 			c.subscribeToRoom(msg.RoomID, false)
 			continue
 		}
-		if c.msgLimiter != nil && !c.msgLimiter.Allow() {
-			continue
-		}
 		if strings.EqualFold(strings.TrimSpace(msg.Type), messageTypeCallLog) && strings.TrimSpace(msg.MediaType) == "" {
 			var envelopeMap map[string]interface{}
 			if err := json.Unmarshal(raw, &envelopeMap); err == nil {
@@ -369,10 +373,22 @@ func (c *Client) readPump() {
 		if msg.ID == "" {
 			msg.ID = fmt.Sprintf("%s_%d", msg.RoomID, msg.CreatedAt.UnixNano())
 		}
-		if c.Hub != nil && c.Hub.tracker != nil {
-			c.Hub.tracker.RecordWSMessage(int64(estimateMessageBytes(msg)))
-		}
 		c.Hub.broadcast <- msg
+	}
+}
+
+func (c *Client) sendRateLimitWarning() {
+	if c == nil {
+		return
+	}
+	warning := map[string]interface{}{
+		"type":    "warning",
+		"code":    "rate_limit_exceeded",
+		"message": "Too many messages. Slow down.",
+	}
+	select {
+	case c.Send <- warning:
+	default:
 	}
 }
 

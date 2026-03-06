@@ -49,7 +49,7 @@ func New(
 	authHandler := handlers.NewAuthHandler()
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
-	handlers.ConfigureCanvasPersistence(redisStore, scyllaStore, r2Client)
+	handlers.ConfigureCanvasPersistence(redisStore, scyllaStore, r2Client, usageTracker)
 	promoteLimiter := security.NewLimiter(5, time.Minute, 5, time.Minute)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

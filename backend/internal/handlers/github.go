@@ -9,11 +9,25 @@ import (
 	neturl "net/url"
 	"strings"
 	"time"
+
+	"github.com/savanp08/converse/internal/security"
 )
 
 const githubArchiveProxyTimeout = 45 * time.Second
 
+var githubProxyLimiter = security.NewLimiter(15, time.Minute, 5, 15*time.Minute)
+
 func ProxyGitHubRepoArchive(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !githubProxyLimiter.Allow(clientIP) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "GitHub proxy rate limit exceeded",
+		})
+		return
+	}
+
 	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
 	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
 	ref := strings.TrimSpace(r.URL.Query().Get("ref"))

@@ -10,9 +10,12 @@ import (
 	"time"
 
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/security"
 )
 
 type AuthHandler struct{}
+
+var authLimiter = security.NewLimiter(5, time.Minute, 5, 15*time.Minute)
 
 type AuthRequest struct {
 	Email    string `json:"email"`
@@ -34,6 +37,12 @@ func NewAuthHandler() *AuthHandler {
 }
 
 func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !authLimiter.Allow(clientIP) {
+		writeAuthError(w, http.StatusTooManyRequests, "Authentication rate limit exceeded")
+		return
+	}
+
 	var req AuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeAuthError(w, http.StatusBadRequest, "Invalid JSON format")
@@ -59,6 +68,12 @@ func (h *AuthHandler) SignUp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !authLimiter.Allow(clientIP) {
+		writeAuthError(w, http.StatusTooManyRequests, "Authentication rate limit exceeded")
+		return
+	}
+
 	var req AuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeAuthError(w, http.StatusBadRequest, "Invalid JSON format")
@@ -91,6 +106,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !authLimiter.Allow(clientIP) {
+		writeAuthError(w, http.StatusTooManyRequests, "Authentication rate limit exceeded")
+		return
+	}
+
 	var req AnonymousAuthRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeAuthError(w, http.StatusBadRequest, "Invalid JSON format")

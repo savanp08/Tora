@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/savanp08/converse/internal/database"
+	"github.com/savanp08/converse/internal/monitor"
+	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
 
 	"github.com/go-chi/chi/v5"
@@ -39,6 +42,8 @@ const (
 
 var canvasAwarenessQueryPayload = []byte{canvasMessageQueryAwareness}
 
+var canvasWriteLimiter = security.NewLimiter(30, time.Minute, 10, 15*time.Minute)
+
 var canvasUpgrader = websocket.Upgrader{
 	ReadBufferSize:    1024,
 	WriteBufferSize:   1024,
@@ -50,7 +55,7 @@ var canvasUpgrader = websocket.Upgrader{
 }
 
 // DefaultCanvasManager is shared by the canvas websocket endpoint.
-var DefaultCanvasManager = NewCanvasManager(nil, nil, nil)
+var DefaultCanvasManager = NewCanvasManager(nil, nil, nil, nil)
 
 // CanvasManager tracks one isolated CanvasHub per room.
 type CanvasManager struct {
@@ -59,18 +64,21 @@ type CanvasManager struct {
 	redisStore  *database.RedisStore
 	scyllaStore *database.ScyllaStore
 	r2Client    *storage.R2Client
+	tracker     *monitor.UsageTracker
 }
 
 func NewCanvasManager(
 	redisStore *database.RedisStore,
 	scyllaStore *database.ScyllaStore,
 	r2Client *storage.R2Client,
+	tracker *monitor.UsageTracker,
 ) *CanvasManager {
 	return &CanvasManager{
 		hubs:        make(map[string]*CanvasHub),
 		redisStore:  redisStore,
 		scyllaStore: scyllaStore,
 		r2Client:    r2Client,
+		tracker:     tracker,
 	}
 }
 
@@ -78,26 +86,29 @@ func ConfigureCanvasPersistence(
 	redisStore *database.RedisStore,
 	scyllaStore *database.ScyllaStore,
 	r2Client *storage.R2Client,
+	tracker *monitor.UsageTracker,
 ) {
-	DefaultCanvasManager.configureStores(redisStore, scyllaStore, r2Client)
+	DefaultCanvasManager.configureStores(redisStore, scyllaStore, r2Client, tracker)
 }
 
 func (m *CanvasManager) configureStores(
 	redisStore *database.RedisStore,
 	scyllaStore *database.ScyllaStore,
 	r2Client *storage.R2Client,
+	tracker *monitor.UsageTracker,
 ) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.redisStore = redisStore
 	m.scyllaStore = scyllaStore
 	m.r2Client = r2Client
+	m.tracker = tracker
 }
 
-func (m *CanvasManager) activeStores() (*database.RedisStore, *database.ScyllaStore, *storage.R2Client) {
+func (m *CanvasManager) activeStores() (*database.RedisStore, *database.ScyllaStore, *storage.R2Client, *monitor.UsageTracker) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.redisStore, m.scyllaStore, m.r2Client
+	return m.redisStore, m.scyllaStore, m.r2Client, m.tracker
 }
 
 func (m *CanvasManager) getHub(roomID string) *CanvasHub {
@@ -274,7 +285,7 @@ func (h *CanvasHub) loadCurrentSnapshot() {
 }
 
 func (h *CanvasHub) flushSnapshotOnTeardown() {
-	redisStore, _, r2Client := h.manager.activeStores()
+	redisStore, _, r2Client, _ := h.manager.activeStores()
 
 	if redisStore == nil || redisStore.Client == nil {
 		return
@@ -578,7 +589,7 @@ func loadCanvasSnapshotForRoom(ctx context.Context, roomID string) ([]byte, canv
 		return nil, lookup, nil
 	}
 
-	redisStore, scyllaStore, r2Client := DefaultCanvasManager.activeStores()
+	redisStore, scyllaStore, r2Client, _ := DefaultCanvasManager.activeStores()
 	lookup.RoomName = resolveCanvasRoomName(roomID, redisStore)
 
 	hub := DefaultCanvasManager.getHub(roomID)
@@ -700,6 +711,15 @@ func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid room id", http.StatusBadRequest)
 		return
 	}
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		clientIP := extractClientIP(r)
+		if !canvasWriteLimiter.Allow(clientIP) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Canvas write rate limit exceeded"})
+			return
+		}
+	}
 
 	hub := DefaultCanvasManager.getHub(roomID)
 
@@ -715,7 +735,10 @@ func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 		hub.setCurrentSnapshot(snapshot)
 	}
 
-	redisStore, scyllaStore, r2Client := DefaultCanvasManager.activeStores()
+	redisStore, scyllaStore, r2Client, tracker := DefaultCanvasManager.activeStores()
+	if tracker != nil {
+		tracker.RecordRequest(int64(len(snapshot)), 0)
+	}
 	if redisStore != nil && redisStore.Client != nil {
 		redisCtx, redisCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
 		saveErr := database.SaveCanvasSnapshotToRedis(redisCtx, redisStore.Client, roomID, snapshot)

@@ -11,7 +11,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/security"
 )
+
+var boardWriteLimiter = security.NewLimiter(30, time.Minute, 10, 15*time.Minute)
 
 func (h *RoomHandler) ClearBoardElements(ctx context.Context, roomID string) error {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
@@ -23,6 +26,9 @@ func (h *RoomHandler) ClearBoardElements(ctx context.Context, roomID string) err
 	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {
 		return fmt.Errorf("invalid room id")
+	}
+	if !boardWriteLimiter.Allow(normalizedRoomID) {
+		return fmt.Errorf("board write rate limit exceeded")
 	}
 
 	boardTable := h.scylla.Table("board_elements")
