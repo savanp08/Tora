@@ -1,6 +1,6 @@
 type WorkerInboundMessage = {
-	id: string;
 	code: string;
+	id: string;
 };
 
 type WorkerOutboundMessage = {
@@ -82,10 +82,10 @@ export class ExecutionManager {
 		const pythonStrategy: ExecutionStrategy = {
 			language: 'python',
 			aliases: ['py'],
-			workerFactory: async () => {
-				const { default: PyodideWorker } = await import('$lib/workers/pyodide.worker?worker');
-				return new PyodideWorker();
-			}
+			workerFactory: async () =>
+				new Worker(new URL('../workers/pyodide.worker.ts', import.meta.url), {
+					type: 'module'
+				})
 		};
 		const javascriptStrategy: ExecutionStrategy = {
 			language: 'javascript',
@@ -148,8 +148,8 @@ export class ExecutionManager {
 		this.activeRunById.set(executionId, context);
 		this.activeRunIdByWorkerLanguage.set(workerLanguage, executionId);
 		worker.postMessage({
-			id: executionId,
-			code
+			code,
+			id: executionId
 		} satisfies WorkerInboundMessage);
 
 		return {

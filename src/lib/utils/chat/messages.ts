@@ -16,9 +16,96 @@ import {
 import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 
 export const DELETED_MESSAGE_PLACEHOLDER = 'This message was deleted';
+const CANVAS_SNIPPET_PAYLOAD_KIND = 'canvas_snippet_v1';
+
+function normalizeSnippetText(value: string) {
+	return value.replace(/\r\n/g, '\n').trim();
+}
+
+function parseSnippetPreviewPayload(
+	rawContent: string,
+	fallbackFileName: string,
+	fallbackSnippet: string,
+	requireKind: boolean
+) {
+	const normalizedFallbackSnippet = normalizeSnippetText(fallbackSnippet);
+	const trimmedContent = rawContent.trim();
+	if (!trimmedContent.startsWith('{') || !trimmedContent.endsWith('}')) {
+		return null;
+	}
+	try {
+		const parsed = JSON.parse(trimmedContent);
+		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+			const parsedRecord = parsed as Record<string, unknown>;
+			const payloadKind =
+				typeof parsedRecord.kind === 'string' ? parsedRecord.kind.trim().toLowerCase() : '';
+			if (requireKind && payloadKind !== CANVAS_SNIPPET_PAYLOAD_KIND) {
+				return null;
+			}
+			const snippet = normalizeSnippetText(
+				typeof parsedRecord.snippet === 'string' ? parsedRecord.snippet : normalizedFallbackSnippet
+			);
+			if (!snippet) {
+				return null;
+			}
+			return {
+				snippet,
+				message: typeof parsedRecord.message === 'string' ? parsedRecord.message.trim() : '',
+				fileName:
+					typeof parsedRecord.fileName === 'string'
+						? parsedRecord.fileName.trim()
+						: fallbackFileName
+			};
+		}
+	} catch {
+		return null;
+	}
+	return null;
+}
 
 export function getMessagePreviewText(message: ChatMessage) {
 	const content = (message.content || '').trim();
+	const messageType = (message.type || '').trim().toLowerCase();
+	const fallbackFileName = (message.fileName || '').trim();
+	const fallbackSnippet = (message.replyToSnippet || '').trim();
+	const hasReplyTarget = normalizeMessageID(message.replyToMessageId || '') !== '';
+	const contentSnippetPayload = parseSnippetPreviewPayload(
+		content,
+		fallbackFileName,
+		fallbackSnippet,
+		true
+	);
+	if (contentSnippetPayload) {
+		if (contentSnippetPayload.message) {
+			return contentSnippetPayload.message;
+		}
+		if (contentSnippetPayload.fileName) {
+			return `Code snippet: ${contentSnippetPayload.fileName}`;
+		}
+		return 'Code snippet';
+	}
+	if (messageType === 'snippet') {
+		const snippetPayload = parseSnippetPreviewPayload(content, fallbackFileName, fallbackSnippet, false);
+		if (snippetPayload?.message) {
+			return snippetPayload.message;
+		}
+		if (snippetPayload?.fileName) {
+			return `Code snippet: ${snippetPayload.fileName}`;
+		}
+		if (content) {
+			return content;
+		}
+		if (fallbackFileName) {
+			return `Code snippet: ${fallbackFileName}`;
+		}
+		return 'Code snippet';
+	}
+	if (fallbackSnippet && !hasReplyTarget) {
+		if (content) {
+			return content;
+		}
+		return fallbackFileName ? `Code snippet: ${fallbackFileName}` : 'Code snippet';
+	}
 	if (message.type === 'task') {
 		const taskPayload = parseTaskMessagePayload(content);
 		if (!taskPayload) {

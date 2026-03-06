@@ -268,23 +268,18 @@ func (h *CanvasHub) loadCurrentSnapshot() {
 		return
 	}
 	if len(snapshot) == 0 {
-		log.Printf("No existing canvas snapshot was found when room %s started.", h.roomID)
 		return
 	}
 	h.setCurrentSnapshot(snapshot)
-	log.Printf("Preloaded canvas snapshot for room %s (%d bytes).", h.roomID, len(snapshot))
 }
 
 func (h *CanvasHub) flushSnapshotOnTeardown() {
 	redisStore, _, r2Client := h.manager.activeStores()
-	log.Printf("Starting final canvas snapshot flush for room %s.", h.roomID)
 
 	if redisStore == nil || redisStore.Client == nil {
-		log.Printf("Skipping final flush for room %s because Redis is unavailable.", h.roomID)
 		return
 	}
 	if r2Client == nil || r2Client.Client == nil || strings.TrimSpace(r2Client.Bucket) == "" {
-		log.Printf("Skipping final flush for room %s because R2 is unavailable.", h.roomID)
 		return
 	}
 
@@ -296,7 +291,6 @@ func (h *CanvasHub) flushSnapshotOnTeardown() {
 		return
 	}
 	if len(redisSnapshot) == 0 {
-		log.Printf("Skipping final flush for room %s because Redis has no snapshot.", h.roomID)
 		return
 	}
 
@@ -307,7 +301,6 @@ func (h *CanvasHub) flushSnapshotOnTeardown() {
 		log.Printf("Could not save final snapshot to R2 for room %s: %v", h.roomID, err)
 		return
 	}
-	log.Printf("Uploaded final snapshot for room %s to R2 (%d bytes).", h.roomID, len(redisSnapshot))
 
 	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
 	defer deleteCancel()
@@ -315,7 +308,6 @@ func (h *CanvasHub) flushSnapshotOnTeardown() {
 		log.Printf("Could not delete Redis snapshot after R2 upload for room %s: %v", h.roomID, err)
 		return
 	}
-	log.Printf("Completed final snapshot flush for room %s (%d bytes).", h.roomID, len(redisSnapshot))
 }
 
 func (h *CanvasHub) Run() {
@@ -329,11 +321,9 @@ func (h *CanvasHub) Run() {
 			}
 			h.clientsMu.Lock()
 			h.clients[client] = struct{}{}
-			log.Printf("A canvas client joined room %s. Client ID: %s. Active clients: %d.", h.roomID, client.debugID(), len(h.clients))
 
 			if snapshot := h.currentSnapshotCopy(); len(snapshot) > 0 {
 				framedSnapshot := encodeCanvasSyncStep2Message(snapshot)
-				log.Printf("Sending initial snapshot to client %s in room %s (%d bytes).", client.debugID(), h.roomID, len(framedSnapshot))
 				select {
 				case client.send <- framedSnapshot:
 				default:
@@ -364,7 +354,6 @@ func (h *CanvasHub) Run() {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
-				log.Printf("A canvas client left room %s. Client ID: %s. Active clients: %d.", h.roomID, client.debugID(), len(h.clients))
 			}
 			empty := len(h.clients) == 0
 			h.clientsMu.Unlock()
@@ -377,21 +366,18 @@ func (h *CanvasHub) Run() {
 		case payload := <-h.broadcast:
 			sender := <-h.broadcastSender
 			h.clientsMu.Lock()
-			recipientCount := 0
 			for client := range h.clients {
 				if client == sender {
 					continue
 				}
 				select {
 				case client.send <- payload:
-					recipientCount += 1
 				default:
 					delete(h.clients, client)
 					close(client.send)
 					log.Printf("Dropped receiver %s in room %s because broadcast delivery was blocked (sender %s).", client.debugID(), h.roomID, sender.debugID())
 				}
 			}
-			log.Printf("Broadcasted canvas update in room %s. Sender: %s. Payload size: %d bytes. Recipients: %d.", h.roomID, sender.debugID(), len(payload), recipientCount)
 			empty := len(h.clients) == 0
 			h.clientsMu.Unlock()
 			if empty {
@@ -406,7 +392,6 @@ func (h *CanvasHub) Run() {
 func (h *CanvasHub) publishFrom(sender *CanvasClient, payload []byte) bool {
 	h.broadcastMu.Lock()
 	defer h.broadcastMu.Unlock()
-	log.Printf("Received canvas update from client %s in room %s (%d bytes).", sender.debugID(), h.roomID, len(payload))
 
 	select {
 	case <-h.done:
@@ -449,7 +434,6 @@ func (c *CanvasClient) readPump() {
 		c.requestUnregister()
 		_ = c.conn.Close()
 	}()
-	log.Printf("Started reading canvas WebSocket messages for client %s in room %s.", c.debugID(), c.hub.roomID)
 
 	c.conn.SetReadLimit(canvasMaxMessageSize)
 	_ = c.conn.SetReadDeadline(time.Now().Add(canvasPongWait))
@@ -463,18 +447,14 @@ func (c *CanvasClient) readPump() {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("Unexpected canvas WebSocket read error in room %s: %v", c.hub.roomID, err)
 			}
-			log.Printf("Stopped reading canvas WebSocket messages for client %s in room %s: %v", c.debugID(), c.hub.roomID, err)
 			return
 		}
 		if messageType != websocket.BinaryMessage {
-			log.Printf("Ignored a non-binary canvas message from client %s in room %s (type %d, %d bytes).", c.debugID(), c.hub.roomID, messageType, len(payload))
 			continue
 		}
 		if len(payload) == 0 {
-			log.Printf("Ignored an empty canvas message from client %s in room %s.", c.debugID(), c.hub.roomID)
 			continue
 		}
-		log.Printf("Read a binary canvas message from client %s in room %s (%d bytes).", c.debugID(), c.hub.roomID, len(payload))
 		payloadCopy := append([]byte(nil), payload...)
 		if ok := c.hub.publishFrom(c, payloadCopy); !ok {
 			log.Printf("Could not publish canvas message from client %s in room %s (%d bytes).", c.debugID(), c.hub.roomID, len(payloadCopy))
@@ -490,18 +470,14 @@ func (c *CanvasClient) writePump() {
 		c.requestUnregister()
 		_ = c.conn.Close()
 	}()
-	log.Printf("Started writing canvas WebSocket messages for client %s in room %s.", c.debugID(), c.hub.roomID)
-
 	for {
 		select {
 		case payload, ok := <-c.send:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(canvasWriteWait))
 			if !ok {
 				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				log.Printf("Stopped writing canvas messages for client %s in room %s because the send channel closed.", c.debugID(), c.hub.roomID)
 				return
 			}
-			log.Printf("Sent a binary canvas message to client %s in room %s (%d bytes).", c.debugID(), c.hub.roomID, len(payload))
 			if err := c.conn.WriteMessage(websocket.BinaryMessage, payload); err != nil {
 				log.Printf("Could not send a canvas message to client %s in room %s: %v", c.debugID(), c.hub.roomID, err)
 				return
@@ -513,7 +489,6 @@ func (c *CanvasClient) writePump() {
 				log.Printf("Canvas ping failed for client %s in room %s: %v", c.debugID(), c.hub.roomID, err)
 				return
 			}
-			log.Printf("Sent canvas ping to client %s in room %s.", c.debugID(), c.hub.roomID)
 		}
 	}
 }
@@ -521,7 +496,6 @@ func (c *CanvasClient) writePump() {
 // ServeCanvasWS upgrades and joins the caller into a room-isolated canvas hub.
 func ServeCanvasWS(w http.ResponseWriter, r *http.Request, roomID string) {
 	normalizedRoomID := normalizeRoomID(roomID)
-	log.Printf("Canvas WebSocket request received. Normalized room ID: %s. Raw room ID: %s. Client: %s.", normalizedRoomID, roomID, r.RemoteAddr)
 	if normalizedRoomID == "" {
 		log.Printf("Rejected canvas WebSocket request with invalid room ID %q from %s.", roomID, r.RemoteAddr)
 		http.Error(w, "invalid room id", http.StatusBadRequest)
@@ -545,7 +519,6 @@ func ServeCanvasWS(w http.ResponseWriter, r *http.Request, roomID string) {
 		log.Printf("Could not upgrade canvas WebSocket for room %s: %v", normalizedRoomID, err)
 		return
 	}
-	log.Printf("Canvas WebSocket upgrade succeeded for room %s from %s.", normalizedRoomID, r.RemoteAddr)
 
 	hub := DefaultCanvasManager.getOrCreateHub(normalizedRoomID)
 	client := &CanvasClient{
@@ -565,7 +538,6 @@ func ServeCanvasWS(w http.ResponseWriter, r *http.Request, roomID string) {
 		log.Printf("Canvas room %s became unavailable during registration for client %s.", normalizedRoomID, r.RemoteAddr)
 		return
 	case hub.register <- client:
-		log.Printf("Registered canvas client %s in room %s from %s.", client.debugID(), normalizedRoomID, r.RemoteAddr)
 	}
 
 	go client.writePump()
@@ -712,15 +684,6 @@ func HandleCanvasSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf(
-		"[canvas] Load success room=%s room_name=%q source=%s bytes=%d elapsed_ms=%d",
-		roomID,
-		lookup.RoomName,
-		lookup.Source,
-		len(snapshot),
-		time.Since(startedAt).Milliseconds(),
-	)
-
 	if len(snapshot) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -747,7 +710,6 @@ func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid snapshot payload", http.StatusBadRequest)
 		return
 	}
-	log.Printf("[canvas] Save payload received room=%s bytes=%d hub_active=%t", roomID, len(snapshot), hub != nil)
 
 	if hub != nil {
 		hub.setCurrentSnapshot(snapshot)
@@ -783,7 +745,6 @@ func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[canvas] Rescue save to R2 failed room=%s err=%v", roomID, saveErr)
 				return
 			}
-			log.Printf("[canvas] Rescue save to R2 succeeded room=%s bytes=%d", roomID, len(snapshotCopy))
 
 			if redisStore != nil && redisStore.Client != nil {
 				deleteCtx, deleteCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)

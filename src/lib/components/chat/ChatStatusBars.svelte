@@ -39,6 +39,8 @@
 		<span class="selection-copy">
 			{#if messageActionMode === 'break'}
 				Break mode active: click a message to start a new topic room.
+			{:else if messageActionMode === 'reply'}
+				Reply mode active: click one message to set it as your reply target.
 			{:else if messageActionMode === 'pin'}
 				Pin mode active: click any message to pin it and open a discussion.
 			{:else if messageActionMode === 'edit'}

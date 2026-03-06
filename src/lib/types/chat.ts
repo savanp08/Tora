@@ -1,5 +1,5 @@
 export type ThreadStatus = 'joined' | 'discoverable' | 'left';
-export type MessageActionMode = 'none' | 'break' | 'edit' | 'delete' | 'pin';
+export type MessageActionMode = 'none' | 'break' | 'reply' | 'edit' | 'delete' | 'pin';
 export type RoomMenuMode = 'create' | 'join';
 export type ThemePreference = 'system' | 'light' | 'dark';
 

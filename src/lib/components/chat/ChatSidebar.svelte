@@ -658,7 +658,9 @@
 		</div>
 	</div>
 	<div class="room-list-search">
-		<input type="text" bind:value={chatListSearch} placeholder="Search names or messages" />
+		<input type="text" 
+		style="width: 95%;"
+		bind:value={chatListSearch} placeholder="Search names or messages" />
 	</div>
 	<div class="room-items">
 		{#if isFullView}

@@ -1,9 +1,10 @@
 /// <reference lib="webworker" />
 
+import { loadPyodide } from 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.mjs';
+
 type PyodideRuntime = {
 	runPythonAsync: (code: string) => Promise<unknown>;
-	setStdout: (options: { batched?: (value: string) => void }) => void;
-	setStderr: (options: { batched?: (value: string) => void }) => void;
+	runPython: (code: string) => unknown;
 };
 
 type PyodideExecuteMessage = {
@@ -17,15 +18,36 @@ type PyodideWorkerMessage = {
 	stream?: 'stdout' | 'stderr';
 	output?: string;
 	error?: string;
+	stdout?: string;
+	stderr?: string;
 };
 
-declare const self: DedicatedWorkerGlobalScope & {
-	importScripts: (...urls: string[]) => void;
-	loadPyodide?: (options?: { indexURL?: string }) => Promise<PyodideRuntime>;
-};
+declare const self: DedicatedWorkerGlobalScope;
 
 const PYODIDE_BASE_URL = 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/';
-const PYODIDE_SCRIPT_URL = `${PYODIDE_BASE_URL}pyodide.js`;
+const INITIALIZE_STD_STREAMS_CODE = `
+import io
+import sys
+
+sys.stdout = io.StringIO()
+sys.stderr = io.StringIO()
+`;
+const CLEAR_STD_STREAMS_CODE = `
+import sys
+
+sys.stdout.seek(0)
+sys.stdout.truncate(0)
+sys.stderr.seek(0)
+sys.stderr.truncate(0)
+`;
+const READ_STDOUT_CODE = `
+import sys
+sys.stdout.getvalue()
+`;
+const READ_STDERR_CODE = `
+import sys
+sys.stderr.getvalue()
+`;
 
 let pyodideReady: Promise<PyodideRuntime> | null = null;
 let executionInProgress = false;
@@ -34,23 +56,44 @@ function emit(message: PyodideWorkerMessage) {
 	self.postMessage(message);
 }
 
+function readBuffers(pyodide: PyodideRuntime) {
+	return {
+		stdout: String(pyodide.runPython(READ_STDOUT_CODE)),
+		stderr: String(pyodide.runPython(READ_STDERR_CODE))
+	};
+}
+
+function emitBufferedOutput(id: string, buffers: { stdout: string; stderr: string }) {
+	if (buffers.stdout) {
+		emit({
+			id,
+			status: 'running',
+			stream: 'stdout',
+			output: buffers.stdout
+		});
+	}
+	if (buffers.stderr) {
+		emit({
+			id,
+			status: 'running',
+			stream: 'stderr',
+			output: buffers.stderr
+		});
+	}
+}
+
 async function initPyodide() {
 	if (!pyodideReady) {
 		pyodideReady = (async () => {
-			self.importScripts(PYODIDE_SCRIPT_URL);
-			if (typeof self.loadPyodide !== 'function') {
-				throw new Error('Pyodide loader is unavailable in worker scope');
-			}
-			return self.loadPyodide({ indexURL: PYODIDE_BASE_URL });
+			const pyodide = (await loadPyodide({ indexURL: PYODIDE_BASE_URL })) as PyodideRuntime;
+			await pyodide.runPythonAsync(INITIALIZE_STD_STREAMS_CODE);
+			return pyodide;
 		})();
 	}
 	return pyodideReady;
 }
 
-// Initialize runtime as soon as the worker is created.
-void initPyodide();
-
-self.addEventListener('message', async (event: MessageEvent<PyodideExecuteMessage>) => {
+self.onmessage = async (event: MessageEvent<PyodideExecuteMessage>) => {
 	const payload = event.data;
 	if (!payload || typeof payload.id !== 'string' || typeof payload.code !== 'string') {
 		return;
@@ -66,54 +109,40 @@ self.addEventListener('message', async (event: MessageEvent<PyodideExecuteMessag
 	executionInProgress = true;
 
 	try {
-		emit({
-			id: payload.id,
-			status: 'running',
-			stream: 'stdout',
-			output: 'Preparing Python runtime...\n'
-		});
 		const pyodide = await initPyodide();
-			pyodide.setStdout({
-				batched: (chunk: string) => {
-					if (!chunk) {
-						return;
-					}
-					emit({
-						id: payload.id,
-						status: 'running',
-						stream: 'stdout',
-						output: chunk
-					});
-				}
-			});
-			pyodide.setStderr({
-				batched: (chunk: string) => {
-					if (!chunk) {
-						return;
-					}
-					emit({
-						id: payload.id,
-						status: 'running',
-						stream: 'stderr',
-						output: chunk
-					});
-				}
-			});
+		await pyodide.runPythonAsync(CLEAR_STD_STREAMS_CODE);
 
 		await pyodide.runPythonAsync(payload.code);
+		const buffers = readBuffers(pyodide);
+		emitBufferedOutput(payload.id, buffers);
 		emit({
 			id: payload.id,
-			status: 'success'
+			status: 'success',
+			stdout: buffers.stdout,
+			stderr: buffers.stderr
 		});
 	} catch (error) {
+		let stdout = '';
+		let stderr = '';
+		try {
+			const pyodide = await initPyodide();
+			const buffers = readBuffers(pyodide);
+			stdout = buffers.stdout;
+			stderr = buffers.stderr;
+			emitBufferedOutput(payload.id, buffers);
+		} catch {
+			// Ignore secondary errors while collecting buffered output.
+		}
 		emit({
 			id: payload.id,
 			status: 'error',
-			error: error instanceof Error ? error.message : String(error)
+			error: error instanceof Error ? error.message : String(error),
+			stdout,
+			stderr
 		});
 	} finally {
 		executionInProgress = false;
 	}
-});
+};
 
 export {};

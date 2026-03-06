@@ -222,8 +222,6 @@ func (t *UsageTracker) record(update func(snapshot *UsageSnapshot, totals *Usage
 
 	now := time.Now().UTC()
 	var rollover *UsageSnapshot
-	var transitionedToSleep bool
-	var sleepReason string
 
 	t.mu.Lock()
 	rollover = t.rolloverLocked(now)
@@ -232,15 +230,11 @@ func (t *UsageTracker) record(update func(snapshot *UsageSnapshot, totals *Usage
 	}
 	t.current.UpdatedAt = now
 	t.totals.UpdatedAt = now
-	transitionedToSleep, sleepReason = t.applyLimitsLocked()
+	_, _ = t.applyLimitsLocked()
 	t.mu.Unlock()
 
 	if rollover != nil {
 		go t.persistSnapshot(*rollover)
-	}
-
-	if transitionedToSleep {
-		log.Printf("[usage] safety sleep mode enabled reason=%s", sleepReason)
 	}
 }
 

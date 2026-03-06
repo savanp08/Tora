@@ -53,6 +53,16 @@
 	grid-template-rows: minmax(0, 1fr);
 }
 
+@media (min-width: 901px) {
+	.room-workspace.canvas-fullscreen {
+		grid-column: 2 / -1;
+	}
+
+	.room-workspace.canvas-fullscreen + .online-pane {
+		display: none;
+	}
+}
+
 .chat-window {
 	display: flex;
 	flex-direction: column;

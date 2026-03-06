@@ -12,6 +12,14 @@
 		content: string;
 	};
 
+	type SnippetPayload = {
+		snippet: string;
+		message: string;
+		fileName: string;
+	};
+
+	type MessageContextAction = 'reply' | 'edit' | 'delete' | 'pin' | 'branch';
+
 	export let messages: ChatMessage[] = [];
 	export let roomId = '';
 	export let isVisible = true;
@@ -40,17 +48,28 @@
 		openPinnedDiscussion: { messageId: string };
 		focusHandled: { messageId: string };
 		reply: { messageId: string; senderName: string; content: string };
-		editMessage: { messageId: string; content: string };
-		deleteMessage: { messageId: string };
 		editSelected: { messageId: string };
 		deleteSelected: { messageId: string };
 		requestOlder: void;
 		readProgress: { isNearBottom: boolean; lastSeenMessageId: string };
 		toggleTask: { messageId: string; taskIndex: number };
 		addTask: { messageId: string; text: string };
+		messageContextAction: { messageId: string; action: MessageContextAction };
 	}>();
 
 	const COLLAPSED_MESSAGE_LENGTH = 500;
+	const COLLAPSED_SNIPPET_CODE_MAX_LINES = 20;
+	const COLLAPSED_SNIPPET_CODE_MAX_CHARS = 1400;
+	const COLLAPSED_SNIPPET_MESSAGE_MAX_LINES = 8;
+	const COLLAPSED_SNIPPET_MESSAGE_MAX_CHARS = 560;
+	const CANVAS_SNIPPET_PAYLOAD_KIND = 'canvas_snippet_v1';
+	const MESSAGE_CONTEXT_MENU_WIDTH_PX = 186;
+	const MESSAGE_CONTEXT_MENU_HEIGHT_PX = 220;
+	const MESSAGE_CONTEXT_MENU_MARGIN_PX = 8;
+	const MESSAGE_LONG_PRESS_DELAY_MS = 520;
+	const MESSAGE_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
+	const MESSAGE_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
+	const MESSAGE_NATIVE_CONTEXT_SUPPRESSION_MS = 1400;
 
 	let viewport: HTMLDivElement | null = null;
 	let previousVisibleCount = 0;
@@ -64,7 +83,6 @@
 	let topSentinel: HTMLDivElement | null = null;
 	let topObserver: IntersectionObserver | null = null;
 	let olderRequestPending = false;
-	let openOwnerActionMessageId = '';
 	let previousVisibleKey = '';
 	let previousRoomId = '';
 	let previousIsVisible = true;
@@ -72,11 +90,39 @@
 	let unreadDividerCount = 0;
 	let scrollTopByRoomId: Record<string, number> = {};
 	let compactMineActionsByMessageID: Record<string, boolean> = {};
+	let expandedSnippetCodeByMessageID: Record<string, boolean> = {};
+	let expandedSnippetMessageByMessageID: Record<string, boolean> = {};
 	let gutterMeasureFrame: number | null = null;
 	let resizeMeasureHandler: (() => void) | null = null;
+	let messageContextMenu = {
+		open: false,
+		x: 0,
+		y: 0,
+		messageId: ''
+	};
+	let messageLongPressTimer: ReturnType<typeof setTimeout> | null = null;
+	let messageLongPressTouchIdentifier = -1;
+	let messageLongPressMessageId = '';
+	let messageLongPressStartX = 0;
+	let messageLongPressStartY = 0;
+	let messageLongPressLastX = 0;
+	let messageLongPressLastY = 0;
+	let suppressMessageClickUntil = 0;
+	let suppressNativeMessageContextMenuUntil = 0;
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
+	}
+
+	$: if (
+		messageContextMenu.open &&
+		!visibleMessages.some((message) => message.id === messageContextMenu.messageId)
+	) {
+		closeMessageContextMenu();
+	}
+
+	$: if (isSelectionMode && messageContextMenu.open) {
+		closeMessageContextMenu();
 	}
 
 	$: visibleMessages = getVisibleMessages(messages, roomMessageSearch);
@@ -151,6 +197,7 @@
 		if (copyResetTimer) {
 			clearTimeout(copyResetTimer);
 		}
+		clearMessageLongPressState();
 		if (typeof window !== 'undefined' && clearFocusOnPointerDown) {
 			window.removeEventListener('pointerdown', clearFocusOnPointerDown, true);
 			clearFocusOnPointerDown = null;
@@ -169,14 +216,16 @@
 		}
 	});
 
-	onMount(() => {
-		setupTopObserver();
-		if (typeof window !== 'undefined') {
-			resizeMeasureHandler = () => scheduleCompactMineActionMeasure();
-			window.addEventListener('resize', resizeMeasureHandler);
-			scheduleCompactMineActionMeasure();
-		}
-		return () => {
+		onMount(() => {
+			setupTopObserver();
+			if (typeof window !== 'undefined') {
+				resizeMeasureHandler = () => scheduleCompactMineActionMeasure();
+				window.addEventListener('resize', resizeMeasureHandler);
+				window.addEventListener('keydown', onWindowKeyDown, true);
+				window.addEventListener('contextmenu', onWindowContextMenuCapture, true);
+				scheduleCompactMineActionMeasure();
+			}
+			return () => {
 			if (topObserver) {
 				topObserver.disconnect();
 				topObserver = null;
@@ -185,6 +234,10 @@
 				window.removeEventListener('resize', resizeMeasureHandler);
 				resizeMeasureHandler = null;
 			}
+				if (typeof window !== 'undefined') {
+					window.removeEventListener('keydown', onWindowKeyDown, true);
+					window.removeEventListener('contextmenu', onWindowContextMenuCapture, true);
+				}
 			if (typeof window !== 'undefined' && gutterMeasureFrame !== null) {
 				window.cancelAnimationFrame(gutterMeasureFrame);
 				gutterMeasureFrame = null;
@@ -290,13 +343,13 @@
 			}
 			const actionButton = actionsWrap.querySelector<HTMLElement>('.gutter-action-btn');
 			const pinHeight = pinButton.getBoundingClientRect().height;
-			const actionHeight = actionButton?.getBoundingClientRect().height ?? 28;
-			const bubbleHeight = bubble.getBoundingClientRect().height;
-			const verticalGap = 10;
-			const requiredVerticalHeight = pinHeight + actionHeight + actionHeight + verticalGap;
-			if (bubbleHeight < requiredVerticalHeight) {
-				next[messageID] = true;
-			}
+				const actionHeight = actionButton?.getBoundingClientRect().height ?? 28;
+				const bubbleHeight = bubble.getBoundingClientRect().height;
+				const verticalGap = 10;
+				const requiredVerticalHeight = pinHeight + actionHeight + verticalGap;
+				if (bubbleHeight < requiredVerticalHeight) {
+					next[messageID] = true;
+				}
 		}
 		if (!equalBooleanMap(compactMineActionsByMessageID, next)) {
 			compactMineActionsByMessageID = next;
@@ -403,6 +456,10 @@
 	}
 
 	function onMessagesScroll() {
+		clearMessageLongPressState();
+		if (messageContextMenu.open) {
+			closeMessageContextMenu();
+		}
 		updateScrollState(true);
 	}
 
@@ -571,6 +628,16 @@
 				}
 				return parsedTask.tasks.some((task) => task.text.toLowerCase().includes(normalized));
 			}
+			const snippetPayload = getSnippetPayload(message);
+			if (snippetPayload) {
+				if (snippetPayload.message.toLowerCase().includes(normalized)) {
+					return true;
+				}
+				if (snippetPayload.fileName.toLowerCase().includes(normalized)) {
+					return true;
+				}
+				return snippetPayload.snippet.toLowerCase().includes(normalized);
+			}
 			return message.content.toLowerCase().includes(normalized);
 		});
 	}
@@ -601,10 +668,127 @@
 		return message.hasBreakRoom ? 1 : 0;
 	}
 
+	function normalizeSnippetText(value: string) {
+		return value.replace(/\r\n/g, '\n').trim();
+	}
+
+	function tryParseSnippetContentPayload(
+		rawContent: string,
+		fallbackFileName: string,
+		fallbackSnippet: string,
+		requireKind: boolean
+	): SnippetPayload | null {
+		const trimmedContent = rawContent.trim();
+		if (!trimmedContent.startsWith('{') || !trimmedContent.endsWith('}')) {
+			return null;
+		}
+		try {
+			const parsed = JSON.parse(trimmedContent);
+			if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+				return null;
+			}
+			const parsedRecord = parsed as Record<string, unknown>;
+			const payloadKind =
+				typeof parsedRecord.kind === 'string' ? parsedRecord.kind.trim().toLowerCase() : '';
+			if (requireKind && payloadKind !== CANVAS_SNIPPET_PAYLOAD_KIND) {
+				return null;
+			}
+			const snippet = normalizeSnippetText(
+				typeof parsedRecord.snippet === 'string' ? parsedRecord.snippet : fallbackSnippet
+			);
+			if (!snippet) {
+				return null;
+			}
+			return {
+				snippet,
+				message: typeof parsedRecord.message === 'string' ? parsedRecord.message.trim() : '',
+				fileName:
+					typeof parsedRecord.fileName === 'string'
+						? parsedRecord.fileName.trim()
+						: fallbackFileName
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	function getSnippetPayload(message: ChatMessage): SnippetPayload | null {
+		const messageType = (message.type || '').trim().toLowerCase();
+		const replyTargetMessageId = (message.replyToMessageId || '').trim();
+		const legacySnippet = normalizeSnippetText(message.replyToSnippet || '');
+		const fallbackFileName = (message.fileName || '').trim();
+		const rawContent = (message.content || '').trim();
+
+		const resolveLegacyPayload = () => {
+			if (!legacySnippet || replyTargetMessageId) {
+				return null;
+			}
+			return {
+				snippet: legacySnippet,
+				message: rawContent,
+				fileName: fallbackFileName
+			};
+		};
+
+		const payloadFromContent = tryParseSnippetContentPayload(
+			rawContent,
+			fallbackFileName,
+			legacySnippet,
+			messageType !== 'snippet'
+		);
+		if (payloadFromContent) {
+			return payloadFromContent;
+		}
+
+		if (messageType !== 'snippet') {
+			return resolveLegacyPayload();
+		}
+
+		if (!rawContent) {
+			if (!legacySnippet) {
+				return null;
+			}
+			return {
+				snippet: legacySnippet,
+				message: '',
+				fileName: fallbackFileName
+			};
+		}
+
+		if (legacySnippet) {
+			return {
+				snippet: legacySnippet,
+				message: rawContent,
+				fileName: fallbackFileName
+			};
+		}
+
+		const inferredSnippet = normalizeSnippetText(rawContent);
+		if (!inferredSnippet) {
+			return null;
+		}
+		return {
+			snippet: inferredSnippet,
+			message: '',
+			fileName: fallbackFileName
+		};
+	}
+
+	function buildSnippetCopyText(payload: SnippetPayload) {
+		const extension = (payload.fileName.split('.').pop() || '').trim();
+		const languageHint = /^[a-z0-9_+-]+$/i.test(extension) ? extension : '';
+		const fenceHeader = languageHint ? `\`\`\`${languageHint}` : '```';
+		const snippetBlock = `${fenceHeader}\n${payload.snippet}\n\`\`\``;
+		if (!payload.message) {
+			return snippetBlock;
+		}
+		return `${snippetBlock}\n\n${payload.message}`;
+	}
+
 	function getReplyPreview(message: ChatMessage): ReplyPreview | null {
 		const messageID = (message.replyToMessageId || '').trim();
 		const rawSnippet = (message.replyToSnippet || '').trim();
-		if (!messageID && !rawSnippet) {
+		if (!messageID) {
 			return null;
 		}
 		if (!rawSnippet) {
@@ -649,6 +833,16 @@
 	}
 
 	function getReplyDispatchContent(message: ChatMessage) {
+		const snippetPayload = getSnippetPayload(message);
+		if (snippetPayload) {
+			if (snippetPayload.message) {
+				return truncateInlineText(snippetPayload.message, 220);
+			}
+			if (snippetPayload.fileName) {
+				return truncateInlineText(`Code snippet: ${snippetPayload.fileName}`, 220);
+			}
+			return 'Code snippet';
+		}
 		if (message.type === 'task') {
 			const parsedTask = parseTaskMessagePayload(message.content || '');
 			if (parsedTask) {
@@ -696,8 +890,45 @@
 		return content.length > COLLAPSED_MESSAGE_LENGTH;
 	}
 
-	function isMessageExpanded(messageId: string) {
-		return Boolean(expandedMessages[messageId]);
+	function getLineCount(content: string) {
+		if (!content) {
+			return 0;
+		}
+		return content.split(/\r?\n/).length;
+	}
+
+	function isLongSnippetCode(content: string) {
+		if (!content) {
+			return false;
+		}
+		return (
+			content.length > COLLAPSED_SNIPPET_CODE_MAX_CHARS ||
+			getLineCount(content) > COLLAPSED_SNIPPET_CODE_MAX_LINES
+		);
+	}
+
+	function isLongSnippetMessage(content: string) {
+		if (!content) {
+			return false;
+		}
+		return (
+			content.length > COLLAPSED_SNIPPET_MESSAGE_MAX_CHARS ||
+			getLineCount(content) > COLLAPSED_SNIPPET_MESSAGE_MAX_LINES
+		);
+	}
+
+	function toggleSnippetCodeExpanded(messageId: string) {
+		expandedSnippetCodeByMessageID = {
+			...expandedSnippetCodeByMessageID,
+			[messageId]: !expandedSnippetCodeByMessageID[messageId]
+		};
+	}
+
+	function toggleSnippetMessageExpanded(messageId: string) {
+		expandedSnippetMessageByMessageID = {
+			...expandedSnippetMessageByMessageID,
+			[messageId]: !expandedSnippetMessageByMessageID[messageId]
+		};
 	}
 
 	function isCodeBlock(content: string) {
@@ -849,11 +1080,13 @@
 	}
 
 	async function copyMessage(message: ChatMessage) {
-		if (!message.content) {
+		const snippetPayload = getSnippetPayload(message);
+		const copyContent = snippetPayload ? buildSnippetCopyText(snippetPayload) : message.content;
+		if (!copyContent) {
 			return;
 		}
 		try {
-			await navigator.clipboard.writeText(message.content);
+			await navigator.clipboard.writeText(copyContent);
 			copiedMessageId = message.id;
 			if (copyResetTimer) {
 				clearTimeout(copyResetTimer);
@@ -867,6 +1100,14 @@
 	}
 
 	function onMessageClick(message: ChatMessage) {
+		if (Date.now() < suppressMessageClickUntil) {
+			suppressMessageClickUntil = 0;
+			return;
+		}
+		suppressMessageClickUntil = 0;
+		if (messageContextMenu.open) {
+			closeMessageContextMenu();
+		}
 		if (!isMember || !isSelectionMode) {
 			return;
 		}
@@ -882,6 +1123,11 @@
 	}
 
 	function onMessageKeyDown(event: KeyboardEvent, message: ChatMessage) {
+		if (event.key === 'Escape' && messageContextMenu.open) {
+			event.preventDefault();
+			closeMessageContextMenu();
+			return;
+		}
 		if (!isMember || !isSelectionMode) {
 			return;
 		}
@@ -891,23 +1137,203 @@
 		}
 	}
 
-	function onEditMessage(message: ChatMessage) {
-		openOwnerActionMessageId = '';
-		dispatch('editMessage', {
-			messageId: message.id,
-			content: message.content
-		});
+	function clearMessageLongPressState() {
+		if (messageLongPressTimer) {
+			clearTimeout(messageLongPressTimer);
+			messageLongPressTimer = null;
+		}
+		messageLongPressTouchIdentifier = -1;
+		messageLongPressMessageId = '';
+		messageLongPressStartX = 0;
+		messageLongPressStartY = 0;
+		messageLongPressLastX = 0;
+		messageLongPressLastY = 0;
 	}
 
-	function onDeleteMessage(message: ChatMessage) {
-		openOwnerActionMessageId = '';
-		dispatch('deleteMessage', {
-			messageId: message.id
-		});
+	function findTouchByIdentifier(touches: TouchList, identifier: number) {
+		for (const touch of Array.from(touches)) {
+			if (touch.identifier === identifier) {
+				return touch;
+			}
+		}
+		return null;
 	}
 
-	function toggleOwnerMessageActions(messageID: string) {
-		openOwnerActionMessageId = openOwnerActionMessageId === messageID ? '' : messageID;
+	function onMessageTouchStart(event: TouchEvent, message: ChatMessage) {
+		if (isSelectionMode || event.touches.length !== 1) {
+			clearMessageLongPressState();
+			return;
+		}
+		const target = event.target instanceof Element ? event.target : null;
+		if (target?.closest('button, a, input, textarea, select, label')) {
+			clearMessageLongPressState();
+			return;
+		}
+		const touch = event.touches[0];
+		clearMessageLongPressState();
+		messageLongPressTouchIdentifier = touch.identifier;
+		messageLongPressMessageId = message.id;
+		messageLongPressStartX = touch.clientX;
+		messageLongPressStartY = touch.clientY;
+		messageLongPressLastX = touch.clientX;
+		messageLongPressLastY = touch.clientY;
+		suppressNativeMessageContextMenuUntil =
+			Date.now() + MESSAGE_LONG_PRESS_DELAY_MS + MESSAGE_NATIVE_CONTEXT_SUPPRESSION_MS;
+		messageLongPressTimer = setTimeout(() => {
+			const messageId = messageLongPressMessageId;
+			const clientX = messageLongPressLastX;
+			const clientY = messageLongPressLastY;
+			clearMessageLongPressState();
+			if (!messageId) {
+				return;
+			}
+			suppressMessageClickUntil = Date.now() + MESSAGE_LONG_PRESS_CLICK_SUPPRESSION_MS;
+			suppressNativeMessageContextMenuUntil =
+				Date.now() + MESSAGE_NATIVE_CONTEXT_SUPPRESSION_MS;
+			openMessageContextMenuAtPosition(messageId, clientX, clientY);
+		}, MESSAGE_LONG_PRESS_DELAY_MS);
+	}
+
+	function onMessageTouchMove(event: TouchEvent) {
+		if (messageLongPressTouchIdentifier < 0) {
+			return;
+		}
+		const touch = findTouchByIdentifier(event.touches, messageLongPressTouchIdentifier);
+		if (!touch) {
+			clearMessageLongPressState();
+			return;
+		}
+		messageLongPressLastX = touch.clientX;
+		messageLongPressLastY = touch.clientY;
+		const dx = touch.clientX - messageLongPressStartX;
+		const dy = touch.clientY - messageLongPressStartY;
+		const movedDistance = Math.hypot(dx, dy);
+		if (movedDistance > MESSAGE_LONG_PRESS_MOVE_TOLERANCE_PX) {
+			clearMessageLongPressState();
+		}
+	}
+
+	function onMessageTouchEnd(event: TouchEvent) {
+		if (Date.now() < suppressMessageClickUntil) {
+			event.preventDefault();
+			event.stopPropagation();
+		}
+		clearMessageLongPressState();
+	}
+
+	function onMessageTouchCancel() {
+		clearMessageLongPressState();
+	}
+
+	function onWindowKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			if (messageContextMenu.open) {
+				closeMessageContextMenu();
+			}
+		}
+	}
+
+	function onWindowContextMenuCapture(event: MouseEvent) {
+		if (Date.now() >= suppressNativeMessageContextMenuUntil) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		event.stopImmediatePropagation();
+	}
+
+	function closeMessageContextMenu() {
+		if (!messageContextMenu.open && !messageContextMenu.messageId) {
+			return;
+		}
+		messageContextMenu = {
+			open: false,
+			x: 0,
+			y: 0,
+			messageId: ''
+		};
+	}
+
+	function openMessageContextMenuAtPosition(messageId: string, clientX: number, clientY: number) {
+		const position = clampContextMenuPosition(clientX, clientY);
+		messageContextMenu = {
+			open: true,
+			x: position.x,
+			y: position.y,
+			messageId
+		};
+	}
+
+	function clampContextMenuPosition(clientX: number, clientY: number) {
+		if (typeof window === 'undefined') {
+			return { x: clientX, y: clientY };
+		}
+		const minX = MESSAGE_CONTEXT_MENU_MARGIN_PX;
+		const minY = MESSAGE_CONTEXT_MENU_MARGIN_PX;
+		const maxX = Math.max(
+			minX,
+			window.innerWidth - MESSAGE_CONTEXT_MENU_WIDTH_PX - MESSAGE_CONTEXT_MENU_MARGIN_PX
+		);
+		const maxY = Math.max(
+			minY,
+			window.innerHeight - MESSAGE_CONTEXT_MENU_HEIGHT_PX - MESSAGE_CONTEXT_MENU_MARGIN_PX
+		);
+		return {
+			x: Math.min(Math.max(clientX, minX), maxX),
+			y: Math.min(Math.max(clientY, minY), maxY)
+		};
+	}
+
+	function onMessageContextMenu(event: MouseEvent, message: ChatMessage) {
+		event.preventDefault();
+		event.stopPropagation();
+		if (Date.now() < suppressNativeMessageContextMenuUntil) {
+			return;
+		}
+		clearMessageLongPressState();
+		suppressMessageClickUntil = 0;
+		openMessageContextMenuAtPosition(message.id, event.clientX, event.clientY);
+	}
+
+	function getVisibleMessageById(messageID: string) {
+		for (const message of visibleMessages) {
+			if (message.id === messageID) {
+				return message;
+			}
+		}
+		return null;
+	}
+
+	function isContextMenuActionDisabled(
+		action: MessageContextAction,
+		message: ChatMessage | null,
+		isMine: boolean
+	) {
+		if (!isMember || !message) {
+			return true;
+		}
+		if (isDeletedMessage(message)) {
+			return true;
+		}
+		if (action === 'reply') {
+			return false;
+		}
+		if ((action === 'edit' || action === 'delete') && !isMine) {
+			return true;
+		}
+		return action === 'edit' && (message.type || '').toLowerCase() === 'task';
+	}
+
+	function onMessageContextAction(action: MessageContextAction) {
+		if (!messageContextMenu.open || !messageContextMenu.messageId) {
+			return;
+		}
+		const messageId = messageContextMenu.messageId;
+		closeMessageContextMenu();
+		dispatch('messageContextAction', {
+			messageId,
+			action
+		});
 	}
 </script>
 
@@ -944,14 +1370,15 @@
 					<span>{unreadDividerLabel}</span>
 				</div>
 			{/if}
-			{@const isMine = message.senderId === currentUserId}
-			{@const totalReplies = getTotalReplies(message)}
-			{@const branchesCreated = getBranchesCreated(message)}
-			{@const replyPreview = getReplyPreview(message)}
-			{@const isMultiDeleteSelected =
-				messageActionMode === 'delete' &&
-				deleteMultiEnabled &&
-				selectedDeleteMessageIds.includes(message.id)}
+				{@const isMine = message.senderId === currentUserId}
+				{@const totalReplies = getTotalReplies(message)}
+				{@const branchesCreated = getBranchesCreated(message)}
+				{@const replyPreview = getReplyPreview(message)}
+				{@const snippetPayload = getSnippetPayload(message)}
+				{@const isMultiDeleteSelected =
+					messageActionMode === 'delete' &&
+					deleteMultiEnabled &&
+					selectedDeleteMessageIds.includes(message.id)}
 				<div
 					class="message-row {isMine ? 'mine' : 'theirs'} {compactMineActionsByMessageID[message.id]
 						? 'compact-gutter'
@@ -983,62 +1410,26 @@
 								<strong>{branchesCreated}</strong>
 							</div>
 						{/if}
-							{#if !isDeletedMessage(message)}
-								<div class="gutter-actions mine-actions">
-									<button
-										type="button"
-										class="gutter-action-btn"
-										title="Reply"
-										aria-label="Reply"
-										on:click|stopPropagation={() =>
-											dispatch('reply', {
-												messageId: message.id,
-												senderName: message.senderName,
-												content: getReplyDispatchContent(message)
-											})}
-									>
-										<IconSet name="reply" size={12} className="gutter-action-icon" />
-									</button>
-									<div class="gutter-owner-menu-wrap">
-										<button
-											type="button"
-											class="gutter-action-btn"
-											title="More actions"
-											aria-label="More actions"
-											aria-expanded={openOwnerActionMessageId === message.id}
-											on:click|stopPropagation={() => toggleOwnerMessageActions(message.id)}
-										>
-											<IconSet name="more-horizontal" size={12} className="gutter-action-icon" />
-										</button>
-										<div
-											class="gutter-action-menu {openOwnerActionMessageId === message.id
-												? 'open'
-												: ''}"
-										>
-											<button
-												type="button"
-												class="gutter-action-btn"
-												title="Edit message"
-												aria-label="Edit message"
-												on:click|stopPropagation={() => onEditMessage(message)}
-											>
-												<IconSet name="edit" size={12} className="gutter-action-icon" />
-											</button>
-											<button
-												type="button"
-												class="gutter-action-btn danger"
-												title="Delete message"
-												aria-label="Delete message"
-												on:click|stopPropagation={() => onDeleteMessage(message)}
-											>
-												<IconSet name="trash" size={12} className="gutter-action-icon" />
-											</button>
-										</div>
-									</div>
-								</div>
-							{/if}
-					</aside>
-				{/if}
+						{#if !isDeletedMessage(message)}
+							<div class="gutter-actions mine-actions">
+								<button
+									type="button"
+									class="gutter-action-btn"
+									title="Reply"
+									aria-label="Reply"
+									on:click|stopPropagation={() =>
+										dispatch('reply', {
+											messageId: message.id,
+											senderName: message.senderName,
+											content: getReplyDispatchContent(message)
+										})}
+								>
+									<IconSet name="reply" size={12} className="gutter-action-icon" />
+								</button>
+							</div>
+						{/if}
+						</aside>
+					{/if}
 				{#if isSelectionMode && messageActionMode === 'delete' && deleteMultiEnabled && isMine && !isDeletedMessage(message)}
 					<label class="delete-select-toggle mine" title="Select message for deletion">
 						<input
@@ -1063,7 +1454,12 @@
 					data-message-id={message.id}
 					on:click={() => onMessageClick(message)}
 					on:keydown={(event) => onMessageKeyDown(event, message)}
-					>
+					on:contextmenu={(event) => onMessageContextMenu(event, message)}
+					on:touchstart={(event) => onMessageTouchStart(event, message)}
+					on:touchmove={onMessageTouchMove}
+					on:touchend={onMessageTouchEnd}
+					on:touchcancel={onMessageTouchCancel}
+				>
 						<div class="bubble-meta">
 							<span>{message.senderName}</span>
 							<div class="meta-right">
@@ -1114,104 +1510,150 @@
 							<span class="reply-snippet-content">{replyPreview.content}</span>
 						</button>
 					{/if}
-					<div
+						<div
 						class="bubble-content"
 						class:deleted-text={isDeletedMessage(message)}
-						class:collapsed={message.type === 'text' &&
+						class:collapsed={!snippetPayload &&
+							message.type === 'text' &&
 							isLongMessage(message.content) &&
-							!isMessageExpanded(message.id)}
-					>
-						{#if isDeletedMessage(message)}
-							This message was deleted
-						{:else if message.type === 'image' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
-							<img
-								src={getMediaURL(message)}
-								alt={getFileName(message)}
-								class="media-preview image-preview"
-								loading="lazy"
-								on:error={() => onMediaError(message.id)}
-							/>
-							{#if getMediaCaption(message)}
-								<div class="media-caption">{getMediaCaption(message)}</div>
-							{/if}
-						{:else if message.type === 'video' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
-							<!-- svelte-ignore a11y_media_has_caption -->
-							<video
-								src={getMediaURL(message)}
-								class="media-preview video-preview"
-								controls
-								preload="metadata"
-								on:error={() => onMediaError(message.id)}
-							></video>
-							{#if getMediaCaption(message)}
-								<div class="media-caption">{getMediaCaption(message)}</div>
-							{/if}
-						{:else if message.type === 'audio' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
-							<!-- svelte-ignore a11y_media_has_caption -->
-							<audio
-								src={getMediaURL(message)}
-								class="audio-preview"
-								controls
-								preload="metadata"
-								on:error={() => onMediaError(message.id)}
-							></audio>
-							{#if getMediaCaption(message)}
-								<div class="media-caption">{getMediaCaption(message)}</div>
-							{/if}
-						{:else if (message.type === 'file' || mediaLoadFailedById[message.id]) && getMediaURL(message)}
-							{#if isPDFMessage(message)}
-								<iframe
-									class="pdf-preview"
-									src={getMediaURL(message)}
-									title={getFileName(message)}
-									loading="lazy"
-								></iframe>
-							{/if}
-							{#if isImageFileMessage(message) && !mediaLoadFailedById[message.id]}
+							!Boolean(expandedMessages[message.id])}
+						>
+							{#if isDeletedMessage(message)}
+								This message was deleted
+							{:else if snippetPayload}
+								{@const snippetCodeNeedsCollapse = isLongSnippetCode(snippetPayload.snippet)}
+								{@const snippetCodeExpanded = Boolean(expandedSnippetCodeByMessageID[message.id])}
+								{@const snippetMessageNeedsCollapse = isLongSnippetMessage(snippetPayload.message)}
+								{@const snippetMessageExpanded = Boolean(
+									expandedSnippetMessageByMessageID[message.id]
+								)}
+								<div class="snippet-card">
+									<div class="snippet-card-header">
+										<span class="snippet-card-label">Code Snippet</span>
+										{#if snippetPayload.fileName}
+											<span class="snippet-card-file">{snippetPayload.fileName}</span>
+										{/if}
+									</div>
+									<pre
+										class="snippet-code"
+										class:collapsed={snippetCodeNeedsCollapse && !snippetCodeExpanded}
+									><code>{snippetPayload.snippet}</code></pre>
+									{#if snippetCodeNeedsCollapse}
+										<button
+											type="button"
+											class="read-more-btn snippet-read-more-btn"
+											on:click|stopPropagation={() => toggleSnippetCodeExpanded(message.id)}
+										>
+											{snippetCodeExpanded ? 'Collapse code' : 'Read more code'}
+										</button>
+									{/if}
+									{#if snippetPayload.message}
+										<div
+											class="snippet-caption"
+											class:collapsed={snippetMessageNeedsCollapse && !snippetMessageExpanded}
+										>
+											{snippetPayload.message}
+										</div>
+										{#if snippetMessageNeedsCollapse}
+											<button
+												type="button"
+												class="read-more-btn snippet-read-more-btn"
+												on:click|stopPropagation={() => toggleSnippetMessageExpanded(message.id)}
+											>
+												{snippetMessageExpanded ? 'Collapse note' : 'Read more note'}
+											</button>
+										{/if}
+									{/if}
+								</div>
+							{:else if message.type === 'image' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
 								<img
 									src={getMediaURL(message)}
 									alt={getFileName(message)}
-									class="media-preview image-preview file-inline-preview"
+									class="media-preview image-preview"
 									loading="lazy"
 									on:error={() => onMediaError(message.id)}
 								/>
-							{:else if isVideoFileMessage(message) && !mediaLoadFailedById[message.id]}
+								{#if getMediaCaption(message)}
+									<div class="media-caption">{getMediaCaption(message)}</div>
+								{/if}
+							{:else if message.type === 'video' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
 								<!-- svelte-ignore a11y_media_has_caption -->
 								<video
 									src={getMediaURL(message)}
-									class="media-preview video-preview file-inline-preview"
+									class="media-preview video-preview"
 									controls
 									preload="metadata"
 									on:error={() => onMediaError(message.id)}
 								></video>
-							{/if}
-							<div class="file-card">
-								<div class="file-meta">
-									<IconSet name="file" size={16} />
-									<div>
-										<div class="file-name">{getFileName(message)}</div>
-										<div class="file-ext">{getFileExtension(message).toUpperCase() || 'FILE'}</div>
+								{#if getMediaCaption(message)}
+									<div class="media-caption">{getMediaCaption(message)}</div>
+								{/if}
+							{:else if message.type === 'audio' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
+								<!-- svelte-ignore a11y_media_has_caption -->
+								<audio
+									src={getMediaURL(message)}
+									class="audio-preview"
+									controls
+									preload="metadata"
+									on:error={() => onMediaError(message.id)}
+								></audio>
+								{#if getMediaCaption(message)}
+									<div class="media-caption">{getMediaCaption(message)}</div>
+								{/if}
+							{:else if (message.type === 'file' || mediaLoadFailedById[message.id]) && getMediaURL(message)}
+								{#if isPDFMessage(message)}
+									<iframe
+										class="pdf-preview"
+										src={getMediaURL(message)}
+										title={getFileName(message)}
+										loading="lazy"
+									></iframe>
+								{/if}
+								{#if isImageFileMessage(message) && !mediaLoadFailedById[message.id]}
+									<img
+										src={getMediaURL(message)}
+										alt={getFileName(message)}
+										class="media-preview image-preview file-inline-preview"
+										loading="lazy"
+										on:error={() => onMediaError(message.id)}
+									/>
+								{:else if isVideoFileMessage(message) && !mediaLoadFailedById[message.id]}
+									<!-- svelte-ignore a11y_media_has_caption -->
+									<video
+										src={getMediaURL(message)}
+										class="media-preview video-preview file-inline-preview"
+										controls
+										preload="metadata"
+										on:error={() => onMediaError(message.id)}
+									></video>
+								{/if}
+								<div class="file-card">
+									<div class="file-meta">
+										<IconSet name="file" size={16} />
+										<div>
+											<div class="file-name">{getFileName(message)}</div>
+											<div class="file-ext">{getFileExtension(message).toUpperCase() || 'FILE'}</div>
+										</div>
+									</div>
+									<div class="file-actions">
+										<a href={getMediaURL(message)} target="_blank" rel="noreferrer" class="file-link"
+											>Open</a
+										>
+										<a
+											href={getMediaURL(message)}
+											target="_blank"
+											rel="noreferrer"
+											download
+											class="file-link"
+										>
+											Download
+										</a>
 									</div>
 								</div>
-								<div class="file-actions">
-									<a href={getMediaURL(message)} target="_blank" rel="noreferrer" class="file-link"
-										>Open</a
-									>
-									<a
-										href={getMediaURL(message)}
-										target="_blank"
-										rel="noreferrer"
-										download
-										class="file-link"
-									>
-										Download
-									</a>
-								</div>
-							</div>
-							{#if getMediaCaption(message)}
-								<div class="media-caption">{getMediaCaption(message)}</div>
-							{/if}
-						{:else if message.type === 'task'}
+								{#if getMediaCaption(message)}
+									<div class="media-caption">{getMediaCaption(message)}</div>
+								{/if}
+							{:else if message.type === 'task'}
 							<TaskCard
 								{message}
 								showAddTaskControl={isMember}
@@ -1241,13 +1683,13 @@
 							{message.content}
 						{/if}
 					</div>
-					{#if message.type === 'text' && isLongMessage(message.content)}
+					{#if !snippetPayload && message.type === 'text' && isLongMessage(message.content)}
 						<button
 							type="button"
 							class="read-more-btn"
 							on:click|stopPropagation={() => dispatch('toggleExpand', { messageId: message.id })}
 						>
-							{isMessageExpanded(message.id) ? 'Read less' : 'Read more'}
+							{Boolean(expandedMessages[message.id]) ? 'Read less' : 'Read more'}
 						</button>
 					{/if}
 				</article>
@@ -1321,18 +1763,89 @@
 				{/if}
 			</div>
 		{/each}
-	</div>
-	{#if showScrollToBottom}
-		<button
-			type="button"
-			class="scroll-bottom-button"
-			on:click={() => scrollToBottom('smooth')}
-			aria-label="Scroll to latest message"
-			title="Scroll to latest"
-		>
-			<IconSet name="chevron-down" size={20} />
-		</button>
-	{/if}
+		</div>
+		{#if messageContextMenu.open}
+			{@const contextMenuMessage = getVisibleMessageById(messageContextMenu.messageId)}
+			{@const contextMenuIsMine = Boolean(
+				contextMenuMessage &&
+					normalizeIdentifier(contextMenuMessage.senderId) === normalizeIdentifier(currentUserId)
+			)}
+			<div
+				class="message-context-menu-backdrop"
+				aria-hidden="true"
+				on:click={closeMessageContextMenu}
+				on:contextmenu|preventDefault={closeMessageContextMenu}
+			></div>
+			<div
+				class="message-context-menu"
+				role="menu"
+				tabindex="-1"
+				aria-label="Message actions"
+				style={`left: ${messageContextMenu.x}px; top: ${messageContextMenu.y}px;`}
+			>
+				<button
+					type="button"
+					class="message-context-menu-item"
+					role="menuitem"
+					disabled={isContextMenuActionDisabled('reply', contextMenuMessage, contextMenuIsMine)}
+					on:click={() => onMessageContextAction('reply')}
+				>
+					<IconSet name="reply" size={14} />
+					<span>Reply</span>
+				</button>
+				<button
+					type="button"
+					class="message-context-menu-item"
+					role="menuitem"
+					disabled={isContextMenuActionDisabled('edit', contextMenuMessage, contextMenuIsMine)}
+					on:click={() => onMessageContextAction('edit')}
+				>
+					<IconSet name="edit" size={14} />
+					<span>Edit</span>
+				</button>
+				<button
+					type="button"
+					class="message-context-menu-item danger"
+					role="menuitem"
+					disabled={isContextMenuActionDisabled('delete', contextMenuMessage, contextMenuIsMine)}
+					on:click={() => onMessageContextAction('delete')}
+				>
+					<IconSet name="trash" size={14} />
+					<span>Delete</span>
+				</button>
+				<button
+					type="button"
+					class="message-context-menu-item"
+					role="menuitem"
+					disabled={isContextMenuActionDisabled('pin', contextMenuMessage, contextMenuIsMine)}
+					on:click={() => onMessageContextAction('pin')}
+				>
+					<IconSet name="pin" size={14} />
+					<span>Pin</span>
+				</button>
+				<button
+					type="button"
+					class="message-context-menu-item"
+					role="menuitem"
+					disabled={isContextMenuActionDisabled('branch', contextMenuMessage, contextMenuIsMine)}
+					on:click={() => onMessageContextAction('branch')}
+				>
+					<IconSet name="break" size={14} />
+					<span>Create branch</span>
+				</button>
+			</div>
+		{/if}
+		{#if showScrollToBottom}
+			<button
+				type="button"
+				class="scroll-bottom-button"
+				on:click={() => scrollToBottom('smooth')}
+				aria-label="Scroll to latest message"
+				title="Scroll to latest"
+			>
+				<IconSet name="chevron-down" size={20} />
+			</button>
+		{/if}
 
 	{#if !isMember}
 		<div class="join-footer">
@@ -1657,53 +2170,9 @@
 		pointer-events: auto;
 	}
 
-	.gutter-owner-menu-wrap {
-		position: relative;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 100%;
-		overflow: visible;
-	}
-
 	.message-row.compact-gutter .gutter-actions.mine-actions {
 		flex-direction: row;
 		width: auto;
-	}
-
-	.message-row.compact-gutter .gutter-owner-menu-wrap {
-		width: auto;
-	}
-
-	.gutter-action-menu {
-		position: absolute;
-		top: 50%;
-		z-index: 2;
-		display: inline-flex;
-		align-items: center;
-		gap: 0.22rem;
-		max-width: 0;
-		opacity: 0;
-		overflow: hidden;
-		pointer-events: none;
-		transform: translateY(-50%);
-		transition:
-			max-width 160ms ease,
-			opacity 140ms ease;
-	}
-
-	.message-row.mine .gutter-action-menu {
-		left: calc(100% + 0.22rem);
-	}
-
-	.message-row.theirs .gutter-action-menu {
-		right: calc(100% + 0.22rem);
-	}
-
-	.gutter-action-menu.open {
-		max-width: calc(var(--action-hit-size) * 2 + 0.45rem);
-		opacity: 1;
-		pointer-events: auto;
 	}
 
 	.gutter-action-btn {
@@ -1729,14 +2198,6 @@
 		color: #ecf2fb;
 	}
 
-	.gutter-action-btn.danger {
-		color: #8f2d2d;
-	}
-
-	.message-row.mine .gutter-action-btn.danger {
-		color: #ffd4d4;
-	}
-
 	.gutter-action-btn:hover {
 		transform: translateY(-1px);
 		background: #dfe7f3;
@@ -1753,6 +2214,78 @@
 		outline-offset: 1px;
 	}
 
+	.message-context-menu-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 30;
+		background: transparent;
+	}
+
+	.message-context-menu {
+		position: fixed;
+		z-index: 31;
+		display: flex;
+		flex-direction: column;
+		gap: 0.16rem;
+		width: 11.6rem;
+		padding: 0.35rem;
+		border-radius: 10px;
+		border: 1px solid #c9d3e2;
+		background: #f8fbff;
+		box-shadow: 0 14px 32px rgba(15, 23, 42, 0.18);
+	}
+
+	.messages-shell.theme-dark .message-context-menu {
+		border-color: #31435e;
+		background: #0f1a2b;
+		box-shadow: 0 14px 36px rgba(2, 6, 23, 0.6);
+	}
+
+	.message-context-menu-item {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.46rem;
+		width: 100%;
+		padding: 0.46rem 0.5rem;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		color: #334155;
+		font-size: 0.8rem;
+		font-weight: 600;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.messages-shell.theme-dark .message-context-menu-item {
+		color: #d6e2f5;
+	}
+
+	.message-context-menu-item:hover {
+		background: #e5edf8;
+	}
+
+	.messages-shell.theme-dark .message-context-menu-item:hover {
+		background: #1a2b42;
+	}
+
+	.message-context-menu-item.danger {
+		color: #b91c1c;
+	}
+
+	.messages-shell.theme-dark .message-context-menu-item.danger {
+		color: #fda4af;
+	}
+
+	.message-context-menu-item:disabled {
+		opacity: 0.48;
+		cursor: not-allowed;
+	}
+
+	.message-context-menu-item:disabled:hover {
+		background: transparent;
+	}
+
 	.bubble {
 		position: relative;
 		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), 40rem);
@@ -1764,6 +2297,15 @@
 		box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
 		box-sizing: border-box;
 		overflow: visible;
+	}
+
+	@media (pointer: coarse) {
+		.bubble {
+			-webkit-touch-callout: none;
+			-webkit-user-select: none;
+			user-select: none;
+			touch-action: manipulation;
+		}
 	}
 
 	.messages-shell.theme-dark .bubble {
@@ -2266,6 +2808,141 @@
 		overflow-x: auto;
 		white-space: pre;
 		word-break: normal;
+	}
+
+	.snippet-card {
+		display: grid;
+		gap: 0.52rem;
+		width: 100%;
+	}
+
+	.snippet-card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 0.45rem;
+	}
+
+	.snippet-card-label {
+		font-size: 0.66rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+		color: #4d5f79;
+	}
+
+	.snippet-card-file {
+		display: inline-flex;
+		align-items: center;
+		max-width: 100%;
+		border: 1px solid #cad4e4;
+		background: #eaf0fb;
+		color: #445a78;
+		border-radius: 999px;
+		padding: 0.12rem 0.4rem;
+		font-size: 0.66rem;
+		line-height: 1.2;
+		font-family:
+			ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+			monospace;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.snippet-code {
+		margin: 0;
+		max-height: 320px;
+		padding: 0.66rem 0.72rem;
+		border-radius: 10px;
+		border: 1px solid #334a66;
+		background: #111d30;
+		color: #e4edfa;
+		font-family:
+			ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+			monospace;
+		font-size: 0.82rem;
+		line-height: 1.42;
+		overflow: auto;
+		white-space: pre;
+		word-break: normal;
+	}
+
+	.snippet-code.collapsed {
+		max-height: 250px;
+		overflow: hidden;
+		mask-image: linear-gradient(180deg, #000 74%, transparent);
+		-webkit-mask-image: linear-gradient(180deg, #000 74%, transparent);
+	}
+
+	.snippet-caption {
+		margin: 0;
+		font-size: 0.89rem;
+		line-height: 1.45;
+		color: #1f2d42;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.snippet-caption.collapsed {
+		max-height: 7.5rem;
+		overflow: hidden;
+		mask-image: linear-gradient(180deg, #000 76%, transparent);
+		-webkit-mask-image: linear-gradient(180deg, #000 76%, transparent);
+	}
+
+	.snippet-read-more-btn {
+		margin-top: -0.14rem;
+		align-self: flex-start;
+	}
+
+	.bubble.mine .snippet-card-label {
+		color: #dbe6f9;
+	}
+
+	.bubble.mine .snippet-card-file {
+		border-color: rgba(224, 235, 255, 0.55);
+		background: rgba(228, 238, 255, 0.16);
+		color: #edf4ff;
+	}
+
+	.bubble.mine .snippet-caption {
+		color: #e9f0fc;
+	}
+
+	.messages-shell.theme-dark .snippet-card-label {
+		color: #cad5e8;
+	}
+
+	.messages-shell.theme-dark .snippet-card-file {
+		border-color: #42546f;
+		background: #1a273d;
+		color: #dce7fb;
+	}
+
+	.messages-shell.theme-dark .snippet-code {
+		border-color: #3a4f6d;
+		background: #101b2d;
+		color: #e7effd;
+	}
+
+	.messages-shell.theme-dark .snippet-caption {
+		color: #d2ddf0;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .snippet-card-label {
+		color: #d9e4f9;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .snippet-card-file {
+		border-color: #586e8f;
+		background: #2a3a55;
+		color: #f0f6ff;
+	}
+
+	.messages-shell.theme-dark .bubble.mine .snippet-caption {
+		color: #e8eefb;
 	}
 
 	.read-more-btn {

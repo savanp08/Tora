@@ -7,7 +7,7 @@
 		type ExecutionRunHandle
 	} from '$lib/utils/executionManager';
 	import { applyUpdate, encodeStateAsUpdate } from 'yjs';
-	import { onDestroy, onMount, tick } from 'svelte';
+	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
 	import 'xterm/css/xterm.css';
 
 	export let roomId: string;
@@ -76,6 +76,12 @@
 		__canvasDebugSendWrapped?: boolean;
 	};
 
+	type CanvasSnippetPayload = {
+		snippet: string;
+		message: string;
+		fileName: string;
+	};
+
 	const DEFAULT_PROJECT_FILE_NAME = 'main.js';
 	const DEFAULT_PROJECT_FILE_CONTENT = "console.log('Hello from Converse canvas');\n";
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
@@ -88,6 +94,10 @@
 	const SNAPSHOT_LOAD_TIMEOUT_MS = 15000;
 	const PROMPT_CANCELLED_ERROR = 'canvas-prompt-cancelled';
 	const CANVAS_CLIENT_LOG_PREFIX = '[canvas-client]';
+	const EXPLORER_LONG_PRESS_DELAY_MS = 520;
+	const EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
+	const EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
+	const EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS = 1400;
 	let currentFile = '';
 	let openTabs: string[] = [];
 	let fileExplorerError = '';
@@ -124,6 +134,7 @@
 	let awarenessChangeHandler: (() => void) | null = null;
 	let cursorSelectionDisposable: Disposable | null = null;
 	let editorContentChangeDisposable: Disposable | null = null;
+	let editorScrollDisposable: Disposable | null = null;
 	let currentYText: any = null;
 	let remoteSelectionDecorations: string[] = [];
 	let showReadOnlyWarning = false;
@@ -133,10 +144,20 @@
 	let contextMenuY = 0;
 	let contextMenuTarget: ProjectFileEntry | null = null;
 	let contextMenuElement: HTMLDivElement | null = null;
+	let explorerLongPressTimer: ReturnType<typeof setTimeout> | null = null;
+	let explorerLongPressTouchIdentifier = -1;
+	let explorerLongPressTarget: ProjectFileEntry | null = null;
+	let explorerLongPressStartX = 0;
+	let explorerLongPressStartY = 0;
+	let explorerLongPressLastX = 0;
+	let explorerLongPressLastY = 0;
+	let suppressExplorerClickUntil = 0;
+	let suppressNativeExplorerContextMenuUntil = 0;
 	let importZipInput: HTMLInputElement | null = null;
 	let sidebarElement: HTMLElement | null = null;
 	let isSidebarDragOver = false;
 	let promptInputElement: HTMLInputElement | null = null;
+	let snippetMessageInputElement: HTMLTextAreaElement | null = null;
 	let promptInputValue = '';
 	let promptState: PromptState = {
 		isOpen: false,
@@ -162,7 +183,19 @@
 	let removeExecutionOutputSubscription: (() => void) | null = null;
 	let isRunInProgress = false;
 	let runningFilePath = '';
+	let isDraggingCode = false;
+	let snippetDraft = '';
+	let snippetMessage = '';
+	let showSnippetComposer = false;
+	let canSendSnippetFromSelection = false;
+	let showSelectionSnippetAction = false;
+	let selectionSnippetActionTop = 0;
+	let selectionSnippetActionLeft = 0;
+	let selectedSnippetText = '';
 	const presenceSessionId = createPresenceSessionId();
+	const dispatch = createEventDispatcher<{
+		sendSnippet: CanvasSnippetPayload;
+	}>();
 
 	function canvasClientLog(event: string, payload?: unknown) {
 		const timestamp = new Date().toISOString();
@@ -1771,8 +1804,125 @@
 	}
 
 	function closeContextMenu() {
+		clearExplorerLongPressState();
 		contextMenuOpen = false;
 		contextMenuTarget = null;
+	}
+
+	function clearExplorerLongPressState() {
+		if (explorerLongPressTimer) {
+			clearTimeout(explorerLongPressTimer);
+			explorerLongPressTimer = null;
+		}
+		explorerLongPressTouchIdentifier = -1;
+		explorerLongPressTarget = null;
+		explorerLongPressStartX = 0;
+		explorerLongPressStartY = 0;
+		explorerLongPressLastX = 0;
+		explorerLongPressLastY = 0;
+	}
+
+	function findTouchByIdentifier(touches: TouchList, identifier: number) {
+		for (const touch of Array.from(touches)) {
+			if (touch.identifier === identifier) {
+				return touch;
+			}
+		}
+		return null;
+	}
+
+	function consumeSuppressedExplorerClick(event?: Event) {
+		if (Date.now() >= suppressExplorerClickUntil) {
+			suppressExplorerClickUntil = 0;
+			return false;
+		}
+		suppressExplorerClickUntil = 0;
+		if (event) {
+			event.preventDefault();
+			event.stopPropagation();
+		}
+		return true;
+	}
+
+	async function openContextMenuAtPosition(
+		clientX: number,
+		clientY: number,
+		target: ProjectFileEntry | null
+	) {
+		contextMenuTarget = target;
+		contextMenuOpen = true;
+		contextMenuX = clientX;
+		contextMenuY = clientY;
+		await tick();
+		if (!contextMenuElement) {
+			return;
+		}
+		const bounds = contextMenuElement.getBoundingClientRect();
+		contextMenuX = Math.min(Math.max(8, contextMenuX), window.innerWidth - bounds.width - 8);
+		contextMenuY = Math.min(Math.max(8, contextMenuY), window.innerHeight - bounds.height - 8);
+	}
+
+	function onExplorerEntryTouchStart(event: TouchEvent, target: ProjectFileEntry) {
+		if (event.touches.length !== 1) {
+			clearExplorerLongPressState();
+			return;
+		}
+		const source = event.target instanceof Element ? event.target : null;
+		if (source?.closest('.file-entry-more, .file-entry-delete')) {
+			clearExplorerLongPressState();
+			return;
+		}
+		const touch = event.touches[0];
+		clearExplorerLongPressState();
+		explorerLongPressTouchIdentifier = touch.identifier;
+		explorerLongPressTarget = target;
+		explorerLongPressStartX = touch.clientX;
+		explorerLongPressStartY = touch.clientY;
+		explorerLongPressLastX = touch.clientX;
+		explorerLongPressLastY = touch.clientY;
+		suppressNativeExplorerContextMenuUntil =
+			Date.now() + EXPLORER_LONG_PRESS_DELAY_MS + EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS;
+		explorerLongPressTimer = setTimeout(() => {
+			const contextTarget = explorerLongPressTarget;
+			const clientX = explorerLongPressLastX;
+			const clientY = explorerLongPressLastY;
+			clearExplorerLongPressState();
+			suppressExplorerClickUntil = Date.now() + EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS;
+			suppressNativeExplorerContextMenuUntil =
+				Date.now() + EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS;
+			void openContextMenuAtPosition(clientX, clientY, contextTarget);
+		}, EXPLORER_LONG_PRESS_DELAY_MS);
+	}
+
+	function onExplorerEntryTouchMove(event: TouchEvent) {
+		if (explorerLongPressTouchIdentifier < 0) {
+			return;
+		}
+		const touch = findTouchByIdentifier(event.touches, explorerLongPressTouchIdentifier);
+		if (!touch) {
+			clearExplorerLongPressState();
+			return;
+		}
+		explorerLongPressLastX = touch.clientX;
+		explorerLongPressLastY = touch.clientY;
+		const dx = touch.clientX - explorerLongPressStartX;
+		const dy = touch.clientY - explorerLongPressStartY;
+		const movedDistance = Math.hypot(dx, dy);
+		if (movedDistance > EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX) {
+			clearExplorerLongPressState();
+		}
+	}
+
+	function onExplorerEntryTouchEnd(event: TouchEvent) {
+		if (Date.now() < suppressExplorerClickUntil) {
+			event.preventDefault();
+			event.stopPropagation();
+		}
+		clearExplorerLongPressState();
+	}
+
+	function onExplorerEntryTouchCancel() {
+		clearExplorerLongPressState();
 	}
 
 	function joinDropPath(basePath: string, entryName: string) {
@@ -2197,6 +2347,175 @@
 		isSidebarDragOver = false;
 	}
 
+	function dragEventHasPlainText(event: DragEvent) {
+		const types = Array.from(event.dataTransfer?.types ?? []);
+		return types.includes('text/plain');
+	}
+
+	function getCurrentSelectionText() {
+		const model = editor?.getModel?.();
+		const selection = editor?.getSelection?.();
+		if (!model || !selection || selection.isEmpty?.()) {
+			return '';
+		}
+		try {
+			return String(model.getValueInRange(selection) || '');
+		} catch {
+			return '';
+		}
+	}
+
+	function hideSelectionSnippetAction() {
+		showSelectionSnippetAction = false;
+	}
+
+	function updateSelectionSnippetAction() {
+		const selectionText = getCurrentSelectionText();
+		selectedSnippetText = selectionText;
+		canSendSnippetFromSelection = selectionText.trim().length > 0;
+		if (!canSendSnippetFromSelection || showSnippetComposer || !editor) {
+			hideSelectionSnippetAction();
+			return;
+		}
+		const selection = editor.getSelection?.();
+		const selectionEnd = selection?.getEndPosition?.();
+		if (!selectionEnd) {
+			hideSelectionSnippetAction();
+			return;
+		}
+		const visiblePosition = editor.getScrolledVisiblePosition(selectionEnd);
+		const editorNode = editor.getDomNode?.();
+		if (!visiblePosition || !editorNode) {
+			hideSelectionSnippetAction();
+			return;
+		}
+		const buttonWidth = 34;
+		const buttonHeight = 30;
+		selectionSnippetActionLeft = Math.max(
+			8,
+			Math.min(editorNode.clientWidth - buttonWidth - 8, visiblePosition.left + 10)
+		);
+		selectionSnippetActionTop = Math.max(
+			8,
+			Math.min(editorNode.clientHeight - buttonHeight - 8, visiblePosition.top - buttonHeight - 4)
+		);
+		showSelectionSnippetAction = true;
+	}
+
+	function openSnippetComposerForSelection() {
+		const text = selectedSnippetText || getCurrentSelectionText();
+		if (!text.trim()) {
+			return;
+		}
+		openSnippetComposerFromDrop(text);
+	}
+
+	function handleEditorCodeDragStart(event: DragEvent) {
+		const selectedText = getCurrentSelectionText();
+		if (!selectedText.trim()) {
+			isDraggingCode = false;
+			hideSelectionSnippetAction();
+			return;
+		}
+		if (event.dataTransfer) {
+			event.dataTransfer.setData('text/plain', selectedText);
+			event.dataTransfer.effectAllowed = 'copy';
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		isDraggingCode = true;
+		hideSelectionSnippetAction();
+	}
+
+	function handleEditorCodeDragEnd() {
+		isDraggingCode = false;
+	}
+
+	function handleEditorCodeDragEnter(event: DragEvent) {
+		if (!dragEventHasPlainText(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		isDraggingCode = true;
+	}
+
+	function handleEditorCodeDragOver(event: DragEvent) {
+		if (!dragEventHasPlainText(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		isDraggingCode = true;
+	}
+
+	function handleEditorCodeDragLeave(event: DragEvent) {
+		const currentTarget = event.currentTarget as HTMLElement | null;
+		const relatedTarget = event.relatedTarget as Node | null;
+		if (relatedTarget && currentTarget?.contains(relatedTarget)) {
+			return;
+		}
+		isDraggingCode = false;
+	}
+
+	function closeSnippetComposer() {
+		showSnippetComposer = false;
+		snippetDraft = '';
+		snippetMessage = '';
+		void tick().then(() => {
+			updateSelectionSnippetAction();
+		});
+	}
+
+	function openSnippetComposerFromDrop(text: string) {
+		snippetDraft = text;
+		snippetMessage = '';
+		showSnippetComposer = true;
+		hideSelectionSnippetAction();
+		void tick().then(() => {
+			snippetMessageInputElement?.focus();
+		});
+	}
+
+	function sendSnippetMessage() {
+		if (!snippetDraft.trim()) {
+			closeSnippetComposer();
+			return;
+		}
+		dispatch('sendSnippet', {
+			snippet: snippetDraft,
+			message: snippetMessage,
+			fileName: getTabLabel(currentFile)
+		});
+		closeSnippetComposer();
+	}
+
+	function handleSnippetComposerWindowKeydown(event: KeyboardEvent) {
+		if (!showSnippetComposer) {
+			return;
+		}
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			event.stopPropagation();
+			closeSnippetComposer();
+			return;
+		}
+		event.stopPropagation();
+	}
+
+	function handleEditorCodeDrop(event: DragEvent) {
+		event.preventDefault();
+		event.stopPropagation();
+		isDraggingCode = false;
+		const droppedText = event.dataTransfer?.getData('text/plain') ?? '';
+		openSnippetComposerFromDrop(droppedText || getCurrentSelectionText());
+	}
+
 	async function handleSidebarDrop(event: DragEvent) {
 		event.preventDefault();
 		event.stopPropagation();
@@ -2233,17 +2552,12 @@
 	async function openContextMenu(event: MouseEvent, target: ProjectFileEntry | null) {
 		event.preventDefault();
 		event.stopPropagation();
-		contextMenuTarget = target;
-		contextMenuOpen = true;
-		contextMenuX = event.clientX;
-		contextMenuY = event.clientY;
-		await tick();
-		if (!contextMenuElement) {
+		if (Date.now() < suppressNativeExplorerContextMenuUntil) {
 			return;
 		}
-		const bounds = contextMenuElement.getBoundingClientRect();
-		contextMenuX = Math.min(Math.max(8, contextMenuX), window.innerWidth - bounds.width - 8);
-		contextMenuY = Math.min(Math.max(8, contextMenuY), window.innerHeight - bounds.height - 8);
+		clearExplorerLongPressState();
+		suppressExplorerClickUntil = 0;
+		await openContextMenuAtPosition(event.clientX, event.clientY, target);
 	}
 
 	async function persistCurrentFileToFS() {
@@ -2302,6 +2616,7 @@
 		binding = new (await import('y-monaco')).MonacoBinding(ytext, model, new Set([editor]));
 		syncLocalSelectionState();
 		renderRemoteSelections();
+		updateSelectionSnippetAction();
 	}
 
 	function ensureTabOpen(fileName: string) {
@@ -2317,6 +2632,9 @@
 		binding = null;
 		currentYText = null;
 		clearRemoteSelectionDecorations();
+		selectedSnippetText = '';
+		canSendSnippetFromSelection = false;
+		hideSelectionSnippetAction();
 		currentFile = '';
 		showReadOnlyWarning = false;
 		const model = editor?.getModel?.();
@@ -2394,7 +2712,10 @@
 		}
 	}
 
-	function handleExplorerEntryClick(entry: ProjectFileEntry) {
+	function handleExplorerEntryClick(event: MouseEvent, entry: ProjectFileEntry) {
+		if (consumeSuppressedExplorerClick(event)) {
+			return;
+		}
 		if (entry.isDir) {
 			toggleFolder(entry);
 			return;
@@ -2602,7 +2923,7 @@
 	}
 
 	async function runFile(entry: ProjectFileEntry | null) {
-		const target = entry && !entry.isDir ? entry : currentFileEntry();
+		const target = entry && !entry.isDir ? entry : currentFileEntry() ?? firstFileEntry();
 		if (!target || target.isDir) {
 			fileExplorerError = 'Select a file to run';
 			writeTerminalLine('\x1b[31mSelect a file to run.\x1b[0m');
@@ -2833,13 +3154,23 @@
 		const onWindowBlur = () => {
 			closeContextMenu();
 		};
+		const onContextMenuCapture = (event: MouseEvent) => {
+			if (Date.now() >= suppressNativeExplorerContextMenuUntil) {
+				return;
+			}
+			event.preventDefault();
+			event.stopPropagation();
+			event.stopImmediatePropagation();
+		};
 		window.addEventListener('pointerdown', onPointerDown, true);
 		window.addEventListener('keydown', onKeyDown, true);
 		window.addEventListener('blur', onWindowBlur);
+		window.addEventListener('contextmenu', onContextMenuCapture, true);
 		return () => {
 			window.removeEventListener('pointerdown', onPointerDown, true);
 			window.removeEventListener('keydown', onKeyDown, true);
 			window.removeEventListener('blur', onWindowBlur);
+			window.removeEventListener('contextmenu', onContextMenuCapture, true);
 		};
 	}
 
@@ -2903,10 +3234,15 @@
 			cursorSelectionDisposable = editor.onDidChangeCursorSelection(() => {
 				syncLocalSelectionState();
 				renderRemoteSelections();
+				updateSelectionSnippetAction();
 			});
 			editorContentChangeDisposable = model.onDidChangeContent(() => {
 				renderRemoteSelections();
 				scheduleCurrentFilePersistToFS();
+				updateSelectionSnippetAction();
+			});
+			editorScrollDisposable = editor.onDidScrollChange(() => {
+				updateSelectionSnippetAction();
 			});
 
 			ydoc = new Y.Doc();
@@ -3066,6 +3402,8 @@
 		cursorSelectionDisposable = null;
 		editorContentChangeDisposable?.dispose();
 		editorContentChangeDisposable = null;
+		editorScrollDisposable?.dispose();
+		editorScrollDisposable = null;
 		if (removeGlobalContextHandlers) {
 			removeGlobalContextHandlers();
 			removeGlobalContextHandlers = null;
@@ -3135,6 +3473,8 @@
 	});
 </script>
 
+<svelte:window on:keydown|capture={handleSnippetComposerWindowKeydown} />
+
 <div
 	class="canvas-shell"
 	class:is-compact-layout={isCompactCanvasLayout}
@@ -3144,6 +3484,57 @@
 	{#if showReadOnlyWarning}
 		<div class="canvas-readonly-warning" role="status" aria-live="polite">
 			Max 5 editors reached. You are in read-only mode.
+		</div>
+	{/if}
+	{#if showSnippetComposer}
+		<div class="snippet-composer-overlay" role="presentation" on:click|self={closeSnippetComposer}>
+			<div
+				class="snippet-composer-modal"
+				role="dialog"
+				tabindex="-1"
+				aria-modal="true"
+				aria-labelledby="snippet-composer-title"
+				on:keydown|capture={handleSnippetComposerWindowKeydown}
+			>
+				<header class="snippet-composer-header">
+					<h3 id="snippet-composer-title">Send Code Snippet</h3>
+					<button
+						type="button"
+						class="snippet-composer-close"
+						aria-label="Close snippet composer"
+						on:click={closeSnippetComposer}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M6 6l12 12M18 6 6 18" />
+						</svg>
+					</button>
+				</header>
+				<div class="snippet-preview-wrap">
+					<pre class="snippet-preview"><code>{snippetDraft}</code></pre>
+				</div>
+				<div class="snippet-message-wrap">
+					<textarea
+						bind:this={snippetMessageInputElement}
+						bind:value={snippetMessage}
+						class="snippet-message-input"
+						rows="3"
+						placeholder="Add a message about this code (optional)..."
+					></textarea>
+				</div>
+					<footer class="snippet-composer-footer">
+						<button type="button" class="snippet-button secondary" on:click={closeSnippetComposer}>
+							Cancel
+						</button>
+						<button
+							type="button"
+							class="snippet-button primary"
+							on:click={sendSnippetMessage}
+							disabled={!snippetDraft.trim()}
+						>
+							Send to Chat
+						</button>
+					</footer>
+			</div>
 		</div>
 	{/if}
 	<aside
@@ -3242,30 +3633,39 @@
 				<div class="file-list-empty">No files yet</div>
 			{:else}
 				{#each visibleFileTree as entry (entry.path)}
-					<div
-						class="file-entry-row"
-						class:is-dir={entry.isDir}
-						class:active={!entry.isDir && entry.relativePath === currentFile}
-						class:contains-active={folderContainsCurrentFile(entry)}
-						role="presentation"
-						on:contextmenu={(event) => void openContextMenu(event, entry)}
-					>
+						<div
+							class="file-entry-row"
+							class:is-dir={entry.isDir}
+							class:active={!entry.isDir && entry.relativePath === currentFile}
+							class:contains-active={folderContainsCurrentFile(entry)}
+							role="presentation"
+							on:contextmenu={(event) => void openContextMenu(event, entry)}
+							on:touchstart={(event) => onExplorerEntryTouchStart(event, entry)}
+							on:touchmove={onExplorerEntryTouchMove}
+							on:touchend={onExplorerEntryTouchEnd}
+							on:touchcancel={onExplorerEntryTouchCancel}
+						>
 						<div
 							class="file-entry-main"
 							class:is-dir={entry.isDir}
 							style:padding-left={`${0.48 + entry.depth * 0.82}rem`}
 						>
 							{#if entry.isDir}
-								<button
-									type="button"
-									class="file-entry-chevron-button"
+									<button
+										type="button"
+										class="file-entry-chevron-button"
 									aria-label={isFolderExpanded(entry)
 										? `Collapse ${entry.name}`
 										: `Expand ${entry.name}`}
 									aria-expanded={isFolderExpanded(entry)}
-									on:click|stopPropagation={() => toggleFolder(entry)}
-									on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
-								>
+										on:click|stopPropagation={(event) => {
+											if (consumeSuppressedExplorerClick(event)) {
+												return;
+											}
+											toggleFolder(entry);
+										}}
+										on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
+									>
 									<span class="file-entry-chevron" aria-hidden="true">
 										<svg viewBox="0 0 24 24" class:expanded={isFolderExpanded(entry)}>
 											<path d="M9 6l6 6-6 6" />
@@ -3275,14 +3675,14 @@
 							{:else}
 								<span class="file-entry-chevron-spacer" aria-hidden="true"></span>
 							{/if}
-							<button
-								type="button"
-								class="file-entry-trigger"
-								class:is-dir={entry.isDir}
-								aria-expanded={entry.isDir ? isFolderExpanded(entry) : undefined}
-								on:click={() => handleExplorerEntryClick(entry)}
-								on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
-							>
+								<button
+									type="button"
+									class="file-entry-trigger"
+									class:is-dir={entry.isDir}
+									aria-expanded={entry.isDir ? isFolderExpanded(entry) : undefined}
+									on:click={(event) => handleExplorerEntryClick(event, entry)}
+									on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
+								>
 								<span class="file-entry-icon" class:is-dir={entry.isDir} aria-hidden="true">
 									{#if entry.isDir}
 										{#if isFolderExpanded(entry)}
@@ -3308,26 +3708,36 @@
 								<span class="file-entry-label">{entry.name}</span>
 							</button>
 						</div>
-						<button
-							type="button"
-							class="file-entry-more"
-							title="More Options"
-							aria-label="More Options"
-							on:click|stopPropagation={(event) => void openContextMenu(event, entry)}
-						>
+							<button
+								type="button"
+								class="file-entry-more"
+								title="More Options"
+								aria-label="More Options"
+								on:click|stopPropagation={(event) => {
+									if (consumeSuppressedExplorerClick(event)) {
+										return;
+									}
+									void openContextMenu(event, entry);
+								}}
+							>
 							<svg viewBox="0 0 24 24" aria-hidden="true">
 								<path
 									d="M12 5.5a1.5 1.5 0 1 0 0 .01M12 12a1.5 1.5 0 1 0 0 .01M12 18.5a1.5 1.5 0 1 0 0 .01"
 								/>
 							</svg>
 						</button>
-						<button
-							type="button"
-							class="file-entry-delete"
-							title={`Delete ${entry.name}`}
-							aria-label={`Delete ${entry.name}`}
-							on:click|stopPropagation={() => openDeleteConfirmation(entry)}
-						>
+							<button
+								type="button"
+								class="file-entry-delete"
+								title={`Delete ${entry.name}`}
+								aria-label={`Delete ${entry.name}`}
+								on:click|stopPropagation={(event) => {
+									if (consumeSuppressedExplorerClick(event)) {
+										return;
+									}
+									openDeleteConfirmation(entry);
+								}}
+							>
 							<svg viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M4.5 7.5h15" />
 								<path d="M9.5 7.5v-2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2" />
@@ -3387,12 +3797,51 @@
 			</div>
 		</div>
 			<div class="canvas-editor-body" bind:this={canvasEditorBodyElement}>
-				<div class="canvas-editor-pane" class:is-empty={openTabs.length === 0}>
+				<div
+					class="canvas-editor-pane"
+					class:is-empty={openTabs.length === 0}
+					role="region"
+					aria-label="Code editor pane"
+					on:dragstart|capture={handleEditorCodeDragStart}
+					on:dragenter|capture={handleEditorCodeDragEnter}
+					on:dragover|capture={handleEditorCodeDragOver}
+					on:dragleave|capture={handleEditorCodeDragLeave}
+					on:drop|capture={handleEditorCodeDrop}
+					on:dragend|capture={handleEditorCodeDragEnd}
+				>
 					<div class="code-canvas" bind:this={editorContainer}></div>
 					{#if openTabs.length === 0}
 						<div class="canvas-blank-state" role="status" aria-live="polite">
 							Open a file from Explorer to start editing.
 						</div>
+					{/if}
+					{#if isDraggingCode}
+						<div class="canvas-code-drop-overlay">
+							<div class="canvas-code-drop-box">
+								<svg viewBox="0 0 24 24" class="canvas-code-drop-icon" aria-hidden="true">
+									<path d="M4 7.5h16v9H4z" />
+									<path d="m4 8 8 6 8-6" />
+								</svg>
+								<span>Drop code here to send to chat</span>
+							</div>
+						</div>
+					{/if}
+					{#if showSelectionSnippetAction}
+						<button
+							type="button"
+							class="selection-snippet-action"
+							style:left={`${selectionSnippetActionLeft}px`}
+							style:top={`${selectionSnippetActionTop}px`}
+							aria-label="Send selected code to chat"
+							title="Send selected code to chat"
+							on:pointerdown|preventDefault
+							on:click={openSnippetComposerForSelection}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M4 7.5h16v9H4z" />
+								<path d="m4 8 8 6 8-6" />
+							</svg>
+						</button>
 					{/if}
 				</div>
 				<div class="terminal-panel" style:height={`${terminalHeight}px`}>
@@ -3416,10 +3865,24 @@
 							<button
 								type="button"
 								class="terminal-action-button terminal-action-run"
-								on:click={() => void runFile(currentFileEntry())}
-								disabled={isRunInProgress || !currentFileEntry()}
+								on:click={() => void runFile(currentFileEntry() ?? firstFileEntry())}
+								disabled={isRunInProgress}
 							>
 								{isRunInProgress ? 'Running...' : 'Run'}
+							</button>
+							<button
+								type="button"
+								class="terminal-action-button terminal-action-snippet"
+								on:click={openSnippetComposerForSelection}
+								disabled={!canSendSnippetFromSelection}
+								title="Send selected code to chat"
+								aria-label="Send selected code to chat"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M4 7.5h16v9H4z" />
+									<path d="m4 8 8 6 8-6" />
+								</svg>
+								<span>Snippet</span>
 							</button>
 							<button
 								type="button"
@@ -3791,6 +4254,18 @@
 		background: rgba(21, 28, 42, 0.68);
 	}
 
+	@media (pointer: coarse) {
+		.file-entry-row,
+		.file-entry-main,
+		.file-entry-trigger,
+		.file-entry-label {
+			-webkit-touch-callout: none;
+			-webkit-user-select: none;
+			user-select: none;
+			touch-action: manipulation;
+		}
+	}
+
 	.file-entry-row.is-dir {
 		background: rgba(19, 26, 39, 0.72);
 	}
@@ -4126,6 +4601,243 @@
 		background: radial-gradient(circle at 28% 24%, rgba(67, 97, 148, 0.3), rgba(8, 12, 19, 0.88));
 	}
 
+	.canvas-code-drop-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 7;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(4, 8, 14, 0.62);
+		backdrop-filter: blur(2px);
+		pointer-events: all;
+	}
+
+	.canvas-code-drop-box {
+		display: inline-flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.6rem;
+		min-width: min(90%, 22rem);
+		max-width: min(92%, 30rem);
+		padding: 1.2rem 1.35rem;
+		border-radius: 0.95rem;
+		border: 2px dashed rgba(218, 232, 252, 0.82);
+		background: linear-gradient(180deg, rgba(49, 66, 92, 0.84) 0%, rgba(24, 32, 48, 0.86) 100%);
+		box-shadow: 0 16px 38px rgba(0, 0, 0, 0.36);
+		color: #eaf2ff;
+		font-size: 0.92rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
+		text-align: center;
+	}
+
+	.canvas-code-drop-icon {
+		width: 1.9rem;
+		height: 1.9rem;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		opacity: 0.92;
+	}
+
+	.selection-snippet-action {
+		position: absolute;
+		z-index: 8;
+		width: 2rem;
+		height: 1.8rem;
+		border: 1px solid rgba(104, 211, 145, 0.78);
+		background: rgba(18, 116, 84, 0.86);
+		color: #effff8;
+		border-radius: 0.42rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		padding: 0;
+		box-shadow: 0 8px 20px rgba(0, 0, 0, 0.36);
+	}
+
+	.selection-snippet-action:hover {
+		border-color: rgba(134, 239, 172, 0.88);
+		background: rgba(20, 145, 94, 0.9);
+	}
+
+	.selection-snippet-action svg {
+		width: 0.9rem;
+		height: 0.9rem;
+		stroke: currentColor;
+		stroke-width: 1.9;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.snippet-composer-overlay {
+		position: fixed;
+		inset: 0;
+		z-index: 10060;
+		display: flex;
+		align-items: flex-start;
+		justify-content: center;
+		padding: max(0.85rem, env(safe-area-inset-top)) 1rem max(0.85rem, env(safe-area-inset-bottom));
+		overflow-y: auto;
+		background: rgba(5, 9, 15, 0.62);
+		backdrop-filter: blur(6px);
+	}
+
+	.snippet-composer-modal {
+		width: min(42rem, 96%);
+		max-height: min(92vh, 44rem);
+		margin: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 0.85rem;
+		padding: 0.95rem;
+		border-radius: 0.8rem;
+		border: 1px solid rgba(113, 136, 176, 0.48);
+		background: linear-gradient(180deg, rgba(19, 27, 40, 0.98) 0%, rgba(12, 18, 30, 0.98) 100%);
+		box-shadow: 0 20px 48px rgba(0, 0, 0, 0.45);
+	}
+
+	.snippet-composer-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.snippet-composer-header h3 {
+		margin: 0;
+		font-size: 0.95rem;
+		font-weight: 700;
+		color: #e8f0ff;
+		letter-spacing: 0.01em;
+	}
+
+	.snippet-composer-close {
+		border: 1px solid rgba(120, 137, 165, 0.5);
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+		border-radius: 0.4rem;
+		width: 1.8rem;
+		height: 1.8rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		padding: 0;
+	}
+
+	.snippet-composer-close:hover {
+		border-color: rgba(185, 124, 124, 0.72);
+		background: rgba(95, 36, 36, 0.72);
+		color: #ffe8e8;
+	}
+
+	.snippet-composer-close svg {
+		width: 0.88rem;
+		height: 0.88rem;
+		stroke: currentColor;
+		stroke-width: 2;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.snippet-preview-wrap {
+		border: 1px solid rgba(83, 107, 144, 0.55);
+		border-radius: 0.6rem;
+		overflow: hidden;
+		background: #1e1e1e;
+	}
+
+	.snippet-preview {
+		margin: 0;
+		padding: 0.8rem 0.85rem;
+		max-height: 200px;
+		overflow-y: auto;
+		color: #d4d4d4;
+		font-size: 0.79rem;
+		line-height: 1.45;
+		font-family:
+			'SFMono-Regular',
+			Consolas,
+			'Liberation Mono',
+			Menlo,
+			monospace;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.snippet-message-wrap {
+		display: flex;
+	}
+
+	.snippet-message-input {
+		width: 100%;
+		min-height: 4.8rem;
+		border: 1px solid rgba(103, 125, 160, 0.58);
+		background: rgba(16, 24, 37, 0.9);
+		color: #dbe6f8;
+		border-radius: 0.55rem;
+		padding: 0.62rem 0.7rem;
+		font-size: 0.8rem;
+		line-height: 1.4;
+		resize: vertical;
+	}
+
+	.snippet-message-input:focus {
+		outline: none;
+		border-color: rgba(117, 166, 248, 0.78);
+		box-shadow: 0 0 0 2px rgba(117, 166, 248, 0.25);
+	}
+
+	.snippet-composer-footer {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.5rem;
+	}
+
+	.snippet-button {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		border-radius: 0.45rem;
+		padding: 0.38rem 0.78rem;
+		font-size: 0.74rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.snippet-button.secondary {
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+	}
+
+	.snippet-button.primary {
+		border-color: rgba(72, 187, 120, 0.76);
+		background: rgba(17, 112, 80, 0.56);
+		color: #ecfff4;
+	}
+
+	.snippet-button:hover:not(:disabled) {
+		border-color: rgba(139, 168, 211, 0.72);
+		background: rgba(38, 61, 96, 0.92);
+	}
+
+	.snippet-button.primary:hover:not(:disabled) {
+		border-color: rgba(104, 211, 145, 0.82);
+		background: rgba(20, 140, 92, 0.62);
+	}
+
+	.snippet-button:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
 	.terminal-panel {
 		position: relative;
 		flex: 0 0 auto;
@@ -4196,6 +4908,19 @@
 		font-size: 0.66rem;
 		font-weight: 600;
 		cursor: pointer;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.28rem;
+	}
+
+	.terminal-action-button svg {
+		width: 0.72rem;
+		height: 0.72rem;
+		stroke: currentColor;
+		stroke-width: 1.9;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.terminal-action-button:disabled {
@@ -4216,6 +4941,11 @@
 	.terminal-action-run {
 		border-color: rgba(72, 187, 120, 0.7);
 		background: rgba(16, 111, 78, 0.42);
+	}
+
+	.terminal-action-snippet {
+		border-color: rgba(104, 211, 145, 0.72);
+		background: rgba(18, 116, 84, 0.45);
 	}
 
 	.terminal-action-stop {

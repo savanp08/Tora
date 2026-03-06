@@ -104,7 +104,6 @@ func SetTrustedProxies(entries []string) {
 	trustedProxiesMu.Lock()
 	trustedProxyMatchers = nextMatchers
 	trustedProxiesMu.Unlock()
-	log.Printf("[ws] trusted proxies configured count=%d", len(nextMatchers))
 }
 
 type Client struct {

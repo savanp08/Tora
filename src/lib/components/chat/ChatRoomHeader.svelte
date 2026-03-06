@@ -30,6 +30,7 @@
 		renameRoom: void;
 		toggleBreakSelectionMode: void;
 		togglePinSelectionMode: void;
+		toggleReplySelectionMode: void;
 		toggleEditSelectionMode: void;
 		toggleDeleteSelectionMode: void;
 		markRead: void;
@@ -75,6 +76,7 @@
 			| 'renameRoom'
 			| 'toggleBreakSelectionMode'
 			| 'togglePinSelectionMode'
+			| 'toggleReplySelectionMode'
 			| 'toggleEditSelectionMode'
 			| 'toggleDeleteSelectionMode'
 			| 'markRead'
@@ -308,6 +310,12 @@
 					on:click|stopPropagation={() => closeMenuThen('togglePinSelectionMode')}
 				>
 					{messageActionMode === 'pin' ? 'Cancel Pin Mode' : '📌 Pin Message'}
+				</button>
+				<button
+					type="button"
+					on:click|stopPropagation={() => closeMenuThen('toggleReplySelectionMode')}
+				>
+					{messageActionMode === 'reply' ? 'Cancel Reply Mode' : 'Reply to Message'}
 				</button>
 				<button
 					type="button"

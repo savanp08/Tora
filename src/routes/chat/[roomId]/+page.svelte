@@ -151,6 +151,7 @@
 	const DISCUSSION_MAX_REPLY_DEPTH = 4;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const PROTECTED_ROOM_PREVIEW_TEXT = 'Protected room. Join with password to preview messages.';
+	const CANVAS_SNIPPET_PAYLOAD_KIND = 'canvas_snippet_v1';
 	const LEGACY_ROOM_TIME_QUERY_KEYS = [
 		'createdAt',
 		'expiresAt',
@@ -2661,6 +2662,64 @@
 		});
 	}
 
+	async function onCanvasSnippetSend(
+		event: CustomEvent<{ snippet: string; message: string; fileName: string }>
+	) {
+		if (!roomId || !isMember) {
+			showErrorToast('Join room before sending messages');
+			return;
+		}
+		const snippet = (event.detail.snippet || '').replace(/\r\n/g, '\n').trim();
+		if (!snippet) {
+			return;
+		}
+		const content = (event.detail.message || '').trim();
+		if (getUTF8ByteLength(content) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Message exceeds the maximum length');
+			return;
+		}
+		const fileName = (event.detail.fileName || '').trim();
+		const serializedSnippetPayload = JSON.stringify({
+			kind: CANVAS_SNIPPET_PAYLOAD_KIND,
+			snippet,
+			message: content,
+			fileName
+		});
+		if (getUTF8ByteLength(serializedSnippetPayload) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Snippet payload exceeds the maximum message size');
+			return;
+		}
+		const encryptedSnippetPayload = await encryptMessageContent(serializedSnippetPayload);
+		if (getUTF8ByteLength(encryptedSnippetPayload) > MESSAGE_TEXT_MAX_BYTES) {
+			showErrorToast('Snippet is too large after encryption. Reduce snippet or message length.');
+			return;
+		}
+		const outgoing: ChatMessage = {
+			id: createMessageId(roomId),
+			roomId,
+			senderId: currentUserId,
+			senderName: currentUsername,
+			content: serializedSnippetPayload,
+			type: 'text',
+			mediaUrl: '',
+			mediaType: '',
+			fileName,
+			replyToMessageId: '',
+			replyToSnippet: '',
+			createdAt: Date.now(),
+			pending: true
+		};
+		upsertMessage(roomId, outgoing, false);
+		sendSocketPayload(
+			toWireMessage({
+				...outgoing,
+				content: encryptedSnippetPayload
+			})
+		);
+		applyReadProgress(roomId, outgoing.id);
+		sendTypingStop();
+	}
+
 	async function sendMessage(payload?: ComposerMediaPayload) {
 		if (!roomId || !isMember) {
 			showErrorToast('Join room before sending messages');
@@ -3646,6 +3705,11 @@
 		setMessageActionMode(nextMode);
 	}
 
+	function toggleReplySelectionMode() {
+		const nextMode: MessageActionMode = messageActionMode === 'reply' ? 'none' : 'reply';
+		setMessageActionMode(nextMode);
+	}
+
 	function toggleEditSelectionMode() {
 		const nextMode: MessageActionMode = messageActionMode === 'edit' ? 'none' : 'edit';
 		setMessageActionMode(nextMode);
@@ -4107,6 +4171,24 @@
 			return;
 		}
 
+		if (messageActionMode === 'reply') {
+			const loweredType = (message.type || '').toLowerCase();
+			if (
+				loweredType === 'deleted' ||
+				(message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER
+			) {
+				showErrorToast('Deleted messages cannot be replied to');
+				return;
+			}
+			activeReply = {
+				messageId: message.id,
+				senderName: normalizeUsernameValue(message.senderName) || 'User',
+				content: getMessagePreviewText(message).trim()
+			};
+			setMessageActionMode('none');
+			return;
+		}
+
 		if (messageActionMode === 'edit' || messageActionMode === 'delete') {
 			if (normalizeIdentifier(message.senderId) !== normalizeIdentifier(currentUserId)) {
 				showErrorToast('You can only edit/delete your own messages');
@@ -4140,6 +4222,91 @@
 			}
 			selectedActionMessageId = message.id;
 			return;
+		}
+	}
+
+	async function onMessageContextAction(
+		event: CustomEvent<{
+			messageId: string;
+			action: 'reply' | 'edit' | 'delete' | 'pin' | 'branch';
+		}>
+	) {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail.messageId);
+		if (!messageId) {
+			return;
+		}
+		const message = (messagesByRoom[roomId] ?? []).find((entry) => entry.id === messageId);
+		if (!message) {
+			return;
+		}
+		const action = event.detail.action;
+		const loweredType = (message.type || '').toLowerCase();
+		const isDeleted =
+			loweredType === 'deleted' || (message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER;
+		const isOwner = normalizeIdentifier(message.senderId) === normalizeIdentifier(currentUserId);
+
+		if (isDeleted) {
+			showErrorToast(
+				action === 'reply'
+					? 'Deleted messages cannot be replied to'
+					: 'Deleted messages cannot be selected'
+			);
+			return;
+		}
+
+		if (action === 'reply') {
+			activeReply = {
+				messageId: message.id,
+				senderName: normalizeUsernameValue(message.senderName) || 'User',
+				content: getMessagePreviewText(message).trim()
+			};
+			return;
+		}
+
+		if (action === 'edit' || action === 'delete') {
+			if (!isOwner) {
+				showErrorToast('You can only edit/delete your own messages');
+				return;
+			}
+		}
+
+		if (action === 'edit') {
+			if (loweredType === 'task') {
+				showErrorToast('Use the checklist inside the task card to update tasks');
+				return;
+			}
+			await onEditMessageRequest({
+				detail: {
+					messageId: message.id,
+					content: message.content
+				}
+			} as CustomEvent<{ messageId: string; content: string }>);
+			return;
+		}
+
+		if (action === 'delete') {
+			await onDeleteMessageRequest({
+				detail: {
+					messageId: message.id
+				}
+			} as CustomEvent<{ messageId: string }>);
+			return;
+		}
+
+		if (action === 'pin') {
+			const pinned = await ensureMessagePinned(message);
+			if (!pinned) {
+				return;
+			}
+			openDiscussionForMessage(message.id);
+			return;
+		}
+
+		if (action === 'branch') {
+			await createBreakRoom(message);
 		}
 	}
 
@@ -4383,6 +4550,7 @@
 					on:renameRoom={() => void renameRoom(roomId)}
 					on:toggleBreakSelectionMode={toggleBreakSelectionMode}
 					on:togglePinSelectionMode={togglePinSelectionMode}
+					on:toggleReplySelectionMode={toggleReplySelectionMode}
 					on:toggleEditSelectionMode={toggleEditSelectionMode}
 					on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
 					on:markRead={() => markRoomAsRead(roomId)}
@@ -4609,8 +4777,7 @@
 							on:messageSelect={onMessageSelected}
 							on:openPinnedDiscussion={onPinnedDiscussionOpen}
 							on:reply={onReplyRequest}
-							on:editMessage={onEditMessageRequest}
-							on:deleteMessage={onDeleteMessageRequest}
+							on:messageContextAction={onMessageContextAction}
 							on:editSelected={onSelectedMessageEdit}
 							on:deleteSelected={onSelectedMessageDelete}
 							on:requestOlder={onRequestOlderHistory}
@@ -4697,7 +4864,7 @@
 					</div>
 				</header>
 				<div class="canvas-pane-body">
-					<CodeCanvas {roomId} currentUser={canvasUser} />
+					<CodeCanvas {roomId} currentUser={canvasUser} on:sendSnippet={onCanvasSnippetSend} />
 				</div>
 			</section>
 		{/if}
