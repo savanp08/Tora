@@ -564,14 +564,18 @@
 						placeholder="Task name"
 						on:keydown={onTaskDraftItemKeyDown}
 					/>
-					<button type="button" class="add-row-action confirm" on:click={addTaskDraftItem}>Add</button>
-					<button
-						type="button"
-						class="add-row-action"
-						on:click={cancelTaskDraftAddInput}
-					>
-						Cancel
-					</button>
+					<div class="task-draft-add-actions">
+						<button type="button" class="add-row-action confirm" on:click={addTaskDraftItem}>
+							Add
+						</button>
+						<button
+							type="button"
+							class="add-row-action"
+							on:click={cancelTaskDraftAddInput}
+						>
+							Cancel
+						</button>
+					</div>
 				</div>
 			{:else}
 				<button type="button" class="task-draft-add-trigger" on:click={openTaskDraftAddInput}>
@@ -1056,9 +1060,16 @@
 
 	.task-draft-add-row {
 		display: grid;
-		grid-template-columns: 1rem minmax(0, 1fr) auto auto;
+		grid-template-columns: 1rem minmax(0, 1fr) auto;
 		gap: 0.34rem;
 		align-items: center;
+	}
+
+	.task-draft-add-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.34rem;
+		flex-wrap: wrap;
 	}
 
 	.task-draft-add-row input[type='checkbox'] {
@@ -1086,6 +1097,8 @@
 		font-size: 0.73rem;
 		font-weight: 700;
 		cursor: pointer;
+		white-space: nowrap;
+		min-width: 3.5rem;
 	}
 
 	.add-row-action.confirm {
@@ -1154,7 +1167,8 @@
 			grid-template-columns: 1rem minmax(0, 1fr);
 		}
 
-		.add-row-action {
+		.task-draft-add-actions {
+			grid-column: 1 / -1;
 			justify-self: start;
 		}
 	}

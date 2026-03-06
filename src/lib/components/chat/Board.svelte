@@ -16,7 +16,7 @@
 	import { inferMediaMessageType, uploadToR2, type MediaMessageType } from '$lib/utils/media';
 	import { globalMessages, sendSocketPayload } from '$lib/ws';
 	import imageCompression from 'browser-image-compression';
-	import { onDestroy, onMount } from 'svelte';
+	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
@@ -154,6 +154,8 @@
 	export let canModerateBoard = false;
 	export let currentUserId = '';
 	export let currentUsername = '';
+
+	const dispatch = createEventDispatcher<{ close: void }>();
 
 	let boardContainerEl: HTMLDivElement | null = null;
 	let boardToolbarEl: HTMLDivElement | null = null;
@@ -299,6 +301,15 @@
 	$: if (boardReady && normalizedRoomId && normalizedRoomId !== initializedRoomId) {
 		void loadBoard(normalizedRoomId);
 	}
+	$: openToolbarHintText = showInsertMenu
+		? 'Insert menu is open. Choose a shape.'
+		: showColorMenu
+			? 'Color menu is open. Pick an ink color.'
+			: showWidthMenu
+				? 'Brush width menu is open. Choose a stroke size.'
+				: showBoardDetails
+					? 'Board details are open.'
+					: '';
 	$: canModerateBoardActions = canEdit;
 	$: canManageAllBoardElements = canEdit && canModerateBoard;
 	$: isWidthControlVisible = activeTool === 'draw' || activeTool === 'eraser';
@@ -573,44 +584,19 @@
 			isToolbarExpanded = false;
 			return;
 		}
-		const toolbarStyles = window.getComputedStyle(boardToolbarEl);
-		const paddingLeft = parseFloat(toolbarStyles.paddingLeft || '0') || 0;
-		const paddingRight = parseFloat(toolbarStyles.paddingRight || '0') || 0;
-		const toolbarGap = parseFloat(toolbarStyles.columnGap || toolbarStyles.gap || '0') || 0;
-		const availableWidth = Math.max(0, boardToolbarEl.clientWidth - paddingLeft - paddingRight);
-		const primaryWidth = measureToolbarGroupWidth(toolbarPrimaryEl, '.mobile-expand-btn');
-		const secondaryWidth = measureToolbarGroupWidth(toolbarSecondaryEl);
-		const requiredWidth = primaryWidth + secondaryWidth + toolbarGap;
-		const needsMenu = requiredWidth > availableWidth + 1;
-		shouldUseToolbarMenu = needsMenu;
-		if (!needsMenu) {
-			isToolbarExpanded = false;
-		}
+		shouldUseToolbarMenu = true;
 	}
 
-	function measureToolbarGroupWidth(groupEl: HTMLDivElement | null, omitSelector = '') {
-		if (!browser || typeof document === 'undefined' || !groupEl) {
-			return 0;
-		}
-		const clone = groupEl.cloneNode(true) as HTMLDivElement;
-		if (omitSelector) {
-			clone.querySelectorAll(omitSelector).forEach((node) => {
-				node.remove();
-			});
-		}
-		clone.style.position = 'absolute';
-		clone.style.visibility = 'hidden';
-		clone.style.pointerEvents = 'none';
-		clone.style.left = '-10000px';
-		clone.style.top = '-10000px';
-		clone.style.display = 'inline-flex';
-		clone.style.flexWrap = 'nowrap';
-		clone.style.width = 'max-content';
-		clone.style.maxWidth = 'none';
-		document.body.appendChild(clone);
-		const width = clone.getBoundingClientRect().width;
-		clone.remove();
-		return Number.isFinite(width) ? width : 0;
+	function closeBoardView() {
+		cancelPendingOperation(false);
+		showInsertMenu = false;
+		showWidthMenu = false;
+		showColorMenu = false;
+		showBoardDetails = false;
+		contextMenuOpen = false;
+		messagePickerOpen = false;
+		isToolbarExpanded = false;
+		dispatch('close');
 	}
 
 	async function initializeBoard() {
@@ -4483,7 +4469,19 @@
 
 <section class="board-root">
 	<div class="board-toolbar" bind:this={boardToolbarEl}>
+		{#if openToolbarHintText}
+			<div class="toolbar-open-hint" role="status" aria-live="polite">{openToolbarHintText}</div>
+		{/if}
 		<div class="toolbar-primary-group" bind:this={toolbarPrimaryEl}>
+			<button
+				type="button"
+				class="tool-icon-button board-close-button"
+				on:click={closeBoardView}
+				title="Close board"
+				aria-label="Close board"
+			>
+				<span aria-hidden="true">×</span>
+			</button>
 			<button
 				type="button"
 				class="tool-icon-button"
@@ -4516,7 +4514,7 @@
 					on:click={toggleColorMenu}
 					aria-haspopup="true"
 					aria-expanded={showColorMenu}
-					title="Ink color"
+					title={showColorMenu ? undefined : 'Ink color'}
 					disabled={!canEdit}
 				>
 					<span class="color-swatch" style={`background:${boardInkColor};`}></span>
@@ -4532,7 +4530,7 @@
 									class:active={boardInkColor === presetColor}
 									style={`--swatch:${presetColor};`}
 									on:click={() => setBoardInkColor(presetColor)}
-									title={presetColor}
+									aria-label={`Set ink color ${presetColor}`}
 								></button>
 							{/each}
 						</div>
@@ -4551,16 +4549,86 @@
 					</div>
 				{/if}
 			</div>
+			<button
+				type="button"
+				class="tool-icon-button"
+				on:click={undo}
+				disabled={!canModerateBoardActions || !canUndoLocalAction}
+				title="Undo"
+			>
+				<svg
+					class="tool-icon"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+				>
+					<path d="M3 7v6h6" />
+					<path d="M3 13a9 9 0 0 1 15-6.7L21 9" />
+				</svg>
+			</button>
+			{#if shouldUseToolbarMenu}
+				<button
+					type="button"
+					class="tool-icon-button mobile-expand-btn"
+					class:active={isToolbarExpanded}
+					on:click={() => (isToolbarExpanded = !isToolbarExpanded)}
+					title={isToolbarExpanded ? 'Hide extra tools' : 'Show extra tools'}
+					aria-label={isToolbarExpanded ? 'Hide extra tools' : 'Show extra tools'}
+					aria-expanded={isToolbarExpanded}
+				>
+					<svg
+						class="tool-icon"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2"
+					>
+						{#if isToolbarExpanded}
+							<path d="m6 14 6-6 6 6" />
+						{:else}
+							<path d="m6 10 6 6 6-6" />
+						{/if}
+					</svg>
+				</button>
+			{/if}
+		</div>
+
+		<div
+			class="toolbar-secondary-group"
+			class:expanded={isToolbarExpanded}
+			class:menu-mode={shouldUseToolbarMenu}
+			bind:this={toolbarSecondaryEl}
+		>
+			<button
+				type="button"
+				class="tool-icon-button"
+				on:click={redo}
+				disabled={!canModerateBoardActions || !canRedoLocalAction}
+				title="Redo"
+			>
+				<svg
+					class="tool-icon"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+				>
+					<path d="M21 7v6h-6" />
+					<path d="M21 13A9 9 0 0 0 6 6.3L3 9" />
+				</svg>
+			</button>
+
 			{#if isWidthControlVisible}
 				<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
 					<button
 						type="button"
-						class="line-width-toggle"
-						on:click={toggleWidthMenu}
-						aria-haspopup="true"
-						aria-expanded={showWidthMenu}
-						title="Brush width"
-					>
+							class="line-width-toggle"
+							on:click={toggleWidthMenu}
+							aria-haspopup="true"
+							aria-expanded={showWidthMenu}
+							title={showWidthMenu ? undefined : 'Brush width'}
+						>
 						<svg class="brush-width-icon" viewBox="0 0 24 24" aria-hidden="true">
 							<line
 								x1="4"
@@ -4600,7 +4668,7 @@
 					on:click={toggleInsertMenu}
 					aria-haspopup="true"
 					aria-expanded={showInsertMenu}
-					title="Insert shape"
+					title={showInsertMenu ? undefined : 'Insert shape'}
 				>
 					<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 						<path d="M11 5h2v14h-2z" />
@@ -4614,7 +4682,7 @@
 							type="button"
 							class="shape-icon-button"
 							on:click={() => beginShapeInsert('line')}
-							title="Line"
+							aria-label="Insert line"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<line x1="4" y1="18" x2="20" y2="6" stroke="currentColor" stroke-width="2.3" />
@@ -4624,7 +4692,7 @@
 							type="button"
 							class="shape-icon-button"
 							on:click={() => beginShapeInsert('arrow')}
-							title="Arrow"
+							aria-label="Insert arrow"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M4 12h13" stroke="currentColor" stroke-width="2.3" fill="none" />
@@ -4635,7 +4703,7 @@
 							type="button"
 							class="shape-icon-button"
 							on:click={() => beginShapeInsert('rect')}
-							title="Rectangle"
+							aria-label="Insert rectangle"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<rect
@@ -4654,7 +4722,7 @@
 							type="button"
 							class="shape-icon-button"
 							on:click={() => beginShapeInsert('ellipse')}
-							title="Ellipse"
+							aria-label="Insert ellipse"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<ellipse
@@ -4672,7 +4740,7 @@
 							type="button"
 							class="shape-icon-button"
 							on:click={() => beginShapeInsert('circle')}
-							title="Circle"
+							aria-label="Insert circle"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<circle
@@ -4689,7 +4757,7 @@
 							type="button"
 							class="shape-icon-button"
 							on:click={() => beginShapeInsert('triangle')}
-							title="Triangle"
+							aria-label="Insert triangle"
 						>
 							<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M12 5.5 19 18H5z" fill="none" stroke="currentColor" stroke-width="2" />
@@ -4699,81 +4767,6 @@
 				{/if}
 			</div>
 
-			<div class="divider"></div>
-
-			<button
-				type="button"
-				class="tool-icon-button"
-				on:click={undo}
-				disabled={!canModerateBoardActions || !canUndoLocalAction}
-				title="Undo"
-			>
-				<svg
-					class="tool-icon"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-				>
-					<path d="M3 7v6h6" />
-					<path d="M3 13a9 9 0 0 1 15-6.7L21 9" />
-				</svg>
-			</button>
-			<button
-				type="button"
-				class="tool-icon-button"
-				on:click={redo}
-				disabled={!canModerateBoardActions || !canRedoLocalAction}
-				title="Redo"
-			>
-				<svg
-					class="tool-icon"
-					viewBox="0 0 24 24"
-					fill="none"
-					stroke="currentColor"
-					stroke-width="2"
-				>
-					<path d="M21 7v6h-6" />
-					<path d="M21 13A9 9 0 0 0 6 6.3L3 9" />
-				</svg>
-			</button>
-			<button
-				type="button"
-				class="cancel-operation-button"
-				disabled={!canCancelCurrentOperation}
-				on:click={cancelCurrentOperation}
-				title="Cancel"
-			>
-				×
-			</button>
-			{#if shouldUseToolbarMenu}
-				<button
-					type="button"
-					class="tool-icon-button mobile-expand-btn"
-					class:active={isToolbarExpanded}
-					on:click={() => (isToolbarExpanded = !isToolbarExpanded)}
-					title="More tools"
-					aria-label="More tools"
-				>
-					<svg
-						class="tool-icon"
-						viewBox="0 0 24 24"
-						fill="none"
-						stroke="currentColor"
-						stroke-width="2"
-					>
-						<path d="M4 6h16M4 12h16M4 18h16" />
-					</svg>
-				</button>
-			{/if}
-		</div>
-
-		<div
-			class="toolbar-secondary-group"
-			class:expanded={isToolbarExpanded}
-			class:menu-mode={shouldUseToolbarMenu}
-			bind:this={toolbarSecondaryEl}
-		>
 			<button
 				type="button"
 				class="tool-icon-button"
@@ -4803,16 +4796,25 @@
 				</svg>
 				<span>Clear</span>
 			</button>
+			<button
+				type="button"
+				class="cancel-operation-button"
+				disabled={!canCancelCurrentOperation}
+				on:click={cancelCurrentOperation}
+				title="Cancel current operation"
+			>
+				×
+			</button>
 
 			<div class="board-details-wrap" bind:this={boardDetailsWrapEl}>
 				<button
 					type="button"
-					class="details-toggle-button"
-					class:active={showBoardDetails}
-					on:click={toggleBoardDetails}
-					title="Board details"
-					aria-label="Board details"
-				>
+						class="details-toggle-button"
+						class:active={showBoardDetails}
+						on:click={toggleBoardDetails}
+						title={showBoardDetails ? undefined : 'Board details'}
+						aria-label="Board details"
+					>
 					i
 				</button>
 				{#if showBoardDetails}
@@ -5041,6 +5043,22 @@
 		background: var(--bg-secondary);
 	}
 
+	.toolbar-open-hint {
+		flex: 1 0 100%;
+		order: -1;
+		display: inline-flex;
+		align-items: center;
+		padding: 0.34rem 0.5rem;
+		border-radius: 8px;
+		border: 1px solid color-mix(in srgb, #38bdf8 42%, transparent);
+		background: color-mix(in srgb, var(--bg-secondary) 82%, #38bdf8 18%);
+		color: var(--text-main);
+		font-size: 0.72rem;
+		font-weight: 600;
+		line-height: 1.25;
+		pointer-events: none;
+	}
+
 	.toolbar-primary-group {
 		display: flex;
 		align-items: center;
@@ -5055,13 +5073,6 @@
 		gap: 0.45rem;
 		flex-wrap: wrap;
 		min-width: 0;
-	}
-
-	.divider {
-		width: 1px;
-		height: 24px;
-		background: var(--border-subtle);
-		margin: 0 0.2rem;
 	}
 
 	.mobile-expand-btn {
@@ -5109,6 +5120,24 @@
 		width: 34px;
 		height: 34px;
 		padding: 0;
+	}
+
+	.board-close-button {
+		border-color: #f87171 !important;
+		background: rgba(239, 68, 68, 0.9) !important;
+		color: #fff !important;
+		font-size: 1.05rem;
+		font-weight: 800;
+	}
+
+	.board-close-button:hover {
+		background: rgba(220, 38, 38, 0.98) !important;
+	}
+
+	.mobile-expand-btn.active {
+		border-color: #38bdf8;
+		background: rgba(56, 189, 248, 0.2);
+		color: #bae6fd;
 	}
 
 	.clear-tool-button {
@@ -5231,7 +5260,7 @@
 		gap: 0.35rem;
 	}
 
-	.color-preset-button {
+	.board-toolbar .color-preset-grid .color-preset-button {
 		width: 28px;
 		height: 28px;
 		min-width: 28px;
@@ -5240,9 +5269,17 @@
 		border-radius: 6px;
 		background: var(--swatch, #111827);
 		border: 1px solid rgba(148, 163, 184, 0.75);
+		color: transparent;
 	}
 
-	.color-preset-button.active {
+	.board-toolbar .color-preset-grid .color-preset-button:hover:not(:disabled),
+	.board-toolbar .color-preset-grid .color-preset-button:focus-visible {
+		background: var(--swatch, #111827);
+	}
+
+	.board-toolbar .color-preset-grid .color-preset-button.active {
+		background: var(--swatch, #111827);
+		border-color: rgba(148, 163, 184, 0.92);
 		outline: 2px solid #38bdf8;
 		outline-offset: 1px;
 	}
@@ -5798,30 +5835,42 @@
 
 	@media (max-width: 768px) {
 		.board-toolbar {
-			flex-direction: row;
-			align-items: center;
-			flex-wrap: wrap;
+			flex-direction: column;
+			align-items: stretch;
 			gap: 0.3rem;
 			padding: 0.42rem;
+			width: 88vw;
+		}
+
+		.toolbar-open-hint {
+			padding: 0.28rem 0.44rem;
+			font-size: 0.68rem;
 		}
 
 		.toolbar-primary-group {
-			width: auto;
-			flex: 1 1 auto;
+			width: 100%;
+			flex: 0 0 auto;
 			justify-content: flex-start;
 			gap: 0.3rem;
 			flex-wrap: nowrap;
+			overflow-x: auto;
+			scrollbar-width: none;
+		}
+
+		.toolbar-primary-group::-webkit-scrollbar {
+			display: none;
 		}
 
 		.mobile-expand-btn {
 			display: inline-flex;
+			margin-left: auto;
 		}
 
 		.toolbar-secondary-group {
 			display: flex;
-			width: auto;
+			width: 100%;
 			gap: 0.3rem;
-			flex-wrap: nowrap;
+			flex-wrap: wrap;
 		}
 
 		.toolbar-secondary-group.menu-mode {

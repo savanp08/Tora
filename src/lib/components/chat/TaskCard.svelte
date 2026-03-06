@@ -188,18 +188,22 @@
 			{/each}
 		</ul>
 
-		{#if showAddTaskControl && canEditTasks && showAddInput}
-			<div class="add-task-input-row">
-				<input
-					type="text"
-					bind:value={newTaskText}
-					placeholder="Task name"
-					on:keydown={onAddInputKeyDown}
-				/>
-				<button type="button" on:click|stopPropagation={submitAddTask}>Add</button>
-				<button type="button" class="ghost" on:click|stopPropagation={cancelAddTask}>Cancel</button>
-			</div>
-		{/if}
+			{#if showAddTaskControl && canEditTasks && showAddInput}
+				<div class="add-task-input-row">
+					<input
+						type="text"
+						bind:value={newTaskText}
+						placeholder="Task name"
+						on:keydown={onAddInputKeyDown}
+					/>
+					<div class="add-task-actions">
+						<button type="button" on:click|stopPropagation={submitAddTask}>Add</button>
+						<button type="button" class="ghost" on:click|stopPropagation={cancelAddTask}>
+							Cancel
+						</button>
+					</div>
+				</div>
+			{/if}
 
 		{#if remainingCount > 0}
 			<button type="button" class="show-more" on:click|stopPropagation={showMore}>
@@ -418,13 +422,20 @@
 
 	.add-task-input-row {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto auto;
+		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 0.38rem;
 		align-items: center;
 		padding: 0.5rem 0.56rem;
 		border: 1px dashed #2f2f35;
 		border-radius: 10px;
 		background: rgba(255, 255, 255, 0.01);
+	}
+
+	.add-task-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.38rem;
+		flex-wrap: wrap;
 	}
 
 	.add-task-input-row input[type='text'] {
@@ -446,9 +457,11 @@
 		font-size: 0.72rem;
 		font-weight: 600;
 		cursor: pointer;
+		white-space: nowrap;
+		min-width: 3.5rem;
 	}
 
-	.add-task-input-row button:first-of-type {
+	.add-task-actions button:first-child {
 		border-color: #10b981;
 		color: #10b981;
 	}
@@ -486,7 +499,7 @@
 			grid-template-columns: 1fr;
 		}
 
-		.add-task-input-row button {
+		.add-task-actions {
 			justify-self: start;
 		}
 	}

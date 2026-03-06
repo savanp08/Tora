@@ -2459,11 +2459,13 @@
 	.bubble.call-log-bubble {
 		background: #e8ebf0;
 		border-color: #d4dae4;
+		color: #1f2937;
 	}
 
 	.messages-shell.theme-dark .bubble.call-log-bubble {
 		background: #1c1d22;
 		border-color: #30313a;
+		color: #e5e7eb;
 	}
 
 	.call-log-entry {
@@ -2498,11 +2500,21 @@
 	.call-log-title {
 		font-weight: 600;
 		font-size: 0.78rem;
+		color: #1f2937;
 	}
 
 	.call-log-status {
 		font-size: 0.74rem;
 		opacity: 0.85;
+		color: #4b5563;
+	}
+
+	.messages-shell.theme-dark .call-log-title {
+		color: #e5e7eb;
+	}
+
+	.messages-shell.theme-dark .call-log-status {
+		color: #cbd5e1;
 	}
 
 	@media (max-width: 900px) {

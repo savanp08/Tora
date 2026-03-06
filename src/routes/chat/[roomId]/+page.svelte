@@ -166,8 +166,8 @@
 		color: string;
 	};
 
-	type WorkspaceTool = 'board' | 'canvas';
 	type CallStreamSlot = { userId: string; stream: MediaStream };
+	type CallParticipantEntry = { userId: string; name: string; isLocal: boolean };
 
 	const CALL_SIGNAL_TYPES = new Set(['call_invite', 'webrtc_offer', 'webrtc_answer', 'webrtc_ice']);
 	const CALL_MAX_PARTICIPANTS = 5;
@@ -211,7 +211,6 @@
 	let showBoardView = false;
 	let isCanvasOpen = false;
 	let isCanvasFullscreen = false;
-	let lastWorkspaceTool: WorkspaceTool = 'board';
 	let canvasUser: CanvasPresenceUser = { id: 'guest', name: 'Guest', color: '#3b82f6' };
 	let themePreference: ThemePreference = 'system';
 	let removeSystemThemeListener: (() => void) | null = null;
@@ -272,8 +271,10 @@
 	let callType: CallType = 'audio';
 	let localCallStream: MediaStream | null = null;
 	let remoteCallStreams: CallStreamSlot[] = [];
+	let callParticipants: CallParticipantEntry[] = [];
 	let isMuted = false;
 	let isCameraEnabled = true;
+	let isCallMinimized = false;
 	let callStartedAtMs = 0;
 	let callDurationLabel = '00:00';
 	let callDurationTicker: ReturnType<typeof setInterval> | null = null;
@@ -383,6 +384,7 @@
 		onlineByRoom[roomId] ?? [],
 		currentUserId
 	);
+	$: callParticipants = buildCallParticipantEntries();
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: canModerateBoard = isMember && !isRoomExpired && isActiveRoomAdmin;
@@ -1022,8 +1024,10 @@
 		incomingCall = null;
 		localCallStream = null;
 		remoteCallStreams = [];
+		callParticipants = [];
 		isMuted = false;
 		isCameraEnabled = false;
+		isCallMinimized = false;
 		callStartedAtMs = 0;
 		callDurationLabel = '00:00';
 		stopCallDurationTicker();
@@ -1101,6 +1105,61 @@
 		);
 	}
 
+	function buildCallParticipantEntries() {
+		const seen = new Set<string>();
+		const entries: CallParticipantEntry[] = [];
+		const localUserId = normalizeIdentifier(currentUserId);
+		if (localCallStream && localUserId) {
+			entries.push({
+				userId: localUserId,
+				name: resolveCallUserName(localUserId),
+				isLocal: true
+			});
+			seen.add(localUserId);
+		}
+		for (const remote of remoteCallStreams) {
+			const remoteUserId = normalizeIdentifier(remote.userId);
+			if (!remoteUserId || seen.has(remoteUserId)) {
+				continue;
+			}
+			entries.push({
+				userId: remoteUserId,
+				name: resolveCallUserName(remoteUserId),
+				isLocal: false
+			});
+			seen.add(remoteUserId);
+		}
+		return entries.slice(0, CALL_MAX_PARTICIPANTS);
+	}
+
+	function getCallNameInitials(name: string) {
+		const tokens = name
+			.trim()
+			.split(/\s+/)
+			.filter(Boolean);
+		if (tokens.length === 0) {
+			return 'U';
+		}
+		const first = tokens[0]?.[0] ?? '';
+		const second = tokens.length > 1 ? tokens[1]?.[0] ?? '' : '';
+		const initials = `${first}${second}`.toUpperCase();
+		return initials || 'U';
+	}
+
+	function minimizeActiveCall() {
+		if (!activeCall) {
+			return;
+		}
+		isCallMinimized = true;
+	}
+
+	function restoreMinimizedCall() {
+		if (!activeCall) {
+			return;
+		}
+		isCallMinimized = false;
+	}
+
 	async function sendCallLogMessage(statusText: string, mode: CallType) {
 		if (!roomId || !isMember) {
 			return;
@@ -1137,6 +1196,7 @@
 			await webrtcManager.startLocalStream(mode === 'video');
 			callType = mode;
 			activeCall = true;
+			isCallMinimized = false;
 			isRinging = false;
 			incomingCall = null;
 			stopRingtone();
@@ -1171,6 +1231,7 @@
 			await webrtcManager.startLocalStream(incomingCall.callType === 'video');
 			callType = incomingCall.callType;
 			activeCall = true;
+			isCallMinimized = false;
 			isRinging = false;
 			stopRingtone();
 			callStartedAtMs = Date.now();
@@ -1258,6 +1319,7 @@
 			syncCallStreamsFromManager();
 			if (kind !== 'call_invite') {
 				activeCall = true;
+				isCallMinimized = false;
 				if (!callStartedAtMs) {
 					callStartedAtMs = Date.now();
 					startCallDurationTicker();
@@ -1797,7 +1859,6 @@
 	}
 
 	function toggleBoardView() {
-		lastWorkspaceTool = 'board';
 		showBoardView = !showBoardView;
 		if (showBoardView) {
 			setMessageActionMode('none');
@@ -1807,7 +1868,6 @@
 	}
 
 	function toggleCanvas() {
-		lastWorkspaceTool = 'canvas';
 		if (isCanvasOpen) {
 			isCanvasOpen = false;
 			isCanvasFullscreen = false;
@@ -1818,19 +1878,10 @@
 	}
 
 	function toggleCanvasFullscreen() {
-		lastWorkspaceTool = 'canvas';
 		if (!isCanvasOpen) {
 			isCanvasOpen = true;
 		}
 		isCanvasFullscreen = !isCanvasFullscreen;
-	}
-
-	function activateLastWorkspaceTool() {
-		if (lastWorkspaceTool === 'canvas') {
-			toggleCanvas();
-			return;
-		}
-		toggleBoardView();
 	}
 
 	function exitCanvasFullscreen() {
@@ -4317,13 +4368,15 @@
 					{showRoomSearch}
 					isBoardView={showBoardView}
 					{isCanvasOpen}
-					{lastWorkspaceTool}
+					hasMinimizedCall={activeCall && isCallMinimized}
+					minimizedCallLabel={callDurationLabel}
+					minimizedCallType={callType}
 					remainingLabel={activeRemainingLabel}
 					on:showMobileList={showMobileRoomList}
 					on:openRoomDetails={openRoomDetails}
 					on:startAudioCall={() => void startOutgoingCall('audio')}
 					on:startVideoCall={() => void startOutgoingCall('video')}
-					on:activateLastWorkspaceTool={activateLastWorkspaceTool}
+					on:restoreMinimizedCall={restoreMinimizedCall}
 					on:toggleBoardView={toggleBoardView}
 					on:toggleCanvas={toggleCanvas}
 					on:toggleRoomSearch={toggleRoomSearch}
@@ -4358,33 +4411,82 @@
 				{#if isRinging && incomingCall}
 					<div class="call-incoming-overlay" role="dialog" aria-modal="true">
 						<div class="call-incoming-card">
-							<div class="call-incoming-title">
-								Incoming {incomingCall.callType === 'video' ? 'Video' : 'Audio'} Call
-							</div>
-							<div class="call-incoming-subtitle">
-								from {resolveCallUserName(incomingCall.fromUserId)}
+							<div class="call-incoming-head">
+								<div class="call-incoming-avatar" aria-hidden="true">
+									{#if incomingCall.callType === 'video'}
+										<svg viewBox="0 0 24 24">
+											<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
+											<path d="M15.5 10 21 7v10l-5.5-3"></path>
+										</svg>
+									{:else}
+										<svg viewBox="0 0 24 24">
+											<path
+												d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
+											></path>
+										</svg>
+									{/if}
+								</div>
+								<div>
+									<div class="call-incoming-title">
+										Incoming {incomingCall.callType === 'video' ? 'Video' : 'Audio'} Call
+									</div>
+									<div class="call-incoming-subtitle">
+										{resolveCallUserName(incomingCall.fromUserId)}
+									</div>
+								</div>
 							</div>
 							<div class="call-incoming-actions">
-								<button type="button" class="call-btn accept" on:click={() => void acceptIncomingCall()}
-									>Accept</button
-								>
-								<button type="button" class="call-btn decline" on:click={() => void declineIncomingCall()}
-									>Decline</button
-								>
+								<button type="button" class="call-btn accept" on:click={() => void acceptIncomingCall()}>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M8 12.5 10.7 15 16 9.8"></path>
+									</svg>
+									<span>Accept</span>
+								</button>
+								<button type="button" class="call-btn decline" on:click={() => void declineIncomingCall()}>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="m8 8 8 8M16 8l-8 8"></path>
+									</svg>
+									<span>Decline</span>
+								</button>
 							</div>
 						</div>
 					</div>
 				{/if}
 
-				{#if activeCall}
+				{#if activeCall && !isCallMinimized}
 					<div class="call-active-overlay" role="region" aria-label="Active call">
 						<header class="call-active-header">
 							<div>
 								<strong>{callType === 'video' ? 'Video Call' : 'Voice Call'}</strong>
 								<span>{callDurationLabel}</span>
 							</div>
-							<span>{remoteCallStreams.length + (localCallStream ? 1 : 0)}/{CALL_MAX_PARTICIPANTS}</span>
+							<div class="call-active-header-actions">
+								<span class="call-active-count"
+									>{remoteCallStreams.length + (localCallStream ? 1 : 0)}/{CALL_MAX_PARTICIPANTS}</span
+								>
+								<button
+									type="button"
+									class="call-minimize-btn"
+									on:click={minimizeActiveCall}
+									aria-label="Minimize call"
+									title="Minimize call"
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M6 12h12"></path>
+									</svg>
+								</button>
+							</div>
 						</header>
+						{#if callParticipants.length > 0}
+							<div class="call-participant-strip" aria-label="People in call">
+								{#each callParticipants as participant (participant.userId)}
+									<div class="call-participant-chip">
+										<span class="call-participant-avatar">{getCallNameInitials(participant.name)}</span>
+										<span class="call-participant-name">{participant.name}</span>
+									</div>
+								{/each}
+							</div>
+						{/if}
 						<div class="call-video-grid">
 							{#if localCallStream}
 								<article class="call-video-tile local">
@@ -4405,17 +4507,63 @@
 							{/each}
 						</div>
 						<div class="call-active-controls">
-							<button type="button" class="call-control-btn" on:click={toggleCallMute}>
-								{isMuted ? 'Unmute' : 'Mute'}
+							<button
+								type="button"
+								class="call-control-btn"
+								class:active={isMuted}
+								on:click={toggleCallMute}
+								aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+								title={isMuted ? 'Unmute microphone' : 'Mute microphone'}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									{#if isMuted}
+										<path d="m4.5 4.5 15 15"></path>
+									{/if}
+									<path d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z"></path>
+									<path d="M6.5 10.8a5.5 5.5 0 0 0 11 0M12 16.3V20M9.3 20h5.4"></path>
+								</svg>
 							</button>
-							<button type="button" class="call-control-btn" on:click={toggleCallCamera}>
-								{isCameraEnabled ? 'Camera Off' : 'Camera On'}
+							<button
+								type="button"
+								class="call-control-btn"
+								class:active={!isCameraEnabled}
+								on:click={toggleCallCamera}
+								aria-label={isCameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+								title={isCameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									{#if !isCameraEnabled}
+										<path d="m4.5 4.5 15 15"></path>
+									{/if}
+									<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
+									<path d="M15.5 10 21 7v10l-5.5-3"></path>
+								</svg>
 							</button>
-							<button type="button" class="call-control-btn" on:click={() => void inviteAnotherUserToCall()}>
-								Add User
+							<button
+								type="button"
+								class="call-control-btn"
+								on:click={() => void inviteAnotherUserToCall()}
+								aria-label="Add user to call"
+								title="Invite user"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M12 12a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z"></path>
+									<path d="M6 19a6 6 0 0 1 12 0"></path>
+									<path d="M19 8v4M17 10h4"></path>
+								</svg>
 							</button>
-							<button type="button" class="call-control-btn hangup" on:click={() => void hangUpCall()}>
-								Hang Up
+							<button
+								type="button"
+								class="call-control-btn hangup"
+								on:click={() => void hangUpCall()}
+								aria-label="Hang up call"
+								title="Hang up call"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path
+										d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
+									></path>
+								</svg>
 							</button>
 						</div>
 					</div>
@@ -4431,6 +4579,7 @@
 							{canModerateBoard}
 							{currentUserId}
 							{currentUsername}
+							on:close={() => (showBoardView = false)}
 						/>
 					{:else}
 						<ChatWindow
