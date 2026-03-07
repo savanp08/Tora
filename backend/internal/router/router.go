@@ -50,6 +50,7 @@ func New(
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
 	handlers.ConfigureCanvasPersistence(redisStore, scyllaStore, r2Client, usageTracker)
+	handlers.ConfigureAIChatPersistence(scyllaStore)
 	promoteLimiter := security.NewLimiter(5, time.Minute, 5, time.Minute)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +121,8 @@ func New(
 	r.Route("/api", func(r chi.Router) {
 		r.Use(middleware.Timeout(60 * time.Second))
 		r.Post("/execute", handlers.HandleCodeExecution)
+		r.Post("/ai/chat", handlers.HandlePrivateAIChat)
+		r.Post("/ai/private-chat", handlers.HandlePrivateAIChat)
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
 		r.Post("/auth/anonymous", authHandler.Anonymous)

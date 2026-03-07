@@ -21,6 +21,7 @@
 	type MessageTextSegment = {
 		value: string;
 		isEmoji: boolean;
+		isMention: boolean;
 	};
 
 	type ReactionEntry = {
@@ -84,6 +85,7 @@
 	const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥'];
 	const EMOJI_TOKEN_PATTERN =
 		/(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*)/gu;
+	const MENTION_TOKEN_PATTERN = /(^|[^A-Za-z0-9_])(@[A-Za-z0-9_.-]{1,32})/g;
 
 	let viewport: HTMLDivElement | null = null;
 	let previousVisibleCount = 0;
@@ -1073,25 +1075,70 @@
 			const start = match.index;
 			const end = start + token.length;
 			if (start > lastIndex) {
-				segments.push({
-					value: value.slice(lastIndex, start),
-					isEmoji: false
-				});
+				segments.push(...splitPlainTextByMentions(value.slice(lastIndex, start)));
 			}
-			segments.push({ value: token, isEmoji: true });
+			segments.push({ value: token, isEmoji: true, isMention: false });
 			lastIndex = end;
 			match = EMOJI_TOKEN_PATTERN.exec(value);
 		}
 		if (lastIndex < value.length) {
-			segments.push({
-				value: value.slice(lastIndex),
-				isEmoji: false
-			});
+			segments.push(...splitPlainTextByMentions(value.slice(lastIndex)));
 		}
 		if (segments.length === 0) {
-			return [{ value, isEmoji: false }];
+			return [{ value, isEmoji: false, isMention: false }];
 		}
 		return segments;
+	}
+
+	function splitPlainTextByMentions(value: string): MessageTextSegment[] {
+		if (!value) {
+			return [];
+		}
+		const parts: MessageTextSegment[] = [];
+		let lastIndex = 0;
+		MENTION_TOKEN_PATTERN.lastIndex = 0;
+		let match = MENTION_TOKEN_PATTERN.exec(value);
+		while (match) {
+			const [fullMatch, prefix, mentionToken] = match;
+			const fullStart = match.index;
+			const mentionStart = fullStart + prefix.length;
+			const mentionEnd = mentionStart + mentionToken.length;
+			if (fullStart > lastIndex) {
+				parts.push({
+					value: value.slice(lastIndex, fullStart),
+					isEmoji: false,
+					isMention: false
+				});
+			}
+			if (prefix) {
+				parts.push({
+					value: prefix,
+					isEmoji: false,
+					isMention: false
+				});
+			}
+			parts.push({
+				value: mentionToken,
+				isEmoji: false,
+				isMention: true
+			});
+			lastIndex = mentionEnd;
+			if (fullMatch.length === 0) {
+				break;
+			}
+			match = MENTION_TOKEN_PATTERN.exec(value);
+		}
+		if (lastIndex < value.length) {
+			parts.push({
+				value: value.slice(lastIndex),
+				isEmoji: false,
+				isMention: false
+			});
+		}
+		if (parts.length === 0) {
+			return [{ value, isEmoji: false, isMention: false }];
+		}
+		return parts;
 	}
 
 	function getReactionEntries(message: ChatMessage): ReactionEntry[] {
@@ -1707,6 +1754,8 @@
 											{#each splitMessageTextByEmoji(snippetPayload.message) as segment}
 												{#if segment.isEmoji}
 													<span class="emoji-boost">{segment.value}</span>
+												{:else if segment.isMention}
+													<span class="mention-tag">{segment.value}</span>
 												{:else}
 													{segment.value}
 												{/if}
@@ -1736,6 +1785,8 @@
 										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
 											{#if segment.isEmoji}
 												<span class="emoji-boost">{segment.value}</span>
+											{:else if segment.isMention}
+												<span class="mention-tag">{segment.value}</span>
 											{:else}
 												{segment.value}
 											{/if}
@@ -1756,6 +1807,8 @@
 										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
 											{#if segment.isEmoji}
 												<span class="emoji-boost">{segment.value}</span>
+											{:else if segment.isMention}
+												<span class="mention-tag">{segment.value}</span>
 											{:else}
 												{segment.value}
 											{/if}
@@ -1776,6 +1829,8 @@
 										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
 											{#if segment.isEmoji}
 												<span class="emoji-boost">{segment.value}</span>
+											{:else if segment.isMention}
+												<span class="mention-tag">{segment.value}</span>
 											{:else}
 												{segment.value}
 											{/if}
@@ -1837,6 +1892,8 @@
 										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
 											{#if segment.isEmoji}
 												<span class="emoji-boost">{segment.value}</span>
+											{:else if segment.isMention}
+												<span class="mention-tag">{segment.value}</span>
 											{:else}
 												{segment.value}
 											{/if}
@@ -1875,6 +1932,8 @@
 							{#each splitMessageTextByEmoji(message.content) as segment}
 								{#if segment.isEmoji}
 									<span class="emoji-boost">{segment.value}</span>
+								{:else if segment.isMention}
+									<span class="mention-tag">{segment.value}</span>
 								{:else}
 									{segment.value}
 								{/if}
@@ -3063,6 +3122,30 @@
 		font-size: 1.5em;
 		line-height: 1;
 		vertical-align: -0.08em;
+	}
+
+	.mention-tag {
+		display: inline-block;
+		color: #1d4ed8;
+		background: rgba(37, 99, 235, 0.14);
+		border-radius: 6px;
+		padding: 0 0.24rem;
+		font-weight: 600;
+	}
+
+	.messages-shell.theme-dark .mention-tag {
+		color: #8db8ff;
+		background: rgba(59, 130, 246, 0.24);
+	}
+
+	.bubble.mine .mention-tag {
+		color: #1e40af;
+		background: rgba(191, 219, 254, 0.38);
+	}
+
+	.messages-shell.theme-dark .bubble.mine .mention-tag {
+		color: #c7dcff;
+		background: rgba(73, 122, 183, 0.38);
 	}
 
 	.bubble.has-reactions {

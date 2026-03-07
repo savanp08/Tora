@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -57,18 +58,28 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	decodedCodeBytes, decodeErr := base64.StdEncoding.DecodeString(req.Code)
+	if decodeErr != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Code must be valid Base64"})
+		return
+	}
+	decodedCode := string(decodedCodeBytes)
+
 	executionRequest := execution.ExecutionRequest{
 		Language: req.Language,
 		Files: []execution.ExecutionFile{
 			{
 				Name:    defaultSourceFilename(req.Language),
-				Content: req.Code,
+				Content: decodedCode,
 			},
 		},
 	}
 
 	response, err := DefaultExecutionManager.Execute(r.Context(), executionRequest)
-	if err != nil {
+	if err != nil && response.Body != nil {
+
 		statusCode := execution.HTTPStatus(err)
 		message := err.Error()
 

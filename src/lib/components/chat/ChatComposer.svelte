@@ -1,5 +1,6 @@
 <script lang="ts">
 	import IconSet from '$lib/components/icons/IconSet.svelte';
+	import AiDisclaimerModal from '$lib/components/chat/AiDisclaimerModal.svelte';
 	import { getUTF8ByteLength, MESSAGE_TEXT_MAX_BYTES } from '$lib/utils/chat/core';
 	import {
 		compressMedia,
@@ -12,6 +13,11 @@
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const AI_TERMS_STORAGE_KEY = 'hasAcceptedAITerms';
+	const AI_PRIVACY_POLICY_URL = 'https://example.com/privacy-policy';
+	const AI_PRIMARY_MENTION = '@ToraAI';
+	const AI_MENTION_TOKENS = ['@ToraAI', '@Tora'];
+	const AI_DISPLAY_NAME = 'ToraAI';
 	const KLIPY_API_KEY_RAW = import.meta.env.VITE_KLIPY_API_KEY as string | undefined;
 	const KLIPY_API_KEY = KLIPY_API_KEY_RAW?.trim() ?? '';
 	const KLIPY_CLIENT_KEY = 'converse-web';
@@ -58,6 +64,15 @@
 		title: string;
 	};
 
+	type MentionOption = {
+		id: string;
+		label: string;
+		insertValue: string;
+		isAI?: boolean;
+	};
+
+	type PendingAIAction = 'send' | 'open-private-ai' | null;
+
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;
 	export let activeReply: ReplyTarget | null = null;
@@ -66,6 +81,7 @@
 	export let currentUsername = 'You';
 	export let roomId = '';
 	export let disabled = false;
+	export let mentionCandidates: string[] = [];
 
 	let mediaInput: HTMLInputElement | null = null;
 	let fileInput: HTMLInputElement | null = null;
@@ -78,6 +94,7 @@
 	let attachWrapEl: HTMLDivElement | null = null;
 	let gifPickerEl: HTMLDivElement | null = null;
 	let emojiWrapEl: HTMLDivElement | null = null;
+	let mentionPickerEl: HTMLDivElement | null = null;
 	let composerTextareaEl: HTMLTextAreaElement | null = null;
 	let normalizedDraftMessage = '';
 	let draftMessageBytes = 0;
@@ -100,6 +117,14 @@
 	let gifSearchTimer: ReturnType<typeof setTimeout> | null = null;
 	let gifAbortController: AbortController | null = null;
 	let attachedGif: GifResult | null = null;
+	let hasAcceptedAITerms = false;
+	let showAIDisclaimerModal = false;
+	let pendingAIAction: PendingAIAction = null;
+	let showMentionPicker = false;
+	let mentionOptions: MentionOption[] = [];
+	let mentionActiveIndex = 0;
+	let mentionReplaceStart = 0;
+	let mentionReplaceEnd = 0;
 
 	$: normalizedDraftMessage = draftMessage.trim();
 	$: draftMessageBytes = getUTF8ByteLength(normalizedDraftMessage);
@@ -128,6 +153,7 @@
 		removeAttachment: void;
 		cancelReply: void;
 		typing: { value: string };
+		openPrivateAi: void;
 	}>();
 
 	function closeGifPicker(resetQuery = false) {
@@ -155,10 +181,205 @@
 		dispatch('typing', { value: draftMessage });
 	}
 
+	function loadHasAcceptedAITerms() {
+		if (typeof window === 'undefined') {
+			return false;
+		}
+		const raw = window.localStorage.getItem(AI_TERMS_STORAGE_KEY);
+		const normalized = (raw || '').trim().toLowerCase();
+		return normalized === 'true' || normalized === '1' || normalized === 'yes';
+	}
+
+	function persistHasAcceptedAITerms(value: boolean) {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		window.localStorage.setItem(AI_TERMS_STORAGE_KEY, value ? 'true' : 'false');
+	}
+
+	function closeMentionPicker() {
+		showMentionPicker = false;
+		mentionOptions = [];
+		mentionActiveIndex = 0;
+	}
+
+	function textUsesAI(text: string) {
+		for (const token of AI_MENTION_TOKENS) {
+			if (text.includes(token)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	function normalizeMentionCandidateValues() {
+		const seen = new Set<string>();
+		const values: string[] = [];
+		for (const candidate of mentionCandidates) {
+			const name = (candidate || '').trim();
+			if (!name) {
+				continue;
+			}
+			const key = name.toLowerCase();
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			values.push(name);
+		}
+		return values;
+	}
+
+	function buildMentionOptions(query: string) {
+		const normalizedQuery = query.toLowerCase();
+		const options: MentionOption[] = [];
+		const aiMatches =
+			normalizedQuery === '' ||
+			AI_DISPLAY_NAME.toLowerCase().includes(normalizedQuery) ||
+			'tora'.includes(normalizedQuery);
+		if (aiMatches) {
+			options.push({
+				id: 'ai_tora',
+				label: AI_DISPLAY_NAME,
+				insertValue: AI_PRIMARY_MENTION,
+				isAI: true
+			});
+		}
+
+		for (const name of normalizeMentionCandidateValues()) {
+			if (name.toLowerCase() === AI_DISPLAY_NAME.toLowerCase()) {
+				continue;
+			}
+			if (normalizedQuery !== '' && !name.toLowerCase().includes(normalizedQuery)) {
+				continue;
+			}
+			options.push({
+				id: `user_${name.toLowerCase()}`,
+				label: name,
+				insertValue: `@${name}`
+			});
+		}
+
+		return options.slice(0, 8);
+	}
+
+	function updateMentionSuggestionsFromCaret() {
+		if (!composerTextareaEl) {
+			closeMentionPicker();
+			return;
+		}
+		const value = draftMessage || '';
+		const caret = composerTextareaEl.selectionStart ?? value.length;
+		const beforeCaret = value.slice(0, caret);
+		const match = beforeCaret.match(/(?:^|\s)@([A-Za-z0-9_.-]{0,32})$/);
+		if (!match) {
+			closeMentionPicker();
+			return;
+		}
+
+		const atIndex = beforeCaret.lastIndexOf('@');
+		if (atIndex < 0) {
+			closeMentionPicker();
+			return;
+		}
+		const query = match[1] || '';
+		const options = buildMentionOptions(query);
+		if (options.length === 0) {
+			closeMentionPicker();
+			return;
+		}
+
+		showMentionPicker = true;
+		mentionOptions = options;
+		mentionReplaceStart = atIndex;
+		mentionReplaceEnd = caret;
+		mentionActiveIndex = Math.max(0, Math.min(mentionActiveIndex, options.length - 1));
+	}
+
+	function selectMentionOption(option: MentionOption) {
+		if (!option || !composerTextareaEl) {
+			closeMentionPicker();
+			return;
+		}
+		const value = draftMessage || '';
+		const replacement = `${option.insertValue} `;
+		const nextValue =
+			value.slice(0, mentionReplaceStart) + replacement + value.slice(mentionReplaceEnd);
+		draftMessage = nextValue;
+		const nextCursor = mentionReplaceStart + replacement.length;
+		requestAnimationFrame(() => {
+			if (!composerTextareaEl) {
+				return;
+			}
+			composerTextareaEl.focus();
+			composerTextareaEl.setSelectionRange(nextCursor, nextCursor);
+		});
+		closeMentionPicker();
+		emitTypingValue();
+	}
+
+	function requiresAITermsForCurrentSend() {
+		if (taskDraftOpen) {
+			return false;
+		}
+		const textToSend = (draftMessage || '').trim();
+		if (attachedGif) {
+			return textUsesAI(textToSend);
+		}
+		if (attachedFile) {
+			return false;
+		}
+		return textUsesAI(textToSend);
+	}
+
+	function requestAITermsAcceptance(nextAction: Exclude<PendingAIAction, null>) {
+		pendingAIAction = nextAction;
+		showAIDisclaimerModal = true;
+		showAttachMenu = false;
+		closeGifPicker();
+		closeEmojiPicker();
+	}
+
+	function onAIButtonClick() {
+		if (composerDisabled) {
+			return;
+		}
+		closeMentionPicker();
+		showAttachMenu = false;
+		closeGifPicker();
+		closeEmojiPicker();
+		if (!hasAcceptedAITerms) {
+			requestAITermsAcceptance('open-private-ai');
+			return;
+		}
+		dispatch('openPrivateAi');
+	}
+
+	function onAIDisclaimerCancel() {
+		showAIDisclaimerModal = false;
+		pendingAIAction = null;
+	}
+
+	function onAIDisclaimerAgree() {
+		hasAcceptedAITerms = true;
+		persistHasAcceptedAITerms(true);
+		showAIDisclaimerModal = false;
+		const action = pendingAIAction;
+		pendingAIAction = null;
+		if (action === 'open-private-ai') {
+			dispatch('openPrivateAi');
+			return;
+		}
+		if (action === 'send') {
+			onSend();
+		}
+	}
+
 	onDestroy(() => {
 		clearAttachmentPreview();
 		closeGifPicker();
 		closeEmojiPicker();
+		closeMentionPicker();
 		if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
 			mediaRecorder.stop();
 		}
@@ -166,6 +387,8 @@
 	});
 
 	onMount(() => {
+		hasAcceptedAITerms = loadHasAcceptedAITerms();
+
 		const onDocumentPointerDown = (event: PointerEvent) => {
 			const target = event.target;
 			if (!(target instanceof Node)) {
@@ -180,6 +403,9 @@
 			if (showEmojiPicker && emojiWrapEl && !emojiWrapEl.contains(target)) {
 				closeEmojiPicker();
 			}
+			if (showMentionPicker && mentionPickerEl && !mentionPickerEl.contains(target)) {
+				closeMentionPicker();
+			}
 		};
 
 		window.addEventListener('pointerdown', onDocumentPointerDown);
@@ -192,6 +418,7 @@
 		if (disabled) {
 			return;
 		}
+		closeMentionPicker();
 		if (showGifPicker) {
 			closeGifPicker();
 		}
@@ -205,6 +432,7 @@
 		if (composerDisabled) {
 			return;
 		}
+		closeMentionPicker();
 		showAttachMenu = false;
 		closeGifPicker();
 		showEmojiPicker = !showEmojiPicker;
@@ -245,6 +473,7 @@
 		if (disabled) {
 			return;
 		}
+		closeMentionPicker();
 		showAttachMenu = false;
 		closeEmojiPicker();
 		attachError = '';
@@ -613,7 +842,7 @@
 		dispatch('cancelReply');
 	}
 
-	function onSend() {
+	function proceedSend() {
 		if (disabled || isProcessingAttachment || isOverMessageLimit || isRecording) {
 			return;
 		}
@@ -632,8 +861,43 @@
 		dispatch('send', undefined);
 	}
 
+	function onSend() {
+		closeMentionPicker();
+		if (!hasAcceptedAITerms && requiresAITermsForCurrentSend()) {
+			requestAITermsAcceptance('send');
+			return;
+		}
+		proceedSend();
+	}
+
 	function onComposerKeyDown(event: KeyboardEvent) {
 		if (disabled) {
+			return;
+		}
+		if (showMentionPicker && mentionOptions.length > 0) {
+			if (event.key === 'ArrowDown') {
+				event.preventDefault();
+				mentionActiveIndex = (mentionActiveIndex + 1) % mentionOptions.length;
+				return;
+			}
+			if (event.key === 'ArrowUp') {
+				event.preventDefault();
+				mentionActiveIndex =
+					(mentionActiveIndex - 1 + mentionOptions.length) % mentionOptions.length;
+				return;
+			}
+			if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+				event.preventDefault();
+				const selected = mentionOptions[mentionActiveIndex] ?? mentionOptions[0];
+				if (selected) {
+					selectMentionOption(selected);
+				}
+				return;
+			}
+		}
+		if (event.key === 'Escape' && showMentionPicker) {
+			event.preventDefault();
+			closeMentionPicker();
 			return;
 		}
 		if (event.key === 'Enter' && !event.shiftKey) {
@@ -644,6 +908,11 @@
 
 	function onComposerInput() {
 		emitTypingValue();
+		updateMentionSuggestionsFromCaret();
+	}
+
+	function onComposerCursorActivity() {
+		updateMentionSuggestionsFromCaret();
 	}
 
 	function stopRecordingStream() {
@@ -895,6 +1164,14 @@
 	}
 </script>
 
+<AiDisclaimerModal
+	open={showAIDisclaimerModal}
+	{isDarkMode}
+	privacyPolicyUrl={AI_PRIVACY_POLICY_URL}
+	on:cancel={onAIDisclaimerCancel}
+	on:agree={onAIDisclaimerAgree}
+/>
+
 {#if taskDraftOpen}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div
@@ -1111,6 +1388,18 @@
 				</div>
 			{/if}
 		</div>
+		<button
+			type="button"
+			class="ai-button"
+			on:click={onAIButtonClick}
+			disabled={composerDisabled}
+			aria-label="Ask AI Privately"
+			title="Ask AI Privately"
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
+			</svg>
+		</button>
 		<div class="emoji-wrap" bind:this={emojiWrapEl}>
 			<button
 				type="button"
@@ -1138,15 +1427,39 @@
 			{/if}
 		</div>
 
-		<textarea
-			bind:this={composerTextareaEl}
-			bind:value={draftMessage}
-			rows="1"
-			placeholder={composerPlaceholder}
-			on:input={onComposerInput}
-			on:keydown={onComposerKeyDown}
-			disabled={composerDisabled}
-		></textarea>
+		<div class="composer-input-wrap">
+			<textarea
+				bind:this={composerTextareaEl}
+				bind:value={draftMessage}
+				rows="1"
+				placeholder={composerPlaceholder}
+				on:input={onComposerInput}
+				on:keydown={onComposerKeyDown}
+				on:click={onComposerCursorActivity}
+				on:keyup={onComposerCursorActivity}
+				disabled={composerDisabled}
+				autocomplete="off"
+			></textarea>
+			{#if showMentionPicker && mentionOptions.length > 0}
+				<div class="mention-picker" bind:this={mentionPickerEl} role="listbox" aria-label="Mention suggestions">
+					{#each mentionOptions as option, index (option.id)}
+						<button
+							type="button"
+							class="mention-option {index === mentionActiveIndex ? 'active' : ''}"
+							role="option"
+							aria-selected={index === mentionActiveIndex}
+							on:mousedown|preventDefault
+							on:click={() => selectMentionOption(option)}
+						>
+							<span class="mention-option-label">@{option.label}</span>
+							{#if option.isAI}
+								<span class="mention-option-pill">AI</span>
+							{/if}
+						</button>
+					{/each}
+				</div>
+			{/if}
+		</div>
 		{#if showSendButton}
 			<button
 				type="button"
@@ -1724,7 +2037,7 @@
 
 	.composer-row {
 		display: grid;
-		grid-template-columns: 2.2rem 2.2rem minmax(0, 1fr) 2.2rem;
+		grid-template-columns: 2.2rem 2.2rem 2.2rem minmax(0, 1fr) 2.2rem;
 		gap: 0.42rem;
 		align-items: center;
 		border: 1px solid #cfd6df;
@@ -1772,6 +2085,7 @@
 
 	.attach-button,
 	.emoji-button,
+	.ai-button,
 	.mic-button,
 	.send-button {
 		display: inline-flex;
@@ -1794,6 +2108,7 @@
 
 	.attach-button:disabled,
 	.emoji-button:disabled,
+	.ai-button:disabled,
 	.mic-button:disabled,
 	.send-button:disabled {
 		opacity: 0.7;
@@ -1802,6 +2117,7 @@
 
 	.attach-button:hover:not(:disabled),
 	.emoji-button:hover:not(:disabled),
+	.ai-button:hover:not(:disabled),
 	.mic-button:hover:not(:disabled),
 	.send-button:hover:not(:disabled) {
 		background: var(--surface-hover);
@@ -1834,6 +2150,16 @@
 	.emoji-button {
 		font-size: 1.1rem;
 		line-height: 1;
+	}
+
+	.ai-button svg {
+		width: 1rem;
+		height: 1rem;
+		stroke: currentColor;
+		fill: none;
+		stroke-width: 1.9;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.emoji-picker {
@@ -1916,7 +2242,12 @@
 		letter-spacing: 0.02em;
 	}
 
-	.composer-row textarea {
+	.composer-input-wrap {
+		position: relative;
+		min-width: 0;
+	}
+
+	.composer-input-wrap textarea {
 		width: 100%;
 		min-width: 0;
 		resize: none;
@@ -1933,19 +2264,76 @@
 		box-sizing: border-box;
 	}
 
-	.composer-row textarea:focus {
+	.composer-input-wrap textarea:focus {
 		outline: none;
 		border-color: #aab3be;
 		background: rgba(255, 255, 255, 0.66);
 	}
 
-	.composer[data-mode='dark'] .composer-row textarea:focus {
+	.composer[data-mode='dark'] .composer-input-wrap textarea:focus {
 		border-color: #737d89;
 		background: rgba(255, 255, 255, 0.05);
 	}
 
-	.composer-row textarea::placeholder {
+	.composer-input-wrap textarea::placeholder {
 		color: var(--text-placeholder);
+	}
+
+	.mention-picker {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: calc(100% + 8px);
+		z-index: 118;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		border-radius: 10px;
+		box-shadow: var(--shadow-md);
+		padding: 0.24rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.14rem;
+		max-height: min(220px, 38vh);
+		overflow: auto;
+	}
+
+	.mention-option {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+		border: none;
+		background: transparent;
+		border-radius: 8px;
+		padding: 0.4rem 0.5rem;
+		font-size: 0.82rem;
+		color: var(--text-primary);
+		cursor: pointer;
+	}
+
+	.mention-option.active,
+	.mention-option:hover {
+		background: var(--surface-hover);
+	}
+
+	.mention-option-label {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.mention-option-pill {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 1.6rem;
+		padding: 0.06rem 0.34rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-default);
+		font-size: 0.64rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		color: var(--text-secondary);
 	}
 
 	@media (max-width: 700px) {
@@ -1959,13 +2347,14 @@
 
 		.attach-button,
 		.emoji-button,
+		.ai-button,
 		.mic-button,
 		.send-button {
 			width: 2rem;
 			height: 2rem;
 		}
 
-		textarea {
+		.composer-input-wrap textarea {
 			font-size: 0.86rem;
 		}
 	}

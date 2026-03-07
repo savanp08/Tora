@@ -385,7 +385,12 @@ func (c *Client) readPump() {
 		if msg.ID == "" {
 			msg.ID = fmt.Sprintf("%s_%d", msg.RoomID, msg.CreatedAt.UnixNano())
 		}
+		hasToraMention := containsToraMention(msg.Content)
+		deviceID := extractDeviceIDFromMessagePayload(raw)
 		c.Hub.broadcast <- msg
+		if hasToraMention && c.Hub != nil {
+			go c.Hub.handlePublicToraMention(msg, c.clientIP, deviceID)
+		}
 	}
 }
 
@@ -1301,6 +1306,26 @@ func parseBoardEventPayload(raw []byte) (clientBoardEventPayload, bool) {
 		Element:   element,
 		ElementID: elementID,
 	}, true
+}
+
+func extractDeviceIDFromMessagePayload(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	var envelopeMap map[string]interface{}
+	if err := json.Unmarshal(raw, &envelopeMap); err != nil {
+		return ""
+	}
+
+	deviceID := strings.TrimSpace(readStringFromMap(envelopeMap, "deviceId", "device_id"))
+	if deviceID != "" {
+		return deviceID
+	}
+	if nestedPayload, ok := envelopeMap["payload"].(map[string]interface{}); ok {
+		return strings.TrimSpace(readStringFromMap(nestedPayload, "deviceId", "device_id"))
+	}
+	return ""
 }
 
 func parseBoardElementFromEnvelope(roomID, eventType string, envelopeMap map[string]interface{}) *models.BoardElement {

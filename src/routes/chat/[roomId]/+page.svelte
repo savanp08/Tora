@@ -7,6 +7,7 @@
 	import CodeCanvas from '$lib/components/canvas/CodeCanvas.svelte';
 	import DiscussionModal from '$lib/components/chat/DiscussionModal.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
+	import PrivateAiChat from '$lib/components/chat/PrivateAiChat.svelte';
 	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
 	import ChatStatusBars from '$lib/components/chat/ChatStatusBars.svelte';
 	import ChatSidebar from '$lib/components/chat/ChatSidebar.svelte';
@@ -225,6 +226,7 @@
 	let showRoomSearch = false;
 	let showRoomDetails = false;
 	let showBoardView = false;
+	let showPrivateAiChat = false;
 	let isCanvasOpen = false;
 	let isCanvasFullscreen = false;
 	let canvasUser: CanvasPresenceUser = { id: 'guest', name: 'Guest', color: '#3b82f6' };
@@ -3849,6 +3851,14 @@
 		attachedFile = null;
 	}
 
+	function openPrivateAiChat() {
+		showPrivateAiChat = true;
+	}
+
+	function closePrivateAiChat() {
+		showPrivateAiChat = false;
+	}
+
 	function toggleLeftMenu() {
 		showLeftMenu = !showLeftMenu;
 	}
@@ -5412,11 +5422,13 @@
 						{activeReply}
 						isDarkMode={$isDarkMode}
 						{currentUsername}
+						mentionCandidates={currentOnlineMembers.map((member) => member.name)}
 						messageLimit={MESSAGE_TEXT_MAX_BYTES}
 						on:send={(event) => void sendMessage(event.detail)}
 						on:typing={onComposerTyping}
 						on:attach={handleComposerAttach}
 						on:removeAttachment={handleComposerRemoveAttachment}
+						on:openPrivateAi={openPrivateAiChat}
 						on:cancelReply={clearReplyTarget}
 					/>
 				{/if}
@@ -5488,6 +5500,14 @@
 		<OnlinePanel members={currentOnlineMembers} isDarkMode={$isDarkMode} />
 	</div>
 </section>
+
+<PrivateAiChat
+	open={showPrivateAiChat}
+	isDarkMode={$isDarkMode}
+	{currentUserId}
+	{currentUsername}
+	on:close={closePrivateAiChat}
+/>
 
 <DiscussionModal
 	open={isDiscussionOpen}

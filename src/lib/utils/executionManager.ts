@@ -417,6 +417,7 @@ export class ExecutionManager {
 	}
 
 	private async runRemote(code: string, language: string, signal: AbortSignal) {
+		const base64Code = btoa(unescape(encodeURIComponent(code)));
 		let response: Response;
 		try {
 			response = await fetch(EXECUTE_ENDPOINT, {
@@ -426,7 +427,7 @@ export class ExecutionManager {
 				},
 				body: JSON.stringify({
 					language,
-					code
+					code: base64Code
 				}),
 				signal
 			});
