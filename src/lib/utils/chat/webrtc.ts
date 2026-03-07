@@ -132,14 +132,18 @@ export class WebRTCManager extends EventTarget {
 	}
 
 	public getAvailablePeerSlots() {
-		return Math.max(0, this.maxParticipants-1 - this.peerConnections.size);
+		return Math.max(0, this.maxParticipants - 1 - this.peerConnections.size);
 	}
 
 	public async startLocalStream(video: boolean) {
 		const wantsVideo = Boolean(video);
 		if (this.localStream) {
 			const hasVideoTrack = this.localStream.getVideoTracks().length > 0;
-			if (!wantsVideo || hasVideoTrack) {
+			const hasAudioTrack = this.localStream.getAudioTracks().length > 0;
+			if ((!wantsVideo || hasVideoTrack) && hasAudioTrack) {
+				for (const track of this.localStream.getAudioTracks()) {
+					track.enabled = true;
+				}
 				this.currentCallType = wantsVideo ? 'video' : 'audio';
 				if (!this.callStartedAt) {
 					this.callStartedAt = Date.now();
@@ -151,9 +155,22 @@ export class WebRTCManager extends EventTarget {
 		}
 
 		const stream = await navigator.mediaDevices.getUserMedia({
-			audio: true,
+			audio: {
+				echoCancellation: true,
+				noiseSuppression: true,
+				autoGainControl: true
+			},
 			video: wantsVideo
 		});
+		if (stream.getAudioTracks().length === 0) {
+			for (const track of stream.getTracks()) {
+				track.stop();
+			}
+			throw new Error('Microphone is unavailable. Please allow audio input for calls.');
+		}
+		for (const track of stream.getAudioTracks()) {
+			track.enabled = true;
+		}
 		this.localStream = stream;
 		this.currentCallType = wantsVideo ? 'video' : 'audio';
 		if (!this.callStartedAt) {
@@ -207,8 +224,25 @@ export class WebRTCManager extends EventTarget {
 		};
 
 		connection.ontrack = (event) => {
-			const remoteStream = event.streams[0] ?? new MediaStream([event.track]);
-			this.remoteStreams.set(normalizedTarget, remoteStream);
+			const incomingStream = event.streams[0] ?? null;
+			const existingStream = this.remoteStreams.get(normalizedTarget) ?? null;
+			const remoteStream = existingStream ?? incomingStream ?? new MediaStream();
+			if (!existingStream) {
+				this.remoteStreams.set(normalizedTarget, remoteStream);
+			}
+			const sourceTracks =
+				incomingStream?.getTracks?.() && incomingStream.getTracks().length > 0
+					? incomingStream.getTracks()
+					: [event.track];
+			for (const track of sourceTracks) {
+				if (!track) {
+					continue;
+				}
+				const hasTrack = remoteStream.getTracks().some((entry) => entry.id === track.id);
+				if (!hasTrack) {
+					remoteStream.addTrack(track);
+				}
+			}
 			this.onRemoteStream?.(normalizedTarget, remoteStream);
 			this.dispatchEvent(
 				new CustomEvent('remote-stream', {
@@ -352,8 +386,12 @@ export class WebRTCManager extends EventTarget {
 		}
 
 		const fromUserName =
-			toStringValue(source.fromUserName ?? source.from_user_name ?? payload.fromUserName ?? payload.from_user_name) ||
-			'User';
+			toStringValue(
+				source.fromUserName ??
+					source.from_user_name ??
+					payload.fromUserName ??
+					payload.from_user_name
+			) || 'User';
 		const callType = normalizeCallType(
 			toStringValue(source.callType ?? source.call_type ?? payload.callType ?? payload.call_type),
 			this.currentCallType
@@ -448,7 +486,8 @@ export class WebRTCManager extends EventTarget {
 				return;
 			}
 			const connection =
-				this.peerConnections.get(fromUserId) ?? (await this.createPeerConnection(fromUserId, false));
+				this.peerConnections.get(fromUserId) ??
+				(await this.createPeerConnection(fromUserId, false));
 			await connection.addIceCandidate(
 				new RTCIceCandidate({
 					candidate: candidateValue,

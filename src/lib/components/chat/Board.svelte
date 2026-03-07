@@ -58,10 +58,8 @@
 	const MAX_IMAGE_PREVIEW_HEIGHT = 460;
 	const MAX_VIDEO_PREVIEW_HEIGHT = 360;
 	const LOCAL_ACTION_LIMIT = 180;
+	const LOCAL_ACTION_STORAGE_PREFIX = 'converse_board_local_actions_v1';
 	const DUSTER_STRIPE_WIDTH = BOARD_WIDTH * 0.01;
-	const DUSTER_HANDLE_WIDTH = 56;
-	const DUSTER_HANDLE_HEIGHT = 34;
-	const DUSTER_HANDLE_PADDING = 8;
 	const MINIMAP_WIDTH = 200;
 	const MINIMAP_HEIGHT = 150;
 	const BOARD_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -83,8 +81,6 @@
 		top: number;
 		width: number;
 		height: number;
-		handleLeft: number;
-		handleTop: number;
 	};
 
 	type FabricObjectLike = Record<string, unknown> & {
@@ -219,9 +215,7 @@
 		left: -9999,
 		top: 0,
 		width: 0,
-		height: 0,
-		handleLeft: -9999,
-		handleTop: DUSTER_HANDLE_PADDING
+		height: 0
 	};
 	let pendingTapGesture: {
 		startX: number;
@@ -505,6 +499,7 @@
 			}
 			event.preventDefault();
 			moveDusterToClientX(event.clientX);
+			clearElementsTouchingDusterStripe();
 		};
 		const onPointerUp = (event: PointerEvent) => {
 			if (!dusterIsDragging) {
@@ -514,7 +509,7 @@
 				return;
 			}
 			event.preventDefault();
-			stopDusterDrag(true);
+			stopDusterDrag();
 		};
 
 		window.addEventListener('keydown', onKeyDown);
@@ -2019,15 +2014,12 @@
 
 	function resolveDusterScreenMetrics(_tick: number, centerX: number): DusterScreenMetrics {
 		void _tick;
-		const fallbackTop = DUSTER_HANDLE_PADDING;
 		if (!fabricCanvas || !boardContainerEl) {
 			return {
 				left: -9999,
 				top: 0,
 				width: 0,
-				height: 0,
-				handleLeft: -9999,
-				handleTop: fallbackTop
+				height: 0
 			};
 		}
 		const viewport = fabricCanvas.viewportTransform ?? [1, 0, 0, 1, 0, 0];
@@ -2039,30 +2031,27 @@
 		const left = translateX + stripeLeftBoard * zoom;
 		const top = translateY;
 		const height = BOARD_HEIGHT * zoom;
-		const containerHeight = Math.max(1, boardContainerEl.clientHeight || 1);
-		const handleTop = Math.max(
-			DUSTER_HANDLE_PADDING,
-			Math.min(
-				containerHeight - DUSTER_HANDLE_HEIGHT - DUSTER_HANDLE_PADDING,
-				top + DUSTER_HANDLE_PADDING
-			)
-		);
 		return {
 			left,
 			top,
 			width: stripeWidthPx,
-			height,
-			handleLeft: left + stripeWidthPx / 2,
-			handleTop
+			height
 		};
 	}
 
-	function stopDusterDrag(shouldClear = false) {
-		const wasDragging = dusterIsDragging;
+	function stopDusterDrag() {
+		const pointerId = dusterPointerId;
 		dusterIsDragging = false;
 		dusterPointerId = null;
-		if (shouldClear && wasDragging) {
-			clearBoardWithBounds(true);
+		if (!boardContainerEl || pointerId === null) {
+			return;
+		}
+		try {
+			if (boardContainerEl.hasPointerCapture?.(pointerId)) {
+				boardContainerEl.releasePointerCapture(pointerId);
+			}
+		} catch {
+			// Ignore failed pointer release when capture has already ended.
 		}
 	}
 
@@ -2085,19 +2074,33 @@
 		moveDusterToBoardX(point.x);
 	}
 
-	function onDusterHandlePointerDown(event: PointerEvent) {
-		if (!canManageAllBoardElements || activeTool !== 'duster') {
+	function clearElementsTouchingDusterStripe() {
+		if (!fabricCanvas || !canManageAllBoardElements) {
 			return;
 		}
-		event.preventDefault();
-		event.stopPropagation();
-		contextMenuOpen = false;
-		showInsertMenu = false;
-		showWidthMenu = false;
-		messagePickerOpen = false;
-		dusterIsDragging = true;
-		dusterPointerId = event.pointerId;
-		moveDusterToClientX(event.clientX);
+		const stripeCenterX = clampDusterCenterX(dusterCenterX);
+		const stripeHalfWidth = DUSTER_STRIPE_WIDTH / 2;
+		const stripeLeft = stripeCenterX - stripeHalfWidth;
+		const stripeRight = stripeCenterX + stripeHalfWidth;
+		const objects = [...(fabricCanvas.getObjects?.() ?? [])] as FabricObjectLike[];
+		for (const object of objects) {
+			if (!object || object === boardBoundsRect || isPendingObject(object)) {
+				continue;
+			}
+			if (!canMutateBoardObject(object)) {
+				continue;
+			}
+			const element = boardObjectToElement(object);
+			if (!element) {
+				continue;
+			}
+			const objectLeft = element.x;
+			const objectRight = element.x + Math.max(1, element.width);
+			if (objectRight < stripeLeft || objectLeft > stripeRight) {
+				continue;
+			}
+			removeBoardObject(object, true);
+		}
 	}
 
 	function isPendingObject(object: FabricObjectLike | null) {
@@ -2340,6 +2343,7 @@
 		}
 		boardLoading = true;
 		boardError = '';
+		restoreLocalActionHistory(normalizedTargetRoomId);
 		try {
 			const res = await fetch(
 				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomId)}/board`
@@ -2350,7 +2354,7 @@
 			const payload = (await res.json()) as unknown;
 			const elements = Array.isArray(payload) ? payload : [];
 			beginRemoteApply();
-			clearBoardElements();
+			clearBoardElements(false);
 			for (const rawElement of elements) {
 				const parsed = await parseBoardElementRecordDecrypted(rawElement);
 				if (!parsed) {
@@ -2369,11 +2373,11 @@
 		}
 	}
 
-	function clearBoardElements() {
-		clearBoardWithBounds(false);
+	function clearBoardElements(resetLocalActions = true) {
+		clearBoardWithBounds(false, resetLocalActions);
 	}
 
-	function clearBoardWithBounds(emitClearEvent: boolean) {
+	function clearBoardWithBounds(emitClearEvent: boolean, resetLocalActions = true) {
 		if (!fabricCanvas) {
 			return;
 		}
@@ -2386,8 +2390,11 @@
 		pendingShapeAnchorPoint = null;
 		pendingShapePointerMoved = false;
 		pendingTransformSnapshotByElementId.clear();
-		localUndoStack = [];
-		localRedoStack = [];
+		if (resetLocalActions) {
+			localUndoStack = [];
+			localRedoStack = [];
+			persistLocalActionHistory();
+		}
 		zControlVisible = false;
 		refreshBoardStats();
 		captureHistorySnapshot(true);
@@ -3641,12 +3648,115 @@
 		);
 	}
 
+	function getLocalActionHistoryStorageKey(targetRoomId = normalizedRoomId) {
+		const normalizedTargetRoomId = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedTargetRoomId) {
+			return '';
+		}
+		const actorId = normalizedCurrentUserID || 'guest';
+		return `${LOCAL_ACTION_STORAGE_PREFIX}:${normalizedTargetRoomId}:${actorId}`;
+	}
+
+	function parsePersistedLocalAction(value: unknown): LocalBoardAction | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		const record = value as Record<string, unknown>;
+		const kind = toStringValue(record.kind).trim().toLowerCase();
+		if (kind !== 'add' && kind !== 'move' && kind !== 'delete') {
+			return null;
+		}
+		const elementId = normalizeMessageID(toStringValue(record.elementId ?? record.element_id));
+		if (!elementId) {
+			return null;
+		}
+		const before = parseBoardElementRecord(record.before) ?? undefined;
+		const after = parseBoardElementRecord(record.after) ?? undefined;
+		if (kind === 'add' && !after) {
+			return null;
+		}
+		if (kind === 'delete' && !before) {
+			return null;
+		}
+		if (kind === 'move' && !before && !after) {
+			return null;
+		}
+		return {
+			kind,
+			elementId,
+			before,
+			after
+		};
+	}
+
+	function persistLocalActionHistory(targetRoomId = normalizedRoomId) {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		const storageKey = getLocalActionHistoryStorageKey(targetRoomId);
+		if (!storageKey) {
+			return;
+		}
+		try {
+			if (localUndoStack.length === 0 && localRedoStack.length === 0) {
+				window.sessionStorage.removeItem(storageKey);
+				return;
+			}
+			window.sessionStorage.setItem(
+				storageKey,
+				JSON.stringify({
+					undo: localUndoStack.slice(-LOCAL_ACTION_LIMIT),
+					redo: localRedoStack.slice(-LOCAL_ACTION_LIMIT)
+				})
+			);
+		} catch {
+			// Ignore local storage quota or availability failures.
+		}
+	}
+
+	function restoreLocalActionHistory(targetRoomId = normalizedRoomId) {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		const storageKey = getLocalActionHistoryStorageKey(targetRoomId);
+		if (!storageKey) {
+			localUndoStack = [];
+			localRedoStack = [];
+			return;
+		}
+		const raw = window.sessionStorage.getItem(storageKey);
+		if (!raw) {
+			localUndoStack = [];
+			localRedoStack = [];
+			return;
+		}
+		try {
+			const parsed = JSON.parse(raw) as Record<string, unknown>;
+			const undoRaw = Array.isArray(parsed.undo) ? parsed.undo : [];
+			const redoRaw = Array.isArray(parsed.redo) ? parsed.redo : [];
+			localUndoStack = undoRaw
+				.map((entry) => parsePersistedLocalAction(entry))
+				.filter((entry): entry is LocalBoardAction => Boolean(entry))
+				.slice(-LOCAL_ACTION_LIMIT);
+			localRedoStack = redoRaw
+				.map((entry) => parsePersistedLocalAction(entry))
+				.filter((entry): entry is LocalBoardAction => Boolean(entry))
+				.slice(-LOCAL_ACTION_LIMIT);
+			persistLocalActionHistory(targetRoomId);
+		} catch {
+			localUndoStack = [];
+			localRedoStack = [];
+			window.sessionStorage.removeItem(storageKey);
+		}
+	}
+
 	function recordLocalAction(action: LocalBoardAction) {
 		if (isApplyingRemoteEvent || isRestoringHistory || isApplyingLocalAction) {
 			return;
 		}
 		localUndoStack = [...localUndoStack, action].slice(-LOCAL_ACTION_LIMIT);
 		localRedoStack = [];
+		persistLocalActionHistory();
 	}
 
 	function discardPendingTransformForElement(elementId: string) {
@@ -3663,6 +3773,7 @@
 		localUndoStack = localUndoStack.filter((entry) => entry.elementId !== elementId);
 		localRedoStack = localRedoStack.filter((entry) => entry.elementId !== elementId);
 		discardPendingTransformForElement(elementId);
+		persistLocalActionHistory();
 	}
 
 	function serializeBoardSnapshot() {
@@ -3730,6 +3841,7 @@
 		try {
 			await applyLocalAction(action, 'undo');
 			localRedoStack = [...localRedoStack, action].slice(-LOCAL_ACTION_LIMIT);
+			persistLocalActionHistory();
 			captureHistorySnapshot();
 		} finally {
 			isApplyingLocalAction = false;
@@ -3751,6 +3863,7 @@
 		try {
 			await applyLocalAction(action, 'redo');
 			localUndoStack = [...localUndoStack, action].slice(-LOCAL_ACTION_LIMIT);
+			persistLocalActionHistory();
 			captureHistorySnapshot();
 		} finally {
 			isApplyingLocalAction = false;
@@ -3831,8 +3944,23 @@
 				return;
 			}
 			event.preventDefault();
+			event.stopPropagation();
 			contextMenuOpen = false;
+			showInsertMenu = false;
+			showWidthMenu = false;
+			showColorMenu = false;
+			showBoardDetails = false;
+			messagePickerOpen = false;
+			pendingTapGesture = null;
 			moveDusterToBoardX(boardPoint.x);
+			dusterIsDragging = true;
+			dusterPointerId = event.pointerId;
+			try {
+				boardContainerEl.setPointerCapture?.(event.pointerId);
+			} catch {
+				// Ignore capture failure; window pointer listeners still keep the sweep active.
+			}
+			clearElementsTouchingDusterStripe();
 			return;
 		}
 
@@ -3986,6 +4114,15 @@
 
 	function onBoardPointerMove(event: PointerEvent) {
 		if (activeTool === 'duster') {
+			if (!canManageAllBoardElements) {
+				return;
+			}
+			const boardPoint = getBoardPointFromClientPosition(event.clientX, event.clientY);
+			moveDusterToBoardX(boardPoint.x);
+			if (dusterIsDragging && (dusterPointerId === null || event.pointerId === dusterPointerId)) {
+				event.preventDefault();
+				clearElementsTouchingDusterStripe();
+			}
 			return;
 		}
 		if (pendingInsertElementId) {
@@ -4004,6 +4141,10 @@
 
 	function onBoardPointerUp(event: PointerEvent) {
 		if (activeTool === 'duster') {
+			if (dusterIsDragging && (dusterPointerId === null || event.pointerId === dusterPointerId)) {
+				event.preventDefault();
+				stopDusterDrag();
+			}
 			return;
 		}
 		if (!pendingTapGesture) {
@@ -4028,6 +4169,7 @@
 
 	function onBoardPointerCancel() {
 		pendingTapGesture = null;
+		stopDusterDrag();
 	}
 
 	function openContextMenuAt(
@@ -4623,12 +4765,12 @@
 				<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
 					<button
 						type="button"
-							class="line-width-toggle"
-							on:click={toggleWidthMenu}
-							aria-haspopup="true"
-							aria-expanded={showWidthMenu}
-							title={showWidthMenu ? undefined : 'Brush width'}
-						>
+						class="line-width-toggle"
+						on:click={toggleWidthMenu}
+						aria-haspopup="true"
+						aria-expanded={showWidthMenu}
+						title={showWidthMenu ? undefined : 'Brush width'}
+					>
 						<svg class="brush-width-icon" viewBox="0 0 24 24" aria-hidden="true">
 							<line
 								x1="4"
@@ -4809,12 +4951,12 @@
 			<div class="board-details-wrap" bind:this={boardDetailsWrapEl}>
 				<button
 					type="button"
-						class="details-toggle-button"
-						class:active={showBoardDetails}
-						on:click={toggleBoardDetails}
-						title={showBoardDetails ? undefined : 'Board details'}
-						aria-label="Board details"
-					>
+					class="details-toggle-button"
+					class:active={showBoardDetails}
+					on:click={toggleBoardDetails}
+					title={showBoardDetails ? undefined : 'Board details'}
+					aria-label="Board details"
+				>
 					i
 				</button>
 				{#if showBoardDetails}
@@ -4854,7 +4996,7 @@
 						</div>
 						<div class="board-detail-note">
 							Drag empty board to pan. Double-tap empty space to attach. Hold Alt and click to cycle
-							overlapping elements.
+							overlapping elements. In Clear mode, click and move to erase touched items instantly.
 						</div>
 					</div>
 				{/if}
@@ -4900,16 +5042,6 @@
 					class="board-duster-stripe"
 					style={`left:${dusterScreenMetrics.left}px;top:${dusterScreenMetrics.top}px;width:${dusterScreenMetrics.width}px;height:${dusterScreenMetrics.height}px;`}
 				></div>
-				<button
-					type="button"
-					class="board-duster-handle"
-					style={`left:${dusterScreenMetrics.handleLeft}px;top:${dusterScreenMetrics.handleTop}px;width:${DUSTER_HANDLE_WIDTH}px;height:${DUSTER_HANDLE_HEIGHT}px;`}
-					on:pointerdown={onDusterHandlePointerDown}
-					title="Drag to clear elements"
-					aria-label="Drag duster handle to clear board elements"
-				>
-					<span>Drag</span>
-				</button>
 			</div>
 		{/if}
 
@@ -5518,42 +5650,6 @@
 			rgba(220, 38, 38, 0.24) 100%
 		);
 		box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.3);
-	}
-
-	.board-duster-handle {
-		position: absolute;
-		transform: translateX(-50%);
-		width: 56px;
-		height: 34px;
-		border-radius: 999px;
-		border: 1px solid rgba(248, 113, 113, 0.85);
-		background: rgba(127, 29, 29, 0.92);
-		color: #fee2e2;
-		font-size: 0.68rem;
-		font-weight: 700;
-		letter-spacing: 0.02em;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		pointer-events: auto;
-		touch-action: none;
-		cursor: ew-resize;
-		box-shadow: 0 6px 18px rgba(15, 23, 42, 0.45);
-	}
-
-	.board-duster-handle:hover {
-		background: rgba(153, 27, 27, 0.96);
-	}
-
-	.board-duster-handle::after {
-		content: '';
-		position: absolute;
-		top: 100%;
-		left: 50%;
-		transform: translateX(-50%);
-		width: 2px;
-		height: 14px;
-		background: rgba(248, 113, 113, 0.82);
 	}
 
 	.board-overlay {

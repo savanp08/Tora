@@ -2378,27 +2378,65 @@
 			return;
 		}
 		const selection = editor.getSelection?.();
+		const selectionStart = selection?.getStartPosition?.();
 		const selectionEnd = selection?.getEndPosition?.();
-		if (!selectionEnd) {
+		if (!selectionStart || !selectionEnd) {
 			hideSelectionSnippetAction();
 			return;
 		}
-		const visiblePosition = editor.getScrolledVisiblePosition(selectionEnd);
+		const startVisiblePosition = editor.getScrolledVisiblePosition(selectionStart);
+		const endVisiblePosition = editor.getScrolledVisiblePosition(selectionEnd);
 		const editorNode = editor.getDomNode?.();
-		if (!visiblePosition || !editorNode) {
+		if (!startVisiblePosition || !endVisiblePosition || !editorNode) {
 			hideSelectionSnippetAction();
 			return;
 		}
 		const buttonWidth = 34;
 		const buttonHeight = 30;
-		selectionSnippetActionLeft = Math.max(
-			8,
-			Math.min(editorNode.clientWidth - buttonWidth - 8, visiblePosition.left + 10)
+		const edgePadding = 8;
+		const selectionGap = 8;
+		const minLeft = edgePadding;
+		const maxLeft = Math.max(edgePadding, editorNode.clientWidth - buttonWidth - edgePadding);
+		const startLeft = startVisiblePosition.left;
+		const endLeft = endVisiblePosition.left;
+		const selectionCenterX = (Math.min(startLeft, endLeft) + Math.max(startLeft, endLeft)) / 2;
+		selectionSnippetActionLeft = Math.min(
+			maxLeft,
+			Math.max(minLeft, selectionCenterX - buttonWidth / 2)
 		);
-		selectionSnippetActionTop = Math.max(
-			8,
-			Math.min(editorNode.clientHeight - buttonHeight - 8, visiblePosition.top - buttonHeight - 4)
+		const selectionTop = Math.min(startVisiblePosition.top, endVisiblePosition.top);
+		const selectionBottom = Math.max(
+			startVisiblePosition.top + startVisiblePosition.height,
+			endVisiblePosition.top + endVisiblePosition.height
 		);
+		const minTop = edgePadding;
+		const maxTop = Math.max(edgePadding, editorNode.clientHeight - buttonHeight - edgePadding);
+		const aboveTop = selectionTop - buttonHeight - selectionGap;
+		const belowTop = selectionBottom + selectionGap;
+		const canPlaceAbove = aboveTop >= minTop;
+		const canPlaceBelow = belowTop <= maxTop;
+		const availableTop = selectionTop - edgePadding;
+		const availableBottom = editorNode.clientHeight - selectionBottom - edgePadding;
+		const preferBelow =
+			isCompactCanvasLayout ||
+			(typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches);
+		let targetTop = aboveTop;
+		if (preferBelow) {
+			if (canPlaceBelow) {
+				targetTop = belowTop;
+			} else if (canPlaceAbove) {
+				targetTop = aboveTop;
+			} else {
+				targetTop = availableBottom >= availableTop ? belowTop : aboveTop;
+			}
+		} else if (canPlaceAbove) {
+			targetTop = aboveTop;
+		} else if (canPlaceBelow) {
+			targetTop = belowTop;
+		} else {
+			targetTop = availableTop >= availableBottom ? aboveTop : belowTop;
+		}
+		selectionSnippetActionTop = Math.min(maxTop, Math.max(minTop, targetTop));
 		showSelectionSnippetAction = true;
 	}
 

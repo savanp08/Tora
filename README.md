@@ -38,254 +38,173 @@
 
 ---
 
-## Product Overview
+## What Tora Is
 
-Tora is a session-based collaboration platform for fast, high-context sessions.
+Tora is a real-time collaboration workspace built for **focused sessions** where conversation, code, and visual thinking happen together.
 
-Teams create or join a session and collaborate across messaging, whiteboarding, coding, calls, and file exchange in one workspace.
+Instead of switching between chat apps, whiteboards, code editors, and calls, participants join a shared session that keeps everything in one place.
 
-The goal is simple: reduce tool switching and keep discussions, artifacts, and execution context aligned.
-
----
-
-## Why This Exists
-
-You can open a workspace without login friction, save information online, and return later with context intact.
-
-Modern collaboration is often split across separate tools for messaging, whiteboarding, coding, and calls.
-
-That split introduces context loss and slows decision-making.
-
-Tora uses a temporary, session-centric model so teams can collaborate end-to-end without switching tools.
+A session can act as a debugging room, architecture board, pair-programming space, or quick meeting environment.
 
 ---
 
-## Comparison
+## Core Characteristics
 
-| Feature | Tora | Slack | Discord |
-|---|---|---|---|
-| Ephemeral sessions | ✅ | ❌ | ❌ |
-| Session branching | ✅ | ❌ | ❌ |
-| Collaborative code canvas | ✅ | ❌ | ❌ |
-| Built-in drawboard workspace | ✅ | ❌ | ❌ |
-| No account required (guest-first flow) | ✅ | ❌ | ❌ |
-| In-session voice and video calls | ✅ | ✅ | ✅ |
-| File and media sharing | ✅ | ✅ | ✅ |
+Tora is designed around a few simple principles:
 
-Comparison reflects built-in capabilities for session-centric collaboration.
+- **Ephemeral sessions**
 
----
+  Sessions are designed for temporary collaboration rather than long-term message storage.
 
-## Collaboration Tools
+- **Real-time interaction**
 
-Each session includes:
+  Messages, drawings, code edits, and presence updates propagate instantly between participants.
 
-- **Real-Time Chat:** messaging, presence, replies, and pinning.
-- **Drawboard Workspace:** shared board for diagrams, notes, and visual planning.
-- **Code Canvas:** collaborative editing with shared execution output.
-- **Voice and Video Calls:** built-in WebRTC calls inside each session.
-- **File and Media Sharing:** session-scoped uploads for files, media, and voice notes.
-- **Branchable Sessions:** split sessions into focused child sessions with shared context.
+- **Shared context**
+
+  Conversations, diagrams, files, and code all live inside the same environment.
+
+- **Session-centric collaboration**
+
+  Participants collaborate inside a shared space rather than through persistent user identities.
+
+- **Self-hostable**
+
+  Teams can run their own instance and maintain full control over infrastructure.
 
 ---
 
 ## Features
 
-Detailed feature breakdown.
+### Messaging
 
-<sub>Media placeholders are embedded with each feature below. Replace files in <code>docs/media/</code> as needed.</sub>
+- Real-time chat with presence indicators
+- Typing indicators and reply navigation
+- Message pinning for important discussions
 
-### Real-Time Chat
+### Collaborative Coding
 
-Low-latency session messaging designed for active collaboration.
+- Monaco-based shared code canvas
+- Multiple participants editing simultaneously
+- Code snippets shareable inside chat
+- Execution output inside the workspace
 
-- Instant session messaging
-- Typing indicators and online presence
-- Replies, pinning, and context-aware navigation
-- Session message history loading
+### Visual Collaboration
 
-<p align="center">
-  <img src="docs/media/realtime-chat.gif" width="900" alt="Real-Time Chat">
-</p>
+- Shared drawboard for sketches and diagrams
+- Shapes, annotations, and quick notes
+- Live cursor presence
 
-### Drawboard Workspace
+### Calls
 
-Shared visual board for ideation and planning.
+- Integrated WebRTC audio and video sessions
+- Join calls directly from the workspace
+- Continue collaborating while calls run
 
-- Infinite pan and zoom canvas
-- Free draw, shapes, text, and sticky notes
-- Cursor presence for collaborators
-- Embedded message and media cards on the board
+### Media and File Exchange
 
-<p align="center">
-  <img src="docs/media/drawboard.gif" width="900" alt="Drawboard Workspace">
-</p>
+- Upload and share files within a session
+- Image previews and attachments
+- Voice message support
 
-### Code Canvas
+### Branching Sessions
 
-Shared coding workspace with live collaborative editing.
-
-- Monaco editor with a project-style file tree
-- CRDT collaboration with Yjs
-- Shared execution output stream
-- Canvas snapshot save and load
-- Snippet-to-chat handoff
-
-Supported runtimes:
-
-- Python (Pyodide worker)
-- JavaScript (worker runtime)
-
-<p align="center">
-  <img src="docs/media/code-canvas.gif" width="900" alt="Code Canvas">
-</p>
-
-### Voice and Video Calls
-
-WebRTC calls built directly into each session.
-
-- Audio and video calls
-- Session header call invites
-- Minimized call state with restore
-- Call activity in the timeline
-
-<p align="center">
-  <img src="docs/media/video-call.gif" width="900" alt="Voice and Video Calls">
-</p>
-
-### File and Media Sharing
-
-Session-scoped upload and attachment workflow.
-
-- File and media attachments
-- Voice note recording
-- Presigned upload support
-- Object storage-backed retrieval
-
-<p align="center">
-  <img src="docs/media/uploads.gif" width="900" alt="File and Media Sharing">
-</p>
-
-### Branchable Sessions
-
-Split active conversations into focused child sessions while preserving context.
-
-- Parent and child session context
-- Temporary sub-session workflows
-- Parallel collaboration tracks per topic
-
-<p align="center">
-  <img src="docs/media/session-branch.gif" width="900" alt="Branchable Sessions">
-</p>
+- Create new sessions derived from an existing discussion
+- Explore ideas without interrupting the main conversation
+- Maintain contextual relationships between sessions
 
 ---
 
-## Use Cases
+## Why Tora Exists
 
-### Engineering Discussions
+Modern collaboration is fragmented.
 
-Spin up a temporary session to debug incidents with chat, code, and calls in one workflow.
+A typical workflow requires multiple tools:
 
-### Architecture Brainstorming
+- messaging platforms for conversation
+- whiteboards for diagrams
+- code editors for debugging
+- video calls for discussion
 
-Sketch system flows on the drawboard while discussing tradeoffs in real time.
+Switching between these tools breaks context and slows collaboration.
 
-### Pair Programming
+Tora brings these workflows together inside a single temporary workspace so that teams can communicate, experiment, and brainstorm without losing momentum.
 
-Write and run code together in the shared canvas.
+---
 
-### Hackathons
+## Example Use Cases
 
-Create session-based collaboration spaces for teams working in parallel.
+Tora can support many collaborative scenarios:
 
-### Study Groups
+- **Engineering debugging sessions**
 
-Discuss problems, sketch diagrams, and exchange runnable snippets during sessions.
+  Investigate production issues while sharing code and discussing fixes.
+
+- **Architecture discussions**
+
+  Sketch diagrams and annotate ideas while talking in real time.
+
+- **Pair programming**
+
+  Collaboratively write and run code inside the shared canvas.
+
+- **Hackathons**
+
+  Quickly create workspaces for teams during rapid development events.
+
+- **Study groups**
+
+  Discuss problems, draw diagrams, and share runnable snippets.
+
+---
+
+## A Note From The Developer
+
+Tora started as an experiment in building a collaboration environment where conversation and problem-solving tools coexist.
+
+Most platforms specialize in one type of interaction: messaging, meetings, or documentation.
+
+Tora explores the idea that a **temporary workspace can host the entire collaboration process**.
 
 ---
 
 ## Architecture
 
+Tora uses a real-time collaboration stack designed for responsiveness.
+
 ```text
 Browser
-   │
-   ▼
+│
+▼
 SvelteKit Frontend
-   │
-   ▼
-Go API Server
-   │
- ┌─┴─────────────┐
- ▼               ▼
-Redis        ScyllaDB / Astra
-(real-time)   (storage)
-   │
-   ▼
-Cloudflare R2
-(file storage)
+│
+▼
+Go Backend API
+│
+┌─┴─────────────┐
+▼               ▼
+Redis        ScyllaDB
+(real-time)   (persistent metadata)
+│
+▼
+Object Storage
+(media and snapshots)
 ```
-
-```text
-SvelteKit Frontend
-├ Chat UI / Drawboard / Code Canvas
-├ Monaco + Yjs collaboration
-├ Media upload components
-└ WebSocket client
-
-Go Backend
-├ Auth + session lifecycle APIs
-├ Message + pin + upload APIs
-├ Canvas snapshot + board APIs
-└ WebSocket hub (presence, typing, events)
-
-Execution
-├ Python runtime worker (Pyodide)
-└ JavaScript runtime worker
-```
-
----
-
-## Security & Privacy
-
-Tora includes practical controls for secure collaboration.
-
-- Minimal identity requirements
-- Optional password-protected session access
-- Scoped session access
-- WebSocket authentication
-- Configurable usage and quota limits
-- Isolated object storage for uploads
-- HTTPS and WSS support in production
-
-Secrets and environment-specific credentials are managed through environment variables and should never be committed.
-
----
-
-## Tech Stack
 
 ### Frontend
 
-- **SvelteKit**
-- **TypeScript**
+- SvelteKit
+- TypeScript
 - Monaco Editor
 - Yjs CRDT collaboration
-- xterm.js
 - Web Workers
 
 ### Backend
 
-- **Go**
-- Chi router
-- Gorilla WebSocket
-- Redis
-- ScyllaDB / Astra DB
-
-### Infrastructure
-
-- Docker Compose
-- Cloudflare R2
-- Optional Piston runtime
-- Optional Caddy reverse proxy
+- Go API server
+- WebSocket hub for real-time communication
+- Redis pub/sub for ephemeral state
+- ScyllaDB for durable data
 
 ---
 
@@ -295,9 +214,11 @@ Secrets and environment-specific credentials are managed through environment var
 
 - Node.js 20+
 - Go 1.24+
-- Docker and Docker Compose
+- Docker + Docker Compose
 
-### Install Dependencies
+---
+
+### Install dependencies
 
 ```bash
 npm install
@@ -306,32 +227,38 @@ go mod download
 cd ..
 ```
 
-### Start Infrastructure
+---
+
+### Start infrastructure
 
 ```bash
 docker compose up -d redis piston
 ```
 
-### Start Backend
+---
+
+### Start backend
 
 ```bash
 cd backend
 go run ./cmd/server/main.go
 ```
 
-Backend runs on:
+Backend runs at
 
 ```text
 http://localhost:8080
 ```
 
-### Start Frontend
+---
+
+### Start frontend
 
 ```bash
 npm run dev
 ```
 
-Frontend runs on:
+Frontend runs at
 
 ```text
 http://localhost:5173
@@ -341,21 +268,22 @@ http://localhost:5173
 
 ## Deployment
 
-Tora can run locally or in production with separate frontend, API, state, and storage layers.
-
-Recommended production setup:
+Typical production deployment:
 
 ```text
 Frontend
-↓
+   │
+   ▼
 Go API Server
-↓
+   │
+   ▼
 Redis + ScyllaDB
-↓
-Object Storage (Cloudflare R2)
+   │
+   ▼
+Object Storage (S3 / R2)
 ```
 
-Docker Compose is included for local infrastructure orchestration and development.
+Infrastructure services can be orchestrated using Docker Compose or container orchestration platforms.
 
 ---
 
@@ -363,55 +291,28 @@ Docker Compose is included for local infrastructure orchestration and developmen
 
 Contributions are welcome.
 
-1. Fork the repository.
-2. Create a feature branch.
-3. Commit your changes.
-4. Submit a pull request.
+1. Fork the repository
+2. Create a feature branch
+3. Implement changes
+4. Submit a pull request
 
-Please ensure code passes checks before submitting:
+Before submitting:
 
 ```bash
-# Frontend
 npm run check
 npm run lint
 npm run test
+```
 
-# Backend
+Backend tests:
+
+```bash
 cd backend
-GOCACHE=/tmp/go-build-cache go test ./...
+go test ./...
 ```
 
 ---
 
-## Community
-
-If you have questions, ideas, or issues:
-
-- Open an issue
-- Start a discussion
-- Submit a feature request
-
----
-
-<!-- ## Roadmap
-
-Potential improvements include:
-
-- OpenAPI documentation
-- End-to-end test suites
-- Observability dashboards
-- Distributed WebSocket scaling
-- Plugin architecture
-- AI collaboration assistants
-
----
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=savanp08/tora&type=Date)](https://star-history.com/#savanp08/tora&Date)
-
---- -->
-
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+This project is licensed under the MIT License.

@@ -3139,10 +3139,20 @@
 		color: #1f2937;
 	}
 
+	.bubble.call-log-bubble .bubble-meta,
+	.bubble.call-log-bubble.mine .bubble-meta {
+		color: #334155;
+	}
+
 	.messages-shell.theme-dark .bubble.call-log-bubble {
 		background: #1c1d22;
 		border-color: #30313a;
 		color: #e5e7eb;
+	}
+
+	.messages-shell.theme-dark .bubble.call-log-bubble .bubble-meta,
+	.messages-shell.theme-dark .bubble.call-log-bubble.mine .bubble-meta {
+		color: #dbe5f5;
 	}
 
 	.call-log-entry {

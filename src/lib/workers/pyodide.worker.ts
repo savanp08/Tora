@@ -1,11 +1,11 @@
 /// <reference lib="webworker" />
 
-import { loadPyodide } from 'https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.mjs';
-
 type PyodideRuntime = {
 	runPythonAsync: (code: string) => Promise<unknown>;
 	runPython: (code: string) => unknown;
 };
+
+type LoadPyodideFn = (options: { indexURL: string }) => Promise<PyodideRuntime>;
 
 type PyodideExecuteMessage = {
 	id: string;
@@ -50,6 +50,7 @@ sys.stderr.getvalue()
 `;
 
 let pyodideReady: Promise<PyodideRuntime> | null = null;
+let loadPyodideFn: LoadPyodideFn | null = null;
 let executionInProgress = false;
 
 function emit(message: PyodideWorkerMessage) {
@@ -85,12 +86,49 @@ function emitBufferedOutput(id: string, buffers: { stdout: string; stderr: strin
 async function initPyodide() {
 	if (!pyodideReady) {
 		pyodideReady = (async () => {
-			const pyodide = (await loadPyodide({ indexURL: PYODIDE_BASE_URL })) as PyodideRuntime;
+			const loadPyodide = await resolveLoadPyodide();
+			const pyodide = await loadPyodide({ indexURL: PYODIDE_BASE_URL });
 			await pyodide.runPythonAsync(INITIALIZE_STD_STREAMS_CODE);
 			return pyodide;
 		})();
 	}
 	return pyodideReady;
+}
+
+async function resolveLoadPyodide(): Promise<LoadPyodideFn> {
+	if (loadPyodideFn) {
+		return loadPyodideFn;
+	}
+	const globalLoadPyodide = (self as unknown as { loadPyodide?: unknown }).loadPyodide;
+	if (typeof globalLoadPyodide === 'function') {
+		loadPyodideFn = globalLoadPyodide as LoadPyodideFn;
+		return loadPyodideFn;
+	}
+	try {
+		const module =
+			(await import('https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.mjs')) as Record<
+				string,
+				unknown
+			>;
+		const moduleLoadPyodide = module.loadPyodide;
+		if (typeof moduleLoadPyodide === 'function') {
+			loadPyodideFn = moduleLoadPyodide as LoadPyodideFn;
+			return loadPyodideFn;
+		}
+	} catch {
+		// Fall through to script-based fallback.
+	}
+	try {
+		importScripts('https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js');
+		const legacyLoadPyodide = (self as unknown as { loadPyodide?: unknown }).loadPyodide;
+		if (typeof legacyLoadPyodide === 'function') {
+			loadPyodideFn = legacyLoadPyodide as LoadPyodideFn;
+			return loadPyodideFn;
+		}
+	} catch {
+		// Ignore and throw a single consistent error below.
+	}
+	throw new Error('Unable to initialize Pyodide runtime in worker');
 }
 
 self.onmessage = async (event: MessageEvent<PyodideExecuteMessage>) => {

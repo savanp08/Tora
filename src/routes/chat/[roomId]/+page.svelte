@@ -169,6 +169,12 @@
 
 	type CallStreamSlot = { userId: string; stream: MediaStream };
 	type CallParticipantEntry = { userId: string; name: string; isLocal: boolean };
+	type CallMemberPresenceEntry = {
+		userId: string;
+		name: string;
+		joinedAt: number;
+		leftAt: number | null;
+	};
 
 	const CALL_SIGNAL_TYPES = new Set(['call_invite', 'webrtc_offer', 'webrtc_answer', 'webrtc_ice']);
 	const CALL_MAX_PARTICIPANTS = 5;
@@ -273,6 +279,12 @@
 	let localCallStream: MediaStream | null = null;
 	let remoteCallStreams: CallStreamSlot[] = [];
 	let callParticipants: CallParticipantEntry[] = [];
+	let callMemberPresenceByUserId: Record<string, Omit<CallMemberPresenceEntry, 'userId'>> = {};
+	let callParticipantSnapshotIds: string[] = [];
+	let showCallMembersPanel = false;
+	let callMemberPresenceList: CallMemberPresenceEntry[] = [];
+	let activeCallMemberPresence: CallMemberPresenceEntry[] = [];
+	let departedCallMemberPresence: CallMemberPresenceEntry[] = [];
 	let isMuted = false;
 	let isCameraEnabled = true;
 	let isCallMinimized = false;
@@ -386,6 +398,14 @@
 		currentUserId
 	);
 	$: callParticipants = buildCallParticipantEntries();
+	$: callMemberPresenceList = Object.entries(callMemberPresenceByUserId)
+		.map(([userId, entry]) => ({ userId, ...entry }))
+		.sort((left, right) => left.joinedAt - right.joinedAt);
+	$: activeCallMemberPresence = callMemberPresenceList.filter((entry) => entry.leftAt == null);
+	$: departedCallMemberPresence = callMemberPresenceList
+		.filter((entry) => entry.leftAt != null)
+		.sort((left, right) => (right.leftAt ?? 0) - (left.leftAt ?? 0));
+	$: trackCallMemberPresence(callParticipants, activeCall);
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: canModerateBoard = isMember && !isRoomExpired && isActiveRoomAdmin;
@@ -1026,6 +1046,9 @@
 		localCallStream = null;
 		remoteCallStreams = [];
 		callParticipants = [];
+		callMemberPresenceByUserId = {};
+		callParticipantSnapshotIds = [];
+		showCallMembersPanel = false;
 		isMuted = false;
 		isCameraEnabled = false;
 		isCallMinimized = false;
@@ -1077,7 +1100,9 @@
 		if (!webrtcManager) {
 			return [];
 		}
-		const connected = new Set(webrtcManager.getPeerUserIds().map((entry) => normalizeIdentifier(entry)));
+		const connected = new Set(
+			webrtcManager.getPeerUserIds().map((entry) => normalizeIdentifier(entry))
+		);
 		return currentOnlineMembers
 			.map((member) => normalizeIdentifier(member.id))
 			.filter((memberId) => {
@@ -1100,9 +1125,8 @@
 			return `${currentUsername} (You)`;
 		}
 		return (
-			currentOnlineMembers.find(
-				(member) => normalizeIdentifier(member.id) === normalizedUserId
-			)?.name || normalizedUserId
+			currentOnlineMembers.find((member) => normalizeIdentifier(member.id) === normalizedUserId)
+				?.name || normalizedUserId
 		);
 	}
 
@@ -1133,24 +1157,122 @@
 		return entries.slice(0, CALL_MAX_PARTICIPANTS);
 	}
 
+	function trackCallMemberPresence(entries: CallParticipantEntry[], isInCall: boolean) {
+		if (!isInCall) {
+			if (
+				Object.keys(callMemberPresenceByUserId).length > 0 ||
+				callParticipantSnapshotIds.length > 0 ||
+				showCallMembersPanel
+			) {
+				callMemberPresenceByUserId = {};
+				callParticipantSnapshotIds = [];
+				showCallMembersPanel = false;
+			}
+			return;
+		}
+		const now = Date.now();
+		const nextIds: string[] = [];
+		const nextNameById: Record<string, string> = {};
+		for (const participant of entries) {
+			const userId = normalizeIdentifier(participant.userId);
+			if (!userId || nextNameById[userId]) {
+				continue;
+			}
+			nextIds.push(userId);
+			nextNameById[userId] = participant.name || 'User';
+		}
+		const prevIds = new Set(callParticipantSnapshotIds);
+		const nextIdSet = new Set(nextIds);
+		const nextPresenceByUserId = { ...callMemberPresenceByUserId };
+		let changed = false;
+		for (const userId of nextIds) {
+			const existing = nextPresenceByUserId[userId];
+			const nextName = nextNameById[userId];
+			if (!existing) {
+				nextPresenceByUserId[userId] = {
+					name: nextName,
+					joinedAt: now,
+					leftAt: null
+				};
+				changed = true;
+				continue;
+			}
+			if (existing.name !== nextName || existing.leftAt !== null) {
+				nextPresenceByUserId[userId] = {
+					...existing,
+					name: nextName,
+					leftAt: null
+				};
+				changed = true;
+			}
+		}
+		for (const userId of prevIds) {
+			if (nextIdSet.has(userId)) {
+				continue;
+			}
+			const existing = nextPresenceByUserId[userId];
+			if (!existing) {
+				nextPresenceByUserId[userId] = {
+					name: resolveCallUserName(userId),
+					joinedAt: now,
+					leftAt: now
+				};
+				changed = true;
+				continue;
+			}
+			if (existing.leftAt == null) {
+				nextPresenceByUserId[userId] = {
+					...existing,
+					leftAt: now
+				};
+				changed = true;
+			}
+		}
+		if (changed) {
+			callMemberPresenceByUserId = nextPresenceByUserId;
+		}
+		const snapshotUnchanged =
+			nextIds.length === callParticipantSnapshotIds.length &&
+			nextIds.every((userId, index) => callParticipantSnapshotIds[index] === userId);
+		if (!snapshotUnchanged) {
+			callParticipantSnapshotIds = nextIds;
+		}
+	}
+
+	function toggleCallMembersPanel() {
+		showCallMembersPanel = !showCallMembersPanel;
+	}
+
+	function formatCallMemberTime(timestampMs: number | null) {
+		if (!timestampMs || !Number.isFinite(timestampMs)) {
+			return '';
+		}
+		return new Date(timestampMs).toLocaleTimeString([], {
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
+
 	function getCallNameInitials(name: string) {
-		const tokens = name
-			.trim()
-			.split(/\s+/)
-			.filter(Boolean);
+		const tokens = name.trim().split(/\s+/).filter(Boolean);
 		if (tokens.length === 0) {
 			return 'U';
 		}
 		const first = tokens[0]?.[0] ?? '';
-		const second = tokens.length > 1 ? tokens[1]?.[0] ?? '' : '';
+		const second = tokens.length > 1 ? (tokens[1]?.[0] ?? '') : '';
 		const initials = `${first}${second}`.toUpperCase();
 		return initials || 'U';
+	}
+
+	function streamHasVideoTrack(stream: MediaStream | null) {
+		return Boolean(stream?.getVideoTracks().length);
 	}
 
 	function minimizeActiveCall() {
 		if (!activeCall) {
 			return;
 		}
+		showCallMembersPanel = false;
 		isCallMinimized = true;
 	}
 
@@ -1204,9 +1326,20 @@
 			callStartedAtMs = Date.now();
 			startCallDurationTicker();
 			syncCallStreamsFromManager();
+			const localAudioTracks = localCallStream?.getAudioTracks() ?? [];
+			if (localAudioTracks.length === 0) {
+				throw new Error('Microphone audio track is unavailable for this call.');
+			}
+			const hasEnabledLocalAudio = localAudioTracks.some((track) => track.enabled);
+			if (!hasEnabledLocalAudio) {
+				for (const track of localAudioTracks) {
+					track.enabled = true;
+				}
+			}
 			isMuted = false;
 			isCameraEnabled =
-				mode === 'video' && Boolean(localCallStream?.getVideoTracks().some((track) => track.enabled));
+				mode === 'video' &&
+				Boolean(localCallStream?.getVideoTracks().some((track) => track.enabled));
 
 			const targets = getCallInviteTargetUserIds().slice(0, webrtcManager.getAvailablePeerSlots());
 			webrtcManager.inviteToCall(mode, targets);
@@ -1238,6 +1371,16 @@
 			callStartedAtMs = Date.now();
 			startCallDurationTicker();
 			syncCallStreamsFromManager();
+			const localAudioTracks = localCallStream?.getAudioTracks() ?? [];
+			if (localAudioTracks.length === 0) {
+				throw new Error('Microphone audio track is unavailable for this call.');
+			}
+			const hasEnabledLocalAudio = localAudioTracks.some((track) => track.enabled);
+			if (!hasEnabledLocalAudio) {
+				for (const track of localAudioTracks) {
+					track.enabled = true;
+				}
+			}
 			if (incomingCall.fromUserId) {
 				await webrtcManager.connectToPeer(incomingCall.fromUserId, incomingCall.callType);
 			}
@@ -1338,12 +1481,42 @@
 	}
 
 	function bindVideoStream(node: HTMLVideoElement, stream: MediaStream | null) {
-		node.srcObject = stream;
+		const attemptPlayback = () => {
+			if (!node.srcObject) {
+				return;
+			}
+			void node.play().catch(() => {
+				// Playback may require gesture on some browsers.
+			});
+		};
+		const applyStream = (nextStream: MediaStream | null) => {
+			node.srcObject = nextStream;
+			node.autoplay = true;
+			node.playsInline = true;
+			const shouldMute = node.hasAttribute('muted');
+			node.muted = shouldMute;
+			if (!shouldMute) {
+				node.volume = 1;
+			}
+			attemptPlayback();
+		};
+		const onLoadedMetadata = () => {
+			attemptPlayback();
+		};
+		const onCanPlay = () => {
+			attemptPlayback();
+		};
+		node.addEventListener('loadedmetadata', onLoadedMetadata);
+		node.addEventListener('canplay', onCanPlay);
+		applyStream(stream);
 		return {
 			update(nextStream: MediaStream | null) {
-				node.srcObject = nextStream;
+				applyStream(nextStream);
 			},
 			destroy() {
+				node.removeEventListener('loadedmetadata', onLoadedMetadata);
+				node.removeEventListener('canplay', onCanPlay);
+				node.pause();
 				node.srcObject = null;
 			}
 		};
@@ -3541,7 +3714,9 @@
 					name: nextRoomName,
 					member: '1'
 				});
-				const passwordHash = buildRoomPasswordHash(roomMode === 'create' ? roomPassword : $activeRoomPassword);
+				const passwordHash = buildRoomPasswordHash(
+					roomMode === 'create' ? roomPassword : $activeRoomPassword
+				);
 				await goto(`/chat/${encodeURIComponent(nextRoomId)}?${params.toString()}${passwordHash}`);
 				return;
 			}
@@ -4604,13 +4779,21 @@
 								</div>
 							</div>
 							<div class="call-incoming-actions">
-								<button type="button" class="call-btn accept" on:click={() => void acceptIncomingCall()}>
+								<button
+									type="button"
+									class="call-btn accept"
+									on:click={() => void acceptIncomingCall()}
+								>
 									<svg viewBox="0 0 24 24" aria-hidden="true">
 										<path d="M8 12.5 10.7 15 16 9.8"></path>
 									</svg>
 									<span>Accept</span>
 								</button>
-								<button type="button" class="call-btn decline" on:click={() => void declineIncomingCall()}>
+								<button
+									type="button"
+									class="call-btn decline"
+									on:click={() => void declineIncomingCall()}
+								>
 									<svg viewBox="0 0 24 24" aria-hidden="true">
 										<path d="m8 8 8 8M16 8l-8 8"></path>
 									</svg>
@@ -4624,14 +4807,37 @@
 				{#if activeCall && !isCallMinimized}
 					<div class="call-active-overlay" role="region" aria-label="Active call">
 						<header class="call-active-header">
-							<div>
+							<div class="call-active-header-meta">
 								<strong>{callType === 'video' ? 'Video Call' : 'Voice Call'}</strong>
 								<span>{callDurationLabel}</span>
+								<div class="call-e2ee-badge" aria-label="End-to-end encrypted call">
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M7.5 11V8.6a4.5 4.5 0 1 1 9 0V11"></path>
+										<rect x="5.2" y="11" width="13.6" height="9.2" rx="2"></rect>
+										<path d="M12 14.6v2.5"></path>
+									</svg>
+									<span>End-to-end encrypted</span>
+								</div>
 							</div>
 							<div class="call-active-header-actions">
-								<span class="call-active-count"
-									>{remoteCallStreams.length + (localCallStream ? 1 : 0)}/{CALL_MAX_PARTICIPANTS}</span
+								<button
+									type="button"
+									class="call-active-count call-members-toggle"
+									on:click={toggleCallMembersPanel}
+									aria-label="Show call members"
+									aria-expanded={showCallMembersPanel}
+									title="Call members"
 								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M8.4 11.8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"></path>
+										<path d="M15.8 10.6a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"></path>
+										<path d="M3.8 18.4a4.6 4.6 0 0 1 9.2 0"></path>
+										<path d="M13 18.4a3.7 3.7 0 0 1 7.4 0"></path>
+									</svg>
+									<span
+										>{activeCallMemberPresence.length}/{CALL_MAX_PARTICIPANTS}</span
+									>
+								</button>
 								<button
 									type="button"
 									class="call-minimize-btn"
@@ -4645,11 +4851,65 @@
 								</button>
 							</div>
 						</header>
+						{#if showCallMembersPanel}
+							<div class="call-members-panel" role="dialog" aria-label="Call members panel">
+								<section class="call-members-section">
+									<div class="call-members-heading">
+										In call ({activeCallMemberPresence.length})
+									</div>
+									{#if activeCallMemberPresence.length === 0}
+										<div class="call-members-empty">No one is connected yet.</div>
+									{:else}
+										<ul class="call-members-list">
+											{#each activeCallMemberPresence as member (member.userId)}
+												<li class="call-members-item">
+													<span class="call-participant-avatar"
+														>{getCallNameInitials(member.name)}</span
+													>
+													<div class="call-members-item-copy">
+														<span class="call-members-name">{member.name}</span>
+														<span class="call-members-meta"
+															>Joined {formatCallMemberTime(member.joinedAt)}</span
+														>
+													</div>
+												</li>
+											{/each}
+										</ul>
+									{/if}
+								</section>
+								<section class="call-members-section">
+									<div class="call-members-heading">
+										Joined and left ({departedCallMemberPresence.length})
+									</div>
+									{#if departedCallMemberPresence.length === 0}
+										<div class="call-members-empty">No one has left this call yet.</div>
+									{:else}
+										<ul class="call-members-list">
+											{#each departedCallMemberPresence as member (member.userId)}
+												<li class="call-members-item">
+													<span class="call-participant-avatar"
+														>{getCallNameInitials(member.name)}</span
+													>
+													<div class="call-members-item-copy">
+														<span class="call-members-name">{member.name}</span>
+														<span class="call-members-meta"
+															>Left {formatCallMemberTime(member.leftAt)}</span
+														>
+													</div>
+												</li>
+											{/each}
+										</ul>
+									{/if}
+								</section>
+							</div>
+						{/if}
 						{#if callParticipants.length > 0}
 							<div class="call-participant-strip" aria-label="People in call">
 								{#each callParticipants as participant (participant.userId)}
 									<div class="call-participant-chip">
-										<span class="call-participant-avatar">{getCallNameInitials(participant.name)}</span>
+										<span class="call-participant-avatar"
+											>{getCallNameInitials(participant.name)}</span
+										>
 										<span class="call-participant-name">{participant.name}</span>
 									</div>
 								{/each}
@@ -4657,19 +4917,38 @@
 						{/if}
 						<div class="call-video-grid">
 							{#if localCallStream}
-								<article class="call-video-tile local">
-									<video
-										autoplay
-										playsinline
-										muted
-										use:bindVideoStream={localCallStream}
-									></video>
+								<article
+									class="call-video-tile local"
+									class:audio-only={!streamHasVideoTrack(localCallStream)}
+								>
+									<video autoplay playsinline muted use:bindVideoStream={localCallStream}></video>
+									{#if !streamHasVideoTrack(localCallStream)}
+										<div class="call-audio-fallback" aria-hidden="true">
+											<svg viewBox="0 0 24 24">
+												<path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
+												<path d="M15 9a4 4 0 0 1 0 6"></path>
+												<path d="M18 6a8 8 0 0 1 0 12"></path>
+											</svg>
+										</div>
+									{/if}
 									<span class="call-video-label">{resolveCallUserName(currentUserId)}</span>
 								</article>
 							{/if}
 							{#each remoteCallStreams as remote (remote.userId)}
-								<article class="call-video-tile">
+								<article
+									class="call-video-tile"
+									class:audio-only={!streamHasVideoTrack(remote.stream)}
+								>
 									<video autoplay playsinline use:bindVideoStream={remote.stream}></video>
+									{#if !streamHasVideoTrack(remote.stream)}
+										<div class="call-audio-fallback" aria-hidden="true">
+											<svg viewBox="0 0 24 24">
+												<path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
+												<path d="M15 9a4 4 0 0 1 0 6"></path>
+												<path d="M18 6a8 8 0 0 1 0 12"></path>
+											</svg>
+										</div>
+									{/if}
 									<span class="call-video-label">{resolveCallUserName(remote.userId)}</span>
 								</article>
 							{/each}
@@ -4687,7 +4966,9 @@
 									{#if isMuted}
 										<path d="m4.5 4.5 15 15"></path>
 									{/if}
-									<path d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z"></path>
+									<path
+										d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z"
+									></path>
 									<path d="M6.5 10.8a5.5 5.5 0 0 0 11 0M12 16.3V20M9.3 20h5.4"></path>
 								</svg>
 							</button>
@@ -4718,6 +4999,19 @@
 									<path d="M12 12a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z"></path>
 									<path d="M6 19a6 6 0 0 1 12 0"></path>
 									<path d="M19 8v4M17 10h4"></path>
+								</svg>
+							</button>
+							<button
+								type="button"
+								class="call-control-btn call-control-btn-chat"
+								on:click={minimizeActiveCall}
+								aria-label="Open chat"
+								title="Open chat"
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<path
+										d="M4 5.8a2.8 2.8 0 0 1 2.8-2.8h10.4A2.8 2.8 0 0 1 20 5.8v7.4a2.8 2.8 0 0 1-2.8 2.8h-6l-4.2 3v-3H6.8A2.8 2.8 0 0 1 4 13.2V5.8Z"
+									></path>
 								</svg>
 							</button>
 							<button

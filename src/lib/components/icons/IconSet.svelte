@@ -40,9 +40,10 @@
 		<rect x="9" y="9" width="13" height="13" rx="2"></rect>
 		<rect x="2" y="2" width="13" height="13" rx="2"></rect>
 	{:else if name === 'break'}
-		<path d="M4 4v6h6"></path>
-		<path d="M20 20v-6h-6"></path>
-		<path d="M10 10l10 10"></path>
+		<line x1="6" y1="3" x2="6" y2="15"></line>
+		<circle cx="18" cy="6" r="3"></circle>
+		<circle cx="6" cy="18" r="3"></circle>
+		<path d="M18 9a9 9 0 0 1-9 9"></path>
 	{:else if name === 'pin'}
 		<path
 			fill="currentColor"
