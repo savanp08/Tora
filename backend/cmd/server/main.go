@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/savanp08/converse/internal/ai"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/monitor"
@@ -18,6 +19,7 @@ import (
 
 func main() {
 	cfg := config.LoadConfig()
+	ai.RefreshDefaultProvidersFromEnv()
 	log.Println("🚀 Starting Converse Backend...")
 	websocket.SetTrustedProxies(cfg.TrustedProxies)
 

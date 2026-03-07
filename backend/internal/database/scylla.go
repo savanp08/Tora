@@ -124,6 +124,53 @@ func (s *ScyllaStore) Ping(ctx context.Context) error {
 	return s.Session.Query(query).WithContext(ctx).Scan(&releaseVersion)
 }
 
+func (s *ScyllaStore) UpdateRoomSummary(ctx context.Context, roomID string, summary string) error {
+	if s == nil || s.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	normalizedRoomID := strings.TrimSpace(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("room id is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	query := fmt.Sprintf(`UPDATE %s SET rolling_summary = ? WHERE room_id = ?`, s.Table("rooms"))
+	return s.Session.Query(
+		query,
+		strings.TrimSpace(summary),
+		normalizedRoomID,
+	).WithContext(ctx).Exec()
+}
+
+func (s *ScyllaStore) GetRoomSummary(ctx context.Context, roomID string) (string, error) {
+	if s == nil || s.Session == nil {
+		return "", fmt.Errorf("scylla session is not configured")
+	}
+	normalizedRoomID := strings.TrimSpace(roomID)
+	if normalizedRoomID == "" {
+		return "", nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	query := fmt.Sprintf(`SELECT rolling_summary FROM %s WHERE room_id = ? LIMIT 1`, s.Table("rooms"))
+	var summary *string
+	err := s.Session.Query(query, normalizedRoomID).WithContext(ctx).Scan(&summary)
+	if err != nil {
+		if errors.Is(err, gocql.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if summary == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*summary), nil
+}
+
 func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 	if session == nil {
 		return fmt.Errorf("scylla session is not configured")
@@ -145,6 +192,7 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 			origin_message_id text,
 			admin_code text,
 			canvas_has_data boolean,
+			rolling_summary text,
 			created_at timestamp,
 			updated_at timestamp
 		)`,
@@ -159,6 +207,7 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD canvas_has_data boolean`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD rolling_summary text`, roomsTable),
 	}
 	for _, alterQuery := range roomAlterQueries {
 		err := session.Query(alterQuery).Exec()

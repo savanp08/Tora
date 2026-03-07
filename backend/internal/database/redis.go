@@ -2,13 +2,21 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 var Ctx = context.Background()
+
+const (
+	roomSummaryDefaultTTL = 6 * time.Hour
+	roomSummaryRoomPrefix = "room:"
+)
 
 type RedisStore struct {
 	Client *redis.Client
@@ -73,4 +81,48 @@ func (r *RedisStore) Ping(ctx context.Context) error {
 
 func (r *RedisStore) Close() error {
 	return r.Client.Close()
+}
+
+func (r *RedisStore) SetRoomSummary(ctx context.Context, roomID string, summary string) error {
+	if r == nil || r.Client == nil {
+		return fmt.Errorf("redis client is not configured")
+	}
+	normalizedRoomID := strings.TrimSpace(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("room id is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ttl := roomSummaryDefaultTTL
+	if roomTTL, err := r.Client.TTL(ctx, roomSummaryRoomPrefix+normalizedRoomID).Result(); err == nil && roomTTL > 0 {
+		ttl = roomTTL
+	}
+
+	key := fmt.Sprintf("room:{%s}:summary", normalizedRoomID)
+	return r.Client.Set(ctx, key, strings.TrimSpace(summary), ttl).Err()
+}
+
+func (r *RedisStore) GetRoomSummary(ctx context.Context, roomID string) (string, error) {
+	if r == nil || r.Client == nil {
+		return "", fmt.Errorf("redis client is not configured")
+	}
+	normalizedRoomID := strings.TrimSpace(roomID)
+	if normalizedRoomID == "" {
+		return "", nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	key := fmt.Sprintf("room:{%s}:summary", normalizedRoomID)
+	summary, err := r.Client.Get(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(summary), nil
 }

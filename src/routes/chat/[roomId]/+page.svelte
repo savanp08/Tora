@@ -812,10 +812,19 @@
 		if (kind !== 'typing_start' && kind !== 'typing_stop') {
 			return false;
 		}
-		const nestedPayload =
-			source.payload && typeof source.payload === 'object' && !Array.isArray(source.payload)
-				? (source.payload as Record<string, unknown>)
-				: {};
+		let nestedPayload: Record<string, unknown> = {};
+		if (source.payload && typeof source.payload === 'object' && !Array.isArray(source.payload)) {
+			nestedPayload = source.payload as Record<string, unknown>;
+		} else if (typeof source.payload === 'string') {
+			try {
+				const parsed = JSON.parse(source.payload);
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					nestedPayload = parsed as Record<string, unknown>;
+				}
+			} catch {
+				// ignore malformed payload; fallback to top-level fields below
+			}
+		}
 		const targetRoomId = normalizeRoomIDValue(
 			toStringValue(
 				source.roomId ?? source.room_id ?? nestedPayload.roomId ?? nestedPayload.room_id ?? roomId
@@ -824,14 +833,36 @@
 		if (!targetRoomId) {
 			return true;
 		}
-		const participant = parseMember(nestedPayload, Date.now()) ?? parseMember(source, Date.now());
-		if (!participant) {
+		const participantId = normalizeIdentifier(
+			toStringValue(
+				nestedPayload.id ??
+					nestedPayload.userId ??
+					nestedPayload.user_id ??
+					source.id ??
+					source.userId ??
+					source.user_id
+			)
+		);
+		if (!participantId) {
 			return true;
 		}
+		const participantName =
+			normalizeUsernameValue(
+				toStringValue(
+					nestedPayload.name ??
+						nestedPayload.username ??
+						nestedPayload.userName ??
+						nestedPayload.user_name ??
+						source.name ??
+						source.username ??
+						source.userName ??
+						source.user_name
+				)
+			) || 'User';
 		if (kind === 'typing_start') {
-			setTypingIndicator(targetRoomId, participant.id, participant.name);
+			setTypingIndicator(targetRoomId, participantId, participantName);
 		} else {
-			clearTypingIndicator(targetRoomId, participant.id);
+			clearTypingIndicator(targetRoomId, participantId);
 		}
 		return true;
 	}
@@ -5401,7 +5432,7 @@
 					{/if}
 				</div>
 
-				{#if isMember && !showBoardView}
+				{#if !showBoardView}
 					<div
 						class="composer-typing-slot"
 						class:active={hasTypingUsers}
@@ -5414,6 +5445,8 @@
 							<div class="composer-typing-status">{hasTypingUsers ? 'typing ...' : '\u00A0'}</div>
 						</div>
 					</div>
+				{/if}
+				{#if isMember && !showBoardView}
 					<ChatComposer
 						bind:draftMessage
 						bind:attachedFile

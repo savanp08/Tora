@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -18,8 +19,9 @@ const (
 	toraBotSenderID         = "Tora-Bot"
 	toraBotSenderName       = "Tora-Bot"
 	toraAuditLogsTable      = "private_ai_logs"
-	toraContextMsgLimit     = 10
-	toraContextLineMaxLen   = 240
+	toraContextMsgLimit     = 50
+	toraRequestTimeout      = 25 * time.Second
+	toraSummaryTimeout      = 20 * time.Second
 )
 
 var toraAuditSchemaState struct {
@@ -49,11 +51,12 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 	}
 	prompt = stripToraMentionTokens(prompt)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), toraRequestTimeout)
 	defer cancel()
 
+	rollingSummary := h.loadRoomRollingSummary(ctx, roomID)
 	contextMessages := h.loadRecentMessagesFromRedis(ctx, roomID, toraContextMsgLimit)
-	aiPrompt := buildToraPrompt(prompt, contextMessages)
+	aiPrompt := buildToraPrompt(rollingSummary, contextMessages, prompt)
 	aiResponse, err := ai.DefaultRouter.GenerateChatResponse(ctx, aiPrompt)
 	if err != nil {
 		log.Printf("[ws] tora mention ai response failed room=%s user=%s err=%v", roomID, userMessage.SenderID, err)
@@ -95,6 +98,8 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 		Type:       "text",
 		CreatedAt:  time.Now().UTC(),
 	}
+
+	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
 }
 
 func containsToraMention(content string) bool {
@@ -150,34 +155,95 @@ func (h *Hub) loadRecentMessagesFromRedis(ctx context.Context, roomID string, li
 	return messages
 }
 
-func buildToraPrompt(prompt string, contextMessages []models.Message) string {
-	var builder strings.Builder
-	builder.WriteString("You are Tora, a helpful room assistant.\n")
-	builder.WriteString("Use the recent room context when relevant. Keep responses concise and actionable.\n\n")
-	if len(contextMessages) > 0 {
-		builder.WriteString("Recent room context:\n")
-		for _, message := range contextMessages {
-			content := strings.TrimSpace(message.Content)
-			if content == "" {
-				continue
-			}
-			if len(content) > toraContextLineMaxLen {
-				content = content[:toraContextLineMaxLen]
-			}
-			senderName := strings.TrimSpace(message.SenderName)
-			if senderName == "" {
-				senderName = "User"
-			}
-			builder.WriteString(senderName)
-			builder.WriteString(": ")
-			builder.WriteString(content)
-			builder.WriteByte('\n')
-		}
-		builder.WriteByte('\n')
+func (h *Hub) loadRoomRollingSummary(ctx context.Context, roomID string) string {
+	if h == nil || h.msgService == nil {
+		return ""
 	}
-	builder.WriteString("New user prompt:\n")
-	builder.WriteString(strings.TrimSpace(prompt))
-	return strings.TrimSpace(builder.String())
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return ""
+	}
+
+	if h.msgService.Redis != nil {
+		summary, err := h.msgService.Redis.GetRoomSummary(ctx, normalizedRoomID)
+		if err != nil {
+			log.Printf("[ws] tora summary redis lookup failed room=%s err=%v", normalizedRoomID, err)
+		} else if strings.TrimSpace(summary) != "" {
+			return strings.TrimSpace(summary)
+		}
+	}
+
+	if h.msgService.Scylla != nil {
+		summary, err := h.msgService.Scylla.GetRoomSummary(ctx, normalizedRoomID)
+		if err != nil {
+			log.Printf("[ws] tora summary scylla lookup failed room=%s err=%v", normalizedRoomID, err)
+		} else if strings.TrimSpace(summary) != "" {
+			if h.msgService.Redis != nil {
+				if cacheErr := h.msgService.Redis.SetRoomSummary(ctx, normalizedRoomID, summary); cacheErr != nil {
+					log.Printf("[ws] tora summary redis backfill failed room=%s err=%v", normalizedRoomID, cacheErr)
+				}
+			}
+			return strings.TrimSpace(summary)
+		}
+	}
+	return ""
+}
+
+func (h *Hub) refreshRoomRollingSummary(roomID string, previousSummary string, recentMessages []models.Message) {
+	if h == nil || h.msgService == nil {
+		return
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), toraSummaryTimeout)
+	defer cancel()
+
+	generatedSummary, err := ai.DefaultRouter.GenerateRollingSummary(
+		ctx,
+		[]byte(strings.TrimSpace(previousSummary)),
+		recentMessages,
+	)
+	if err != nil {
+		log.Printf("[ws] tora summary generation failed room=%s err=%v", normalizedRoomID, err)
+		return
+	}
+
+	nextSummary := strings.TrimSpace(string(generatedSummary))
+	if nextSummary == "" {
+		return
+	}
+
+	if h.msgService.Redis != nil {
+		if err := h.msgService.Redis.SetRoomSummary(ctx, normalizedRoomID, nextSummary); err != nil {
+			log.Printf("[ws] tora summary redis save failed room=%s err=%v", normalizedRoomID, err)
+		}
+	}
+	if h.msgService.Scylla != nil {
+		if err := h.msgService.Scylla.UpdateRoomSummary(ctx, normalizedRoomID, nextSummary); err != nil {
+			log.Printf("[ws] tora summary scylla save failed room=%s err=%v", normalizedRoomID, err)
+		}
+	}
+}
+
+func buildToraPrompt(rollingSummary string, contextMessages []models.Message, prompt string) string {
+	encodedMessages := "[]"
+	if len(contextMessages) > 0 {
+		payload, err := json.Marshal(contextMessages)
+		if err != nil {
+			log.Printf("[ws] tora context marshal failed err=%v", err)
+		} else {
+			encodedMessages = string(payload)
+		}
+	}
+	return fmt.Sprintf(
+		"System Context: %s. Recent Chat History: %s. Respond to this new user prompt: %s",
+		strings.TrimSpace(rollingSummary),
+		encodedMessages,
+		strings.TrimSpace(prompt),
+	)
 }
 
 func (h *Hub) persistToraAuditRecord(ctx context.Context, record toraAuditRecord) error {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,25 +16,42 @@ import (
 )
 
 const (
-	defaultGeminiModel = "gemini-2.0-flash"
-	defaultGroqModel   = "llama-3.3-70b-versatile"
 	defaultOpenAIModel = "gpt-4o-mini"
 	defaultCohereModel = "command-r"
 )
 
+var (
+	defaultGeminiModels = []string{
+		"gemini-2.5-flash",
+		"gemini-3.1-pro",
+		"gemini-3.1-flash",
+		"gemini-3.1-flash-lite",
+	}
+	defaultXAIModels = []string{
+		"grok-2-latest",
+		"grok-beta",
+	}
+)
+
 // buildDefaultProvidersFromEnv returns providers in fixed fallback order:
-// Gemini -> Groq -> OpenAI -> Cohere.
+// Gemini -> OpenAI -> xAI -> Cohere.
 func buildDefaultProvidersFromEnv() []Summarizer {
 	providers := make([]Summarizer, 0, 4)
 
 	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewGeminiProvider(apiKey, strings.TrimSpace(os.Getenv("GEMINI_MODEL"))))
-	}
-	if apiKey := strings.TrimSpace(os.Getenv("GROQ_API_KEY")); apiKey != "" {
-		providers = append(providers, NewGroqProvider(apiKey, strings.TrimSpace(os.Getenv("GROQ_MODEL"))))
+		providers = append(providers, NewGeminiProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("GEMINI_MODELS"),
+			os.Getenv("GEMINI_MODEL"),
+		)))
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
 		providers = append(providers, NewOpenAIProvider(apiKey, strings.TrimSpace(os.Getenv("OPENAI_MODEL"))))
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("XAI_API_KEY")); apiKey != "" {
+		providers = append(providers, NewXAIProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("XAI_MODELS"),
+			os.Getenv("XAI_MODEL"),
+		)))
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("COHERE_API_KEY")); apiKey != "" {
 		providers = append(providers, NewCohereProvider(apiKey, strings.TrimSpace(os.Getenv("COHERE_MODEL"))))
@@ -44,14 +62,14 @@ func buildDefaultProvidersFromEnv() []Summarizer {
 
 type GeminiProvider struct {
 	apiKey string
-	model  string
+	models []string
 	client *http.Client
 }
 
-func NewGeminiProvider(apiKey, model string) *GeminiProvider {
+func NewGeminiProvider(apiKey string, models []string) *GeminiProvider {
 	return &GeminiProvider{
 		apiKey: strings.TrimSpace(apiKey),
-		model:  trimOrDefault(model, defaultGeminiModel),
+		models: mergeModelCascade(models, defaultGeminiModels),
 		client: newProviderHTTPClient(),
 	}
 }
@@ -74,133 +92,66 @@ func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string
 		return "", fmt.Errorf("gemini prompt is empty")
 	}
 
-	modelPath := url.PathEscape(strings.TrimSpace(p.model))
-	endpoint := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-		modelPath,
-		url.QueryEscape(strings.TrimSpace(p.apiKey)),
-	)
+	providerLabel := "gemini"
+	for _, model := range p.models {
+		modelPath := url.PathEscape(model)
+		endpoint := fmt.Sprintf(
+			"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+			modelPath,
+			url.QueryEscape(strings.TrimSpace(p.apiKey)),
+		)
 
-	payload := map[string]any{
-		"contents": []map[string]any{
-			{
-				"parts": []map[string]string{
-					{"text": prompt},
+		payload := map[string]any{
+			"contents": []map[string]any{
+				{
+					"parts": []map[string]string{
+						{"text": prompt},
+					},
 				},
 			},
-		},
-		"generationConfig": map[string]any{
-			"temperature": 0.2,
-		},
-	}
-
-	statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
-	if err != nil {
-		return "", err
-	}
-
-	var parsed struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(body, &parsed)
-
-	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return "", toProviderStatusError("gemini", statusCode, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body)))
-	}
-	if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("gemini returned empty response")
-	}
-
-	text := strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text)
-	if text == "" {
-		return "", fmt.Errorf("gemini returned empty text")
-	}
-	return text, nil
-}
-
-type GroqProvider struct {
-	apiKey string
-	model  string
-	client *http.Client
-}
-
-func NewGroqProvider(apiKey, model string) *GroqProvider {
-	return &GroqProvider{
-		apiKey: strings.TrimSpace(apiKey),
-		model:  trimOrDefault(model, defaultGroqModel),
-		client: newProviderHTTPClient(),
-	}
-}
-
-func (p *GroqProvider) GenerateRollingSummary(
-	ctx context.Context,
-	previousState []byte,
-	newMessages []Message,
-) ([]byte, error) {
-	response, err := p.GenerateChatResponse(ctx, buildRollingSummaryPrompt(previousState, newMessages))
-	if err != nil {
-		return nil, err
-	}
-	return []byte(strings.TrimSpace(response)), nil
-}
-
-func (p *GroqProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
-		return "", fmt.Errorf("groq prompt is empty")
-	}
-
-	payload := map[string]any{
-		"model": p.model,
-		"messages": []map[string]string{
-			{
-				"role":    "user",
-				"content": prompt,
+			"generationConfig": map[string]any{
+				"temperature": 0.2,
 			},
-		},
-		"temperature": 0.2,
-	}
+		}
 
-	statusCode, body, err := postJSON(ctx, p.client, "https://api.groq.com/openai/v1/chat/completions", map[string]string{
-		"Authorization": "Bearer " + p.apiKey,
-	}, payload)
-	if err != nil {
-		return "", err
-	}
+		statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
+		if err != nil {
+			return "", err
+		}
 
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(body, &parsed)
+		var parsed struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &parsed)
 
-	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return "", toProviderStatusError("groq", statusCode, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body)))
-	}
-	if len(parsed.Choices) == 0 {
-		return "", fmt.Errorf("groq returned empty response")
-	}
+		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				continue
+			}
+			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+		}
+		if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
+			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+		}
 
-	text := strings.TrimSpace(parsed.Choices[0].Message.Content)
-	if text == "" {
-		return "", fmt.Errorf("groq returned empty text")
+		text := strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text)
+		if text == "" {
+			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+		}
+		return text, nil
 	}
-	return text, nil
+	return "", newModelCascadeExhaustedError(providerLabel, p.models)
 }
 
 type OpenAIProvider struct {
@@ -277,6 +228,91 @@ func (p *OpenAIProvider) GenerateChatResponse(ctx context.Context, prompt string
 		return "", fmt.Errorf("openai returned empty text")
 	}
 	return text, nil
+}
+
+type XAIProvider struct {
+	apiKey string
+	models []string
+	client *http.Client
+}
+
+func NewXAIProvider(apiKey string, models []string) *XAIProvider {
+	return &XAIProvider{
+		apiKey: strings.TrimSpace(apiKey),
+		models: mergeModelCascade(models, defaultXAIModels),
+		client: newProviderHTTPClient(),
+	}
+}
+
+func (p *XAIProvider) GenerateRollingSummary(
+	ctx context.Context,
+	previousState []byte,
+	newMessages []Message,
+) ([]byte, error) {
+	response, err := p.GenerateChatResponse(ctx, buildRollingSummaryPrompt(previousState, newMessages))
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSpace(response)), nil
+}
+
+func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", fmt.Errorf("xai prompt is empty")
+	}
+
+	providerLabel := "xai"
+	for _, model := range p.models {
+		payload := map[string]any{
+			"model": model,
+			"messages": []map[string]string{
+				{
+					"role":    "user",
+					"content": prompt,
+				},
+			},
+			"temperature": 0.2,
+		}
+
+		statusCode, body, err := postJSON(ctx, p.client, "https://api.x.ai/v1/chat/completions", map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
+		}, payload)
+		if err != nil {
+			return "", err
+		}
+
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+
+		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				continue
+			}
+			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+		}
+		if len(parsed.Choices) == 0 {
+			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+		}
+
+		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
+		if text == "" {
+			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+		}
+		return text, nil
+	}
+	return "", newModelCascadeExhaustedError(providerLabel, p.models)
 }
 
 type CohereProvider struct {
@@ -441,6 +477,55 @@ func toProviderStatusError(provider string, statusCode int, message string) erro
 		Provider: provider,
 		Err:      errors.New(normalizedMessage),
 	}
+}
+
+func parseModelCascadeFromEnv(values ...string) []string {
+	cascade := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(token)
+			if trimmed == "" {
+				continue
+			}
+			cascade = append(cascade, trimmed)
+		}
+	}
+	return cascade
+}
+
+func mergeModelCascade(configured []string, defaults []string) []string {
+	cascade := make([]string, 0, len(configured)+len(defaults))
+	seen := make(map[string]struct{}, len(configured)+len(defaults))
+	appendUnique := func(model string) {
+		trimmed := strings.TrimSpace(model)
+		if trimmed == "" {
+			return
+		}
+		if _, exists := seen[trimmed]; exists {
+			return
+		}
+		seen[trimmed] = struct{}{}
+		cascade = append(cascade, trimmed)
+	}
+	for _, model := range configured {
+		appendUnique(model)
+	}
+	for _, model := range defaults {
+		appendUnique(model)
+	}
+	return cascade
+}
+
+func newModelCascadeExhaustedError(provider string, attemptedModels []string) error {
+	modelList := strings.Join(attemptedModels, ",")
+	if strings.TrimSpace(modelList) == "" {
+		modelList = "none"
+	}
+	return toProviderStatusError(
+		provider,
+		http.StatusTooManyRequests,
+		fmt.Sprintf("%s models exhausted due to rate limit or temporary unavailability (%s)", provider, modelList),
+	)
 }
 
 func extractMessageFromBody(body []byte) string {

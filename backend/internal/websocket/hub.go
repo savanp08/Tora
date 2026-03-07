@@ -1320,13 +1320,6 @@ func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 		},
 	}
 	for roomClient := range clients {
-		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
-			roomClient.subscribeToRoom(roomID, false)
-			continue
-		}
-		if !roomClient.canWriteToRoom(roomID) {
-			continue
-		}
 		if roomClient.UserID == userID {
 			continue
 		}

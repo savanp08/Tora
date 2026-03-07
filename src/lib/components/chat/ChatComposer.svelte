@@ -71,7 +71,14 @@
 		isAI?: boolean;
 	};
 
+	type ComposerTextSegment = {
+		value: string;
+		isMention: boolean;
+	};
+
 	type PendingAIAction = 'send' | 'open-private-ai' | null;
+
+	const COMPOSER_MENTION_TOKEN_PATTERN = /(^|[^A-Za-z0-9_])(@[A-Za-z0-9_.-]{1,32})/g;
 
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;
@@ -96,8 +103,10 @@
 	let emojiWrapEl: HTMLDivElement | null = null;
 	let mentionPickerEl: HTMLDivElement | null = null;
 	let composerTextareaEl: HTMLTextAreaElement | null = null;
+	let composerHighlightEl: HTMLDivElement | null = null;
 	let normalizedDraftMessage = '';
 	let draftMessageBytes = 0;
+	let composerMentionSegments: ComposerTextSegment[] = [];
 	let taskDraftOpen = false;
 	let taskDraftTitle = '';
 	let taskDraftItems: TaskChecklistItem[] = [];
@@ -127,6 +136,8 @@
 	let mentionReplaceEnd = 0;
 
 	$: normalizedDraftMessage = draftMessage.trim();
+	$: hasComposerInput = draftMessage.length > 0;
+	$: composerMentionSegments = splitComposerTextByMention(draftMessage);
 	$: draftMessageBytes = getUTF8ByteLength(normalizedDraftMessage);
 	$: isOverMessageLimit = draftMessageBytes > messageLimit;
 	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
@@ -144,6 +155,9 @@
 				: hasPendingAttachment
 					? 'Add a caption (optional)'
 					: 'Type a message';
+	$: if (hasComposerInput && showEmojiPicker) {
+		closeEmojiPicker();
+	}
 
 	const dispatch = createEventDispatcher<{
 		send:
@@ -201,6 +215,51 @@
 		showMentionPicker = false;
 		mentionOptions = [];
 		mentionActiveIndex = 0;
+	}
+
+	function splitComposerTextByMention(value: string): ComposerTextSegment[] {
+		const source = value || '';
+		if (!source) {
+			return [];
+		}
+		const segments: ComposerTextSegment[] = [];
+		COMPOSER_MENTION_TOKEN_PATTERN.lastIndex = 0;
+		let cursor = 0;
+		let match = COMPOSER_MENTION_TOKEN_PATTERN.exec(source);
+		while (match) {
+			const matchIndex = match.index ?? -1;
+			const fullValue = match[0] || '';
+			const prefix = match[1] || '';
+			const mention = match[2] || '';
+			if (matchIndex >= 0 && fullValue) {
+				if (matchIndex > cursor) {
+					segments.push({ value: source.slice(cursor, matchIndex), isMention: false });
+				}
+				if (prefix) {
+					segments.push({ value: prefix, isMention: false });
+				}
+				if (mention) {
+					segments.push({ value: mention, isMention: true });
+				}
+				cursor = matchIndex + fullValue.length;
+			}
+			match = COMPOSER_MENTION_TOKEN_PATTERN.exec(source);
+		}
+		if (cursor < source.length) {
+			segments.push({ value: source.slice(cursor), isMention: false });
+		}
+		if (segments.length === 0) {
+			return [{ value: source, isMention: false }];
+		}
+		return segments;
+	}
+
+	function syncComposerHighlightScroll() {
+		if (!composerTextareaEl || !composerHighlightEl) {
+			return;
+		}
+		composerHighlightEl.scrollTop = composerTextareaEl.scrollTop;
+		composerHighlightEl.scrollLeft = composerTextareaEl.scrollLeft;
 	}
 
 	function textUsesAI(text: string) {
@@ -313,6 +372,7 @@
 			}
 			composerTextareaEl.focus();
 			composerTextareaEl.setSelectionRange(nextCursor, nextCursor);
+			syncComposerHighlightScroll();
 		});
 		closeMentionPicker();
 		emitTypingValue();
@@ -388,6 +448,9 @@
 
 	onMount(() => {
 		hasAcceptedAITerms = loadHasAcceptedAITerms();
+		requestAnimationFrame(() => {
+			syncComposerHighlightScroll();
+		});
 
 		const onDocumentPointerDown = (event: PointerEvent) => {
 			const target = event.target;
@@ -907,11 +970,13 @@
 	}
 
 	function onComposerInput() {
+		syncComposerHighlightScroll();
 		emitTypingValue();
 		updateMentionSuggestionsFromCaret();
 	}
 
 	function onComposerCursorActivity() {
+		syncComposerHighlightScroll();
 		updateMentionSuggestionsFromCaret();
 	}
 
@@ -1340,7 +1405,7 @@
 	{#if isProcessingAttachment}
 		<div class="attachment-progress">Compressing &amp; Uploading...</div>
 	{/if}
-	<div class="composer-row">
+		<div class="composer-row" class:typing-active={hasComposerInput}>
 		<input
 			bind:this={mediaInput}
 			type="file"
@@ -1388,27 +1453,30 @@
 				</div>
 			{/if}
 		</div>
-		<button
-			type="button"
-			class="ai-button"
-			on:click={onAIButtonClick}
-			disabled={composerDisabled}
-			aria-label="Ask AI Privately"
-			title="Ask AI Privately"
-		>
-			<svg viewBox="0 0 24 24" aria-hidden="true">
-				<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
-			</svg>
-		</button>
-		<div class="emoji-wrap" bind:this={emojiWrapEl}>
 			<button
 				type="button"
-				class="emoji-button"
-				on:click={toggleEmojiPicker}
-				disabled={composerDisabled}
-				aria-label="Insert emoji"
-				title="Insert emoji"
+				class="ai-button"
+				class:slot-hidden={hasComposerInput}
+				on:click={onAIButtonClick}
+				disabled={composerDisabled || hasComposerInput}
+				aria-hidden={hasComposerInput}
+				aria-label="Ask AI Privately"
+				title="Ask AI Privately"
 			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
+				</svg>
+			</button>
+			<div class="emoji-wrap" class:slot-hidden={hasComposerInput} bind:this={emojiWrapEl}>
+				<button
+					type="button"
+					class="emoji-button"
+					on:click={toggleEmojiPicker}
+					disabled={composerDisabled || hasComposerInput}
+					aria-hidden={hasComposerInput}
+					aria-label="Insert emoji"
+					title="Insert emoji"
+				>
 				<span aria-hidden="true">😊</span>
 			</button>
 			{#if showEmojiPicker}
@@ -1427,16 +1495,32 @@
 			{/if}
 		</div>
 
-		<div class="composer-input-wrap">
-			<textarea
-				bind:this={composerTextareaEl}
-				bind:value={draftMessage}
-				rows="1"
-				placeholder={composerPlaceholder}
-				on:input={onComposerInput}
-				on:keydown={onComposerKeyDown}
-				on:click={onComposerCursorActivity}
-				on:keyup={onComposerCursorActivity}
+			<div class="composer-input-wrap">
+				<div class="composer-input-highlight" bind:this={composerHighlightEl} aria-hidden="true">
+					<div class="composer-input-highlight-content">
+						{#if composerMentionSegments.length === 0}
+							<span> </span>
+						{:else}
+							{#each composerMentionSegments as segment, segmentIndex (`${segmentIndex}-${segment.value}-${segment.isMention ? 'mention' : 'text'}`)}
+								{#if segment.isMention}
+									<span class="composer-mention-token">{segment.value}</span>
+								{:else}
+									{segment.value}
+								{/if}
+							{/each}
+						{/if}
+					</div>
+				</div>
+				<textarea
+					bind:this={composerTextareaEl}
+					bind:value={draftMessage}
+					rows="1"
+					placeholder={composerPlaceholder}
+					on:input={onComposerInput}
+					on:scroll={syncComposerHighlightScroll}
+					on:keydown={onComposerKeyDown}
+					on:click={onComposerCursorActivity}
+					on:keyup={onComposerCursorActivity}
 				disabled={composerDisabled}
 				autocomplete="off"
 			></textarea>
@@ -2050,7 +2134,11 @@
 		transition:
 			border-color 140ms ease,
 			box-shadow 140ms ease,
-			background 140ms ease;
+		background 140ms ease;
+	}
+
+	.composer-row.typing-active {
+		grid-template-columns: 2.2rem 0 0 minmax(0, 1fr) 2.2rem;
 	}
 
 	.composer[data-mode='dark'] .composer-row {
@@ -2162,6 +2250,35 @@
 		stroke-linejoin: round;
 	}
 
+	.ai-button.slot-hidden,
+	.emoji-wrap.slot-hidden {
+		visibility: hidden;
+		pointer-events: none;
+	}
+
+	.ai-button.slot-hidden {
+		width: 0;
+		height: 0;
+		border: 0;
+		padding: 0;
+	}
+
+	.ai-button.slot-hidden svg {
+		display: none;
+	}
+
+	.emoji-wrap.slot-hidden {
+		width: 0;
+		overflow: hidden;
+	}
+
+	.emoji-wrap.slot-hidden .emoji-button {
+		width: 0;
+		height: 0;
+		border: 0;
+		padding: 0;
+	}
+
 	.emoji-picker {
 		position: absolute;
 		left: 0;
@@ -2247,7 +2364,45 @@
 		min-width: 0;
 	}
 
+	.composer-input-highlight {
+		position: absolute;
+		inset: 0;
+		z-index: 0;
+		pointer-events: none;
+		overflow: auto;
+		scrollbar-width: none;
+	}
+
+	.composer-input-highlight::-webkit-scrollbar {
+		display: none;
+	}
+
+	.composer-input-highlight-content {
+		min-height: 100%;
+		padding: 0.44rem 0.56rem;
+		font-size: 0.9rem;
+		line-height: 1.32;
+		font-family: inherit;
+		box-sizing: border-box;
+		white-space: pre-wrap;
+		word-break: break-word;
+		overflow-wrap: anywhere;
+		color: var(--text-primary);
+	}
+
+	.composer-mention-token {
+		color: #2563eb;
+		font-weight: 600;
+		text-decoration: none;
+	}
+
+	.composer[data-mode='dark'] .composer-mention-token {
+		color: #9bc2ff;
+	}
+
 	.composer-input-wrap textarea {
+		position: relative;
+		z-index: 1;
 		width: 100%;
 		min-width: 0;
 		resize: none;
@@ -2260,19 +2415,21 @@
 		line-height: 1.32;
 		font-family: inherit;
 		background: transparent;
-		color: var(--text-primary);
+		color: transparent;
+		-webkit-text-fill-color: transparent;
+		caret-color: var(--text-primary);
 		box-sizing: border-box;
 	}
 
 	.composer-input-wrap textarea:focus {
 		outline: none;
 		border-color: #aab3be;
-		background: rgba(255, 255, 255, 0.66);
+		background: transparent;
 	}
 
 	.composer[data-mode='dark'] .composer-input-wrap textarea:focus {
 		border-color: #737d89;
-		background: rgba(255, 255, 255, 0.05);
+		background: transparent;
 	}
 
 	.composer-input-wrap textarea::placeholder {

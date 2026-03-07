@@ -24,6 +24,28 @@ func NewAIRouter(providers ...Summarizer) *AIRouter {
 	return &AIRouter{providers: filtered}
 }
 
+func (r *AIRouter) replaceProviders(providers ...Summarizer) {
+	if r == nil {
+		return
+	}
+	filtered := make([]Summarizer, 0, len(providers))
+	for _, provider := range providers {
+		if provider != nil {
+			filtered = append(filtered, provider)
+		}
+	}
+	r.providers = filtered
+}
+
+// RefreshDefaultProvidersFromEnv rebuilds the default provider chain using
+// current process environment variables.
+func RefreshDefaultProvidersFromEnv() {
+	if DefaultRouter == nil {
+		DefaultRouter = NewAIRouter()
+	}
+	DefaultRouter.replaceProviders(buildDefaultProvidersFromEnv()...)
+}
+
 func (r *AIRouter) RouteRequest(
 	ctx context.Context,
 	request func(context.Context, Summarizer) (any, error),

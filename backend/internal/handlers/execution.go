@@ -24,6 +24,10 @@ type codeExecutionResponse struct {
 }
 
 type pistonExecuteEnvelope struct {
+	Compile struct {
+		Stdout string `json:"stdout"`
+		Stderr string `json:"stderr"`
+	} `json:"compile"`
 	Run struct {
 		Stdout string `json:"stdout"`
 		Stderr string `json:"stderr"`
@@ -147,12 +151,12 @@ func parseExecutionResponse(body []byte) (codeExecutionResponse, error) {
 		return codeExecutionResponse{}, err
 	}
 
-	stdout := envelope.Run.Stdout
-	stderr := envelope.Run.Stderr
-	if stdout == "" {
+	stdout := joinExecutionPhaseOutput(envelope.Compile.Stdout, envelope.Run.Stdout)
+	stderr := joinExecutionPhaseOutput(envelope.Compile.Stderr, envelope.Run.Stderr)
+	if strings.TrimSpace(stdout) == "" {
 		stdout = envelope.Stdout
 	}
-	if stderr == "" {
+	if strings.TrimSpace(stderr) == "" {
 		stderr = envelope.Stderr
 	}
 
@@ -178,6 +182,9 @@ func parseExecutionErrorBody(body []byte) string {
 	if strings.TrimSpace(envelope.Message) != "" {
 		return strings.TrimSpace(envelope.Message)
 	}
+	if strings.TrimSpace(envelope.Compile.Stderr) != "" {
+		return strings.TrimSpace(envelope.Compile.Stderr)
+	}
 	if strings.TrimSpace(envelope.Run.Stderr) != "" {
 		return strings.TrimSpace(envelope.Run.Stderr)
 	}
@@ -185,4 +192,16 @@ func parseExecutionErrorBody(body []byte) string {
 		return strings.TrimSpace(envelope.Stderr)
 	}
 	return ""
+}
+
+func joinExecutionPhaseOutput(parts ...string) string {
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	return strings.Join(filtered, "\n")
 }

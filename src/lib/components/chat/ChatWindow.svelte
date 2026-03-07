@@ -86,6 +86,8 @@
 	const EMOJI_TOKEN_PATTERN =
 		/(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*)/gu;
 	const MENTION_TOKEN_PATTERN = /(^|[^A-Za-z0-9_])(@[A-Za-z0-9_.-]{1,32})/g;
+	const LIGHT_SENDER_NAME_FALLBACK = '#475569';
+	const DARK_SENDER_NAME_FALLBACK = '#cbd5e1';
 
 	let viewport: HTMLDivElement | null = null;
 	let previousVisibleCount = 0;
@@ -127,6 +129,7 @@
 	let suppressNativeMessageContextMenuUntil = 0;
 	let reactionPopoverMessageId = '';
 	let touchReactionRevealMessageId = '';
+	const senderNameColorCache = new Map<string, string>();
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -414,6 +417,32 @@
 			}
 		}
 		return true;
+	}
+
+	function getSenderNameColor(senderId: string, senderName: string) {
+		const normalizedSenderId = normalizeIdentifier(senderId || '');
+		const normalizedSenderName = normalizeIdentifier(senderName || '');
+		const identity = normalizedSenderId || normalizedSenderName;
+		if (!identity) {
+			return isDarkMode ? DARK_SENDER_NAME_FALLBACK : LIGHT_SENDER_NAME_FALLBACK;
+		}
+		const theme = isDarkMode ? 'dark' : 'light';
+		const cacheKey = `${theme}:${identity}`;
+		const cached = senderNameColorCache.get(cacheKey);
+		if (cached) {
+			return cached;
+		}
+		let hash = 2166136261;
+		for (let index = 0; index < identity.length; index += 1) {
+			hash ^= identity.charCodeAt(index);
+			hash = Math.imul(hash, 16777619) >>> 0;
+		}
+		const hue = hash % 360;
+		const saturation = isDarkMode ? 72 : 68;
+		const lightness = isDarkMode ? 66 + (hash % 8) : 34 + (hash % 10);
+		const color = `hsl(${hue} ${saturation}% ${lightness}%)`;
+		senderNameColorCache.set(cacheKey, color);
+		return color;
 	}
 
 	function getVisibleMessageKey(entries: ChatMessage[]) {
@@ -1683,9 +1712,14 @@
 					on:touchend={onMessageTouchEnd}
 					on:touchcancel={onMessageTouchCancel}
 				>
-						<div class="bubble-meta">
-							<span>{message.senderName}</span>
-							<div class="meta-right">
+							<div class="bubble-meta">
+								<span
+									class="bubble-sender-name"
+									style={`color:${getSenderNameColor(message.senderId, message.senderName)};`}
+								>
+									{message.senderName}
+								</span>
+								<div class="meta-right">
 								<span class="time-meta">
 									<time>{formatClock(message.createdAt)}</time>
 									{#if message.isEdited && !isDeletedMessage(message)}
@@ -2822,6 +2856,11 @@
 		margin-bottom: 0.44rem;
 	}
 
+	.bubble-sender-name {
+		font-weight: 600;
+		letter-spacing: 0.01em;
+	}
+
 	.bubble.mine .bubble-meta {
 		color: #dce5f2;
 	}
@@ -3156,27 +3195,22 @@
 	}
 
 	.mention-tag {
-		display: inline-block;
+		display: inline;
 		color: #1d4ed8;
-		background: rgba(37, 99, 235, 0.14);
-		border-radius: 6px;
-		padding: 0 0.24rem;
 		font-weight: 600;
+		text-decoration: none;
 	}
 
 	.messages-shell.theme-dark .mention-tag {
-		color: #8db8ff;
-		background: rgba(59, 130, 246, 0.24);
+		color: #9bc2ff;
 	}
 
 	.bubble.mine .mention-tag {
-		color: #1e40af;
-		background: rgba(191, 219, 254, 0.38);
+		color: #2d63d9;
 	}
 
 	.messages-shell.theme-dark .bubble.mine .mention-tag {
-		color: #c7dcff;
-		background: rgba(73, 122, 183, 0.38);
+		color: #afd1ff;
 	}
 
 	.bubble.has-reactions {
