@@ -1,3 +1,7 @@
+const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+const EXECUTE_ENDPOINT = `${API_BASE}/api/execute`;
+
 type WorkerInboundMessage = {
 	code: string;
 	id: string;
@@ -13,19 +17,40 @@ type WorkerOutboundMessage = {
 
 type WorkerFactory = () => Promise<Worker>;
 
-type ExecutionStrategy = {
+type RemoteExecutionPayload = {
+	stdout: string;
+	stderr: string;
+};
+
+type WorkerExecutionStrategy = {
+	mode: 'worker';
 	language: string;
 	aliases: string[];
 	workerFactory: WorkerFactory;
 };
 
+type RemoteExecutionStrategy = {
+	mode: 'remote';
+	language: string;
+	aliases: string[];
+	runRemote: (
+		code: string,
+		language: string,
+		signal: AbortSignal
+	) => Promise<RemoteExecutionPayload>;
+};
+
+type ExecutionStrategy = WorkerExecutionStrategy | RemoteExecutionStrategy;
+
 type RunContext = {
 	id: string;
 	language: string;
-	workerLanguage: string;
+	runtimeLanguage: string;
+	strategyMode: 'worker' | 'remote';
 	resolve: (value: ExecutionRunResult) => void;
 	reject: (reason: Error) => void;
 	timeoutId: ReturnType<typeof setTimeout> | null;
+	abortController: AbortController | null;
 	subscribers: Set<ExecutionOutputCallback>;
 	outputBufferByStream: {
 		stdout: string;
@@ -64,6 +89,18 @@ export type ExecutionRunHandle = {
 	cancel: () => void;
 };
 
+class RemoteExecutionError extends Error {
+	readonly stdout: string;
+	readonly stderr: string;
+
+	constructor(message: string, stdout = '', stderr = '') {
+		super(message);
+		this.name = 'RemoteExecutionError';
+		this.stdout = stdout;
+		this.stderr = stderr;
+	}
+}
+
 function createExecutionId() {
 	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
 		return crypto.randomUUID();
@@ -76,10 +113,11 @@ export class ExecutionManager {
 	private readonly strategyByLanguage = new Map<string, ExecutionStrategy>();
 	private readonly workerRuntimeByLanguage = new Map<string, WorkerRuntime>();
 	private readonly activeRunById = new Map<string, RunContext>();
-	private readonly activeRunIdByWorkerLanguage = new Map<string, string>();
+	private readonly activeRunIdByRuntimeLanguage = new Map<string, string>();
 
 	constructor() {
-		const pythonStrategy: ExecutionStrategy = {
+		const pythonStrategy: WorkerExecutionStrategy = {
+			mode: 'worker',
 			language: 'python',
 			aliases: ['py'],
 			workerFactory: async () =>
@@ -87,7 +125,8 @@ export class ExecutionManager {
 					type: 'module'
 				})
 		};
-		const javascriptStrategy: ExecutionStrategy = {
+		const javascriptStrategy: WorkerExecutionStrategy = {
+			mode: 'worker',
 			language: 'javascript',
 			aliases: ['js', 'mjs', 'cjs'],
 			workerFactory: async () => {
@@ -95,8 +134,45 @@ export class ExecutionManager {
 				return new JavaScriptWorker();
 			}
 		};
+
+		const remoteStrategies: RemoteExecutionStrategy[] = [
+			{
+				mode: 'remote',
+				language: 'cpp',
+				aliases: ['c++'],
+				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+			},
+			{
+				mode: 'remote',
+				language: 'c',
+				aliases: [],
+				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+			},
+			{
+				mode: 'remote',
+				language: 'java',
+				aliases: [],
+				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+			},
+			{
+				mode: 'remote',
+				language: 'go',
+				aliases: ['golang'],
+				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+			},
+			{
+				mode: 'remote',
+				language: 'rust',
+				aliases: ['rs'],
+				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+			}
+		];
+
 		this.registerStrategy(pythonStrategy);
 		this.registerStrategy(javascriptStrategy);
+		for (const strategy of remoteStrategies) {
+			this.registerStrategy(strategy);
+		}
 	}
 
 	getSupportedLanguages() {
@@ -111,13 +187,18 @@ export class ExecutionManager {
 				`Unsupported language "${language}". Supported: ${[...this.strategies.keys()].join(', ')}`
 			);
 		}
-		const workerLanguage = strategy.language;
-		if (this.activeRunIdByWorkerLanguage.has(workerLanguage)) {
+		const runtimeLanguage = strategy.language;
+		if (this.activeRunIdByRuntimeLanguage.has(runtimeLanguage)) {
 			throw new Error(
-				`Execution for ${workerLanguage} is already in progress. Wait for it to finish or cancel it first.`
+				`Execution for ${runtimeLanguage} is already in progress. Wait for it to finish or cancel it first.`
 			);
 		}
-		const worker = await this.ensureWorker(workerLanguage, strategy);
+
+		let worker: Worker | null = null;
+		if (strategy.mode === 'worker') {
+			worker = await this.ensureWorker(runtimeLanguage, strategy);
+		}
+
 		const executionId = createExecutionId();
 
 		let resolveResult: (value: ExecutionRunResult) => void = () => {};
@@ -129,10 +210,12 @@ export class ExecutionManager {
 		const context: RunContext = {
 			id: executionId,
 			language: strategy.language,
-			workerLanguage,
+			runtimeLanguage,
+			strategyMode: strategy.mode,
 			resolve: resolveResult,
 			reject: rejectResult,
 			timeoutId: null,
+			abortController: null,
 			subscribers: new Set<ExecutionOutputCallback>(),
 			outputBufferByStream: {
 				stdout: '',
@@ -146,11 +229,24 @@ export class ExecutionManager {
 		}, Math.max(1, timeoutMs));
 
 		this.activeRunById.set(executionId, context);
-		this.activeRunIdByWorkerLanguage.set(workerLanguage, executionId);
-		worker.postMessage({
-			code,
-			id: executionId
-		} satisfies WorkerInboundMessage);
+		this.activeRunIdByRuntimeLanguage.set(runtimeLanguage, executionId);
+
+		if (strategy.mode === 'worker') {
+			worker?.postMessage({
+				code,
+				id: executionId
+			} satisfies WorkerInboundMessage);
+		} else {
+			const abortController = new AbortController();
+			context.abortController = abortController;
+			void this.executeRemoteRun(
+				context,
+				strategy,
+				code,
+				normalizedLanguage,
+				abortController.signal
+			);
+		}
 
 		return {
 			id: executionId,
@@ -179,6 +275,9 @@ export class ExecutionManager {
 
 	dispose() {
 		for (const context of this.activeRunById.values()) {
+			if (context.strategyMode === 'remote') {
+				context.abortController?.abort();
+			}
 			this.finishWithError(context, new Error('Execution manager disposed'));
 		}
 		for (const [workerLanguage] of this.workerRuntimeByLanguage.entries()) {
@@ -198,7 +297,7 @@ export class ExecutionManager {
 		return (language || '').trim().toLowerCase();
 	}
 
-	private async ensureWorker(workerLanguage: string, strategy: ExecutionStrategy) {
+	private async ensureWorker(workerLanguage: string, strategy: WorkerExecutionStrategy) {
 		const existing = this.workerRuntimeByLanguage.get(workerLanguage);
 		if (existing) {
 			return existing.worker;
@@ -208,7 +307,7 @@ export class ExecutionManager {
 			this.handleWorkerMessage(workerLanguage, event.data);
 		};
 		const onError = (event: ErrorEvent) => {
-			const activeRunId = this.activeRunIdByWorkerLanguage.get(workerLanguage);
+			const activeRunId = this.activeRunIdByRuntimeLanguage.get(workerLanguage);
 			if (!activeRunId) {
 				return;
 			}
@@ -259,9 +358,107 @@ export class ExecutionManager {
 		this.flushBufferedOutput(context, 'error', 'stdout');
 		this.flushBufferedOutput(context, 'error', 'stderr');
 		this.finishWithError(context, new Error(messageError));
-		if (this.activeRunIdByWorkerLanguage.get(workerLanguage) === context.id) {
-			this.activeRunIdByWorkerLanguage.delete(workerLanguage);
+		if (this.activeRunIdByRuntimeLanguage.get(workerLanguage) === context.id) {
+			this.activeRunIdByRuntimeLanguage.delete(workerLanguage);
 		}
+	}
+
+	private async executeRemoteRun(
+		context: RunContext,
+		strategy: RemoteExecutionStrategy,
+		code: string,
+		language: string,
+		signal: AbortSignal
+	) {
+		try {
+			const remotePayload = await strategy.runRemote(code, language, signal);
+			if (context.settled) {
+				return;
+			}
+			if (remotePayload.stdout) {
+				this.streamOutput(context, remotePayload.stdout, 'running', 'stdout');
+			}
+			if (remotePayload.stderr) {
+				this.streamOutput(context, remotePayload.stderr, 'running', 'stderr');
+			}
+			this.flushBufferedOutput(context, 'success', 'stdout');
+			this.flushBufferedOutput(context, 'success', 'stderr');
+			this.finishWithSuccess(context);
+		} catch (error) {
+			if (context.settled) {
+				return;
+			}
+
+			let stdout = '';
+			let stderr = '';
+			let message = '';
+			if (error instanceof RemoteExecutionError) {
+				stdout = error.stdout;
+				stderr = error.stderr;
+				message = error.message;
+			} else {
+				message = error instanceof Error ? error.message : String(error);
+			}
+
+			if (stdout) {
+				this.streamOutput(context, stdout, 'running', 'stdout');
+			}
+			if (stderr) {
+				this.streamOutput(context, stderr, 'running', 'stderr');
+			}
+			this.flushBufferedOutput(context, 'error', 'stdout');
+			this.flushBufferedOutput(context, 'error', 'stderr');
+
+			const fallbackMessage = `Execution failed for ${context.language}`;
+			const errorMessage = (message || fallbackMessage).trim() || fallbackMessage;
+			this.emitLine(context, errorMessage, 'error', 'stderr');
+			this.finishWithError(context, new Error(errorMessage));
+		}
+	}
+
+	private async runRemote(code: string, language: string, signal: AbortSignal) {
+		let response: Response;
+		try {
+			response = await fetch(EXECUTE_ENDPOINT, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					language,
+					code
+				}),
+				signal
+			});
+		} catch (error) {
+			const isAbortError =
+				typeof error === 'object' &&
+				error !== null &&
+				'name' in error &&
+				(error as { name?: string }).name === 'AbortError';
+			if (isAbortError) {
+				throw error;
+			}
+			throw new RemoteExecutionError(
+				error instanceof Error ? error.message : 'Failed to reach execution server'
+			);
+		}
+
+		const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+		const stdout = typeof payload?.stdout === 'string' ? payload.stdout : '';
+		const stderr = typeof payload?.stderr === 'string' ? payload.stderr : '';
+		if (!response.ok) {
+			const serverMessage =
+				typeof payload?.error === 'string' && payload.error.trim()
+					? payload.error.trim()
+					: `Execution request failed (${response.status})`;
+			throw new RemoteExecutionError(serverMessage, stdout, stderr);
+		}
+
+		return {
+			stdout,
+			stderr
+		} satisfies RemoteExecutionPayload;
 	}
 
 	private streamOutput(
@@ -320,8 +517,9 @@ export class ExecutionManager {
 		}
 		context.settled = true;
 		this.clearContextTimer(context);
+		context.abortController = null;
 		this.activeRunById.delete(context.id);
-		this.activeRunIdByWorkerLanguage.delete(context.workerLanguage);
+		this.activeRunIdByRuntimeLanguage.delete(context.runtimeLanguage);
 		context.resolve({
 			id: context.id,
 			language: context.language,
@@ -335,8 +533,9 @@ export class ExecutionManager {
 		}
 		context.settled = true;
 		this.clearContextTimer(context);
+		context.abortController = null;
 		this.activeRunById.delete(context.id);
-		this.activeRunIdByWorkerLanguage.delete(context.workerLanguage);
+		this.activeRunIdByRuntimeLanguage.delete(context.runtimeLanguage);
 		context.reject(error);
 	}
 
@@ -351,6 +550,9 @@ export class ExecutionManager {
 		if (context.settled) {
 			return;
 		}
+		const strategyMode = context.strategyMode;
+		const runtimeLanguage = context.runtimeLanguage;
+		const abortController = context.abortController;
 		this.flushBufferedOutput(context, 'error', 'stdout');
 		this.flushBufferedOutput(context, 'error', 'stderr');
 		this.emitLine(
@@ -369,7 +571,11 @@ export class ExecutionManager {
 					: `Execution timed out after ${Math.max(1, timeoutMs)}ms (${context.language})`
 			)
 		);
-		this.terminateWorker(context.workerLanguage);
+		if (strategyMode === 'worker') {
+			this.terminateWorker(runtimeLanguage);
+			return;
+		}
+		abortController?.abort();
 	}
 
 	private terminateWorker(workerLanguage: string) {

@@ -2,6 +2,7 @@ export type CallType = 'audio' | 'video';
 
 export type SignalingMessageType =
 	| 'call_invite'
+	| 'call_cancel'
 	| 'webrtc_offer'
 	| 'webrtc_answer'
 	| 'webrtc_ice'
@@ -74,6 +75,7 @@ function normalizeCallType(input: string, fallback: CallType = 'audio'): CallTyp
 function isTransientSignalingType(input: string) {
 	switch (input.toLowerCase()) {
 		case 'call_invite':
+		case 'call_cancel':
 		case 'webrtc_offer':
 		case 'webrtc_answer':
 		case 'webrtc_ice':

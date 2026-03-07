@@ -12,6 +12,51 @@
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const KLIPY_API_KEY_RAW = import.meta.env.VITE_KLIPY_API_KEY as string | undefined;
+	const KLIPY_API_KEY = KLIPY_API_KEY_RAW?.trim() ?? '';
+	const KLIPY_CLIENT_KEY = 'converse-web';
+	const KLIPY_SEARCH_LIMIT = 24;
+	const COMMON_EMOJIS = [
+		'😊',
+		'😀',
+		'😁',
+		'😂',
+		'🤣',
+		'😍',
+		'🥳',
+		'😎',
+		'🤔',
+		'😴',
+		'😅',
+		'😭',
+		'😡',
+		'🙏',
+		'👏',
+		'🙌',
+		'👍',
+		'👎',
+		'👌',
+		'🤝',
+		'🔥',
+		'✨',
+		'💯',
+		'🚀',
+		'🎉',
+		'❤️',
+		'💙',
+		'💚',
+		'💛',
+		'👀',
+		'✅',
+		'🤖'
+	];
+
+	type GifResult = {
+		id: string;
+		url: string;
+		previewUrl: string;
+		title: string;
+	};
 
 	export let draftMessage = '';
 	export let attachedFile: File | null = null;
@@ -31,6 +76,9 @@
 	let attachedPickerType: 'media' | 'file' = 'file';
 	let attachmentPreviewURL = '';
 	let attachWrapEl: HTMLDivElement | null = null;
+	let gifPickerEl: HTMLDivElement | null = null;
+	let emojiWrapEl: HTMLDivElement | null = null;
+	let composerTextareaEl: HTMLTextAreaElement | null = null;
 	let normalizedDraftMessage = '';
 	let draftMessageBytes = 0;
 	let taskDraftOpen = false;
@@ -43,6 +91,14 @@
 	let mediaRecorder: MediaRecorder | null = null;
 	let audioChunks: Blob[] = [];
 	let recordingStream: MediaStream | null = null;
+	let showGifPicker = false;
+	let showEmojiPicker = false;
+	let gifQuery = '';
+	let gifResults: GifResult[] = [];
+	let gifLoading = false;
+	let gifError = '';
+	let gifSearchTimer: ReturnType<typeof setTimeout> | null = null;
+	let gifAbortController: AbortController | null = null;
 
 	$: normalizedDraftMessage = draftMessage.trim();
 	$: draftMessageBytes = getUTF8ByteLength(normalizedDraftMessage);
@@ -72,8 +128,35 @@
 		typing: { value: string };
 	}>();
 
+	function closeGifPicker(resetQuery = false) {
+		showGifPicker = false;
+		if (gifSearchTimer) {
+			clearTimeout(gifSearchTimer);
+			gifSearchTimer = null;
+		}
+		gifAbortController?.abort();
+		gifAbortController = null;
+		gifLoading = false;
+		if (resetQuery) {
+			gifQuery = '';
+		}
+	}
+
+	function closeEmojiPicker() {
+		showEmojiPicker = false;
+	}
+
+	function emitTypingValue() {
+		if (disabled) {
+			return;
+		}
+		dispatch('typing', { value: draftMessage });
+	}
+
 	onDestroy(() => {
 		clearAttachmentPreview();
+		closeGifPicker();
+		closeEmojiPicker();
 		if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
 			mediaRecorder.stop();
 		}
@@ -82,15 +165,18 @@
 
 	onMount(() => {
 		const onDocumentPointerDown = (event: PointerEvent) => {
-			if (!showAttachMenu) {
-				return;
-			}
 			const target = event.target;
 			if (!(target instanceof Node)) {
 				return;
 			}
-			if (attachWrapEl && !attachWrapEl.contains(target)) {
+			if (showAttachMenu && attachWrapEl && !attachWrapEl.contains(target)) {
 				showAttachMenu = false;
+			}
+			if (showGifPicker && gifPickerEl && !gifPickerEl.contains(target)) {
+				closeGifPicker();
+			}
+			if (showEmojiPicker && emojiWrapEl && !emojiWrapEl.contains(target)) {
+				closeEmojiPicker();
 			}
 		};
 
@@ -104,17 +190,70 @@
 		if (disabled) {
 			return;
 		}
+		if (showGifPicker) {
+			closeGifPicker();
+		}
+		if (showEmojiPicker) {
+			closeEmojiPicker();
+		}
 		showAttachMenu = !showAttachMenu;
 	}
 
-	function chooseAttachmentType(type: 'media' | 'file' | 'task') {
+	function toggleEmojiPicker() {
+		if (composerDisabled) {
+			return;
+		}
+		showAttachMenu = false;
+		closeGifPicker();
+		showEmojiPicker = !showEmojiPicker;
+	}
+
+	function insertEmoji(emoji: string) {
+		if (composerDisabled) {
+			return;
+		}
+		const normalizedEmoji = (emoji || '').trim();
+		if (!normalizedEmoji) {
+			return;
+		}
+		const currentValue = draftMessage || '';
+		if (!composerTextareaEl) {
+			draftMessage = `${currentValue}${normalizedEmoji}`;
+			emitTypingValue();
+			return;
+		}
+
+		const selectionStart = composerTextareaEl.selectionStart ?? currentValue.length;
+		const selectionEnd = composerTextareaEl.selectionEnd ?? currentValue.length;
+		draftMessage =
+			currentValue.slice(0, selectionStart) +
+			normalizedEmoji +
+			currentValue.slice(selectionEnd);
+
+		const nextCaretPosition = selectionStart + normalizedEmoji.length;
+		requestAnimationFrame(() => {
+			if (!composerTextareaEl) {
+				return;
+			}
+			composerTextareaEl.focus();
+			composerTextareaEl.setSelectionRange(nextCaretPosition, nextCaretPosition);
+		});
+		emitTypingValue();
+	}
+
+	function chooseAttachmentType(type: 'media' | 'file' | 'task' | 'gif') {
 		if (disabled) {
 			return;
 		}
 		showAttachMenu = false;
+		closeEmojiPicker();
 		attachError = '';
 		taskDraftError = '';
+		if (type !== 'gif') {
+			gifError = '';
+		}
 		if (type === 'task') {
+			closeGifPicker();
 			clearAttachmentPreview();
 			attachedFile = null;
 			attachedMessageType = null;
@@ -126,6 +265,27 @@
 			}
 			return;
 		}
+		if (type === 'gif') {
+			taskDraftOpen = false;
+			taskAddInputOpen = false;
+			clearAttachmentPreview();
+			attachedFile = null;
+			attachedMessageType = null;
+			dispatch('attach', { file: null, type: 'file' });
+			if (!KLIPY_API_KEY) {
+				const message = 'GIF search is unavailable. Add VITE_KLIPY_API_KEY to enable it.';
+				gifError = message;
+				attachError = message;
+				closeGifPicker();
+				return;
+			}
+			showGifPicker = true;
+			if (gifResults.length === 0) {
+				void fetchTrendingGifs();
+			}
+			return;
+		}
+		closeGifPicker();
 		taskDraftOpen = false;
 		taskAddInputOpen = false;
 		if (type === 'media') {
@@ -151,6 +311,201 @@
 		return inferMediaMessageType(file);
 	}
 
+	function toRecord(value: unknown): Record<string, unknown> | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		return value as Record<string, unknown>;
+	}
+
+	function toTrimmedString(value: unknown) {
+		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function readMediaUrl(formats: Record<string, unknown> | null, keys: string[]) {
+		if (!formats) {
+			return '';
+		}
+		for (const key of keys) {
+			const entry = formats[key];
+			if (!entry) {
+				continue;
+			}
+			if (typeof entry === 'string') {
+				const direct = entry.trim();
+				if (direct) {
+					return direct;
+				}
+				continue;
+			}
+			const record = toRecord(entry);
+			const url = toTrimmedString(record?.url);
+			if (url) {
+				return url;
+			}
+		}
+		return '';
+	}
+
+	function parseKlipyGifResults(payload: unknown): GifResult[] {
+		const source = toRecord(payload);
+		if (!source) {
+			return [];
+		}
+		const entriesRaw = Array.isArray(source.results)
+			? source.results
+			: Array.isArray(source.data)
+				? source.data
+				: Array.isArray(source.gifs)
+					? source.gifs
+					: [];
+		const items: GifResult[] = [];
+		for (let index = 0; index < entriesRaw.length; index += 1) {
+			const entry = toRecord(entriesRaw[index]);
+			if (!entry) {
+				continue;
+			}
+			const mediaFormats = toRecord(entry.media_formats);
+			const images = toRecord(entry.images);
+			const previewFromMediaFormats = readMediaUrl(mediaFormats, [
+				'tinygif',
+				'nanogif',
+				'tinywebp',
+				'nanowebp',
+				'previewgif',
+				'preview'
+			]);
+			const gifFromMediaFormats = readMediaUrl(mediaFormats, [
+				'gif',
+				'mediumgif',
+				'fullgif',
+				'largegif',
+				'original'
+			]);
+			const previewFromImages = readMediaUrl(images, [
+				'preview_gif',
+				'fixed_width_small',
+				'downsized_small',
+				'preview',
+				'tiny'
+			]);
+			const gifFromImages = readMediaUrl(images, [
+				'original',
+				'downsized_large',
+				'downsized',
+				'fixed_width',
+				'gif'
+			]);
+			const directPreview =
+				toTrimmedString(entry.preview_url) || toTrimmedString(entry.thumbnail_url);
+			const directGif =
+				toTrimmedString(entry.url) ||
+				toTrimmedString(entry.gif_url) ||
+				toTrimmedString(entry.media_url);
+			const previewUrl = previewFromMediaFormats || previewFromImages || directPreview || directGif;
+			const url = gifFromMediaFormats || gifFromImages || directGif || previewUrl;
+			if (!url) {
+				continue;
+			}
+			const id =
+				toTrimmedString(entry.id) ||
+				toTrimmedString(entry.gif_id) ||
+				`gif_${Date.now()}_${index}`;
+			const title =
+				toTrimmedString(entry.content_description) ||
+				toTrimmedString(entry.title) ||
+				toTrimmedString(entry.alt_text) ||
+				'GIF';
+			items.push({
+				id,
+				url,
+				previewUrl: previewUrl || url,
+				title
+			});
+		}
+		return items;
+	}
+
+	async function fetchKlipyGifs(query: string) {
+		if (!KLIPY_API_KEY) {
+			return;
+		}
+		gifAbortController?.abort();
+		gifAbortController = new AbortController();
+		gifLoading = true;
+		gifError = '';
+		try {
+			const endpointPath = query ? '/v2/search' : '/v2/featured';
+			const params = new URLSearchParams({
+				key: KLIPY_API_KEY,
+				client_key: KLIPY_CLIENT_KEY,
+				limit: String(KLIPY_SEARCH_LIMIT),
+				media_filter: 'tinygif,gif',
+				contentfilter: 'medium'
+			});
+			if (query) {
+				params.set('q', query);
+			}
+			const response = await fetch(`https://api.klipy.com${endpointPath}?${params.toString()}`, {
+				signal: gifAbortController.signal
+			});
+			const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!response.ok) {
+				throw new Error(
+					typeof payload.error === 'string'
+						? payload.error
+						: `GIF request failed (${response.status})`
+				);
+			}
+			gifResults = parseKlipyGifResults(payload);
+		} catch (error) {
+			const isAbortError =
+				typeof error === 'object' &&
+				error !== null &&
+				'name' in error &&
+				(error as { name?: string }).name === 'AbortError';
+			if (isAbortError) {
+				return;
+			}
+			gifError = error instanceof Error ? error.message : 'Failed to load GIFs.';
+			gifResults = [];
+		} finally {
+			gifLoading = false;
+		}
+	}
+
+	async function fetchTrendingGifs() {
+		await fetchKlipyGifs('');
+	}
+
+	function onGifQueryInput() {
+		if (!showGifPicker || !KLIPY_API_KEY) {
+			return;
+		}
+		if (gifSearchTimer) {
+			clearTimeout(gifSearchTimer);
+			gifSearchTimer = null;
+		}
+		const normalizedQuery = gifQuery.trim();
+		gifSearchTimer = setTimeout(() => {
+			void fetchKlipyGifs(normalizedQuery);
+		}, 300);
+	}
+
+	function sendGif(gif: GifResult) {
+		if (!gif || !gif.url || disabled || isProcessingAttachment || isRecording) {
+			return;
+		}
+		dispatch('send', {
+			type: 'image',
+			content: gif.url,
+			fileName: `${gif.title || 'gif'}.gif`,
+			text: draftMessage.trim()
+		});
+		draftMessage = '';
+		closeGifPicker(true);
+	}
+
 	function clearAttachmentPreview() {
 		if (attachmentPreviewURL) {
 			URL.revokeObjectURL(attachmentPreviewURL);
@@ -169,6 +524,7 @@
 		if (disabled) {
 			return;
 		}
+		showGifPicker = false;
 		const target = event.currentTarget as HTMLInputElement;
 		const selected = target.files?.[0] ?? null;
 		target.value = '';
@@ -252,10 +608,7 @@
 	}
 
 	function onComposerInput() {
-		if (disabled) {
-			return;
-		}
-		dispatch('typing', { value: draftMessage });
+		emitTypingValue();
 	}
 
 	function stopRecordingStream() {
@@ -339,6 +692,7 @@
 		if (disabled || isProcessingAttachment || attachedFile || taskDraftOpen) {
 			return;
 		}
+		closeEmojiPicker();
 
 		if (!isRecording) {
 			if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
@@ -630,6 +984,47 @@
 			{/if}
 		</div>
 	{/if}
+	{#if showGifPicker}
+		<div class="gif-picker-panel" bind:this={gifPickerEl}>
+			<div class="gif-picker-header">
+				<input
+					type="text"
+					placeholder="Search GIFs"
+					bind:value={gifQuery}
+					on:input={onGifQueryInput}
+				/>
+				<button
+					type="button"
+					class="gif-picker-close"
+					on:click={() => closeGifPicker()}
+					aria-label="Close GIF picker"
+				>
+					Close
+				</button>
+			</div>
+			{#if gifError}
+				<div class="gif-picker-error">{gifError}</div>
+			{:else if gifLoading}
+				<div class="gif-picker-loading">Loading GIFs...</div>
+			{:else if gifResults.length === 0}
+				<div class="gif-picker-empty">No GIFs found. Try another search.</div>
+			{:else}
+				<div class="gif-grid">
+					{#each gifResults as gif (gif.id)}
+						<button
+							type="button"
+							class="gif-card"
+							on:click={() => sendGif(gif)}
+							title={`Send GIF: ${gif.title}`}
+							aria-label={`Send GIF: ${gif.title}`}
+						>
+							<img src={gif.previewUrl} alt={gif.title || 'GIF'} loading="lazy" />
+						</button>
+					{/each}
+				</div>
+			{/if}
+		</div>
+	{/if}
 	{#if attachError}
 		<div class="attachment-error">{attachError}</div>
 	{/if}
@@ -677,11 +1072,42 @@
 						<IconSet name="list-vertical" size={14} />
 						<span>Task</span>
 					</button>
+					<button type="button" on:click={() => chooseAttachmentType('gif')}>
+						<span class="gif-pill">GIF</span>
+						<span>GIF</span>
+					</button>
+				</div>
+			{/if}
+		</div>
+		<div class="emoji-wrap" bind:this={emojiWrapEl}>
+			<button
+				type="button"
+				class="emoji-button"
+				on:click={toggleEmojiPicker}
+				disabled={composerDisabled}
+				aria-label="Insert emoji"
+				title="Insert emoji"
+			>
+				<span aria-hidden="true">😊</span>
+			</button>
+			{#if showEmojiPicker}
+				<div class="emoji-picker" role="dialog" aria-label="Emoji picker">
+					{#each COMMON_EMOJIS as emoji}
+						<button
+							type="button"
+							class="emoji-option"
+							on:click={() => insertEmoji(emoji)}
+							aria-label={`Insert ${emoji}`}
+						>
+							{emoji}
+						</button>
+					{/each}
 				</div>
 			{/if}
 		</div>
 
 		<textarea
+			bind:this={composerTextareaEl}
 			bind:value={draftMessage}
 			rows="1"
 			placeholder={composerPlaceholder}
@@ -891,6 +1317,81 @@
 		border: 1px solid var(--state-info-border);
 		border-radius: 8px;
 		padding: 0.36rem 0.5rem;
+	}
+
+	.gif-picker-panel {
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		border-radius: 12px;
+		padding: 0.56rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.46rem;
+		max-height: min(54vh, 380px);
+		overflow: hidden;
+	}
+
+	.gif-picker-header {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
+	.gif-picker-header input {
+		flex: 1;
+		min-width: 0;
+		border: 1px solid var(--border-default);
+		background: var(--surface-secondary);
+		color: var(--text-primary);
+		border-radius: 9px;
+		padding: 0.34rem 0.52rem;
+		font-size: 0.8rem;
+	}
+
+	.gif-picker-close {
+		border: 1px solid var(--border-default);
+		background: var(--surface-secondary);
+		color: var(--text-secondary);
+		border-radius: 8px;
+		padding: 0.3rem 0.5rem;
+		font-size: 0.72rem;
+		cursor: pointer;
+	}
+
+	.gif-picker-loading,
+	.gif-picker-empty,
+	.gif-picker-error {
+		font-size: 0.78rem;
+		color: var(--text-secondary);
+	}
+
+	.gif-picker-error {
+		color: var(--accent-danger);
+	}
+
+	.gif-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+		gap: 0.42rem;
+		overflow: auto;
+		padding-right: 0.08rem;
+	}
+
+	.gif-card {
+		border: 1px solid var(--border-default);
+		background: var(--surface-secondary);
+		border-radius: 9px;
+		padding: 0;
+		overflow: hidden;
+		cursor: pointer;
+		aspect-ratio: 1 / 1;
+	}
+
+	.gif-card img {
+		display: block;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
 	}
 
 	.task-draft-shell {
@@ -1187,7 +1688,7 @@
 
 	.composer-row {
 		display: grid;
-		grid-template-columns: 2.2rem minmax(0, 1fr) 2.2rem;
+		grid-template-columns: 2.2rem 2.2rem minmax(0, 1fr) 2.2rem;
 		gap: 0.42rem;
 		align-items: center;
 		border: 1px solid #cfd6df;
@@ -1234,6 +1735,7 @@
 	}
 
 	.attach-button,
+	.emoji-button,
 	.mic-button,
 	.send-button {
 		display: inline-flex;
@@ -1255,6 +1757,7 @@
 	}
 
 	.attach-button:disabled,
+	.emoji-button:disabled,
 	.mic-button:disabled,
 	.send-button:disabled {
 		opacity: 0.7;
@@ -1262,6 +1765,7 @@
 	}
 
 	.attach-button:hover:not(:disabled),
+	.emoji-button:hover:not(:disabled),
 	.mic-button:hover:not(:disabled),
 	.send-button:hover:not(:disabled) {
 		background: var(--surface-hover);
@@ -1285,6 +1789,51 @@
 	.send-button:hover:not(:disabled) {
 		background: var(--accent-primary-hover);
 		border-color: var(--accent-primary-hover);
+	}
+
+	.emoji-wrap {
+		position: relative;
+	}
+
+	.emoji-button {
+		font-size: 1.1rem;
+		line-height: 1;
+	}
+
+	.emoji-picker {
+		position: absolute;
+		left: 0;
+		bottom: calc(100% + 8px);
+		z-index: 121;
+		display: grid;
+		grid-template-columns: repeat(8, minmax(0, 1fr));
+		gap: 0.22rem;
+		width: min(18rem, calc(100vw - 1.6rem));
+		max-height: min(40vh, 220px);
+		overflow: auto;
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		border-radius: 10px;
+		padding: 0.38rem;
+		box-shadow: var(--shadow-md);
+	}
+
+	.emoji-option {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.86rem;
+		height: 1.86rem;
+		border: none;
+		background: transparent;
+		border-radius: 8px;
+		font-size: 1.16rem;
+		line-height: 1;
+		cursor: pointer;
+	}
+
+	.emoji-option:hover {
+		background: var(--surface-hover);
 	}
 
 	.attach-menu {
@@ -1316,6 +1865,19 @@
 
 	.attach-menu button:hover {
 		background: var(--surface-hover);
+	}
+
+	.gif-pill {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 2.1rem;
+		padding: 0.08rem 0.32rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-default);
+		font-size: 0.66rem;
+		font-weight: 700;
+		letter-spacing: 0.02em;
 	}
 
 	.composer-row textarea {
@@ -1360,6 +1922,7 @@
 		}
 
 		.attach-button,
+		.emoji-button,
 		.mic-button,
 		.send-button {
 			width: 2rem;

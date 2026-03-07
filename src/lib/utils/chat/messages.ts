@@ -1,4 +1,4 @@
-import type { ChatMessage, OnlineMember } from '$lib/types/chat';
+import type { ChatMessage, MessageReactions, OnlineMember } from '$lib/types/chat';
 import {
 	createMessageId,
 	isLikelyMediaURL,
@@ -61,6 +61,46 @@ function parseSnippetPreviewPayload(
 		return null;
 	}
 	return null;
+}
+
+function normalizeReactionEmoji(value: string) {
+	const trimmed = value.trim();
+	if (!trimmed || trimmed.length > 32) {
+		return '';
+	}
+	return trimmed;
+}
+
+function normalizeReactionUserID(value: string) {
+	return value
+		.trim()
+		.replace(/[^a-zA-Z0-9\s_-]/g, '')
+		.replace(/[\s-]+/g, '_')
+		.replace(/_+/g, '_')
+		.replace(/^_+|_+$/g, '');
+}
+
+function parseMessageReactions(value: unknown): MessageReactions {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return {};
+	}
+	const source = value as Record<string, unknown>;
+	const reactions: MessageReactions = {};
+	for (const [emojiCandidate, usersValue] of Object.entries(source)) {
+		const emoji = normalizeReactionEmoji(emojiCandidate);
+		if (!emoji || !Array.isArray(usersValue)) {
+			continue;
+		}
+		const users = usersValue
+			.map((entry) => normalizeReactionUserID(toStringValue(entry)))
+			.filter((entry, index, input) => entry !== '' && input.indexOf(entry) === index)
+			.sort((left, right) => left.localeCompare(right));
+		if (users.length === 0) {
+			continue;
+		}
+		reactions[emoji] = users;
+	}
+	return reactions;
 }
 
 export function getMessagePreviewText(message: ChatMessage) {
@@ -259,6 +299,7 @@ export function parseIncomingMessage(
 		isPinned: toBool(source.isPinned ?? source.is_pinned),
 		pinnedBy: toStringValue(source.pinnedBy ?? source.pinned_by),
 		pinnedByName: toStringValue(source.pinnedByName ?? source.pinned_by_name),
+		reactions: parseMessageReactions(source.reactions),
 		pending: false
 	};
 }

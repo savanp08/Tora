@@ -119,6 +119,7 @@ func New(
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(middleware.Timeout(60 * time.Second))
+		r.Post("/execute", handlers.HandleCodeExecution)
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
 		r.Post("/auth/anonymous", authHandler.Anonymous)

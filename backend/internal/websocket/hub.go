@@ -29,6 +29,7 @@ type Hub struct {
 	boardEvent           chan *ClientBoardEvent
 	discussionComment    chan *ClientDiscussionCommentEvent
 	discussionCommentPin chan *ClientDiscussionCommentPinEvent
+	messageReaction      chan *ClientMessageReactionEvent
 	discussionInbox      chan DiscussionCommentEvent
 	messageEdit          chan *ClientMessageEditEvent
 	messageDelete        chan *ClientMessageDeleteEvent
@@ -102,6 +103,13 @@ type ClientMessageDeleteEvent struct {
 	MessageID string
 }
 
+type ClientMessageReactionEvent struct {
+	Client    *Client
+	RoomID    string
+	MessageID string
+	Emoji     string
+}
+
 type MessageMutationEvent struct {
 	Type        string `json:"type"`
 	RoomID      string `json:"roomId"`
@@ -133,6 +141,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		boardEvent:           make(chan *ClientBoardEvent, 4096),
 		discussionComment:    make(chan *ClientDiscussionCommentEvent, 256),
 		discussionCommentPin: make(chan *ClientDiscussionCommentPinEvent, 256),
+		messageReaction:      make(chan *ClientMessageReactionEvent, 256),
 		discussionInbox:      make(chan DiscussionCommentEvent, 512),
 		messageEdit:          make(chan *ClientMessageEditEvent, 256),
 		messageDelete:        make(chan *ClientMessageDeleteEvent, 256),
@@ -468,6 +477,9 @@ func (h *Hub) Run() {
 		case deleteEvent := <-h.messageDelete:
 			h.handleClientMessageDeleteEvent(deleteEvent)
 
+		case reactionEvent := <-h.messageReaction:
+			h.handleClientMessageReactionEvent(reactionEvent)
+
 		case roomEvent := <-h.roomEvent:
 			h.publishRoomEvent(roomEvent)
 
@@ -715,21 +727,21 @@ func (h *Hub) handleClientTypingEvent(event *ClientTypingEvent) {
 		UpdatedAt: time.Now().UTC().UnixMilli(),
 	}
 
+	// Broadcast immediately to this process so typing indicators stay responsive
+	// even if Redis pub/sub delivery is delayed.
+	h.broadcastTypingToLocal(typingEvent)
+
 	if h.msgService != nil && h.msgService.Redis != nil && h.msgService.Redis.Client != nil {
 		payload, err := json.Marshal(typingEvent)
 		if err != nil {
 			log.Printf("redis typing marshal error: %v", err)
-			h.broadcastTypingToLocal(typingEvent)
 			return
 		}
 		if err := h.msgService.Redis.Client.Publish(context.Background(), chatTypingChannel, payload).Err(); err != nil {
 			log.Printf("redis typing publish error: %v", err)
-			h.broadcastTypingToLocal(typingEvent)
 		}
 		return
 	}
-
-	h.broadcastTypingToLocal(typingEvent)
 }
 
 func (h *Hub) handleClientBoardEvent(event *ClientBoardEvent) {
@@ -1130,6 +1142,57 @@ func (h *Hub) handleClientMessageDeleteEvent(event *ClientMessageDeleteEvent) {
 		EditedAt:  time.Now().UTC().UnixMilli(),
 	}
 	h.publishMutationEvent(mutation)
+}
+
+func (h *Hub) handleClientMessageReactionEvent(event *ClientMessageReactionEvent) {
+	if event == nil || event.Client == nil || h.msgService == nil {
+		return
+	}
+	roomID := normalizeRoomID(event.RoomID)
+	messageID := normalizeMessageID(event.MessageID)
+	emoji := normalizeReactionEmoji(event.Emoji)
+	client := event.Client
+	if roomID == "" || messageID == "" || emoji == "" {
+		return
+	}
+	if !client.isSubscribedToRoom(roomID) || !client.canWriteToRoom(roomID) {
+		return
+	}
+	if !h.isClientRoomMember(client.UserID, roomID) {
+		client.subscribeToRoom(roomID, false)
+		return
+	}
+
+	reactions, _, err := h.msgService.ToggleMessageReaction(
+		context.Background(),
+		roomID,
+		messageID,
+		client.UserID,
+		emoji,
+	)
+	if err != nil {
+		log.Printf(
+			"[ws] message reaction toggle failed room=%s message=%s user=%s err=%v",
+			roomID,
+			messageID,
+			client.UserID,
+			err,
+		)
+		return
+	}
+
+	h.publishRoomEvent(RoomEvent{
+		Type:   "message_reaction",
+		RoomID: roomID,
+		Payload: map[string]interface{}{
+			"messageId":  messageID,
+			"message_id": messageID,
+			"emoji":      emoji,
+			"userId":     strings.TrimSpace(client.UserID),
+			"user_id":    strings.TrimSpace(client.UserID),
+			"reactions":  reactions,
+		},
+	})
 }
 
 func (h *Hub) publishMutationEvent(event MessageMutationEvent) {

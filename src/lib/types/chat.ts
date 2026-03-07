@@ -37,6 +37,8 @@ export type UiDialogState =
 			cancelLabel: string;
 	  };
 
+export type MessageReactions = Record<string, string[]>;
+
 export type ChatMessage = {
 	id: string;
 	roomId: string;
@@ -44,6 +46,7 @@ export type ChatMessage = {
 	senderName: string;
 	content: string;
 	type: string;
+	reactions?: MessageReactions;
 	mediaUrl?: string;
 	mediaType?: string;
 	fileName?: string;

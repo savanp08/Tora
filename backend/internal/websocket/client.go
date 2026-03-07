@@ -32,6 +32,7 @@ const (
 	maxWSConnectionsPerIP  = int32(2000)
 
 	messageTypeCallInvite   = "call_invite"
+	messageTypeCallCancel   = "call_cancel"
 	messageTypeWebRTCOffer  = "webrtc_offer"
 	messageTypeWebRTCAnswer = "webrtc_answer"
 	messageTypeWebRTCIce    = "webrtc_ice"
@@ -305,6 +306,17 @@ func (c *Client) readPump() {
 					Client:    c,
 					RoomID:    deletion.RoomID,
 					MessageID: deletion.MessageID,
+				}
+			}
+			continue
+		}
+		if reaction, isReaction := parseMessageReactionPayload(raw); isReaction {
+			if c.Hub != nil {
+				c.Hub.messageReaction <- &ClientMessageReactionEvent{
+					Client:    c,
+					RoomID:    reaction.RoomID,
+					MessageID: reaction.MessageID,
+					Emoji:     reaction.Emoji,
 				}
 			}
 			continue
@@ -626,6 +638,16 @@ type messageDeleteEnvelope struct {
 	Payload    json.RawMessage `json:"payload"`
 }
 
+type messageReactionEnvelope struct {
+	Type       string          `json:"type"`
+	RoomID     string          `json:"roomId"`
+	RoomID2    string          `json:"room_id"`
+	MessageID  string          `json:"messageId"`
+	MessageID2 string          `json:"message_id"`
+	Emoji      string          `json:"emoji"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
 type discussionCommentEnvelope struct {
 	Type              string          `json:"type"`
 	RoomID            string          `json:"roomId"`
@@ -666,6 +688,12 @@ type clientMessageEditPayload struct {
 type clientMessageDeletePayload struct {
 	RoomID    string
 	MessageID string
+}
+
+type clientMessageReactionPayload struct {
+	RoomID    string
+	MessageID string
+	Emoji     string
 }
 
 type clientDiscussionCommentPayload struct {
@@ -906,6 +934,60 @@ func parseMessageDeletePayload(raw []byte) (clientMessageDeletePayload, bool) {
 	}, true
 }
 
+func parseMessageReactionPayload(raw []byte) (clientMessageReactionPayload, bool) {
+	if len(raw) == 0 {
+		return clientMessageReactionPayload{}, false
+	}
+	var envelope messageReactionEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return clientMessageReactionPayload{}, false
+	}
+	if strings.ToLower(strings.TrimSpace(envelope.Type)) != "message_reaction" {
+		return clientMessageReactionPayload{}, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	messageID := normalizeMessageID(envelope.MessageID)
+	if messageID == "" {
+		messageID = normalizeMessageID(envelope.MessageID2)
+	}
+	emoji := strings.TrimSpace(envelope.Emoji)
+
+	if len(envelope.Payload) > 0 {
+		var payload messageReactionEnvelope
+		if err := json.Unmarshal(envelope.Payload, &payload); err == nil {
+			if roomID == "" {
+				roomID = normalizeRoomID(payload.RoomID)
+				if roomID == "" {
+					roomID = normalizeRoomID(payload.RoomID2)
+				}
+			}
+			if messageID == "" {
+				messageID = normalizeMessageID(payload.MessageID)
+				if messageID == "" {
+					messageID = normalizeMessageID(payload.MessageID2)
+				}
+			}
+			if emoji == "" {
+				emoji = strings.TrimSpace(payload.Emoji)
+			}
+		}
+	}
+
+	emoji = normalizeReactionEmoji(emoji)
+	if roomID == "" || messageID == "" || emoji == "" {
+		return clientMessageReactionPayload{}, false
+	}
+	return clientMessageReactionPayload{
+		RoomID:    roomID,
+		MessageID: messageID,
+		Emoji:     emoji,
+	}, true
+}
+
 func parseDiscussionCommentPayload(raw []byte) (clientDiscussionCommentPayload, bool) {
 	if len(raw) == 0 {
 		return clientDiscussionCommentPayload{}, false
@@ -1053,7 +1135,7 @@ func parseDiscussionCommentPinPayload(raw []byte) (clientDiscussionCommentPinPay
 
 func isTransientSignalingType(eventType string) bool {
 	switch strings.ToLower(strings.TrimSpace(eventType)) {
-	case messageTypeCallInvite, messageTypeWebRTCOffer, messageTypeWebRTCAnswer, messageTypeWebRTCIce:
+	case messageTypeCallInvite, messageTypeCallCancel, messageTypeWebRTCOffer, messageTypeWebRTCAnswer, messageTypeWebRTCIce:
 		return true
 	default:
 		return false

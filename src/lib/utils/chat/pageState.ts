@@ -1,6 +1,7 @@
 import type {
 	ChatMessage,
 	ChatThread,
+	MessageReactions,
 	OnlineMember,
 	RoomMeta,
 	ThreadStatus
@@ -379,6 +380,106 @@ export function applyMessageDeleteState(
 	return {
 		messagesByRoom: nextMessagesByRoom,
 		roomThreads: updateThreadPreview(roomThreads, nextMessagesByRoom, targetRoomId, deps),
+		changed: true
+	};
+}
+
+function normalizeReactionEmoji(value: string) {
+	const trimmed = (value || '').trim();
+	if (!trimmed || trimmed.length > 32) {
+		return '';
+	}
+	return trimmed;
+}
+
+function normalizeReactionUserID(value: string) {
+	return value
+		.trim()
+		.replace(/[^a-zA-Z0-9\s_-]/g, '')
+		.replace(/[\s-]+/g, '_')
+		.replace(/_+/g, '_')
+		.replace(/^_+|_+$/g, '');
+}
+
+function parseReactionsPayload(value: unknown): MessageReactions {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return {};
+	}
+	const source = value as Record<string, unknown>;
+	const reactions: MessageReactions = {};
+	for (const [emojiCandidate, usersValue] of Object.entries(source)) {
+		const emoji = normalizeReactionEmoji(emojiCandidate);
+		if (!emoji || !Array.isArray(usersValue)) {
+			continue;
+		}
+		const users = usersValue
+			.map((entry) => normalizeReactionUserID(toStringValue(entry)))
+			.filter((entry, index, input) => entry !== '' && input.indexOf(entry) === index)
+			.sort((left, right) => left.localeCompare(right));
+		if (users.length === 0) {
+			continue;
+		}
+		reactions[emoji] = users;
+	}
+	return reactions;
+}
+
+function reactionsEqual(left: MessageReactions, right: MessageReactions) {
+	const leftEntries = Object.entries(left);
+	const rightEntries = Object.entries(right);
+	if (leftEntries.length !== rightEntries.length) {
+		return false;
+	}
+	for (const [emoji, leftUsers] of leftEntries) {
+		const rightUsers = right[emoji];
+		if (!rightUsers || rightUsers.length !== leftUsers.length) {
+			return false;
+		}
+		for (let index = 0; index < leftUsers.length; index += 1) {
+			if (leftUsers[index] !== rightUsers[index]) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+export function applyMessageReactionsState(
+	messagesByRoom: Record<string, ChatMessage[]>,
+	targetRoomId: string,
+	payload: unknown
+) {
+	if (!payload || typeof payload !== 'object') {
+		return { messagesByRoom, changed: false };
+	}
+	const source = payload as Record<string, unknown>;
+	const messageId = normalizeMessageID(
+		toStringValue(source.messageId ?? source.message_id ?? source.id)
+	);
+	if (!messageId) {
+		return { messagesByRoom, changed: false };
+	}
+	const reactions = parseReactionsPayload(source.reactions);
+	const roomMessages = messagesByRoom[targetRoomId] ?? [];
+	const index = roomMessages.findIndex((entry) => normalizeMessageID(entry.id) === messageId);
+	if (index < 0) {
+		return { messagesByRoom, changed: false };
+	}
+	const currentMessage = roomMessages[index];
+	const currentReactions = currentMessage.reactions ?? {};
+	if (reactionsEqual(currentReactions, reactions)) {
+		return { messagesByRoom, changed: false };
+	}
+	const nextMessages = [...roomMessages];
+	nextMessages[index] = {
+		...currentMessage,
+		reactions
+	};
+	return {
+		messagesByRoom: {
+			...messagesByRoom,
+			[targetRoomId]: nextMessages
+		},
 		changed: true
 	};
 }

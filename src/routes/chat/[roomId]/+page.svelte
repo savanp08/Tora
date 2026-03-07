@@ -103,6 +103,7 @@
 		sortThreads
 	} from '$lib/utils/chat/threadList';
 	import {
+		applyMessageReactionsState,
 		applyMessageDeleteState,
 		applyMessageEditState,
 		createThread as createThreadState,
@@ -176,8 +177,16 @@
 		leftAt: number | null;
 	};
 
-	const CALL_SIGNAL_TYPES = new Set(['call_invite', 'webrtc_offer', 'webrtc_answer', 'webrtc_ice']);
+	const CALL_SIGNAL_TYPES = new Set([
+		'call_invite',
+		'webrtc_offer',
+		'webrtc_answer',
+		'webrtc_ice',
+		'call_cancel'
+	]);
 	const CALL_MAX_PARTICIPANTS = 5;
+	const INCOMING_CALL_TIMEOUT_MS = 30000;
+	const EMPTY_CALL_GRACE_MS = 4500;
 
 	function getCanvasPresenceColor(user: { color?: unknown } | null | undefined) {
 		if (typeof user?.color === 'string') {
@@ -279,6 +288,9 @@
 	let localCallStream: MediaStream | null = null;
 	let remoteCallStreams: CallStreamSlot[] = [];
 	let callParticipants: CallParticipantEntry[] = [];
+	let callRingingUserIds: string[] = [];
+	let callRingingParticipants: CallParticipantEntry[] = [];
+	let activeRemoteCallParticipantCount = 0;
 	let callMemberPresenceByUserId: Record<string, Omit<CallMemberPresenceEntry, 'userId'>> = {};
 	let callParticipantSnapshotIds: string[] = [];
 	let showCallMembersPanel = false;
@@ -291,7 +303,9 @@
 	let callStartedAtMs = 0;
 	let callDurationLabel = '00:00';
 	let callDurationTicker: ReturnType<typeof setInterval> | null = null;
-	let ringtoneAudio: HTMLAudioElement | null = null;
+	let incomingCallExpireTimer: ReturnType<typeof setTimeout> | null = null;
+	let callEmptyGraceTimer: ReturnType<typeof setTimeout> | null = null;
+	let callHadRemoteParticipant = false;
 	let webrtcContextKey = '';
 	let uiDialog: UiDialogState = { kind: 'none' };
 	const dialogController = createChatDialogController({
@@ -407,6 +421,55 @@
 		webrtcManager;
 		callParticipants = buildCallParticipantEntries();
 	}
+	$: activeRemoteCallParticipantCount = callParticipants.filter(
+		(participant) => !participant.isLocal
+	).length;
+	$: {
+		callParticipants;
+		callRingingUserIds;
+		currentOnlineMembers;
+		currentUserId;
+		activeCall;
+		const localUserId = normalizeIdentifier(currentUserId);
+		const activeRemoteParticipantIDs = new Set(
+			callParticipants
+				.filter((participant) => !participant.isLocal)
+				.map((participant) => normalizeIdentifier(participant.userId))
+				.filter(Boolean)
+		);
+		const onlineMemberIDs = new Set(
+			currentOnlineMembers
+				.map((member) => normalizeIdentifier(member.id))
+				.filter(Boolean)
+		);
+		const nextRingingUserIDs = callRingingUserIds.filter((userId) => {
+			const normalizedUserID = normalizeIdentifier(userId);
+			if (!normalizedUserID || normalizedUserID === localUserId) {
+				return false;
+			}
+			if (!activeCall) {
+				return false;
+			}
+			if (activeRemoteParticipantIDs.has(normalizedUserID)) {
+				return false;
+			}
+			return onlineMemberIDs.has(normalizedUserID);
+		});
+		const hasChanged =
+			nextRingingUserIDs.length !== callRingingUserIds.length ||
+			nextRingingUserIDs.some((entry, index) => entry !== callRingingUserIds[index]);
+		if (hasChanged) {
+			callRingingUserIds = nextRingingUserIDs;
+		}
+	}
+	$: callRingingParticipants = callRingingUserIds.map((userId) => ({
+		userId,
+		name: resolveCallUserName(userId),
+		isLocal: false
+	}));
+	$: if (activeCall && activeRemoteCallParticipantCount > 0) {
+		callHadRemoteParticipant = true;
+	}
 	$: callMemberPresenceList = Object.entries(callMemberPresenceByUserId)
 		.map(([userId, entry]) => ({ userId, ...entry }))
 		.sort((left, right) => left.joinedAt - right.joinedAt);
@@ -415,6 +478,21 @@
 		.filter((entry) => entry.leftAt != null)
 		.sort((left, right) => (right.leftAt ?? 0) - (left.leftAt ?? 0));
 	$: trackCallMemberPresence(callParticipants, activeCall);
+	$: if (!activeCall || !callHadRemoteParticipant || activeRemoteCallParticipantCount > 0) {
+		clearCallEmptyGraceTimer();
+	}
+	$: if (activeCall && callHadRemoteParticipant && activeRemoteCallParticipantCount === 0) {
+		scheduleEmptyCallAutoEnd();
+	}
+	$: if (incomingCall && !activeCall) {
+		const callerID = normalizeIdentifier(incomingCall.fromUserId);
+		const callerStillOnline = currentOnlineMembers.some(
+			(member) => normalizeIdentifier(member.id) === callerID
+		);
+		if (!callerID || !callerStillOnline) {
+			clearIncomingCallState();
+		}
+	}
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: canModerateBoard = isMember && !isRoomExpired && isActiveRoomAdmin;
@@ -542,7 +620,8 @@
 		clearRoomExpiryTicker();
 		clearToastTimer();
 		stopCallDurationTicker();
-		stopRingtone();
+		clearIncomingCallExpireTimer();
+		clearCallEmptyGraceTimer();
 		if (webrtcManager) {
 			const duration = webrtcManager.endCall();
 			clientLog('call-ended-on-destroy', { durationSeconds: duration });
@@ -1045,26 +1124,61 @@
 		}
 	}
 
-	function stopRingtone() {
-		if (!ringtoneAudio) {
+	function clearIncomingCallExpireTimer() {
+		if (!incomingCallExpireTimer) {
 			return;
 		}
-		ringtoneAudio.pause();
-		ringtoneAudio.currentTime = 0;
+		clearTimeout(incomingCallExpireTimer);
+		incomingCallExpireTimer = null;
 	}
 
-	function startRingtone() {
-		if (!browser) {
+	function clearCallEmptyGraceTimer() {
+		if (!callEmptyGraceTimer) {
 			return;
 		}
-		if (!ringtoneAudio) {
-			ringtoneAudio = new Audio('/ringtone.wav');
-			ringtoneAudio.loop = true;
-			ringtoneAudio.preload = 'auto';
+		clearTimeout(callEmptyGraceTimer);
+		callEmptyGraceTimer = null;
+	}
+
+	function clearIncomingCallState() {
+		incomingCall = null;
+		isRinging = false;
+		clearIncomingCallExpireTimer();
+	}
+
+	function scheduleIncomingCallExpiry() {
+		clearIncomingCallExpireTimer();
+		incomingCallExpireTimer = setTimeout(() => {
+			if (activeCall || !incomingCall) {
+				return;
+			}
+			clearIncomingCallState();
+		}, INCOMING_CALL_TIMEOUT_MS);
+	}
+
+	function scheduleEmptyCallAutoEnd() {
+		if (callEmptyGraceTimer) {
+			return;
 		}
-		void ringtoneAudio.play().catch(() => {
-			// Browser autoplay policies may block ringtone until first user gesture.
-		});
+		callEmptyGraceTimer = setTimeout(() => {
+			void endCallWhenParticipantsLeave();
+		}, EMPTY_CALL_GRACE_MS);
+	}
+
+	function sendCallCancelSignal(targetUserId = '') {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const payload: Record<string, unknown> = {
+			type: 'call_cancel',
+			roomId,
+			callType
+		};
+		const normalizedTargetUserID = normalizeIdentifier(targetUserId);
+		if (normalizedTargetUserID) {
+			payload.targetUserId = normalizedTargetUserID;
+		}
+		sendSocketPayload(payload);
 	}
 
 	function syncCallStreamsFromManager() {
@@ -1084,32 +1198,41 @@
 		if (!fromUserId || fromUserId === normalizeIdentifier(currentUserId)) {
 			return;
 		}
+		const callerStillOnline = currentOnlineMembers.some(
+			(member) => normalizeIdentifier(member.id) === fromUserId
+		);
+		if (!callerStillOnline) {
+			return;
+		}
 		incomingCall = event;
 		callType = event.callType;
 		if (activeCall) {
 			return;
 		}
 		isRinging = true;
-		startRingtone();
+		scheduleIncomingCallExpiry();
 	}
 
 	function resetCallUiState() {
 		activeCall = false;
 		isRinging = false;
 		incomingCall = null;
+		clearIncomingCallExpireTimer();
+		clearCallEmptyGraceTimer();
 		localCallStream = null;
 		remoteCallStreams = [];
 		callParticipants = [];
+		callRingingUserIds = [];
 		callMemberPresenceByUserId = {};
 		callParticipantSnapshotIds = [];
 		showCallMembersPanel = false;
 		isMuted = false;
 		isCameraEnabled = false;
 		isCallMinimized = false;
+		callHadRemoteParticipant = false;
 		callStartedAtMs = 0;
 		callDurationLabel = '00:00';
 		stopCallDurationTicker();
-		stopRingtone();
 	}
 
 	function ensureWebRTCManager() {
@@ -1173,6 +1296,40 @@
 			});
 	}
 
+	function normalizeCallUserIdList(userIds: string[]) {
+		const next: string[] = [];
+		const seen = new Set<string>();
+		for (const candidate of userIds) {
+			const normalizedUserID = normalizeIdentifier(candidate);
+			if (!normalizedUserID || seen.has(normalizedUserID)) {
+				continue;
+			}
+			seen.add(normalizedUserID);
+			next.push(normalizedUserID);
+		}
+		return next;
+	}
+
+	function setRingingUserIds(userIds: string[]) {
+		callRingingUserIds = normalizeCallUserIdList(userIds);
+	}
+
+	function addRingingUserIds(userIds: string[]) {
+		const merged = normalizeCallUserIdList([...callRingingUserIds, ...userIds]);
+		callRingingUserIds = merged;
+	}
+
+	function removeRingingUserIds(userIds: string[]) {
+		if (callRingingUserIds.length === 0) {
+			return;
+		}
+		const removed = new Set(normalizeCallUserIdList(userIds));
+		if (removed.size === 0) {
+			return;
+		}
+		callRingingUserIds = callRingingUserIds.filter((userId) => !removed.has(userId));
+	}
+
 	function resolveCallUserName(userId: string) {
 		const normalizedUserId = normalizeIdentifier(userId);
 		if (!normalizedUserId) {
@@ -1210,18 +1367,6 @@
 				isLocal: false
 			});
 			seen.add(remoteUserId);
-		}
-		for (const peerUserId of webrtcManager?.getPeerUserIds?.() ?? []) {
-			const normalizedPeerUserId = normalizeIdentifier(peerUserId);
-			if (!normalizedPeerUserId || seen.has(normalizedPeerUserId)) {
-				continue;
-			}
-			entries.push({
-				userId: normalizedPeerUserId,
-				name: resolveCallUserName(normalizedPeerUserId),
-				isLocal: false
-			});
-			seen.add(normalizedPeerUserId);
 		}
 		return entries.slice(0, CALL_MAX_PARTICIPANTS);
 	}
@@ -1392,10 +1537,9 @@
 			await webrtcManager.startLocalStream(mode === 'video');
 			callType = mode;
 			activeCall = true;
+			callHadRemoteParticipant = false;
 			isCallMinimized = false;
-			isRinging = false;
-			incomingCall = null;
-			stopRingtone();
+			clearIncomingCallState();
 			callStartedAtMs = Date.now();
 			startCallDurationTicker();
 			syncCallStreamsFromManager();
@@ -1415,6 +1559,7 @@
 				Boolean(localCallStream?.getVideoTracks().some((track) => track.enabled));
 
 			const targets = getCallInviteTargetUserIds().slice(0, webrtcManager.getAvailablePeerSlots());
+			setRingingUserIds(targets);
 			webrtcManager.inviteToCall(mode, targets);
 			for (const targetUserId of targets) {
 				await webrtcManager.connectToPeer(targetUserId, mode);
@@ -1438,9 +1583,9 @@
 			await webrtcManager.startLocalStream(incomingCall.callType === 'video');
 			callType = incomingCall.callType;
 			activeCall = true;
+			callHadRemoteParticipant = false;
 			isCallMinimized = false;
-			isRinging = false;
-			stopRingtone();
+			clearIncomingCallState();
 			callStartedAtMs = Date.now();
 			startCallDurationTicker();
 			syncCallStreamsFromManager();
@@ -1457,7 +1602,6 @@
 			if (incomingCall.fromUserId) {
 				await webrtcManager.connectToPeer(incomingCall.fromUserId, incomingCall.callType);
 			}
-			incomingCall = null;
 		} catch (error) {
 			showErrorToast(error instanceof Error ? error.message : 'Unable to accept call');
 		}
@@ -1468,13 +1612,18 @@
 			return;
 		}
 		const declinedType = incomingCall.callType;
-		incomingCall = null;
-		isRinging = false;
-		stopRingtone();
+		const declineTargetUserID = incomingCall.fromUserId;
+		clearIncomingCallState();
+		sendCallCancelSignal(declineTargetUserID);
 		await sendCallLogMessage('Missed Call', declinedType);
 	}
 
-	async function hangUpCall() {
+	async function endCallWhenParticipantsLeave() {
+		clearCallEmptyGraceTimer();
+		if (!activeCall || !callHadRemoteParticipant || activeRemoteCallParticipantCount > 0) {
+			return;
+		}
+		sendCallCancelSignal();
 		if (!webrtcManager) {
 			resetCallUiState();
 			return;
@@ -1484,7 +1633,27 @@
 			? Math.max(0, Math.floor((Date.now() - callStartedAtMs) / 1000))
 			: 0;
 		const elapsedSeconds = Math.max(elapsedFromManager, fallbackSeconds);
-		const statusText = elapsedSeconds > 0 ? formatCallDuration(elapsedSeconds) : 'Missed Call';
+		const statusText = elapsedSeconds > 0 ? formatCallDuration(elapsedSeconds) : 'Call ended';
+		await sendCallLogMessage(statusText, callType);
+		resetCallUiState();
+	}
+
+	async function hangUpCall() {
+		sendCallCancelSignal();
+		if (!webrtcManager) {
+			resetCallUiState();
+			return;
+		}
+		const elapsedFromManager = webrtcManager.endCall();
+		const fallbackSeconds = callStartedAtMs
+			? Math.max(0, Math.floor((Date.now() - callStartedAtMs) / 1000))
+			: 0;
+		const elapsedSeconds = Math.max(elapsedFromManager, fallbackSeconds);
+		const statusText = !callHadRemoteParticipant
+			? `Rung for ${formatCallDuration(elapsedSeconds)}`
+			: elapsedSeconds > 0
+				? formatCallDuration(elapsedSeconds)
+				: 'Missed Call';
 		await sendCallLogMessage(statusText, callType);
 		resetCallUiState();
 	}
@@ -1512,6 +1681,7 @@
 			showErrorToast('No additional room members available to invite');
 			return;
 		}
+		addRingingUserIds(targets);
 		webrtcManager.inviteToCall(callType, targets);
 		for (const targetUserId of targets) {
 			await webrtcManager.connectToPeer(targetUserId, callType);
@@ -1527,6 +1697,36 @@
 		if (!normalizedTargetRoomId || normalizedTargetRoomId !== roomId) {
 			return;
 		}
+		const source = envelope as Record<string, unknown>;
+		const payload = resolveEnvelopePayloadRecord(envelope);
+		const fromUserID = normalizeIdentifier(
+			toStringValue(
+				source.fromUserId ??
+					source.from_user_id ??
+					payload.fromUserId ??
+					payload.from_user_id ??
+					source.userId ??
+					source.user_id
+			)
+		);
+
+		if (kind === 'call_cancel') {
+			if (!fromUserID || fromUserID === normalizeIdentifier(currentUserId)) {
+				return;
+			}
+			removeRingingUserIds([fromUserID]);
+			if (incomingCall && normalizeIdentifier(incomingCall.fromUserId) === fromUserID) {
+				clearIncomingCallState();
+			}
+			if (
+				activeCall &&
+				activeRemoteCallParticipantCount === 0 &&
+				(callHadRemoteParticipant || normalizeIdentifier(currentUserId) !== fromUserID)
+			) {
+				await endCallWhenParticipantsLeave();
+			}
+			return;
+		}
 		ensureWebRTCManager();
 		if (!webrtcManager) {
 			return;
@@ -1534,6 +1734,9 @@
 		try {
 			await webrtcManager.handleSignaling(envelope as unknown as Record<string, unknown>);
 			syncCallStreamsFromManager();
+			if (kind === 'webrtc_answer' && fromUserID) {
+				removeRingingUserIds([fromUserID]);
+			}
 			if (kind !== 'call_invite') {
 				activeCall = true;
 				isCallMinimized = false;
@@ -1541,9 +1744,7 @@
 					callStartedAtMs = Date.now();
 					startCallDurationTicker();
 				}
-				isRinging = false;
-				incomingCall = null;
-				stopRingtone();
+				clearIncomingCallState();
 			}
 		} catch (error) {
 			clientLog('call-signaling-handle-error', {
@@ -2535,7 +2736,13 @@
 			return;
 		}
 
-		if ((kind === 'typing_start' || kind === 'typing_stop') && targetRoomId) {
+		if (kind === 'typing_start' || kind === 'typing_stop') {
+			if (handleTypingSignalPayload(envelope)) {
+				return;
+			}
+			if (!targetRoomId) {
+				return;
+			}
 			const participant = parseMember(envelope.payload, Date.now());
 			if (!participant) {
 				return;
@@ -2562,6 +2769,11 @@
 
 		if (kind === 'message_delete' && targetRoomId) {
 			applyMessageDelete(targetRoomId, envelope.payload);
+			return;
+		}
+
+		if (kind === 'message_reaction' && targetRoomId) {
+			applyMessageReactions(targetRoomId, payload);
 		}
 	}
 
@@ -2770,6 +2982,19 @@
 		messagesByRoom = next.messagesByRoom;
 		roomThreads = next.roomThreads;
 		queueOfflineCachePersist(targetRoomId);
+	}
+
+	function applyMessageReactions(targetRoomId: string, payload: unknown) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return;
+		}
+		const next = applyMessageReactionsState(messagesByRoom, normalizedRoomID, payload);
+		if (!next.changed) {
+			return;
+		}
+		messagesByRoom = next.messagesByRoom;
+		queueOfflineCachePersist(normalizedRoomID);
 	}
 
 	function applyMessagePinState(targetRoomId: string, payload: unknown) {
@@ -3575,6 +3800,26 @@
 			showErrorToast(
 				error instanceof Error ? error.message : 'Failed to navigate pinned discussions'
 			);
+		}
+	}
+
+	function onMessageReactionToggle(event: CustomEvent<{ messageId: string; emoji: string }>) {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail?.messageId || '');
+		const emoji = (event.detail?.emoji || '').trim();
+		if (!messageId || !emoji) {
+			return;
+		}
+		const queued = sendSocketPayload({
+			type: 'message_reaction',
+			roomId,
+			messageId,
+			emoji
+		});
+		if (!queued) {
+			showErrorToast('Socket reconnecting. Reaction queued.');
 		}
 	}
 
@@ -4827,55 +5072,53 @@
 					/>
 				{/if}
 
-				{#if isRinging && incomingCall}
-					<div class="call-incoming-overlay" role="dialog" aria-modal="true">
-						<div class="call-incoming-card">
-							<div class="call-incoming-head">
-								<div class="call-incoming-avatar" aria-hidden="true">
-									{#if incomingCall.callType === 'video'}
-										<svg viewBox="0 0 24 24">
-											<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
-											<path d="M15.5 10 21 7v10l-5.5-3"></path>
-										</svg>
-									{:else}
-										<svg viewBox="0 0 24 24">
-											<path
-												d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
-											></path>
-										</svg>
-									{/if}
-								</div>
-								<div>
-									<div class="call-incoming-title">
-										Incoming {incomingCall.callType === 'video' ? 'Video' : 'Audio'} Call
-									</div>
-									<div class="call-incoming-subtitle">
-										{resolveCallUserName(incomingCall.fromUserId)}
-									</div>
-								</div>
+				{#if isRinging && incomingCall && !activeCall}
+					<div class="call-inline-request" role="region" aria-label="Incoming call request">
+						<div class="call-inline-copy">
+							<div class="call-inline-title">
+								Incoming {incomingCall.callType === 'video' ? 'Video' : 'Audio'} call
 							</div>
-							<div class="call-incoming-actions">
-								<button
-									type="button"
-									class="call-btn accept"
-									on:click={() => void acceptIncomingCall()}
-								>
-									<svg viewBox="0 0 24 24" aria-hidden="true">
-										<path d="M8 12.5 10.7 15 16 9.8"></path>
-									</svg>
-									<span>Accept</span>
-								</button>
-								<button
-									type="button"
-									class="call-btn decline"
-									on:click={() => void declineIncomingCall()}
-								>
-									<svg viewBox="0 0 24 24" aria-hidden="true">
-										<path d="m8 8 8 8M16 8l-8 8"></path>
-									</svg>
-									<span>Decline</span>
-								</button>
+							<div class="call-inline-subtitle">
+								{resolveCallUserName(incomingCall.fromUserId)} is requesting to connect
 							</div>
+						</div>
+						<div class="call-inline-actions">
+							<button
+								type="button"
+								class="call-inline-btn accept"
+								on:click={() => void acceptIncomingCall()}
+							>
+								Accept
+							</button>
+							<button
+								type="button"
+								class="call-inline-btn decline"
+								on:click={() => void declineIncomingCall()}
+							>
+								Decline
+							</button>
+						</div>
+					</div>
+				{/if}
+
+				{#if activeCall && callParticipants.length > 0 && !isCallMinimized}
+					<div class="call-inline-presence" role="status" aria-label="Call participants">
+						<span class="call-inline-presence-label">In call</span>
+						<div class="call-inline-presence-list">
+							{#each callParticipants as participant (participant.userId)}
+								<span class="call-inline-presence-chip">{participant.name}</span>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				{#if activeCall && callRingingParticipants.length > 0 && !isCallMinimized}
+					<div class="call-inline-presence" role="status" aria-label="Ringing participants">
+						<span class="call-inline-presence-label">Ringing</span>
+						<div class="call-inline-presence-list">
+							{#each callRingingParticipants as participant (participant.userId)}
+								<span class="call-inline-presence-chip">{participant.name}</span>
+							{/each}
 						</div>
 					</div>
 				{/if}
@@ -4977,18 +5220,6 @@
 										</ul>
 									{/if}
 								</section>
-							</div>
-						{/if}
-						{#if callParticipants.length > 0}
-							<div class="call-participant-strip" aria-label="People in call">
-								{#each callParticipants as participant (participant.userId)}
-									<div class="call-participant-chip">
-										<span class="call-participant-avatar"
-											>{getCallNameInitials(participant.name)}</span
-										>
-										<span class="call-participant-name">{participant.name}</span>
-									</div>
-								{/each}
 							</div>
 						{/if}
 						<div class="call-video-grid">
@@ -5147,6 +5378,7 @@
 							on:messageSelect={onMessageSelected}
 							on:openPinnedDiscussion={onPinnedDiscussionOpen}
 							on:reply={onReplyRequest}
+							on:toggleReaction={onMessageReactionToggle}
 							on:messageContextAction={onMessageContextAction}
 							on:editSelected={onSelectedMessageEdit}
 							on:deleteSelected={onSelectedMessageDelete}

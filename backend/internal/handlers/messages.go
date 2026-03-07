@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +27,7 @@ const (
 	maxDiscussionCommentContentRune = 2000
 	deletedDiscussionPlaceholder    = "This message was deleted"
 	hardScyllaTTLSeconds            = 15 * 24 * 60 * 60
+	messageReactionsPrefix          = "message:reactions:"
 )
 
 type RoomMessagesResponse struct {
@@ -960,6 +963,9 @@ func (h *RoomHandler) queryRoomMessagesPage(
 	if err := h.applyPinnedState(ctx, roomID, messages); err != nil {
 		log.Printf("[room-messages] pin-state enrich failed room=%s err=%v", roomID, err)
 	}
+	if err := h.applyMessageReactions(ctx, roomID, messages); err != nil {
+		log.Printf("[room-messages] reaction-state enrich failed room=%s err=%v", roomID, err)
+	}
 
 	hasMore := false
 	if len(messages) > limit {
@@ -1150,7 +1156,7 @@ func (h *RoomHandler) lookupMessageByPrimaryKey(
 		)
 	}
 
-	return models.Message{
+	message := models.Message{
 		ID:               dbMessageID,
 		RoomID:           dbRoomID,
 		SenderID:         senderID,
@@ -1169,7 +1175,12 @@ func (h *RoomHandler) lookupMessageByPrimaryKey(
 		ReplyToSnippet:   replySnippet,
 		IsPinned:         isPinned,
 		CreatedAt:        dbCreatedAt,
-	}, nil
+	}
+	single := []models.Message{message}
+	if err := h.applyMessageReactions(ctx, roomID, single); err == nil && len(single) == 1 {
+		message = single[0]
+	}
+	return message, nil
 }
 
 func (h *RoomHandler) lookupMessageCreatedAt(
@@ -1240,6 +1251,117 @@ func (h *RoomHandler) applyPinnedState(ctx context.Context, roomID string, messa
 	for index, message := range messages {
 		if pinnedByMessageID[normalizeMessageID(message.ID)] {
 			messages[index].IsPinned = true
+		}
+	}
+	return nil
+}
+
+func roomMessageReactionsKey(roomID, messageID string) string {
+	return messageReactionsPrefix + roomID + ":" + messageID
+}
+
+func decodeReactionField(field string) (string, string, bool) {
+	separator := strings.Index(field, "|")
+	if separator <= 0 || separator >= len(field)-1 {
+		return "", "", false
+	}
+	userID := normalizeIdentifier(field[:separator])
+	emojiBytes, err := base64.RawURLEncoding.DecodeString(field[separator+1:])
+	if err != nil {
+		return "", "", false
+	}
+	emoji := strings.TrimSpace(string(emojiBytes))
+	if userID == "" || emoji == "" {
+		return "", "", false
+	}
+	return userID, emoji, true
+}
+
+func decodeReactionUsers(raw map[string]string) map[string][]string {
+	if len(raw) == 0 {
+		return map[string][]string{}
+	}
+	result := make(map[string][]string)
+	seen := make(map[string]map[string]struct{})
+	for field := range raw {
+		userID, emoji, ok := decodeReactionField(field)
+		if !ok {
+			continue
+		}
+		emojiSeen, exists := seen[emoji]
+		if !exists {
+			emojiSeen = make(map[string]struct{})
+			seen[emoji] = emojiSeen
+		}
+		if _, duplicate := emojiSeen[userID]; duplicate {
+			continue
+		}
+		emojiSeen[userID] = struct{}{}
+		result[emoji] = append(result[emoji], userID)
+	}
+	for emoji := range result {
+		sort.Strings(result[emoji])
+	}
+	return result
+}
+
+func (h *RoomHandler) applyMessageReactions(ctx context.Context, roomID string, messages []models.Message) error {
+	if h == nil || h.redis == nil || h.redis.Client == nil || len(messages) == 0 {
+		return nil
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return nil
+	}
+
+	pipe := h.redis.Client.Pipeline()
+	cmds := make(map[string]*redis.MapStringStringCmd, len(messages))
+	for _, message := range messages {
+		normalizedMessageID := normalizeMessageID(message.ID)
+		if normalizedMessageID == "" {
+			continue
+		}
+		if _, exists := cmds[normalizedMessageID]; exists {
+			continue
+		}
+		cmds[normalizedMessageID] = pipe.HGetAll(
+			ctx,
+			roomMessageReactionsKey(normalizedRoomID, normalizedMessageID),
+		)
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return err
+	}
+
+	reactionsByMessageID := make(map[string]map[string][]string, len(cmds))
+	for messageID, cmd := range cmds {
+		if cmd == nil {
+			continue
+		}
+		entries, resultErr := cmd.Result()
+		if resultErr != nil && resultErr != redis.Nil {
+			return resultErr
+		}
+		reactions := decodeReactionUsers(entries)
+		if len(reactions) == 0 {
+			continue
+		}
+		reactionsByMessageID[messageID] = reactions
+	}
+	if len(reactionsByMessageID) == 0 {
+		return nil
+	}
+
+	for index, message := range messages {
+		normalizedMessageID := normalizeMessageID(message.ID)
+		if normalizedMessageID == "" {
+			continue
+		}
+		if reactions, exists := reactionsByMessageID[normalizedMessageID]; exists {
+			messages[index].Reactions = reactions
 		}
 	}
 	return nil

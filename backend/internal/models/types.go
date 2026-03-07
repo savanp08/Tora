@@ -12,26 +12,27 @@ type User struct {
 }
 
 type Message struct {
-	ID               string     `json:"id"`
-	RoomID           string     `json:"roomId"`
-	SenderID         string     `json:"senderId"`
-	SenderName       string     `json:"senderName"`
-	Content          string     `json:"content"`
-	Type             string     `json:"type"`
-	MediaURL         string     `json:"mediaUrl,omitempty"`
-	MediaType        string     `json:"mediaType,omitempty"`
-	FileName         string     `json:"fileName,omitempty"`
-	IsEdited         bool       `json:"isEdited,omitempty"`
-	EditedAt         *time.Time `json:"editedAt,omitempty"`
-	ReplyToMessageID string     `json:"replyToMessageId,omitempty"`
-	ReplyToSnippet   string     `json:"replyToSnippet,omitempty"`
-	IsPinned         bool       `json:"isPinned,omitempty"`
-	PinnedBy         string     `json:"pinnedBy,omitempty"`
-	PinnedByName     string     `json:"pinnedByName,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	HasBreakRoom     bool       `json:"hasBreakRoom"`
-	BreakRoomID      string     `json:"breakRoomId,omitempty"`
-	BreakJoinCount   int        `json:"breakJoinCount"`
+	ID               string              `json:"id"`
+	RoomID           string              `json:"roomId"`
+	SenderID         string              `json:"senderId"`
+	SenderName       string              `json:"senderName"`
+	Content          string              `json:"content"`
+	Type             string              `json:"type"`
+	Reactions        map[string][]string `json:"reactions,omitempty"`
+	MediaURL         string              `json:"mediaUrl,omitempty"`
+	MediaType        string              `json:"mediaType,omitempty"`
+	FileName         string              `json:"fileName,omitempty"`
+	IsEdited         bool                `json:"isEdited,omitempty"`
+	EditedAt         *time.Time          `json:"editedAt,omitempty"`
+	ReplyToMessageID string              `json:"replyToMessageId,omitempty"`
+	ReplyToSnippet   string              `json:"replyToSnippet,omitempty"`
+	IsPinned         bool                `json:"isPinned,omitempty"`
+	PinnedBy         string              `json:"pinnedBy,omitempty"`
+	PinnedByName     string              `json:"pinnedByName,omitempty"`
+	CreatedAt        time.Time           `json:"createdAt"`
+	HasBreakRoom     bool                `json:"hasBreakRoom"`
+	BreakRoomID      string              `json:"breakRoomId,omitempty"`
+	BreakJoinCount   int                 `json:"breakJoinCount"`
 }
 
 type Room struct {

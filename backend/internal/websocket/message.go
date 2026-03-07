@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gocql/gocql"
 	"github.com/redis/go-redis/v9"
@@ -42,6 +44,8 @@ const (
 	boardSizeTotalPrefix       = "board:size:total:"
 	boardSizeElementsPrefix    = "board:size:elements:"
 	boardSizeEntryTTL          = scyllaMessageTTL
+	messageReactionsPrefix     = "message:reactions:"
+	maxReactionEmojiBytes      = 32
 )
 
 var ErrBoardSizeLimitExceeded = errors.New("board storage limit exceeded")
@@ -938,6 +942,75 @@ func toInt64(value interface{}) (int64, error) {
 	}
 }
 
+func normalizeReactionEmoji(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > maxReactionEmojiBytes {
+		return ""
+	}
+	if utf8.RuneCountInString(trimmed) > 8 {
+		return ""
+	}
+	return trimmed
+}
+
+func messageReactionsKey(roomID, messageID string) string {
+	return messageReactionsPrefix + roomID + ":" + messageID
+}
+
+func encodeReactionHashField(userID, emoji string) string {
+	return userID + "|" + base64.RawURLEncoding.EncodeToString([]byte(emoji))
+}
+
+func decodeReactionHashField(field string) (string, string, bool) {
+	separator := strings.Index(field, "|")
+	if separator <= 0 || separator >= len(field)-1 {
+		return "", "", false
+	}
+	userID := normalizeUsername(field[:separator])
+	emojiBytes, err := base64.RawURLEncoding.DecodeString(field[separator+1:])
+	if err != nil {
+		return "", "", false
+	}
+	emoji := normalizeReactionEmoji(string(emojiBytes))
+	if userID == "" || emoji == "" {
+		return "", "", false
+	}
+	return userID, emoji, true
+}
+
+func decodeMessageReactionUsers(raw map[string]string) map[string][]string {
+	if len(raw) == 0 {
+		return map[string][]string{}
+	}
+
+	result := make(map[string][]string)
+	seen := make(map[string]map[string]struct{})
+	for field := range raw {
+		userID, emoji, ok := decodeReactionHashField(field)
+		if !ok {
+			continue
+		}
+		emojiSeen, exists := seen[emoji]
+		if !exists {
+			emojiSeen = make(map[string]struct{})
+			seen[emoji] = emojiSeen
+		}
+		if _, duplicate := emojiSeen[userID]; duplicate {
+			continue
+		}
+		emojiSeen[userID] = struct{}{}
+		result[emoji] = append(result[emoji], userID)
+	}
+
+	for emoji := range result {
+		sort.Strings(result[emoji])
+	}
+	return result
+}
+
 func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) ([]models.Message, error) {
 	if roomID == "" {
 		return []models.Message{}, nil
@@ -963,6 +1036,7 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 		combined := mergeRecentHistory(normalMessages, taskMessages)
 		s.enrichBreakMetadata(ctx, combined)
 		s.enrichPinMetadata(ctx, roomID, combined)
+		s.enrichReactionMetadata(ctx, roomID, combined)
 		return combined, nil
 	}
 
@@ -978,6 +1052,7 @@ func (s *MessageService) GetRecentMessages(ctx context.Context, roomID string) (
 	combined := mergeRecentHistory(normalMessages, taskMessages)
 	s.enrichBreakMetadata(ctx, combined)
 	s.enrichPinMetadata(ctx, roomID, combined)
+	s.enrichReactionMetadata(ctx, roomID, combined)
 
 	return combined, nil
 }
@@ -1271,6 +1346,50 @@ func (s *MessageService) enrichPinMetadata(ctx context.Context, roomID string, m
 	}
 }
 
+func (s *MessageService) enrichReactionMetadata(ctx context.Context, roomID string, messages []models.Message) {
+	if len(messages) == 0 {
+		return
+	}
+	reactionsByMessageID, err := s.GetRoomMessageReactions(ctx, roomID, collectMessageIDs(messages))
+	if err != nil {
+		return
+	}
+	if len(reactionsByMessageID) == 0 {
+		return
+	}
+	for index, message := range messages {
+		normalizedMessageID := normalizeMessageID(message.ID)
+		if normalizedMessageID == "" {
+			continue
+		}
+		reactions := reactionsByMessageID[normalizedMessageID]
+		if len(reactions) == 0 {
+			continue
+		}
+		messages[index].Reactions = reactions
+	}
+}
+
+func collectMessageIDs(messages []models.Message) []string {
+	if len(messages) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(messages))
+	ids := make([]string, 0, len(messages))
+	for _, message := range messages {
+		normalizedID := normalizeMessageID(message.ID)
+		if normalizedID == "" {
+			continue
+		}
+		if _, exists := seen[normalizedID]; exists {
+			continue
+		}
+		seen[normalizedID] = struct{}{}
+		ids = append(ids, normalizedID)
+	}
+	return ids
+}
+
 func decodeCachedMessages(rawMessages []string) []models.Message {
 	messages := make([]models.Message, 0, len(rawMessages))
 	for _, raw := range rawMessages {
@@ -1513,6 +1632,106 @@ func toTime(value interface{}) time.Time {
 	return time.Time{}
 }
 
+func (s *MessageService) ToggleMessageReaction(
+	ctx context.Context,
+	roomID,
+	messageID,
+	userID,
+	emoji string,
+) (map[string][]string, bool, error) {
+	roomID = normalizeRoomID(roomID)
+	messageID = normalizeMessageID(messageID)
+	userID = normalizeUsername(userID)
+	emoji = normalizeReactionEmoji(emoji)
+	if roomID == "" || messageID == "" || userID == "" || emoji == "" {
+		return nil, false, fmt.Errorf("invalid reaction payload")
+	}
+	if s == nil || s.Redis == nil || s.Redis.Client == nil {
+		return nil, false, fmt.Errorf("redis client is not configured")
+	}
+
+	key := messageReactionsKey(roomID, messageID)
+	field := encodeReactionHashField(userID, emoji)
+	exists, err := s.Redis.Client.HExists(ctx, key, field).Result()
+	if err != nil {
+		return nil, false, fmt.Errorf("lookup existing message reaction: %w", err)
+	}
+
+	added := !exists
+	pipe := s.Redis.Client.TxPipeline()
+	if exists {
+		pipe.HDel(ctx, key, field)
+	} else {
+		pipe.HSet(ctx, key, field, "1")
+	}
+	pipe.Expire(ctx, key, time.Duration(s.resolveRoomTTLSeconds(ctx, roomID))*time.Second)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, false, fmt.Errorf("toggle message reaction: %w", err)
+	}
+
+	reactions, err := s.GetRoomMessageReactions(ctx, roomID, []string{messageID})
+	if err != nil {
+		return nil, false, err
+	}
+	return reactions[messageID], added, nil
+}
+
+func (s *MessageService) GetRoomMessageReactions(
+	ctx context.Context,
+	roomID string,
+	messageIDs []string,
+) (map[string]map[string][]string, error) {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" || len(messageIDs) == 0 {
+		return map[string]map[string][]string{}, nil
+	}
+	if s == nil || s.Redis == nil || s.Redis.Client == nil {
+		return map[string]map[string][]string{}, nil
+	}
+
+	normalizedMessageIDs := make([]string, 0, len(messageIDs))
+	seen := make(map[string]struct{}, len(messageIDs))
+	for _, rawMessageID := range messageIDs {
+		normalizedMessageID := normalizeMessageID(rawMessageID)
+		if normalizedMessageID == "" {
+			continue
+		}
+		if _, exists := seen[normalizedMessageID]; exists {
+			continue
+		}
+		seen[normalizedMessageID] = struct{}{}
+		normalizedMessageIDs = append(normalizedMessageIDs, normalizedMessageID)
+	}
+	if len(normalizedMessageIDs) == 0 {
+		return map[string]map[string][]string{}, nil
+	}
+
+	pipe := s.Redis.Client.Pipeline()
+	cmds := make(map[string]*redis.MapStringStringCmd, len(normalizedMessageIDs))
+	for _, normalizedMessageID := range normalizedMessageIDs {
+		cmds[normalizedMessageID] = pipe.HGetAll(ctx, messageReactionsKey(roomID, normalizedMessageID))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("load message reactions: %w", err)
+	}
+
+	reactionsByMessageID := make(map[string]map[string][]string, len(normalizedMessageIDs))
+	for messageID, cmd := range cmds {
+		if cmd == nil {
+			continue
+		}
+		entries, resultErr := cmd.Result()
+		if resultErr != nil && !errors.Is(resultErr, redis.Nil) {
+			return nil, fmt.Errorf("read message reactions: %w", resultErr)
+		}
+		reactions := decodeMessageReactionUsers(entries)
+		if len(reactions) > 0 {
+			reactionsByMessageID[messageID] = reactions
+		}
+	}
+	return reactionsByMessageID, nil
+}
+
 func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messageID, content string, editedAt time.Time) (string, error) {
 	roomID = normalizeRoomID(roomID)
 	messageID = normalizeMessageID(messageID)
@@ -1657,12 +1876,18 @@ func (s *MessageService) MarkMessageDeleted(ctx context.Context, roomID, message
 		msg.MediaURL = ""
 		msg.MediaType = ""
 		msg.FileName = ""
+		msg.Reactions = map[string][]string{}
 		msg.IsEdited = false
 		msg.EditedAt = nil
 		msg.ReplyToMessageID = ""
 		msg.ReplyToSnippet = ""
 	}); cacheErr != nil {
 		log.Printf("[message-service] cache delete sync failed room=%s message=%s err=%v", roomID, messageID, cacheErr)
+	}
+	if s.Redis != nil && s.Redis.Client != nil {
+		if err := s.Redis.Client.Del(ctx, messageReactionsKey(roomID, messageID)).Err(); err != nil {
+			log.Printf("[message-service] reaction cleanup failed room=%s message=%s err=%v", roomID, messageID, err)
+		}
 	}
 
 	return nil

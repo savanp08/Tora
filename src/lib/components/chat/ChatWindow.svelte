@@ -18,6 +18,16 @@
 		fileName: string;
 	};
 
+	type MessageTextSegment = {
+		value: string;
+		isEmoji: boolean;
+	};
+
+	type ReactionEntry = {
+		emoji: string;
+		users: string[];
+	};
+
 	type MessageContextAction = 'reply' | 'edit' | 'delete' | 'pin' | 'branch';
 
 	export let messages: ChatMessage[] = [];
@@ -54,6 +64,7 @@
 		readProgress: { isNearBottom: boolean; lastSeenMessageId: string };
 		toggleTask: { messageId: string; taskIndex: number };
 		addTask: { messageId: string; text: string };
+		toggleReaction: { messageId: string; emoji: string };
 		messageContextAction: { messageId: string; action: MessageContextAction };
 	}>();
 
@@ -70,6 +81,9 @@
 	const MESSAGE_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const MESSAGE_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
 	const MESSAGE_NATIVE_CONTEXT_SUPPRESSION_MS = 1400;
+	const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥'];
+	const EMOJI_TOKEN_PATTERN =
+		/(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*)/gu;
 
 	let viewport: HTMLDivElement | null = null;
 	let previousVisibleCount = 0;
@@ -109,6 +123,7 @@
 	let messageLongPressLastY = 0;
 	let suppressMessageClickUntil = 0;
 	let suppressNativeMessageContextMenuUntil = 0;
+	let reactionPopoverMessageId = '';
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -123,6 +138,21 @@
 
 	$: if (isSelectionMode && messageContextMenu.open) {
 		closeMessageContextMenu();
+	}
+
+	$: if (
+		reactionPopoverMessageId &&
+		!visibleMessages.some((message) => message.id === reactionPopoverMessageId)
+	) {
+		closeReactionPopover();
+	}
+
+	$: if (isSelectionMode && reactionPopoverMessageId) {
+		closeReactionPopover();
+	}
+
+	$: if (messageContextMenu.open && reactionPopoverMessageId) {
+		closeReactionPopover();
 	}
 
 	$: visibleMessages = getVisibleMessages(messages, roomMessageSearch);
@@ -216,16 +246,17 @@
 		}
 	});
 
-		onMount(() => {
-			setupTopObserver();
-			if (typeof window !== 'undefined') {
-				resizeMeasureHandler = () => scheduleCompactMineActionMeasure();
-				window.addEventListener('resize', resizeMeasureHandler);
-				window.addEventListener('keydown', onWindowKeyDown, true);
-				window.addEventListener('contextmenu', onWindowContextMenuCapture, true);
-				scheduleCompactMineActionMeasure();
-			}
-			return () => {
+	onMount(() => {
+		setupTopObserver();
+		if (typeof window !== 'undefined') {
+			resizeMeasureHandler = () => scheduleCompactMineActionMeasure();
+			window.addEventListener('resize', resizeMeasureHandler);
+			window.addEventListener('keydown', onWindowKeyDown, true);
+			window.addEventListener('contextmenu', onWindowContextMenuCapture, true);
+			window.addEventListener('pointerdown', onWindowPointerDown, true);
+			scheduleCompactMineActionMeasure();
+		}
+		return () => {
 			if (topObserver) {
 				topObserver.disconnect();
 				topObserver = null;
@@ -234,10 +265,11 @@
 				window.removeEventListener('resize', resizeMeasureHandler);
 				resizeMeasureHandler = null;
 			}
-				if (typeof window !== 'undefined') {
-					window.removeEventListener('keydown', onWindowKeyDown, true);
-					window.removeEventListener('contextmenu', onWindowContextMenuCapture, true);
-				}
+			if (typeof window !== 'undefined') {
+				window.removeEventListener('keydown', onWindowKeyDown, true);
+				window.removeEventListener('contextmenu', onWindowContextMenuCapture, true);
+				window.removeEventListener('pointerdown', onWindowPointerDown, true);
+			}
 			if (typeof window !== 'undefined' && gutterMeasureFrame !== null) {
 				window.cancelAnimationFrame(gutterMeasureFrame);
 				gutterMeasureFrame = null;
@@ -460,6 +492,7 @@
 		if (messageContextMenu.open) {
 			closeMessageContextMenu();
 		}
+		closeReactionPopover();
 		updateScrollState(true);
 	}
 
@@ -881,6 +914,15 @@
 		return content === 'missed call';
 	}
 
+	function isRungCallMessage(message: ChatMessage) {
+		const content = (message.content || '').trim().toLowerCase();
+		return content.startsWith('rung for ');
+	}
+
+	function isNegativeCallMessage(message: ChatMessage) {
+		return isMissedCallMessage(message) || isRungCallMessage(message);
+	}
+
 	function getCallLogModeLabel(message: ChatMessage) {
 		const mode = (message.mediaType || '').trim().toLowerCase();
 		return mode === 'video' ? 'Video call' : 'Voice call';
@@ -1018,6 +1060,101 @@
 		return content;
 	}
 
+	function splitMessageTextByEmoji(value: string): MessageTextSegment[] {
+		if (!value) {
+			return [];
+		}
+		const segments: MessageTextSegment[] = [];
+		let lastIndex = 0;
+		EMOJI_TOKEN_PATTERN.lastIndex = 0;
+		let match = EMOJI_TOKEN_PATTERN.exec(value);
+		while (match) {
+			const [token] = match;
+			const start = match.index;
+			const end = start + token.length;
+			if (start > lastIndex) {
+				segments.push({
+					value: value.slice(lastIndex, start),
+					isEmoji: false
+				});
+			}
+			segments.push({ value: token, isEmoji: true });
+			lastIndex = end;
+			match = EMOJI_TOKEN_PATTERN.exec(value);
+		}
+		if (lastIndex < value.length) {
+			segments.push({
+				value: value.slice(lastIndex),
+				isEmoji: false
+			});
+		}
+		if (segments.length === 0) {
+			return [{ value, isEmoji: false }];
+		}
+		return segments;
+	}
+
+	function getReactionEntries(message: ChatMessage): ReactionEntry[] {
+		const source = message.reactions ?? {};
+		return Object.entries(source)
+			.filter((entry) => entry[0].trim() !== '' && Array.isArray(entry[1]) && entry[1].length > 0)
+			.map(([emoji, users]) => ({
+				emoji,
+				users
+			}))
+			.sort((left, right) => {
+				if (left.users.length !== right.users.length) {
+					return right.users.length - left.users.length;
+				}
+				return left.emoji.localeCompare(right.emoji);
+			});
+	}
+
+	function getReactionStackEntries(entries: ReactionEntry[]) {
+		return entries.slice(0, 3);
+	}
+
+	function getReactionTotalCount(entries: ReactionEntry[]) {
+		return entries.reduce((sum, entry) => sum + entry.users.length, 0);
+	}
+
+	function closeReactionPopover() {
+		if (!reactionPopoverMessageId) {
+			return;
+		}
+		reactionPopoverMessageId = '';
+	}
+
+	function toggleReactionPopover(message: ChatMessage) {
+		if (!isMember || isDeletedMessage(message)) {
+			return;
+		}
+		reactionPopoverMessageId =
+			reactionPopoverMessageId === message.id ? '' : message.id;
+	}
+
+	function hasCurrentUserReacted(users: string[]) {
+		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
+		if (!normalizedCurrentUserID) {
+			return false;
+		}
+		return users.some((entry) => normalizeIdentifier(entry) === normalizedCurrentUserID);
+	}
+
+	function toggleReaction(message: ChatMessage, emoji: string) {
+		if (!isMember || isDeletedMessage(message)) {
+			return;
+		}
+		const normalizedEmoji = (emoji || '').trim();
+		if (!normalizedEmoji) {
+			return;
+		}
+		dispatch('toggleReaction', {
+			messageId: message.id,
+			emoji: normalizedEmoji
+		});
+	}
+
 	function getFileName(message: ChatMessage) {
 		const provided = (message.fileName || '').trim();
 		if (provided) {
@@ -1108,6 +1245,7 @@
 		if (messageContextMenu.open) {
 			closeMessageContextMenu();
 		}
+		closeReactionPopover();
 		if (!isMember || !isSelectionMode) {
 			return;
 		}
@@ -1230,7 +1368,19 @@
 			if (messageContextMenu.open) {
 				closeMessageContextMenu();
 			}
+			closeReactionPopover();
 		}
+	}
+
+	function onWindowPointerDown(event: PointerEvent) {
+		if (!reactionPopoverMessageId) {
+			return;
+		}
+		const target = event.target instanceof Element ? event.target : null;
+		if (!target || target.closest('.reaction-row')) {
+			return;
+		}
+		closeReactionPopover();
 	}
 
 	function onWindowContextMenuCapture(event: MouseEvent) {
@@ -1375,6 +1525,7 @@
 				{@const branchesCreated = getBranchesCreated(message)}
 				{@const replyPreview = getReplyPreview(message)}
 				{@const snippetPayload = getSnippetPayload(message)}
+				{@const reactionEntries = !isDeletedMessage(message) ? getReactionEntries(message) : []}
 				{@const isMultiDeleteSelected =
 					messageActionMode === 'delete' &&
 					deleteMultiEnabled &&
@@ -1447,6 +1598,7 @@
 					class:media-bubble={isMediaBubble(message)}
 					class:call-log-bubble={isCallLogMessage(message)}
 					class:deleted={isDeletedMessage(message)}
+					class:has-reactions={reactionEntries.length > 0}
 					class:selected-target={selectedMessageId === message.id || isMultiDeleteSelected}
 					class:focused={focusedMessageId === message.id}
 					role={isSelectionMode ? 'button' : undefined}
@@ -1552,7 +1704,13 @@
 											class="snippet-caption"
 											class:collapsed={snippetMessageNeedsCollapse && !snippetMessageExpanded}
 										>
-											{snippetPayload.message}
+											{#each splitMessageTextByEmoji(snippetPayload.message) as segment}
+												{#if segment.isEmoji}
+													<span class="emoji-boost">{segment.value}</span>
+												{:else}
+													{segment.value}
+												{/if}
+											{/each}
 										</div>
 										{#if snippetMessageNeedsCollapse}
 											<button
@@ -1574,7 +1732,15 @@
 									on:error={() => onMediaError(message.id)}
 								/>
 								{#if getMediaCaption(message)}
-									<div class="media-caption">{getMediaCaption(message)}</div>
+									<div class="media-caption">
+										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
+											{#if segment.isEmoji}
+												<span class="emoji-boost">{segment.value}</span>
+											{:else}
+												{segment.value}
+											{/if}
+										{/each}
+									</div>
 								{/if}
 							{:else if message.type === 'video' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
 								<!-- svelte-ignore a11y_media_has_caption -->
@@ -1586,7 +1752,15 @@
 									on:error={() => onMediaError(message.id)}
 								></video>
 								{#if getMediaCaption(message)}
-									<div class="media-caption">{getMediaCaption(message)}</div>
+									<div class="media-caption">
+										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
+											{#if segment.isEmoji}
+												<span class="emoji-boost">{segment.value}</span>
+											{:else}
+												{segment.value}
+											{/if}
+										{/each}
+									</div>
 								{/if}
 							{:else if message.type === 'audio' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
 								<!-- svelte-ignore a11y_media_has_caption -->
@@ -1598,7 +1772,15 @@
 									on:error={() => onMediaError(message.id)}
 								></audio>
 								{#if getMediaCaption(message)}
-									<div class="media-caption">{getMediaCaption(message)}</div>
+									<div class="media-caption">
+										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
+											{#if segment.isEmoji}
+												<span class="emoji-boost">{segment.value}</span>
+											{:else}
+												{segment.value}
+											{/if}
+										{/each}
+									</div>
 								{/if}
 							{:else if (message.type === 'file' || mediaLoadFailedById[message.id]) && getMediaURL(message)}
 								{#if isPDFMessage(message)}
@@ -1651,7 +1833,15 @@
 									</div>
 								</div>
 								{#if getMediaCaption(message)}
-									<div class="media-caption">{getMediaCaption(message)}</div>
+									<div class="media-caption">
+										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
+											{#if segment.isEmoji}
+												<span class="emoji-boost">{segment.value}</span>
+											{:else}
+												{segment.value}
+											{/if}
+										{/each}
+									</div>
 								{/if}
 							{:else if message.type === 'task'}
 							<TaskCard
@@ -1664,7 +1854,7 @@
 						{:else if isCallLogMessage(message)}
 							<div class="call-log-entry">
 								<svg
-									class="call-log-icon {isMissedCallMessage(message) ? 'missed' : 'completed'}"
+									class="call-log-icon {isNegativeCallMessage(message) ? 'missed' : 'completed'}"
 									viewBox="0 0 24 24"
 									aria-hidden="true"
 								>
@@ -1674,15 +1864,90 @@
 								</svg>
 								<div class="call-log-copy">
 									<div class="call-log-title">{getCallLogModeLabel(message)}</div>
-									<div class="call-log-status">{message.content}</div>
+									<div class="call-log-status" class:rung={isRungCallMessage(message)}>
+										{message.content}
+									</div>
 								</div>
 							</div>
 						{:else if isCodeBlock(message.content)}
 							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
 						{:else}
-							{message.content}
+							{#each splitMessageTextByEmoji(message.content) as segment}
+								{#if segment.isEmoji}
+									<span class="emoji-boost">{segment.value}</span>
+								{:else}
+									{segment.value}
+								{/if}
+							{/each}
 						{/if}
 					</div>
+					{#if !isDeletedMessage(message)}
+						{@const isReactionPopoverOpen = reactionPopoverMessageId === message.id}
+						<div class="reaction-row {isMine ? 'mine' : 'theirs'} {reactionEntries.length > 0
+							? 'has-reactions'
+							: ''} {isReactionPopoverOpen ? 'open' : ''}">
+							<button
+								type="button"
+								class="reaction-trigger {reactionEntries.length > 0 ? 'has-reactions' : 'empty'}"
+								title={reactionEntries.length > 0 ? 'View reactions' : 'Add reaction'}
+								aria-label={reactionEntries.length > 0 ? 'View reactions' : 'Add reaction'}
+								aria-expanded={isReactionPopoverOpen}
+								on:click|stopPropagation={() => toggleReactionPopover(message)}
+							>
+								{#if reactionEntries.length > 0}
+									<span class="reaction-stack" aria-hidden="true">
+										{#each getReactionStackEntries(reactionEntries) as reaction, stackIndex (`${reaction.emoji}-${stackIndex}`)}
+											<span
+												class="reaction-stack-item"
+												style={`--reaction-index:${stackIndex}; z-index:${10 - stackIndex};`}
+											>
+												{reaction.emoji}
+											</span>
+										{/each}
+									</span>
+									<span class="reaction-trigger-count">{getReactionTotalCount(reactionEntries)}</span>
+								{:else}
+									<span class="reaction-trigger-icon" aria-hidden="true">🙂</span>
+								{/if}
+							</button>
+							{#if isReactionPopoverOpen}
+								<div class="reaction-popover {isMine ? 'mine' : 'theirs'}" role="dialog" aria-label="Message reactions">
+									<div class="reaction-popover-quick">
+										{#each QUICK_REACTIONS as reactionEmoji}
+											<button
+												type="button"
+												class="reaction-popover-quick-btn"
+												title={`Add ${reactionEmoji} reaction`}
+												aria-label={`Add ${reactionEmoji} reaction`}
+												on:click|stopPropagation={() => toggleReaction(message, reactionEmoji)}
+											>
+												{reactionEmoji}
+											</button>
+										{/each}
+									</div>
+									{#if reactionEntries.length > 0}
+										<div class="reaction-popover-list">
+											{#each reactionEntries as reaction (reaction.emoji)}
+												<button
+													type="button"
+													class="reaction-popover-item"
+													class:reacted={hasCurrentUserReacted(reaction.users)}
+													title={reaction.users.length === 1
+														? `1 reaction`
+														: `${reaction.users.length} reactions`}
+													aria-label={`${reaction.emoji} ${reaction.users.length} reactions`}
+													on:click|stopPropagation={() => toggleReaction(message, reaction.emoji)}
+												>
+													<span class="reaction-popover-emoji">{reaction.emoji}</span>
+													<span class="reaction-popover-count">{reaction.users.length}</span>
+												</button>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					{/if}
 					{#if !snippetPayload && message.type === 'text' && isLongMessage(message.content)}
 						<button
 							type="button"
@@ -2787,6 +3052,242 @@
 		color: #ced8ea;
 	}
 
+	.emoji-boost {
+		display: inline-block;
+		font-size: 1.5em;
+		line-height: 1;
+		vertical-align: -0.08em;
+	}
+
+	.bubble.has-reactions {
+		margin-bottom: 1rem;
+	}
+
+	.reaction-row {
+		position: absolute;
+		left: 0.56rem;
+		bottom: -0.78rem;
+		display: inline-flex;
+		align-items: flex-end;
+		z-index: 3;
+	}
+
+	.reaction-row.mine {
+		left: auto;
+		right: 0.56rem;
+	}
+
+	.reaction-trigger {
+		--reaction-stack-size: 1.04rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 1.72rem;
+		height: 1.42rem;
+		padding: 0 0.38rem;
+		border: 1px solid #cad4e3;
+		background: #f0f4fa;
+		color: #33455f;
+		border-radius: 999px;
+		cursor: pointer;
+		opacity: 0;
+		pointer-events: none;
+		transform: translateY(2px) scale(0.96);
+		transition:
+			opacity 120ms ease,
+			transform 120ms ease,
+			background 120ms ease,
+			border-color 120ms ease;
+	}
+
+	.reaction-trigger.empty {
+		font-size: 0.88rem;
+		line-height: 1;
+	}
+
+	.reaction-trigger.has-reactions {
+		min-width: calc(var(--reaction-stack-size) * 2.5 + 1.2rem);
+		padding-inline: 0.18rem 0.3rem;
+		gap: 0.16rem;
+		opacity: 1;
+		pointer-events: auto;
+		transform: translateY(0) scale(1);
+	}
+
+	.message-row:hover .reaction-trigger,
+	.message-row:focus-within .reaction-trigger,
+	.reaction-row.open .reaction-trigger {
+		opacity: 1;
+		pointer-events: auto;
+		transform: translateY(0) scale(1);
+	}
+
+	.reaction-trigger:hover {
+		background: #e4ecf8;
+		border-color: #b8c7dc;
+	}
+
+	.reaction-stack {
+		position: relative;
+		display: block;
+		width: calc(var(--reaction-stack-size) * 2.5);
+		height: var(--reaction-stack-size);
+		overflow: hidden;
+	}
+
+	.reaction-stack-item {
+		position: absolute;
+		top: 0;
+		left: calc(var(--reaction-index) * (var(--reaction-stack-size) * 0.5));
+		width: var(--reaction-stack-size);
+		height: var(--reaction-stack-size);
+		border-radius: 999px;
+		border: 1px solid #cfd8e8;
+		background: #f8fbff;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		box-sizing: border-box;
+		font-size: 0.76rem;
+		line-height: 1;
+	}
+
+	.reaction-trigger-icon {
+		line-height: 1;
+	}
+
+	.reaction-trigger-count {
+		font-size: 0.65rem;
+		font-weight: 700;
+		line-height: 1;
+		min-width: 0.7rem;
+		text-align: center;
+		color: inherit;
+	}
+
+	.reaction-popover {
+		position: absolute;
+		bottom: calc(100% + 0.4rem);
+		left: 0;
+		display: grid;
+		gap: 0.34rem;
+		min-width: 8rem;
+		max-width: 11.5rem;
+		padding: 0.34rem;
+		border-radius: 0.62rem;
+		border: 1px solid #cbd6e7;
+		background: rgba(249, 252, 255, 0.97);
+		box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
+		backdrop-filter: blur(8px);
+		-webkit-backdrop-filter: blur(8px);
+		z-index: 4;
+	}
+
+	.reaction-popover.mine {
+		left: auto;
+		right: 0;
+	}
+
+	.reaction-popover-quick,
+	.reaction-popover-list {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.24rem;
+	}
+
+	.reaction-popover-quick-btn,
+	.reaction-popover-item {
+		border: 1px solid #cad4e3;
+		background: #f6f8fc;
+		color: #2c3d58;
+		border-radius: 999px;
+		padding: 0.08rem 0.34rem;
+		font-size: 0.72rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.18rem;
+		cursor: pointer;
+		transition:
+			background 120ms ease,
+			border-color 120ms ease;
+	}
+
+	.reaction-popover-quick-btn {
+		font-size: 0.86rem;
+		line-height: 1.2;
+		padding: 0.04rem 0.28rem;
+	}
+
+	.reaction-popover-quick-btn:hover,
+	.reaction-popover-item:hover {
+		background: #e9f0fb;
+		border-color: #b8c7dc;
+	}
+
+	.reaction-popover-item.reacted {
+		background: #dce8f8;
+		border-color: #9fb8da;
+	}
+
+	.reaction-popover-emoji {
+		font-size: 0.95rem;
+		line-height: 1;
+	}
+
+	.reaction-popover-count {
+		font-weight: 600;
+		min-width: 0.7rem;
+		text-align: center;
+	}
+
+	.messages-shell.theme-dark .reaction-trigger {
+		border-color: #3f4d63;
+		background: #1a2738;
+		color: #d0dced;
+	}
+
+	.messages-shell.theme-dark .reaction-trigger:hover {
+		background: #223349;
+		border-color: #556783;
+	}
+
+	.messages-shell.theme-dark .reaction-stack-item {
+		border-color: #3b4a61;
+		background: #23344b;
+	}
+
+	.messages-shell.theme-dark .reaction-popover {
+		border-color: #31435e;
+		background: rgba(15, 26, 43, 0.96);
+		box-shadow: 0 14px 34px rgba(2, 6, 23, 0.62);
+	}
+
+	.messages-shell.theme-dark .reaction-popover-quick-btn,
+	.messages-shell.theme-dark .reaction-popover-item {
+		border-color: #3f4d63;
+		background: #1f2d40;
+		color: #d0dced;
+	}
+
+	.messages-shell.theme-dark .reaction-popover-quick-btn:hover,
+	.messages-shell.theme-dark .reaction-popover-item:hover {
+		background: #273b54;
+		border-color: #5a7090;
+	}
+
+	.messages-shell.theme-dark .reaction-popover-item.reacted {
+		background: #294263;
+		border-color: #5d7ba0;
+	}
+
+	@media (hover: none) {
+		.reaction-trigger {
+			opacity: 1;
+			pointer-events: auto;
+			transform: none;
+		}
+	}
+
 	.bubble-content.collapsed {
 		max-height: 300px;
 		overflow: hidden;
@@ -3196,12 +3697,21 @@
 		color: #4b5563;
 	}
 
+	.call-log-status.rung {
+		color: #d1495b;
+		font-weight: 600;
+	}
+
 	.messages-shell.theme-dark .call-log-title {
 		color: #e5e7eb;
 	}
 
 	.messages-shell.theme-dark .call-log-status {
 		color: #cbd5e1;
+	}
+
+	.messages-shell.theme-dark .call-log-status.rung {
+		color: #fca5a5;
 	}
 
 	@media (max-width: 900px) {
