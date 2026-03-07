@@ -99,14 +99,16 @@
 	let gifError = '';
 	let gifSearchTimer: ReturnType<typeof setTimeout> | null = null;
 	let gifAbortController: AbortController | null = null;
+	let attachedGif: GifResult | null = null;
 
 	$: normalizedDraftMessage = draftMessage.trim();
 	$: draftMessageBytes = getUTF8ByteLength(normalizedDraftMessage);
 	$: isOverMessageLimit = draftMessageBytes > messageLimit;
 	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
 	$: taskDraftReady = taskDraftOpen && taskDraftTitle.trim() !== '' && taskDraftItems.length > 0;
+	$: hasPendingAttachment = Boolean(attachedFile || attachedGif);
 	$: showSendButton =
-		!isRecording && !taskDraftOpen && (!!attachedFile || normalizedDraftMessage.length > 0);
+		!isRecording && !taskDraftOpen && (hasPendingAttachment || normalizedDraftMessage.length > 0);
 	$: composerDisabled = disabled || isProcessingAttachment || isRecording || taskDraftOpen;
 	$: composerPlaceholder = disabled
 		? 'This room has expired. Extend time to continue chatting.'
@@ -114,7 +116,7 @@
 			? 'Recording... Click mic to send.'
 			: taskDraftOpen
 				? 'Task mode active. Press send when ready.'
-				: attachedFile
+				: hasPendingAttachment
 					? 'Add a caption (optional)'
 					: 'Type a message';
 
@@ -226,9 +228,7 @@
 		const selectionStart = composerTextareaEl.selectionStart ?? currentValue.length;
 		const selectionEnd = composerTextareaEl.selectionEnd ?? currentValue.length;
 		draftMessage =
-			currentValue.slice(0, selectionStart) +
-			normalizedEmoji +
-			currentValue.slice(selectionEnd);
+			currentValue.slice(0, selectionStart) + normalizedEmoji + currentValue.slice(selectionEnd);
 
 		const nextCaretPosition = selectionStart + normalizedEmoji.length;
 		requestAnimationFrame(() => {
@@ -256,6 +256,7 @@
 			closeGifPicker();
 			clearAttachmentPreview();
 			attachedFile = null;
+			attachedGif = null;
 			attachedMessageType = null;
 			dispatch('attach', { file: null, type: 'file' });
 			taskDraftOpen = true;
@@ -270,6 +271,7 @@
 			taskAddInputOpen = false;
 			clearAttachmentPreview();
 			attachedFile = null;
+			attachedGif = null;
 			attachedMessageType = null;
 			dispatch('attach', { file: null, type: 'file' });
 			if (!KLIPY_API_KEY) {
@@ -408,9 +410,7 @@
 				continue;
 			}
 			const id =
-				toTrimmedString(entry.id) ||
-				toTrimmedString(entry.gif_id) ||
-				`gif_${Date.now()}_${index}`;
+				toTrimmedString(entry.id) || toTrimmedString(entry.gif_id) || `gif_${Date.now()}_${index}`;
 			const title =
 				toTrimmedString(entry.content_description) ||
 				toTrimmedString(entry.title) ||
@@ -492,18 +492,47 @@
 		}, 300);
 	}
 
-	function sendGif(gif: GifResult) {
+	function toGifFileName(gif: GifResult) {
+		const normalizedTitle = (gif.title || 'gif').trim();
+		const safeBaseName = normalizedTitle
+			.replace(/\.[^./\\\s]+$/, '')
+			.replace(/[^a-zA-Z0-9-_ ]+/g, '')
+			.trim()
+			.replace(/\s+/g, '-')
+			.slice(0, 64);
+		return `${safeBaseName || 'gif'}.gif`;
+	}
+
+	function selectGifAttachment(gif: GifResult) {
 		if (!gif || !gif.url || disabled || isProcessingAttachment || isRecording) {
+			return;
+		}
+		clearAttachmentPreview();
+		attachedFile = null;
+		attachedGif = gif;
+		attachedMessageType = 'image';
+		attachedPickerType = 'media';
+		attachError = '';
+		gifError = '';
+		closeGifPicker();
+		dispatch('attach', { file: null, type: 'media' });
+	}
+
+	function sendGifAttachment() {
+		if (!attachedGif) {
+			dispatch('send', undefined);
 			return;
 		}
 		dispatch('send', {
 			type: 'image',
-			content: gif.url,
-			fileName: `${gif.title || 'gif'}.gif`,
+			content: attachedGif.url,
+			fileName: toGifFileName(attachedGif),
 			text: draftMessage.trim()
 		});
 		draftMessage = '';
-		closeGifPicker(true);
+		attachedGif = null;
+		attachedMessageType = null;
+		dispatch('attach', { file: null, type: 'media' });
 	}
 
 	function clearAttachmentPreview() {
@@ -535,6 +564,7 @@
 		const messageType = resolveMessageType(selected, pickerType);
 		attachError = '';
 		attachedFile = selected;
+		attachedGif = null;
 		attachedMessageType = messageType;
 		attachedPickerType = pickerType;
 		setAttachmentPreview(selected, messageType);
@@ -573,6 +603,7 @@
 	function removeAttachment() {
 		clearAttachmentPreview();
 		attachedFile = null;
+		attachedGif = null;
 		attachedMessageType = null;
 		attachError = '';
 		dispatch('removeAttachment');
@@ -592,6 +623,10 @@
 		}
 		if (attachedFile) {
 			void sendAttachment();
+			return;
+		}
+		if (attachedGif) {
+			sendGifAttachment();
 			return;
 		}
 		dispatch('send', undefined);
@@ -689,7 +724,7 @@
 	}
 
 	async function toggleRecording() {
-		if (disabled || isProcessingAttachment || attachedFile || taskDraftOpen) {
+		if (disabled || isProcessingAttachment || attachedFile || attachedGif || taskDraftOpen) {
 			return;
 		}
 		closeEmojiPicker();
@@ -873,12 +908,7 @@
 				<div class="task-draft-kicker">Task Preview</div>
 				<button type="button" class="task-draft-close" on:click={clearTaskDraft}>Cancel</button>
 			</div>
-			<input
-				type="text"
-				class="task-draft-title"
-				bind:value={taskDraftTitle}
-				placeholder="Title"
-			/>
+			<input type="text" class="task-draft-title" bind:value={taskDraftTitle} placeholder="Title" />
 			<div class="task-draft-list">
 				{#if taskDraftItems.length === 0}
 					<div class="task-draft-empty">No tasks yet. Add your first item.</div>
@@ -922,11 +952,7 @@
 						<button type="button" class="add-row-action confirm" on:click={addTaskDraftItem}>
 							Add
 						</button>
-						<button
-							type="button"
-							class="add-row-action"
-							on:click={cancelTaskDraftAddInput}
-						>
+						<button type="button" class="add-row-action" on:click={cancelTaskDraftAddInput}>
 							Cancel
 						</button>
 					</div>
@@ -960,15 +986,21 @@
 			<button type="button" class="reply-preview-cancel" on:click={cancelReply}>Cancel</button>
 		</div>
 	{/if}
-	{#if attachedFile}
+	{#if attachedFile || attachedGif}
 		<div class="attachment-preview-panel">
 			<div class="attachment-preview-header">
 				<div class="attachment-preview-title">{getAttachmentLabel(attachedMessageType)}</div>
 				<button type="button" class="preview-remove" on:click={removeAttachment}>x</button>
 			</div>
-			{#if attachedMessageType === 'image' && attachmentPreviewURL}
+			{#if attachedGif}
+				<img
+					src={attachedGif.previewUrl || attachedGif.url}
+					alt={attachedGif.title || 'GIF'}
+					class="attachment-preview-image"
+				/>
+			{:else if attachedMessageType === 'image' && attachmentPreviewURL && attachedFile}
 				<img src={attachmentPreviewURL} alt={attachedFile.name} class="attachment-preview-image" />
-			{:else if attachedMessageType === 'video' && attachmentPreviewURL}
+			{:else if attachedMessageType === 'video' && attachmentPreviewURL && attachedFile}
 				<!-- svelte-ignore a11y_media_has_caption -->
 				<video
 					src={attachmentPreviewURL}
@@ -976,7 +1008,7 @@
 					controls
 					preload="metadata"
 				></video>
-			{:else}
+			{:else if attachedFile}
 				<div class="attachment-preview-file">
 					<IconSet name="file" size={18} />
 					<span>{attachedFile.name}</span>
@@ -1014,9 +1046,9 @@
 						<button
 							type="button"
 							class="gif-card"
-							on:click={() => sendGif(gif)}
-							title={`Send GIF: ${gif.title}`}
-							aria-label={`Send GIF: ${gif.title}`}
+							on:click={() => selectGifAttachment(gif)}
+							title={`Attach GIF: ${gif.title}`}
+							aria-label={`Attach GIF: ${gif.title}`}
 						>
 							<img src={gif.previewUrl} alt={gif.title || 'GIF'} loading="lazy" />
 						</button>
@@ -1125,10 +1157,14 @@
 					isOverMessageLimit ||
 					isRecording ||
 					(taskDraftOpen && !taskDraftReady)}
-				aria-label={attachedFile ? 'Send attachment' : taskDraftOpen ? 'Send task' : 'Send message'}
+				aria-label={hasPendingAttachment
+					? 'Send attachment'
+					: taskDraftOpen
+						? 'Send task'
+						: 'Send message'}
 				title={isOverMessageLimit
 					? `Message is too long (${draftMessageBytes}/${messageLimit})`
-					: attachedFile
+					: hasPendingAttachment
 						? 'Send attachment'
 						: taskDraftOpen
 							? 'Send task card'
@@ -1141,7 +1177,7 @@
 				type="button"
 				class="mic-button {isRecording ? 'recording' : ''}"
 				on:click={toggleRecording}
-				disabled={disabled || isProcessingAttachment || !!attachedFile || taskDraftOpen}
+				disabled={disabled || isProcessingAttachment || hasPendingAttachment || taskDraftOpen}
 				aria-label={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 				title={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 			>

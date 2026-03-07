@@ -17,6 +17,8 @@ services:
     build: ./backend
     restart: unless-stopped
     env_file: .env
+    environment:
+      PISTON_ENDPOINT: ${PISTON_ENDPOINT:-http://piston:2000/api/v2/execute}
     ulimits:
       nofile:
         soft: 65535

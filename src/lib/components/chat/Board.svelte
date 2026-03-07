@@ -64,6 +64,9 @@
 	const MINIMAP_HEIGHT = 150;
 	const BOARD_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024;
 	const RICH_MESSAGE_SCHEMA = 'rich_message_v1';
+	const BOARD_STROKE_SCHEMA = 'board_stroke_v1';
+	const BOARD_TEXT_BOX_SCHEMA = 'board_text_box_v1';
+	const BOARD_SHAPE_STYLE_SCHEMA = 'board_shape_style_v1';
 	const UTF8_ENCODER = new TextEncoder();
 
 	type ToolMode = 'select' | 'draw' | 'eraser' | 'duster';
@@ -2286,25 +2289,7 @@
 		const createdAt =
 			parseOptionalTimestamp((object as Record<string, unknown>).createdAt) || Date.now();
 
-		let content = toStringValue((object as Record<string, unknown>).content);
-		if (!content) {
-			content = toStringValue((object as Record<string, unknown>).text);
-		}
-		if (elementType === 'text_box') {
-			content = toStringValue((object as Record<string, unknown>).text);
-		}
-		if (!content && elementType === 'stroke') {
-			const strokePath = ((object as Record<string, unknown>).path as unknown[]) ?? [];
-			content = serializePathCommands(strokePath);
-		}
-		if (!content && (elementType === 'line' || elementType === 'arrow')) {
-			content = JSON.stringify({
-				x1: toNumber((object as Record<string, unknown>).x1, left),
-				y1: toNumber((object as Record<string, unknown>).y1, top),
-				x2: toNumber((object as Record<string, unknown>).x2, left + width),
-				y2: toNumber((object as Record<string, unknown>).y2, top + height)
-			});
-		}
+		const content = buildElementContent(object, elementType, left, top, width, height);
 
 		return {
 			elementId,
@@ -2319,6 +2304,103 @@
 			createdByName,
 			createdAt
 		};
+	}
+
+	function toRecord(value: unknown): Record<string, unknown> | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		return value as Record<string, unknown>;
+	}
+
+	function parseContentRecord(content: string): Record<string, unknown> | null {
+		const trimmed = toStringValue(content).trim();
+		if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+			return null;
+		}
+		try {
+			return toRecord(JSON.parse(trimmed));
+		} catch {
+			return null;
+		}
+	}
+
+	function normalizeOptionalColor(value: unknown) {
+		const normalized = toStringValue(value).trim();
+		return normalized || '';
+	}
+
+	function normalizeOptionalPositiveNumber(value: unknown) {
+		const parsed = toNumber(value, 0);
+		return parsed > 0 ? parsed : 0;
+	}
+
+	function buildElementContent(
+		object: FabricObjectLike,
+		elementType: string,
+		left: number,
+		top: number,
+		width: number,
+		height: number
+	) {
+		const objectRecord = object as Record<string, unknown>;
+		let baseContent = toStringValue(objectRecord.content);
+		if (!baseContent) {
+			baseContent = toStringValue(objectRecord.text);
+		}
+
+		if (elementType === 'text_box') {
+			return JSON.stringify({
+				schema: BOARD_TEXT_BOX_SCHEMA,
+				text: toStringValue(objectRecord.text),
+				fill: normalizeOptionalColor(objectRecord.fill),
+				fontSize: normalizeOptionalPositiveNumber(objectRecord.fontSize),
+				lineHeight: normalizeOptionalPositiveNumber(objectRecord.lineHeight)
+			});
+		}
+
+		if (elementType === 'stroke') {
+			const strokePath = (objectRecord.path as unknown[]) ?? [];
+			const path = serializePathCommands(strokePath);
+			if (!path) {
+				return baseContent;
+			}
+			return JSON.stringify({
+				schema: BOARD_STROKE_SCHEMA,
+				path,
+				stroke: normalizeOptionalColor(objectRecord.stroke),
+				fill: normalizeOptionalColor(objectRecord.fill),
+				strokeWidth: normalizeOptionalPositiveNumber(objectRecord.strokeWidth)
+			});
+		}
+
+		if (elementType === 'line' || elementType === 'arrow') {
+			return JSON.stringify({
+				x1: toNumber(objectRecord.x1, left),
+				y1: toNumber(objectRecord.y1, top),
+				x2: toNumber(objectRecord.x2, left + width),
+				y2: toNumber(objectRecord.y2, top + height),
+				stroke: normalizeOptionalColor(objectRecord.stroke),
+				strokeWidth: normalizeOptionalPositiveNumber(objectRecord.strokeWidth)
+			});
+		}
+
+		if (
+			elementType === 'rect' ||
+			elementType === 'shape' ||
+			elementType === 'circle' ||
+			elementType === 'ellipse' ||
+			elementType === 'triangle'
+		) {
+			return JSON.stringify({
+				schema: BOARD_SHAPE_STYLE_SCHEMA,
+				stroke: normalizeOptionalColor(objectRecord.stroke),
+				fill: normalizeOptionalColor(objectRecord.fill),
+				strokeWidth: normalizeOptionalPositiveNumber(objectRecord.strokeWidth)
+			});
+		}
+
+		return baseContent;
 	}
 
 	function serializePathCommands(pathCommands: unknown[]) {
@@ -2493,199 +2575,304 @@
 		fabricCanvas.moveTo?.(nextObject, targetIndex);
 	}
 
+	function parseStrokeContent(content: string) {
+		const record = parseContentRecord(content);
+		if (!record) {
+			return null;
+		}
+		const schema = toStringValue(record.schema).trim().toLowerCase();
+		if (schema !== BOARD_STROKE_SCHEMA) {
+			return null;
+		}
+		const path = toStringValue(record.path);
+		if (!path) {
+			return null;
+		}
+		const strokeWidth = normalizeOptionalPositiveNumber(record.strokeWidth ?? record.stroke_width);
+		return {
+			path,
+			stroke: normalizeOptionalColor(record.stroke),
+			fill: normalizeOptionalColor(record.fill),
+			strokeWidth
+		};
+	}
+
+	function parseShapeStyleContent(content: string) {
+		const record = parseContentRecord(content);
+		if (!record) {
+			return null;
+		}
+		const schema = toStringValue(record.schema).trim().toLowerCase();
+		if (schema !== BOARD_SHAPE_STYLE_SCHEMA) {
+			return null;
+		}
+		const strokeWidth = normalizeOptionalPositiveNumber(record.strokeWidth ?? record.stroke_width);
+		return {
+			stroke: normalizeOptionalColor(record.stroke),
+			fill: normalizeOptionalColor(record.fill),
+			strokeWidth
+		};
+	}
+
+	function parseTextBoxContent(content: string) {
+		const record = parseContentRecord(content);
+		if (!record) {
+			return null;
+		}
+		const schema = toStringValue(record.schema).trim().toLowerCase();
+		if (schema !== BOARD_TEXT_BOX_SCHEMA) {
+			return null;
+		}
+		const text = toStringValue(record.text);
+		return {
+			text,
+			fill: normalizeOptionalColor(record.fill),
+			fontSize: normalizeOptionalPositiveNumber(record.fontSize ?? record.font_size),
+			lineHeight: normalizeOptionalPositiveNumber(record.lineHeight ?? record.line_height)
+		};
+	}
+
+	function parseLineContent(content: string) {
+		const record = parseContentRecord(content);
+		if (!record) {
+			return null;
+		}
+		const hasLineCoordinates =
+			Object.prototype.hasOwnProperty.call(record, 'x1') ||
+			Object.prototype.hasOwnProperty.call(record, 'y1') ||
+			Object.prototype.hasOwnProperty.call(record, 'x2') ||
+			Object.prototype.hasOwnProperty.call(record, 'y2');
+		if (!hasLineCoordinates) {
+			return null;
+		}
+		const strokeWidth = normalizeOptionalPositiveNumber(record.strokeWidth ?? record.stroke_width);
+		return {
+			x1: toNumber(record.x1, 0),
+			y1: toNumber(record.y1, 0),
+			x2: toNumber(record.x2, 0),
+			y2: toNumber(record.y2, 0),
+			stroke: normalizeOptionalColor(record.stroke),
+			strokeWidth
+		};
+	}
+
 	async function createFabricObjectFromElement(
 		element: BoardElementWire
 	): Promise<FabricObjectLike | null> {
 		const { elementType } = element;
-		const strokeColor = isDarkMode ? '#f3f4f6' : '#111827';
-		const fillColor = isDarkMode ? 'rgba(148, 163, 184, 0.16)' : 'rgba(30, 64, 175, 0.08)';
+		const fallbackStrokeColor = isDarkMode ? '#f3f4f6' : '#111827';
+		const fallbackFillColor = isDarkMode
+			? 'rgba(148, 163, 184, 0.16)'
+			: 'rgba(30, 64, 175, 0.08)';
+		const fallbackTextColor = isDarkMode ? '#f3f4f6' : '#111827';
 
-		if (elementType === 'stroke' && element.content) {
-			const PathClass = getFabricClass('Path');
-			if (!PathClass) {
-				return null;
-			}
-			try {
-				return new PathClass(element.content, {
-					left: element.x,
-					top: element.y,
-					stroke: strokeColor,
-					fill: '',
-					strokeWidth: 2
-				}) as FabricObjectLike;
-			} catch {
-				return null;
-			}
-		}
-
-		if (elementType === 'rect' || elementType === 'shape') {
-			const RectClass = getFabricClass('Rect');
-			return RectClass
-				? (new RectClass({
+			if (elementType === 'stroke' && element.content) {
+				const PathClass = getFabricClass('Path');
+				if (!PathClass) {
+					return null;
+				}
+				const strokeContent = parseStrokeContent(element.content);
+				const pathData = strokeContent?.path || element.content;
+				const strokeColor = strokeContent?.stroke || fallbackStrokeColor;
+				const fillColor = strokeContent?.fill || '';
+				const strokeWidth = strokeContent?.strokeWidth || 2;
+				try {
+					return new PathClass(pathData, {
 						left: element.x,
 						top: element.y,
-						width: element.width,
-						height: element.height,
-						rx: 10,
-						ry: 10,
 						stroke: strokeColor,
-						strokeWidth: 2,
-						fill: fillColor
-					}) as FabricObjectLike)
-				: null;
-		}
-
-		if (elementType === 'circle') {
-			const CircleClass = getFabricClass('Circle');
-			if (!CircleClass) {
-				return null;
+						fill: fillColor,
+						strokeWidth
+					}) as FabricObjectLike;
+				} catch {
+					return null;
+				}
 			}
-			return new CircleClass({
-				left: element.x,
-				top: element.y,
-				radius: Math.max(element.width, element.height) / 2,
-				stroke: strokeColor,
-				strokeWidth: 2,
-				fill: fillColor
-			}) as FabricObjectLike;
-		}
 
-		if (elementType === 'ellipse') {
-			const EllipseClass = getFabricClass('Ellipse');
-			if (!EllipseClass) {
-				return null;
+			const shapeStyle = parseShapeStyleContent(element.content);
+			const shapeStrokeColor = shapeStyle?.stroke || fallbackStrokeColor;
+			const shapeFillColor = shapeStyle?.fill || fallbackFillColor;
+			const shapeStrokeWidth = shapeStyle?.strokeWidth || 2;
+
+			if (elementType === 'rect' || elementType === 'shape') {
+				const RectClass = getFabricClass('Rect');
+				return RectClass
+					? (new RectClass({
+							left: element.x,
+							top: element.y,
+							width: element.width,
+							height: element.height,
+							rx: 10,
+							ry: 10,
+							stroke: shapeStrokeColor,
+							strokeWidth: shapeStrokeWidth,
+							fill: shapeFillColor
+						}) as FabricObjectLike)
+					: null;
 			}
-			return new EllipseClass({
-				left: element.x,
-				top: element.y,
-				rx: Math.max(1, element.width / 2),
-				ry: Math.max(1, element.height / 2),
-				stroke: strokeColor,
-				strokeWidth: 2,
-				fill: fillColor
-			}) as FabricObjectLike;
-		}
 
-		if (elementType === 'triangle') {
-			const TriangleClass = getFabricClass('Triangle');
-			if (!TriangleClass) {
-				return null;
+			if (elementType === 'circle') {
+				const CircleClass = getFabricClass('Circle');
+				if (!CircleClass) {
+					return null;
+				}
+				return new CircleClass({
+					left: element.x,
+					top: element.y,
+					radius: Math.max(element.width, element.height) / 2,
+					stroke: shapeStrokeColor,
+					strokeWidth: shapeStrokeWidth,
+					fill: shapeFillColor
+				}) as FabricObjectLike;
 			}
-			return new TriangleClass({
-				left: element.x,
-				top: element.y,
-				width: element.width,
-				height: element.height,
-				stroke: strokeColor,
-				strokeWidth: 2,
-				fill: fillColor
-			}) as FabricObjectLike;
-		}
 
-		if (elementType === 'line' || elementType === 'arrow') {
-			const LineClass = getFabricClass('Line');
-			if (!LineClass) {
-				return null;
+			if (elementType === 'ellipse') {
+				const EllipseClass = getFabricClass('Ellipse');
+				if (!EllipseClass) {
+					return null;
+				}
+				return new EllipseClass({
+					left: element.x,
+					top: element.y,
+					rx: Math.max(1, element.width / 2),
+					ry: Math.max(1, element.height / 2),
+					stroke: shapeStrokeColor,
+					strokeWidth: shapeStrokeWidth,
+					fill: shapeFillColor
+				}) as FabricObjectLike;
 			}
-			const linePoints = parseLinePoints(element.content, element);
-			return new LineClass(linePoints, {
-				stroke: strokeColor,
-				strokeWidth: elementType === 'arrow' ? 4 : 3
-			}) as FabricObjectLike;
-		}
 
-		if (elementType === 'image') {
-			const parsedMedia = parseBoardMediaContent(element.content);
-			if (parsedMedia?.url) {
-				const imageObject = await createImageObjectFromMedia(
-					parsedMedia,
+			if (elementType === 'triangle') {
+				const TriangleClass = getFabricClass('Triangle');
+				if (!TriangleClass) {
+					return null;
+				}
+				return new TriangleClass({
+					left: element.x,
+					top: element.y,
+					width: element.width,
+					height: element.height,
+					stroke: shapeStrokeColor,
+					strokeWidth: shapeStrokeWidth,
+					fill: shapeFillColor
+				}) as FabricObjectLike;
+			}
+
+			if (elementType === 'line' || elementType === 'arrow') {
+				const LineClass = getFabricClass('Line');
+				if (!LineClass) {
+					return null;
+				}
+				const lineContent = parseLineContent(element.content);
+				const linePoints = lineContent
+					? [lineContent.x1, lineContent.y1, lineContent.x2, lineContent.y2]
+					: parseLinePoints(element.content, element);
+				const lineStrokeColor = lineContent?.stroke || fallbackStrokeColor;
+				const lineStrokeWidth =
+					lineContent?.strokeWidth || (elementType === 'arrow' ? 4 : 3);
+				return new LineClass(linePoints, {
+					stroke: lineStrokeColor,
+					strokeWidth: lineStrokeWidth
+				}) as FabricObjectLike;
+			}
+
+			if (elementType === 'image') {
+				const parsedMedia = parseBoardMediaContent(element.content);
+				if (parsedMedia?.url) {
+					const imageObject = await createImageObjectFromMedia(
+						parsedMedia,
+						element.x,
+						element.y,
+						element.width,
+						element.height
+					);
+					if (imageObject) {
+						return imageObject;
+					}
+				}
+			}
+
+			if (
+				elementType === 'image' ||
+				elementType === 'video' ||
+				elementType === 'audio' ||
+				elementType === 'file' ||
+				elementType === 'media'
+			) {
+				const media = parseBoardMediaContent(element.content) ?? {
+					url: '',
+					name: 'Attachment',
+					kind: 'file',
+					mimeType: '',
+					sizeBytes: 0,
+					caption: '',
+					senderName: '',
+					sentAt: 0
+				};
+				const mediaObject = createMediaCardObject(
+					media,
 					element.x,
 					element.y,
 					element.width,
 					element.height
 				);
-				if (imageObject) {
-					return imageObject;
+				if (mediaObject) {
+					return mediaObject;
 				}
 			}
-		}
 
-		if (
-			elementType === 'image' ||
-			elementType === 'video' ||
-			elementType === 'audio' ||
-			elementType === 'file' ||
-			elementType === 'media'
-		) {
-			const media = parseBoardMediaContent(element.content) ?? {
-				url: '',
-				name: 'Attachment',
-				kind: 'file',
-				mimeType: '',
-				sizeBytes: 0,
-				caption: '',
-				senderName: '',
-				sentAt: 0
-			};
-			const mediaObject = createMediaCardObject(
-				media,
-				element.x,
-				element.y,
-				element.width,
-				element.height
-			);
-			if (mediaObject) {
-				return mediaObject;
+			if (elementType === 'text_box') {
+				const textBoxContent = parseTextBoxContent(element.content);
+				const textValue = textBoxContent?.text || element.content || 'Text';
+				const textColor = textBoxContent?.fill || fallbackTextColor;
+				const textFontSize = textBoxContent?.fontSize || 18;
+				const textLineHeight = textBoxContent?.lineHeight || 1.28;
+				const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
+				if (!TextboxClass) {
+					return null;
+				}
+				return new TextboxClass(textValue, {
+					left: clampBoardX(element.x, Math.max(140, element.width)),
+					top: clampBoardY(element.y, Math.max(48, element.height)),
+					width: Math.max(140, element.width),
+					height: Math.max(48, element.height),
+					fontSize: textFontSize,
+					lineHeight: textLineHeight,
+					fill: textColor,
+					backgroundColor: 'transparent',
+					padding: 8
+				}) as FabricObjectLike;
 			}
-		}
 
-		if (elementType === 'text_box') {
-			const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
-			if (!TextboxClass) {
-				return null;
-			}
-			return new TextboxClass(element.content || 'Text', {
-				left: clampBoardX(element.x, Math.max(140, element.width)),
-				top: clampBoardY(element.y, Math.max(48, element.height)),
-				width: Math.max(140, element.width),
-				height: Math.max(48, element.height),
-				fontSize: 18,
-				lineHeight: 1.28,
-				fill: boardInkColor,
-				backgroundColor: 'transparent',
-				padding: 8
-			}) as FabricObjectLike;
-		}
-
-		if (elementType === 'sticky_note') {
-			return createStickyNoteObject(
-				element.content || 'Type here...',
-				element.x,
-				element.y,
-				Math.max(120, element.width),
-				Math.max(120, element.height)
-			);
-		}
-
-		if (elementType === 'message') {
-			const richMessage = parseRichMessageCardPayload(element.content);
-			if (richMessage) {
-				return await createRichMessageObjectFromPayload(
-					richMessage,
+			if (elementType === 'sticky_note') {
+				return createStickyNoteObject(
+					element.content || 'Type here...',
 					element.x,
 					element.y,
-					Math.max(220, element.width)
+					Math.max(120, element.width),
+					Math.max(120, element.height)
 				);
 			}
-		}
 
-		return createMessageCardObject(
-			element.content || `Pinned message (${element.elementId.slice(0, 6)})`,
-			element.x,
-			element.y,
-			Math.max(150, element.width)
-		);
-	}
+			if (elementType === 'message') {
+				const richMessage = parseRichMessageCardPayload(element.content);
+				if (richMessage) {
+					return await createRichMessageObjectFromPayload(
+						richMessage,
+						element.x,
+						element.y,
+						Math.max(220, element.width)
+					);
+				}
+			}
+
+			return createMessageCardObject(
+				element.content || `Pinned message (${element.elementId.slice(0, 6)})`,
+				element.x,
+				element.y,
+				Math.max(150, element.width)
+			);
+		}
 
 	function parseBoardMediaContent(rawContent: string): BoardMediaContent | null {
 		const raw = toStringValue(rawContent).trim();
@@ -5929,10 +6116,10 @@
 		}
 	}
 
-	@media (max-width: 768px) {
-		.board-toolbar {
-			flex-direction: column;
-			align-items: stretch;
+		@media (max-width: 768px) {
+			.board-toolbar {
+				flex-direction: column;
+				align-items: stretch;
 			gap: 0.3rem;
 			padding: 0.42rem;
 			width: 88vw;
@@ -5943,19 +6130,14 @@
 			font-size: 0.68rem;
 		}
 
-		.toolbar-primary-group {
-			width: 100%;
-			flex: 0 0 auto;
-			justify-content: flex-start;
-			gap: 0.3rem;
-			flex-wrap: nowrap;
-			overflow-x: auto;
-			scrollbar-width: none;
-		}
-
-		.toolbar-primary-group::-webkit-scrollbar {
-			display: none;
-		}
+			.toolbar-primary-group {
+				width: 100%;
+				flex: 0 0 auto;
+				justify-content: flex-start;
+				gap: 0.3rem;
+				flex-wrap: wrap;
+				overflow: visible;
+			}
 
 		.mobile-expand-btn {
 			display: inline-flex;
@@ -6032,11 +6214,12 @@
 			display: none;
 		}
 
-		.color-menu-popover {
-			left: 50%;
-			transform: translateX(-50%);
-			min-width: 158px;
-		}
+			.color-menu-popover {
+				left: 50%;
+				transform: translateX(-50%);
+				min-width: 158px;
+				max-width: calc(100vw - 1.2rem);
+			}
 
 		.brush-width-text {
 			min-width: 2.4rem;

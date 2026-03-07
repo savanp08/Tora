@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 const (
 	defaultPistonEndpoint    = "http://127.0.0.1:2000/api/v2/execute"
+	pistonEndpointEnvVar     = "PISTON_ENDPOINT"
 	defaultWorkerCount       = 20
 	defaultQueueSize         = 20
 	defaultRequestTimeout    = 10 * time.Second
@@ -143,7 +145,14 @@ var frontendToPistonRuntime = map[string]pistonRuntimeSpec{
 }
 
 func NewExecutionManager() *ExecutionManager {
-	return NewExecutionManagerWithOptions(defaultPistonEndpoint, nil)
+	return NewExecutionManagerWithOptions(resolveDefaultPistonEndpoint(), nil)
+}
+
+func resolveDefaultPistonEndpoint() string {
+	if endpoint := strings.TrimSpace(os.Getenv(pistonEndpointEnvVar)); endpoint != "" {
+		return endpoint
+	}
+	return defaultPistonEndpoint
 }
 
 func NewExecutionManagerWithOptions(pistonEndpoint string, httpClient *http.Client) *ExecutionManager {

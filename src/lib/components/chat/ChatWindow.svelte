@@ -2600,6 +2600,12 @@
 		color: #e6edf8;
 	}
 
+	.messages-shell.theme-dark .bubble.theirs {
+		background: #1c1d22;
+		border-color: #30313a;
+		color: #e5e7eb;
+	}
+
 	.bubble.media-bubble {
 		width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), 42rem);
 		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), 42rem);
