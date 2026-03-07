@@ -397,7 +397,16 @@
 		onlineByRoom[roomId] ?? [],
 		currentUserId
 	);
-	$: callParticipants = buildCallParticipantEntries();
+	$: {
+		localCallStream;
+		remoteCallStreams;
+		currentUserId;
+		currentUsername;
+		currentOnlineMembers;
+		activeCall;
+		webrtcManager;
+		callParticipants = buildCallParticipantEntries();
+	}
 	$: callMemberPresenceList = Object.entries(callMemberPresenceByUserId)
 		.map(([userId, entry]) => ({ userId, ...entry }))
 		.sort((left, right) => left.joinedAt - right.joinedAt);
@@ -413,7 +422,8 @@
 	$: activeFirstUnreadMessageId = getUnreadStartMessageId(roomId);
 	$: activeLastReadTimestamp = getLastReadTimestamp(roomId);
 	$: activeTypingUsers = getActiveTypingUsers(roomId);
-	$: typingIndicatorText = formatTypingIndicator(activeTypingUsers);
+	$: typingNamesPreview = formatTypingNamePreview(activeTypingUsers);
+	$: hasTypingUsers = activeTypingUsers.length > 0;
 	$: activeRoomCreatedAtMs = roomId ? (roomMetaById[roomId]?.createdAt ?? 0) : 0;
 	$: activeRoomExpiresAtMs = roomId ? (roomMetaById[roomId]?.expiresAt ?? 0) : 0;
 	$: activeRoomRemainingMs =
@@ -690,17 +700,59 @@
 		return typingController.getActiveTypingUsers(targetRoomId, currentUserId);
 	}
 
-	function formatTypingIndicator(names: string[]) {
+	function truncateTypingName(name: string, maxChars = 7) {
+		const cleaned = name.trim();
+		if (!cleaned) {
+			return 'User';
+		}
+		if (cleaned.length <= maxChars) {
+			return cleaned;
+		}
+		return `${cleaned.slice(0, maxChars)}...`;
+	}
+
+	function formatTypingNamePreview(names: string[]) {
 		if (!names || names.length === 0) {
 			return '';
 		}
-		if (names.length === 1) {
-			return `${names[0]} is typing...`;
+		const visible = names.slice(0, 2).map((name) => truncateTypingName(name));
+		if (names.length > visible.length) {
+			return `${visible.join(', ')}, ....`;
 		}
-		if (names.length === 2) {
-			return `${names[0]} and ${names[1]} are typing...`;
+		return visible.join(', ');
+	}
+
+	function handleTypingSignalPayload(payload: unknown) {
+		if (!payload || typeof payload !== 'object') {
+			return false;
 		}
-		return `${names[0]} and ${names.length - 1} others are typing...`;
+		const source = payload as Record<string, unknown>;
+		const kind = toStringValue(source.type).toLowerCase();
+		if (kind !== 'typing_start' && kind !== 'typing_stop') {
+			return false;
+		}
+		const nestedPayload =
+			source.payload && typeof source.payload === 'object' && !Array.isArray(source.payload)
+				? (source.payload as Record<string, unknown>)
+				: {};
+		const targetRoomId = normalizeRoomIDValue(
+			toStringValue(
+				source.roomId ?? source.room_id ?? nestedPayload.roomId ?? nestedPayload.room_id ?? roomId
+			)
+		);
+		if (!targetRoomId) {
+			return true;
+		}
+		const participant = parseMember(nestedPayload, Date.now()) ?? parseMember(source, Date.now());
+		if (!participant) {
+			return true;
+		}
+		if (kind === 'typing_start') {
+			setTypingIndicator(targetRoomId, participant.id, participant.name);
+		} else {
+			clearTypingIndicator(targetRoomId, participant.id);
+		}
+		return true;
 	}
 
 	function initializeTrustedDevicePreference() {
@@ -1022,7 +1074,9 @@
 			return;
 		}
 		localCallStream = webrtcManager.getLocalStream();
-		remoteCallStreams = webrtcManager.getRemoteStreamEntries();
+		remoteCallStreams = webrtcManager
+			.getRemoteStreamEntries()
+			.filter((entry) => streamHasLiveTracks(entry.stream));
 	}
 
 	function handleIncomingCallEvent(event: IncomingCallEvent) {
@@ -1087,6 +1141,9 @@
 				},
 				onRemoteStreamRemoved: () => {
 					syncCallStreamsFromManager();
+				},
+				onPeerStateChange: () => {
+					syncCallStreamsFromManager();
 				}
 			});
 		}
@@ -1134,7 +1191,7 @@
 		const seen = new Set<string>();
 		const entries: CallParticipantEntry[] = [];
 		const localUserId = normalizeIdentifier(currentUserId);
-		if (localCallStream && localUserId) {
+		if (activeCall && localUserId) {
 			entries.push({
 				userId: localUserId,
 				name: resolveCallUserName(localUserId),
@@ -1144,7 +1201,7 @@
 		}
 		for (const remote of remoteCallStreams) {
 			const remoteUserId = normalizeIdentifier(remote.userId);
-			if (!remoteUserId || seen.has(remoteUserId)) {
+			if (!remoteUserId || seen.has(remoteUserId) || !streamHasLiveTracks(remote.stream)) {
 				continue;
 			}
 			entries.push({
@@ -1153,6 +1210,18 @@
 				isLocal: false
 			});
 			seen.add(remoteUserId);
+		}
+		for (const peerUserId of webrtcManager?.getPeerUserIds?.() ?? []) {
+			const normalizedPeerUserId = normalizeIdentifier(peerUserId);
+			if (!normalizedPeerUserId || seen.has(normalizedPeerUserId)) {
+				continue;
+			}
+			entries.push({
+				userId: normalizedPeerUserId,
+				name: resolveCallUserName(normalizedPeerUserId),
+				isLocal: false
+			});
+			seen.add(normalizedPeerUserId);
 		}
 		return entries.slice(0, CALL_MAX_PARTICIPANTS);
 	}
@@ -1266,6 +1335,10 @@
 
 	function streamHasVideoTrack(stream: MediaStream | null) {
 		return Boolean(stream?.getVideoTracks().length);
+	}
+
+	function streamHasLiveTracks(stream: MediaStream | null) {
+		return Boolean(stream?.getTracks().some((track) => track.readyState !== 'ended'));
 	}
 
 	function minimizeActiveCall() {
@@ -2110,6 +2183,10 @@
 			for (const [targetRoomId, history] of byRoom.entries()) {
 				mergeMessages(targetRoomId, history);
 			}
+			return;
+		}
+
+		if (handleTypingSignalPayload(payload)) {
 			return;
 		}
 
@@ -4737,7 +4814,6 @@
 
 				{#if !showBoardView}
 					<ChatStatusBars
-						{typingIndicatorText}
 						{showTrustedDevicePrompt}
 						{isSelectionMode}
 						{messageActionMode}
@@ -5084,6 +5160,18 @@
 				</div>
 
 				{#if isMember && !showBoardView}
+					<div
+						class="composer-typing-slot"
+						class:active={hasTypingUsers}
+						role="status"
+						aria-live="polite"
+						aria-atomic="true"
+					>
+						<div class="composer-typing-card">
+							<div class="composer-typing-names">{hasTypingUsers ? typingNamesPreview : '\u00A0'}</div>
+							<div class="composer-typing-status">{hasTypingUsers ? 'typing ...' : '\u00A0'}</div>
+						</div>
+					</div>
 					<ChatComposer
 						bind:draftMessage
 						bind:attachedFile

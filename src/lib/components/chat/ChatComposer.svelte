@@ -748,21 +748,21 @@
 <style>
 	.composer {
 		position: relative;
-		border-top: 1px solid #bcc9da;
-		background: linear-gradient(180deg, #edf3fa 0%, #e5edf7 100%);
+		border-top: 1px solid #cfd6de;
+		background: linear-gradient(180deg, #f6f7f9 0%, #edf0f3 100%);
 		padding: 0.72rem 0.78rem 0.82rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.48rem;
 		flex-shrink: 0;
-		box-shadow: 0 -12px 24px rgba(15, 23, 42, 0.14);
+		box-shadow: 0 -12px 24px rgba(15, 23, 42, 0.09);
 		backdrop-filter: blur(8px);
 	}
 
 	.composer[data-mode='dark'] {
-		border-top-color: #33465f;
-		background: linear-gradient(180deg, #121d2e 0%, #0f1828 100%);
-		box-shadow: 0 -14px 26px rgba(2, 8, 23, 0.42);
+		border-top-color: #343a43;
+		background: linear-gradient(180deg, #1c2026 0%, #171b21 100%);
+		box-shadow: 0 -14px 26px rgba(2, 8, 23, 0.3);
 	}
 
 	.composer::before {
@@ -771,9 +771,13 @@
 		left: 0;
 		right: 0;
 		top: 0;
-		height: 2px;
-		background: var(--gemini-gradient);
-		opacity: 0.42;
+		height: 1px;
+		background: rgba(121, 130, 143, 0.4);
+		opacity: 1;
+	}
+
+	.composer[data-mode='dark']::before {
+		background: rgba(126, 136, 149, 0.34);
 	}
 
 	.reply-preview-panel {
@@ -1186,12 +1190,12 @@
 		grid-template-columns: 2.2rem minmax(0, 1fr) 2.2rem;
 		gap: 0.42rem;
 		align-items: center;
-		border: 1px solid #bac8da;
-		background: #f7fbff;
+		border: 1px solid #cfd6df;
+		background: #f8f9fb;
 		border-radius: 16px;
 		padding: 0.32rem 0.34rem;
 		box-shadow:
-			0 7px 18px rgba(15, 23, 42, 0.1),
+			0 7px 18px rgba(15, 23, 42, 0.07),
 			inset 0 1px 0 rgba(255, 255, 255, 0.95);
 		transition:
 			border-color 140ms ease,
@@ -1200,25 +1204,25 @@
 	}
 
 	.composer[data-mode='dark'] .composer-row {
-		border-color: #3c506b;
-		background: #132033;
+		border-color: #3c434d;
+		background: #242a32;
 		box-shadow:
-			0 8px 18px rgba(2, 8, 23, 0.36),
+			0 8px 18px rgba(2, 8, 23, 0.24),
 			inset 0 1px 0 rgba(148, 163, 184, 0.08);
 	}
 
 	.composer-row:focus-within {
-		border-color: #8ca3c3;
+		border-color: #a1acb8;
 		box-shadow:
-			0 10px 22px rgba(15, 23, 42, 0.14),
-			0 0 0 2px rgba(92, 128, 177, 0.2);
+			0 10px 22px rgba(15, 23, 42, 0.1),
+			0 0 0 2px rgba(127, 138, 151, 0.2);
 	}
 
 	.composer[data-mode='dark'] .composer-row:focus-within {
-		border-color: #5f7aa2;
+		border-color: #656f7c;
 		box-shadow:
-			0 10px 22px rgba(2, 8, 23, 0.44),
-			0 0 0 2px rgba(96, 129, 178, 0.22);
+			0 10px 22px rgba(2, 8, 23, 0.32),
+			0 0 0 2px rgba(127, 138, 151, 0.2);
 	}
 
 	.hidden-file-input {
@@ -1333,13 +1337,13 @@
 
 	.composer-row textarea:focus {
 		outline: none;
-		border-color: #9ab0cc;
-		background: rgba(255, 255, 255, 0.58);
+		border-color: #aab3be;
+		background: rgba(255, 255, 255, 0.66);
 	}
 
 	.composer[data-mode='dark'] .composer-row textarea:focus {
-		border-color: #5f7aa2;
-		background: rgba(148, 163, 184, 0.08);
+		border-color: #737d89;
+		background: rgba(255, 255, 255, 0.05);
 	}
 
 	.composer-row textarea::placeholder {

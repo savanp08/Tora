@@ -1239,11 +1239,21 @@ func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 		envelopeType = "typing_start"
 	}
 	payload := map[string]interface{}{
-		"type":   envelopeType,
-		"roomId": roomID,
+		"type":    envelopeType,
+		"roomId":  roomID,
+		"room_id": roomID,
 		"payload": map[string]interface{}{
-			"id":   userID,
-			"name": event.UserName,
+			"id":        userID,
+			"userId":    userID,
+			"user_id":   userID,
+			"name":      event.UserName,
+			"username":  event.UserName,
+			"userName":  event.UserName,
+			"user_name": event.UserName,
+			"roomId":    roomID,
+			"room_id":   roomID,
+			"isTyping":  event.IsTyping,
+			"is_typing": event.IsTyping,
 		},
 	}
 	for roomClient := range clients {

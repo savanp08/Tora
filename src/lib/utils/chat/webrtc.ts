@@ -24,6 +24,7 @@ type WebRTCManagerOptions = {
 	onIncomingCall?: (event: IncomingCallEvent) => void;
 	onRemoteStream?: (userId: string, stream: MediaStream) => void;
 	onRemoteStreamRemoved?: (userId: string) => void;
+	onPeerStateChange?: () => void;
 	maxParticipants?: number;
 };
 
@@ -90,6 +91,7 @@ export class WebRTCManager extends EventTarget {
 	private onIncomingCall?: (event: IncomingCallEvent) => void;
 	private onRemoteStream?: (userId: string, stream: MediaStream) => void;
 	private onRemoteStreamRemoved?: (userId: string) => void;
+	private onPeerStateChange?: () => void;
 	private maxParticipants: number;
 
 	private localStream: MediaStream | null = null;
@@ -107,6 +109,7 @@ export class WebRTCManager extends EventTarget {
 		this.onIncomingCall = options.onIncomingCall;
 		this.onRemoteStream = options.onRemoteStream;
 		this.onRemoteStreamRemoved = options.onRemoteStreamRemoved;
+		this.onPeerStateChange = options.onPeerStateChange;
 		const requestedMax = Number.isFinite(options.maxParticipants)
 			? Math.max(2, Math.trunc(Number(options.maxParticipants)))
 			: MAX_PARTICIPANTS_DEFAULT;
@@ -128,7 +131,14 @@ export class WebRTCManager extends EventTarget {
 	}
 
 	public getPeerUserIds() {
-		return Array.from(this.peerConnections.keys());
+		const activePeerUserIds: string[] = [];
+		for (const [userId, connection] of this.peerConnections.entries()) {
+			if (!this.isPeerConnectionActive(connection)) {
+				continue;
+			}
+			activePeerUserIds.push(userId);
+		}
+		return activePeerUserIds;
 	}
 
 	public getAvailablePeerSlots() {
@@ -200,6 +210,7 @@ export class WebRTCManager extends EventTarget {
 
 		const connection = new RTCPeerConnection(WEBRTC_STUN_CONFIG);
 		this.peerConnections.set(normalizedTarget, connection);
+		this.notifyPeerStateChange();
 		this.attachLocalTracks(connection);
 
 		connection.onicecandidate = (event) => {
@@ -258,7 +269,21 @@ export class WebRTCManager extends EventTarget {
 				connection.connectionState === 'disconnected'
 			) {
 				this.cleanupPeerConnection(normalizedTarget);
+				return;
 			}
+			this.notifyPeerStateChange();
+		};
+
+		connection.oniceconnectionstatechange = () => {
+			if (
+				connection.iceConnectionState === 'failed' ||
+				connection.iceConnectionState === 'closed' ||
+				connection.iceConnectionState === 'disconnected'
+			) {
+				this.cleanupPeerConnection(normalizedTarget);
+				return;
+			}
+			this.notifyPeerStateChange();
 		};
 
 		if (isInitiator) {
@@ -569,6 +594,7 @@ export class WebRTCManager extends EventTarget {
 			connection.onicecandidate = null;
 			connection.ontrack = null;
 			connection.onconnectionstatechange = null;
+			connection.oniceconnectionstatechange = null;
 			connection.close();
 		}
 		this.peerConnections.delete(targetUserId);
@@ -581,6 +607,32 @@ export class WebRTCManager extends EventTarget {
 				})
 			);
 		}
+		this.notifyPeerStateChange();
+	}
+
+	private isPeerConnectionActive(connection: RTCPeerConnection | null) {
+		if (!connection) {
+			return false;
+		}
+		if (
+			connection.connectionState === 'failed' ||
+			connection.connectionState === 'closed' ||
+			connection.connectionState === 'disconnected'
+		) {
+			return false;
+		}
+		if (
+			connection.iceConnectionState === 'failed' ||
+			connection.iceConnectionState === 'closed' ||
+			connection.iceConnectionState === 'disconnected'
+		) {
+			return false;
+		}
+		return true;
+	}
+
+	private notifyPeerStateChange() {
+		this.onPeerStateChange?.();
 	}
 
 	private stopLocalStreamTracks() {

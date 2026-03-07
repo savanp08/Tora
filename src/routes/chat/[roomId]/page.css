@@ -81,6 +81,65 @@
 	pointer-events: none;
 }
 
+.composer-typing-slot {
+	flex-shrink: 0;
+	padding: 0.12rem 0.78rem 0.08rem;
+}
+
+.composer-typing-card {
+	min-height: 2.02rem;
+	width: fit-content;
+	max-width: min(calc(100% - 0.2rem), 26rem);
+	padding: 0.52rem 0.72rem;
+	border-radius: 12px;
+	border: 1px solid #ccd5e2;
+	background: #f7f9fc;
+	box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+	display: grid;
+	grid-template-rows: auto auto;
+	gap: 0.14rem;
+	opacity: 0;
+	transform: translateY(1px);
+	transition:
+		opacity 140ms ease,
+		transform 140ms ease;
+}
+
+.composer-typing-slot.active .composer-typing-card {
+	opacity: 1;
+	transform: translateY(0);
+}
+
+.composer-typing-names {
+	font-size: 0.74rem;
+	font-weight: 700;
+	color: #5f6d83;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	line-height: 1.16;
+}
+
+.composer-typing-status {
+	font-size: 0.84rem;
+	color: #2f3d54;
+	line-height: 1.14;
+}
+
+.chat-shell.theme-dark .composer-typing-card {
+	border-color: #2f3f59;
+	background: #101b2d;
+	box-shadow: 0 2px 6px rgba(2, 6, 23, 0.24);
+}
+
+.chat-shell.theme-dark .composer-typing-names {
+	color: #aebbd2;
+}
+
+.chat-shell.theme-dark .composer-typing-status {
+	color: #f1f5ff;
+}
+
 .canvas-pane {
 	display: flex;
 	flex-direction: column;
@@ -829,6 +888,14 @@
 	.sidebar-pane {
 		align-self: stretch;
 		height: 100%;
+	}
+
+	.composer-typing-slot {
+		padding: 0.14rem 0.58rem 0.06rem;
+	}
+
+	.composer-typing-card {
+		min-height: 1.86rem;
 	}
 
 	@media (max-height: 500px) {
