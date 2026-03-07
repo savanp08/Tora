@@ -126,6 +126,7 @@
 	let suppressMessageClickUntil = 0;
 	let suppressNativeMessageContextMenuUntil = 0;
 	let reactionPopoverMessageId = '';
+	let touchReactionRevealMessageId = '';
 
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
@@ -149,8 +150,19 @@
 		closeReactionPopover();
 	}
 
+	$: if (
+		touchReactionRevealMessageId &&
+		!visibleMessages.some((message) => message.id === touchReactionRevealMessageId)
+	) {
+		touchReactionRevealMessageId = '';
+	}
+
 	$: if (isSelectionMode && reactionPopoverMessageId) {
 		closeReactionPopover();
+	}
+
+	$: if (isSelectionMode && touchReactionRevealMessageId) {
+		touchReactionRevealMessageId = '';
 	}
 
 	$: if (messageContextMenu.open && reactionPopoverMessageId) {
@@ -1399,11 +1411,20 @@
 	}
 
 	function onMessageTouchEnd(event: TouchEvent) {
+		const tappedMessageId = messageLongPressMessageId;
+		const shouldRevealTouchReaction =
+			Boolean(tappedMessageId) &&
+			!isSelectionMode &&
+			isMember &&
+			Date.now() >= suppressMessageClickUntil;
 		if (Date.now() < suppressMessageClickUntil) {
 			event.preventDefault();
 			event.stopPropagation();
 		}
 		clearMessageLongPressState();
+		if (shouldRevealTouchReaction && tappedMessageId) {
+			touchReactionRevealMessageId = tappedMessageId;
+		}
 	}
 
 	function onMessageTouchCancel() {
@@ -1420,10 +1441,13 @@
 	}
 
 	function onWindowPointerDown(event: PointerEvent) {
+		const target = event.target instanceof Element ? event.target : null;
+		if (touchReactionRevealMessageId && (!target || !target.closest('.message-row'))) {
+			touchReactionRevealMessageId = '';
+		}
 		if (!reactionPopoverMessageId) {
 			return;
 		}
-		const target = event.target instanceof Element ? event.target : null;
 		if (!target || target.closest('.reaction-row')) {
 			return;
 		}
@@ -1944,18 +1968,25 @@
 						{@const isReactionPopoverOpen = reactionPopoverMessageId === message.id}
 						<div class="reaction-row {isMine ? 'mine' : 'theirs'} {reactionEntries.length > 0
 							? 'has-reactions'
-							: ''} {isReactionPopoverOpen ? 'open' : ''}">
+							: ''} {isReactionPopoverOpen ? 'open' : ''} {touchReactionRevealMessageId === message.id
+							? 'touch-visible'
+							: ''}">
 							<button
 								type="button"
 								class="reaction-trigger {reactionEntries.length > 0 ? 'has-reactions' : 'empty'}"
-								title={reactionEntries.length > 0 ? 'View reactions' : 'Add reaction'}
+								title={reactionEntries.length > 0 ? 'View reactions' : ''}
 								aria-label={reactionEntries.length > 0 ? 'View reactions' : 'Add reaction'}
 								aria-expanded={isReactionPopoverOpen}
 								on:click|stopPropagation={() => toggleReactionPopover(message)}
 							>
 								{#if reactionEntries.length > 0}
-									<span class="reaction-stack" aria-hidden="true">
-										{#each getReactionStackEntries(reactionEntries) as reaction, stackIndex (`${reaction.emoji}-${stackIndex}`)}
+									{@const reactionStackEntries = getReactionStackEntries(reactionEntries)}
+									<span
+										class="reaction-stack"
+										aria-hidden="true"
+										style={`--reaction-stack-count:${reactionStackEntries.length};`}
+									>
+										{#each reactionStackEntries as reaction, stackIndex (`${reaction.emoji}-${stackIndex}`)}
 											<span
 												class="reaction-stack-item"
 												style={`--reaction-index:${stackIndex}; z-index:${10 - stackIndex};`}
@@ -1976,7 +2007,7 @@
 											<button
 												type="button"
 												class="reaction-popover-quick-btn"
-												title={`Add ${reactionEmoji} reaction`}
+												title={``}
 												aria-label={`Add ${reactionEmoji} reaction`}
 												on:click|stopPropagation={() => toggleReaction(message, reactionEmoji)}
 											>
@@ -3195,7 +3226,7 @@
 	}
 
 	.reaction-trigger.has-reactions {
-		min-width: calc(var(--reaction-stack-size) * 2.5 + 1.2rem);
+		min-width: 0;
 		padding-inline: 0.18rem 0.3rem;
 		gap: 0.16rem;
 		opacity: 1;
@@ -3205,7 +3236,8 @@
 
 	.message-row:hover .reaction-trigger,
 	.message-row:focus-within .reaction-trigger,
-	.reaction-row.open .reaction-trigger {
+	.reaction-row.open .reaction-trigger,
+	.reaction-row.touch-visible .reaction-trigger {
 		opacity: 1;
 		pointer-events: auto;
 		transform: translateY(0) scale(1);
@@ -3217,9 +3249,14 @@
 	}
 
 	.reaction-stack {
+		--reaction-stack-count: 3;
 		position: relative;
 		display: block;
-		width: calc(var(--reaction-stack-size) * 2.5);
+		width: calc(
+			var(--reaction-stack-size) +
+				max(0px, (var(--reaction-stack-count) - 1) * (var(--reaction-stack-size) * 0.5))
+		);
+		min-width: var(--reaction-stack-size);
 		height: var(--reaction-stack-size);
 		overflow: hidden;
 	}
@@ -3367,14 +3404,6 @@
 	.messages-shell.theme-dark .reaction-popover-item.reacted {
 		background: #294263;
 		border-color: #5d7ba0;
-	}
-
-	@media (hover: none) {
-		.reaction-trigger {
-			opacity: 1;
-			pointer-events: auto;
-			transform: none;
-		}
 	}
 
 	.bubble-content.collapsed {
