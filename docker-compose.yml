@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      PISTON_ENDPOINT: ${PISTON_ENDPOINT:-http://piston:2000/api/v2/execute}
+      PISTON_ENDPOINT: ${PISTON_ENDPOINT=http://<AMD_PRIVATE_IP>:2000/api/v2/execute}
     ulimits:
       nofile:
         soft: 65535
@@ -27,22 +27,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      piston:
-        condition: service_started
-        
-  piston:
-    image: ghcr.io/engineer-man/piston
-    platform: linux/amd64 
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:2000:2000"
-    environment:
-      PISTON_DISABLE_NETWORKING: "true"
-    deploy:
-      resources:
-        limits:
-          memory: 5G
-          cpus: "1.0"
           
   prometheus:
     image: prom/prometheus:latest

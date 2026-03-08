@@ -94,6 +94,11 @@
 	const SNAPSHOT_LOAD_TIMEOUT_MS = 15000;
 	const PROMPT_CANCELLED_ERROR = 'canvas-prompt-cancelled';
 	const CANVAS_CLIENT_LOG_PREFIX = '[canvas-client]';
+	const CANVAS_AI_DEVICE_ID_STORAGE_KEY = 'canvasAiDeviceId';
+	const CANVAS_AI_SYSTEM_PROMPT = `You are an in-editor coding assistant.
+Return ONLY the final code for the target file.
+Do not include markdown fences, explanations, notes, or extra text.
+If the user asks for edits, apply them to the existing code and return the full updated file content.`;
 	const EXPLORER_LONG_PRESS_DELAY_MS = 520;
 	const EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
@@ -187,6 +192,12 @@
 	let snippetDraft = '';
 	let snippetMessage = '';
 	let showSnippetComposer = false;
+	let showCanvasAIPrompt = false;
+	let canvasAIPrompt = '';
+	let canvasAIError = '';
+	let isCanvasAIGenerating = false;
+	let canvasAIPromptElement: HTMLTextAreaElement | null = null;
+	let canvasAIAbortController: AbortController | null = null;
 	let canSendSnippetFromSelection = false;
 	let showSelectionSnippetAction = false;
 	let selectionSnippetActionTop = 0;
@@ -2533,6 +2544,212 @@
 		closeSnippetComposer();
 	}
 
+	function resolveCanvasAIDeviceID() {
+		if (typeof window === 'undefined') {
+			return `canvas-device-${createPresenceSessionId()}`;
+		}
+		const existing = (window.localStorage.getItem(CANVAS_AI_DEVICE_ID_STORAGE_KEY) || '').trim();
+		if (existing) {
+			return existing;
+		}
+		const generated =
+			typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+				? crypto.randomUUID()
+				: `canvas-device-${createPresenceSessionId()}`;
+		window.localStorage.setItem(CANVAS_AI_DEVICE_ID_STORAGE_KEY, generated);
+		return generated;
+	}
+
+	function stripCodeFences(rawResponse: string) {
+		let normalized = String(rawResponse || '').replace(/\r\n/g, '\n').trim();
+		if (!normalized) {
+			return '';
+		}
+		if (normalized.startsWith('```')) {
+			normalized = normalized.replace(/^```[a-zA-Z0-9_+-]*\n?/, '');
+			normalized = normalized.replace(/\n?```$/, '');
+		}
+		return normalized.trim();
+	}
+
+	function openCanvasAIPromptPanel() {
+		if (!currentFileEntry()) {
+			fileExplorerError = 'Open a file before using AI.';
+			return;
+		}
+		showCanvasAIPrompt = true;
+		canvasAIError = '';
+		void tick().then(() => {
+			canvasAIPromptElement?.focus();
+		});
+	}
+
+	function closeCanvasAIPromptPanel() {
+		if (isCanvasAIGenerating) {
+			canvasAIAbortController?.abort();
+		}
+		showCanvasAIPrompt = false;
+		canvasAIError = '';
+		isCanvasAIGenerating = false;
+		canvasAIAbortController = null;
+	}
+
+	function buildCanvasAICodePrompt(
+		instruction: string,
+		targetFilePath: string,
+		language: string,
+		currentContent: string
+	) {
+		return `${CANVAS_AI_SYSTEM_PROMPT}
+
+Target file path: ${targetFilePath}
+Target language: ${language}
+
+Current file content:
+<<<FILE_CONTENT
+${currentContent}
+FILE_CONTENT
+
+User instruction:
+${instruction}
+
+Return only the final code for this file.`;
+	}
+
+	async function requestCanvasAICode(
+		instruction: string,
+		target: ProjectFileEntry,
+		currentContent: string,
+		language: string,
+		signal: AbortSignal
+	) {
+		const prompt = buildCanvasAICodePrompt(
+			instruction,
+			target.relativePath || target.name,
+			language,
+			currentContent
+		);
+		const headers: Record<string, string> = {
+			'Content-Type': 'application/json',
+			'X-User-Id': currentUser?.id || '',
+			'X-Username': currentUser?.name || ''
+		};
+		const body = JSON.stringify({
+			prompt,
+			deviceId: resolveCanvasAIDeviceID(),
+			roomId
+		});
+
+		let response = await fetch(`${API_BASE}/api/ai/chat`, {
+			method: 'POST',
+			headers,
+			body,
+			signal
+		});
+		if (response.status === 404) {
+			response = await fetch(`${API_BASE}/api/ai/private-chat`, {
+				method: 'POST',
+				headers,
+				body,
+				signal
+			});
+		}
+
+		const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+		if (!response.ok) {
+			const details = typeof payload.error === 'string' ? payload.error.trim() : '';
+			throw new Error(details || `AI request failed (${response.status})`);
+		}
+
+		const aiText =
+			typeof payload.response === 'string'
+				? payload.response
+				: typeof payload.message === 'string'
+					? payload.message
+					: '';
+		const code = stripCodeFences(aiText);
+		if (!code) {
+			throw new Error('AI returned an empty code response.');
+		}
+		return code;
+	}
+
+	async function applyAIToCurrentFile() {
+		if (isCanvasAIGenerating) {
+			return;
+		}
+		const instruction = canvasAIPrompt.trim();
+		if (!instruction) {
+			canvasAIError = 'Enter a prompt for AI.';
+			return;
+		}
+		const target = currentFileEntry();
+		if (!target || target.isDir) {
+			canvasAIError = 'Open a file before using AI.';
+			return;
+		}
+		if (showReadOnlyWarning) {
+			canvasAIError = 'This file is currently read-only. Try again when fewer editors are active.';
+			return;
+		}
+
+		const model = editor?.getModel?.();
+		if (!model) {
+			canvasAIError = 'Editor is not ready yet.';
+			return;
+		}
+
+		isCanvasAIGenerating = true;
+		canvasAIError = '';
+		fileExplorerError = '';
+		canvasAIAbortController?.abort();
+		canvasAIAbortController = new AbortController();
+
+		try {
+			const source = target.relativePath === currentFile ? String(model.getValue() || '') : '';
+			const language = resolveExecutionLanguageForEntry(target);
+			const generatedCode = await requestCanvasAICode(
+				instruction,
+				target,
+				source,
+				language,
+				canvasAIAbortController.signal
+			);
+			model.setValue(generatedCode);
+			scheduleCurrentFilePersistToFS();
+			scheduleCanvasSnapshotSave();
+			writeTerminalLine('\x1b[35m> AI updated the file.\x1b[0m');
+			showCanvasAIPrompt = false;
+		} catch (error) {
+			const isAbortError =
+				typeof error === 'object' &&
+				error !== null &&
+				'name' in error &&
+				(error as { name?: string }).name === 'AbortError';
+			if (isAbortError) {
+				return;
+			}
+			const message = error instanceof Error ? error.message : 'Failed to generate code with AI.';
+			canvasAIError = message;
+			fileExplorerError = message;
+		} finally {
+			isCanvasAIGenerating = false;
+			canvasAIAbortController = null;
+		}
+	}
+
+	function handleCanvasAIPromptKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			closeCanvasAIPromptPanel();
+			return;
+		}
+		if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+			event.preventDefault();
+			void applyAIToCurrentFile();
+		}
+	}
+
 	function handleSnippetComposerWindowKeydown(event: KeyboardEvent) {
 		if (!showSnippetComposer) {
 			return;
@@ -3181,6 +3398,25 @@
 			closeContextMenu();
 		};
 		const onKeyDown = (event: KeyboardEvent) => {
+			const isAIPromptShortcut =
+				(event.metaKey || event.ctrlKey) &&
+				!event.altKey &&
+				!event.shiftKey &&
+				event.key.toLowerCase() === 'i';
+			if (isAIPromptShortcut) {
+				event.preventDefault();
+				if (showCanvasAIPrompt) {
+					void applyAIToCurrentFile();
+					return;
+				}
+				openCanvasAIPromptPanel();
+				return;
+			}
+			if (event.key === 'Escape' && showCanvasAIPrompt) {
+				event.preventDefault();
+				closeCanvasAIPromptPanel();
+				return;
+			}
 			if (event.key === 'Escape' && deleteConfirmTarget) {
 				closeDeleteConfirmation();
 				return;
@@ -3430,6 +3666,8 @@
 
 	onDestroy(() => {
 		void persistCurrentFileToFS();
+		canvasAIAbortController?.abort();
+		canvasAIAbortController = null;
 		if (activeExecutionHandle && executionManager) {
 			executionManager.stop(activeExecutionHandle.id);
 		}
@@ -3848,6 +4086,63 @@
 					on:dragend|capture={handleEditorCodeDragEnd}
 				>
 					<div class="code-canvas" bind:this={editorContainer}></div>
+					<button
+						type="button"
+						class="canvas-ai-trigger"
+						title="Ask AI for this file (Cmd/Ctrl+I)"
+						aria-label="Ask AI for this file"
+						on:click={openCanvasAIPromptPanel}
+						disabled={!currentFile || isCanvasAIGenerating}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
+						</svg>
+					</button>
+					{#if showCanvasAIPrompt}
+						<div class="canvas-ai-panel" role="dialog" aria-label="AI code prompt">
+							<div class="canvas-ai-panel-header">
+								<span>AI in Editor</span>
+								<button
+									type="button"
+									class="canvas-ai-close"
+									on:click={closeCanvasAIPromptPanel}
+									aria-label="Close AI prompt"
+								>
+									×
+								</button>
+							</div>
+							<textarea
+								bind:this={canvasAIPromptElement}
+								bind:value={canvasAIPrompt}
+								rows="3"
+								class="canvas-ai-input"
+								placeholder="Describe what code you want in this file..."
+								on:keydown={handleCanvasAIPromptKeydown}
+								disabled={isCanvasAIGenerating}
+							></textarea>
+							{#if canvasAIError}
+								<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
+							{/if}
+							<div class="canvas-ai-actions">
+								<button
+									type="button"
+									class="canvas-ai-action secondary"
+									on:click={closeCanvasAIPromptPanel}
+									disabled={isCanvasAIGenerating}
+								>
+									Cancel
+								</button>
+								<button
+									type="button"
+									class="canvas-ai-action primary"
+									on:click={() => void applyAIToCurrentFile()}
+									disabled={isCanvasAIGenerating || !canvasAIPrompt.trim()}
+								>
+									{isCanvasAIGenerating ? 'Generating...' : 'Apply to File'}
+								</button>
+							</div>
+						</div>
+					{/if}
 					{#if openTabs.length === 0}
 						<div class="canvas-blank-state" role="status" aria-live="polite">
 							Open a file from Explorer to start editing.
@@ -4712,6 +5007,161 @@
 		fill: none;
 		stroke-linecap: round;
 		stroke-linejoin: round;
+	}
+
+	.canvas-ai-trigger {
+		position: absolute;
+		top: 0.7rem;
+		right: 0.75rem;
+		z-index: 8;
+		width: 1.95rem;
+		height: 1.95rem;
+		border: 1px solid rgba(122, 168, 244, 0.75);
+		background: rgba(35, 66, 122, 0.9);
+		color: #ecf4ff;
+		border-radius: 0.5rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		cursor: pointer;
+		box-shadow: 0 10px 24px rgba(0, 0, 0, 0.34);
+	}
+
+	.canvas-ai-trigger:hover:not(:disabled) {
+		border-color: rgba(155, 197, 255, 0.95);
+		background: rgba(49, 88, 156, 0.96);
+	}
+
+	.canvas-ai-trigger:disabled {
+		opacity: 0.52;
+		cursor: not-allowed;
+	}
+
+	.canvas-ai-trigger svg {
+		width: 0.95rem;
+		height: 0.95rem;
+		fill: currentColor;
+	}
+
+	.canvas-ai-panel {
+		position: absolute;
+		top: 3.05rem;
+		right: 0.75rem;
+		z-index: 9;
+		width: min(24.5rem, calc(100% - 1.5rem));
+		padding: 0.64rem;
+		border-radius: 0.62rem;
+		border: 1px solid rgba(122, 154, 205, 0.52);
+		background: rgba(9, 15, 24, 0.96);
+		box-shadow: 0 18px 42px rgba(0, 0, 0, 0.48);
+		display: flex;
+		flex-direction: column;
+		gap: 0.55rem;
+	}
+
+	.canvas-ai-panel-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		color: #dce8ff;
+		font-size: 0.73rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.canvas-ai-close {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(22, 32, 48, 0.9);
+		color: #dbe6f8;
+		border-radius: 0.34rem;
+		width: 1.5rem;
+		height: 1.5rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		padding: 0;
+		font-size: 1rem;
+		line-height: 1;
+	}
+
+	.canvas-ai-close:hover:not(:disabled) {
+		border-color: rgba(139, 168, 211, 0.72);
+		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.canvas-ai-input {
+		width: 100%;
+		min-height: 5.2rem;
+		border: 1px solid rgba(103, 125, 160, 0.56);
+		background: rgba(15, 23, 36, 0.94);
+		color: #e7efff;
+		border-radius: 0.45rem;
+		padding: 0.56rem 0.62rem;
+		font-size: 0.8rem;
+		line-height: 1.38;
+		resize: vertical;
+	}
+
+	.canvas-ai-input:focus {
+		outline: none;
+		border-color: rgba(117, 166, 248, 0.86);
+		box-shadow: 0 0 0 2px rgba(117, 166, 248, 0.24);
+	}
+
+	.canvas-ai-error {
+		font-size: 0.72rem;
+		font-weight: 500;
+		color: #ffd4d4;
+		background: rgba(131, 35, 35, 0.5);
+		border: 1px solid rgba(231, 138, 138, 0.58);
+		border-radius: 0.42rem;
+		padding: 0.4rem 0.5rem;
+	}
+
+	.canvas-ai-actions {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.4rem;
+	}
+
+	.canvas-ai-action {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		border-radius: 0.42rem;
+		padding: 0.34rem 0.64rem;
+		font-size: 0.72rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.canvas-ai-action.secondary {
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+	}
+
+	.canvas-ai-action.primary {
+		border-color: rgba(95, 130, 180, 0.72);
+		background: rgba(36, 71, 130, 0.94);
+		color: #f7fbff;
+	}
+
+	.canvas-ai-action:hover:not(:disabled) {
+		border-color: rgba(139, 168, 211, 0.72);
+		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.canvas-ai-action.primary:hover:not(:disabled) {
+		border-color: rgba(122, 168, 244, 0.84);
+		background: rgba(49, 88, 156, 0.98);
+	}
+
+	.canvas-ai-action:disabled {
+		opacity: 0.56;
+		cursor: not-allowed;
 	}
 
 	.snippet-composer-overlay {
