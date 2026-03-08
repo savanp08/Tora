@@ -36,6 +36,7 @@ type RemoteExecutionStrategy = {
 	runRemote: (
 		code: string,
 		language: string,
+		runId: string,
 		signal: AbortSignal
 	) => Promise<RemoteExecutionPayload>;
 };
@@ -140,31 +141,31 @@ export class ExecutionManager {
 				mode: 'remote',
 				language: 'cpp',
 				aliases: ['c++'],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, runId, signal) => this.runRemote(code, language, runId, signal)
 			},
 			{
 				mode: 'remote',
 				language: 'c',
 				aliases: [],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, runId, signal) => this.runRemote(code, language, runId, signal)
 			},
 			{
 				mode: 'remote',
 				language: 'java',
 				aliases: [],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, runId, signal) => this.runRemote(code, language, runId, signal)
 			},
 			{
 				mode: 'remote',
 				language: 'go',
 				aliases: ['golang'],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, runId, signal) => this.runRemote(code, language, runId, signal)
 			},
 			{
 				mode: 'remote',
 				language: 'rust',
 				aliases: ['rs'],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, runId, signal) => this.runRemote(code, language, runId, signal)
 			}
 		];
 
@@ -371,7 +372,10 @@ export class ExecutionManager {
 		signal: AbortSignal
 	) {
 		try {
-			const remotePayload = await strategy.runRemote(code, language, signal);
+			console.info(
+				`[execution][client] User triggered remote execution runId=${context.id} language=${language} source_chars=${code.length}`
+			);
+			const remotePayload = await strategy.runRemote(code, language, context.id, signal);
 			if (context.settled) {
 				return;
 			}
@@ -411,13 +415,19 @@ export class ExecutionManager {
 
 			const fallbackMessage = `Execution failed for ${context.language}`;
 			const errorMessage = (message || fallbackMessage).trim() || fallbackMessage;
+			console.error(
+				`[execution][client] Remote execution failed runId=${context.id} language=${language} message=${errorMessage} stdout_chars=${stdout.length} stderr_chars=${stderr.length}`
+			);
 			this.emitLine(context, errorMessage, 'error', 'stderr');
 			this.finishWithError(context, new Error(errorMessage));
 		}
 	}
 
-	private async runRemote(code: string, language: string, signal: AbortSignal) {
+	private async runRemote(code: string, language: string, runId: string, signal: AbortSignal) {
 		const base64Code = btoa(unescape(encodeURIComponent(code)));
+		console.info(
+			`[execution][client] Sending execution request to server runId=${runId} endpoint=${EXECUTE_ENDPOINT} language=${language} source_chars=${code.length} base64_chars=${base64Code.length}`
+		);
 		let response: Response;
 		try {
 			response = await fetch(EXECUTE_ENDPOINT, {
@@ -438,8 +448,16 @@ export class ExecutionManager {
 				'name' in error &&
 				(error as { name?: string }).name === 'AbortError';
 			if (isAbortError) {
+				console.info(
+					`[execution][client] Execution request was cancelled before completion runId=${runId} language=${language}`
+				);
 				throw error;
 			}
+			console.error(
+				`[execution][client] Failed to reach execution server runId=${runId} language=${language} error=${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
 			throw new RemoteExecutionError(
 				error instanceof Error ? error.message : 'Failed to reach execution server'
 			);
@@ -448,6 +466,10 @@ export class ExecutionManager {
 		const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
 		const stdout = typeof payload?.stdout === 'string' ? payload.stdout : '';
 		const stderr = typeof payload?.stderr === 'string' ? payload.stderr : '';
+		const serverError = typeof payload?.error === 'string' ? payload.error : '';
+		console.info(
+			`[execution][client] Received execution response from server runId=${runId} language=${language} status=${response.status} ok=${response.ok} stdout_chars=${stdout.length} stderr_chars=${stderr.length} error_message=${serverError || '<none>'}`
+		);
 		if (!response.ok) {
 			const serverMessage =
 				typeof payload?.error === 'string' && payload.error.trim()
