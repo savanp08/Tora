@@ -2,9 +2,9 @@
 // Edit these values to adjust enforcement without touching Go code.
 export const AI_LIMITS = {
 	windowSeconds: 86400,
-	perUser: 2,
-	perRoom: 10,
-	perIP: 5,
-	perDeviceId: 5
+	perUser: 6,
+	perRoom: 20,
+	perIP: 10,
+	perDeviceId: 10
 } as const;
 

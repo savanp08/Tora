@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/ai"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
@@ -24,11 +25,11 @@ const (
 
 const privateAISystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
 RULES:
-1. Tone: Quirky, witty, lightly sarcastic. Playful "hallucinating entity" persona allowed.
-2. Accuracy: Persona is style only. STRICT FACTUALITY. Never invent data; admit uncertainty. Ground answers in provided room context.
-3. Formatting: NO heavy markdown (**, *, #, ---). Use - or • for lists.
-4. Delivery: Direct, natural. NO meta-commentary ("Here is...", "As an AI..."). Answer first, avoid unprompted summaries. If unclear, ask exactly one concise clarifying question.
-5. You are private to this user; no one else can see this response.`
+1. Style: lazy + quirky, but subtle (max one short quirk line).
+2. Brevity: default to 1-3 short sentences; avoid long paragraphs.
+3. Accuracy: never invent facts; use room context; say when unsure.
+4. Formatting: no heavy markdown (**, *, #, ---). Use - or • for lists.
+5. Private mode: this response is only for this user.`
 
 // DefaultAIRouter serves private chat requests using configured AI providers.
 var DefaultAIRouter = ai.DefaultRouter
@@ -104,6 +105,15 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 	userID, username := extractAIChatIdentity(r)
 	if userID == "" || username == "" {
 		writeAIChatError(w, http.StatusUnauthorized, "Authenticated user context is required")
+		return
+	}
+	roomAIEnabled, roomFeatureErr := isPrivateAIRoomEnabled(r.Context(), roomID)
+	if roomFeatureErr != nil {
+		writeAIChatError(w, http.StatusServiceUnavailable, "Unable to verify room AI settings")
+		return
+	}
+	if !roomAIEnabled {
+		writeAIChatError(w, http.StatusForbidden, "AI is disabled for this room")
 		return
 	}
 
@@ -259,6 +269,45 @@ func resolvePrivateAIRoomID(rawRoomID string, r *http.Request) string {
 		strings.TrimSpace(r.URL.Query().Get("roomId")),
 		strings.TrimSpace(r.URL.Query().Get("room_id")),
 	))
+}
+
+func isPrivateAIRoomEnabled(ctx context.Context, roomID string) (bool, error) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return true, nil
+	}
+	redisStore, _ := activePrivateAIChatStores()
+	if redisStore == nil || redisStore.Client == nil {
+		return true, nil
+	}
+	values, err := redisStore.Client.HMGet(
+		ctx,
+		roomKey(normalizedRoomID),
+		"ai_enabled",
+		"e2ee_enabled",
+		"e2e_enabled",
+	).Result()
+	if err == redis.Nil {
+		return roomDefaultAIEnabled, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	aiEnabled := roomDefaultAIEnabled
+	e2eEnabled := roomDefaultE2EE
+	if len(values) > 0 {
+		aiEnabled = parseFlagString(toString(values[0]), roomDefaultAIEnabled)
+	}
+	if len(values) > 1 {
+		rawE2E := strings.TrimSpace(toString(values[1]))
+		if rawE2E == "" && len(values) > 2 {
+			rawE2E = strings.TrimSpace(toString(values[2]))
+		}
+		e2eEnabled = parseFlagString(rawE2E, roomDefaultE2EE)
+	}
+	normalized := normalizeRoomFeatureFlags(aiEnabled, e2eEnabled)
+	return normalized.AIEnabled, nil
 }
 
 func buildPrivateAIPromptWithRoomContext(ctx context.Context, roomID, prompt string) string {

@@ -28,10 +28,10 @@ const (
 
 const toraSystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
 RULES:
-1. Tone: Quirky, witty, lightly sarcastic. Playful "hallucinating entity" persona allowed.
-2. Accuracy: Persona is style only. STRICT FACTUALITY. Never invent data; admit uncertainty. Ground answers in provided room context.
-3. Formatting: NO heavy markdown (**, *, #, ---). Use - or • for lists.
-4. Delivery: Direct, natural. NO meta-commentary ("Here is...", "As an AI..."). Answer first, avoid unprompted summaries. If unclear, ask exactly one concise clarifying question.`
+1. Style: lazy + quirky, but subtle (max one short quirk line).
+2. Brevity: default to 1-3 short sentences; avoid long paragraphs.
+3. Accuracy: never invent facts; use room context; say when unsure.
+4. Formatting: no heavy markdown (**, *, #, ---). Use - or • for lists.`
 
 var toraAuditSchemaState struct {
 	mu      sync.Mutex
@@ -44,7 +44,7 @@ type toraAuditRecord struct {
 	IPAddress string
 	DeviceID  string
 	Prompt    string
-	Response  string 
+	Response  string
 	Timestamp time.Time
 }
 
@@ -56,6 +56,9 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 	roomID := normalizeRoomID(userMessage.RoomID)
 	prompt := strings.TrimSpace(userMessage.Content)
 	if roomID == "" || prompt == "" || !containsToraMention(prompt) {
+		return
+	}
+	if !h.isRoomAIEnabled(roomID) {
 		return
 	}
 	prompt = stripToraMentionTokens(prompt)

@@ -4,7 +4,13 @@
 	import LoginFooter from '$lib/components/home/LoginFooter.svelte';
 	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
 	import toraLogo from '$lib/assets/tora-logo.svg';
-	import { activeRoomPassword, authToken, currentUser } from '$lib/store';
+	import {
+		activeRoomPassword,
+		authToken,
+		currentUser,
+		sessionAIEnabled,
+		sessionE2EEnabled
+	} from '$lib/store';
 	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
 	import {
 		normalizeRoomCodeInput,
@@ -14,6 +20,10 @@
 		type JoinMode
 	} from '$lib/utils/homeJoin';
 	import { generateRoomName } from '$lib/utils/nameGenerator';
+	import {
+		readSessionRoomPreferences,
+		writeSessionRoomPreferences
+	} from '$lib/utils/sessionPreferences';
 	import { setSessionToken } from '$lib/utils/sessionToken';
 	import { onMount } from 'svelte';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
@@ -25,9 +35,41 @@
 	let guestUsername = '';
 	let roomPassword = '';
 	let roomDurationHours = 24;
+	let aiEnabled = true;
+	let e2eEnabled = false;
+	let showAdvancedOptions = false;
+	let showAiTierDetails = false;
 	let activeActionMode: JoinMode | '' = '';
 	let isJoining = false;
 	let joinError = '';
+
+	function persistSessionRoomPreferences() {
+		const normalized = writeSessionRoomPreferences({
+			aiEnabled,
+			e2eEnabled
+		});
+		aiEnabled = normalized.aiEnabled;
+		e2eEnabled = normalized.e2eEnabled;
+		sessionAIEnabled.set(normalized.aiEnabled);
+		sessionE2EEnabled.set(normalized.e2eEnabled);
+		return normalized;
+	}
+
+	function setAiPreference(nextValue: boolean) {
+		if (e2eEnabled && nextValue) {
+			return;
+		}
+		aiEnabled = nextValue;
+		persistSessionRoomPreferences();
+	}
+
+	function setE2EPreference(nextValue: boolean) {
+		e2eEnabled = nextValue;
+		if (e2eEnabled) {
+			aiEnabled = false;
+		}
+		persistSessionRoomPreferences();
+	}
 
 	function clientLog(event: string, payload?: unknown) {
 		const timestamp = new Date().toISOString();
@@ -42,6 +84,11 @@
 		roomName = generateRoomName();
 		const identity = getOrInitIdentity();
 		currentUser.set({ id: identity.id, username: identity.username });
+		const preferences = readSessionRoomPreferences();
+		aiEnabled = preferences.aiEnabled;
+		e2eEnabled = preferences.e2eEnabled;
+		sessionAIEnabled.set(preferences.aiEnabled);
+		sessionE2EEnabled.set(preferences.e2eEnabled);
 	});
 
 	function onRoomNameFocus(event: FocusEvent) {
@@ -74,6 +121,7 @@
 		guestUsername = userToJoin;
 		const normalizedRoomPassword = (roomPassword || '').trim().slice(0, 32);
 		activeRoomPassword.set(normalizedRoomPassword);
+		const sessionPreferences = persistSessionRoomPreferences();
 
 		try {
 			clientLog('api-rooms-join-request', {
@@ -81,7 +129,9 @@
 				roomCode: normalizedRoomCode,
 				userToJoin,
 				mode,
-				roomDurationHours
+				roomDurationHours,
+				aiEnabled: sessionPreferences.aiEnabled,
+				e2eEnabled: sessionPreferences.e2eEnabled
 			});
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
 				method: 'POST',
@@ -93,7 +143,9 @@
 					userId: userIdentity.id,
 					type: 'ephemeral',
 					mode,
-					roomDurationHours
+					roomDurationHours,
+					aiEnabled: sessionPreferences.aiEnabled,
+					e2eEnabled: sessionPreferences.e2eEnabled
 				})
 			});
 
@@ -115,7 +167,9 @@
 			const roomPasswordHash = normalizedRoomPassword
 				? `#key=${encodeURIComponent(normalizedRoomPassword)}`
 				: '';
-			goto(`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${roomPasswordHash}`);
+			goto(
+				`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${roomPasswordHash}`
+			);
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
 			joinError = e.message;
@@ -130,18 +184,20 @@
 		normalizeRoomNameInput(roomName) !== '' || normalizeRoomCodeInput(roomCode) !== '';
 </script>
 
-<div class="container">
-	<header>
-		<div class="logo">
-			<img src={toraLogo} alt="Tora logo" class="logo-mark" />
-			<span>Tora</span>
-		</div>
-	</header>
+	<div class="container">
+		<header>
+			<div class="logo">
+				<div class="logo-mark-wrap">
+					<img src={toraLogo} alt="Tora logo" class="logo-mark" />
+				</div>
+				<span>Tora</span>
+			</div>
+		</header>
 
 	<main>
 		<div class="hero-box">
 			<h1>Disappearing chats. <br />Instant connections.</h1>
-			<p>Create a room. Share the link. It vanishes when you leave.</p>
+			<p>Create a room. Share the link. Live the moment.</p>
 
 			{#if joinError}
 				<div class="error-msg">{joinError}</div>
@@ -169,39 +225,122 @@
 					</div>
 				</div>
 
-				<div class="field-group">
-					<ExpiryClockPicker bind:valueHours={roomDurationHours} disabled={isJoining} />
-				</div>
+					<button
+						type="button"
+						class="advanced-toggle"
+						class:is-open={showAdvancedOptions}
+						on:click={() => (showAdvancedOptions = !showAdvancedOptions)}
+						aria-expanded={showAdvancedOptions}
+					>
+						<span class="advanced-toggle-label">
+							{showAdvancedOptions ? 'Hide advanced options' : 'Advanced options'}
+						</span>
+						<span class="advanced-toggle-icon" aria-hidden="true"></span>
+					</button>
 
-				<div class="identity-inputs-row">
-					<div class="field-group">
-						<label for="username-input">Username (optional)</label>
-						<input
-							id="username-input"
-							type="text"
-							placeholder="e.g. dizzy_panda"
-							bind:value={guestUsername}
-							maxlength="32"
-							pattern="[-A-Za-z0-9 _]+"
-						/>
-						<small>Optional. Spaces and dashes are normalized to underscores.</small>
-					</div>
+				{#if showAdvancedOptions}
+					<div class="advanced-panel">
+						<div class="field-group">
+							<ExpiryClockPicker bind:valueHours={roomDurationHours} disabled={isJoining} />
+						</div>
 
-					<div class="field-group">
-						<label for="room-password-input">Room Password (optional)</label>
-						<input
-							id="room-password-input"
-							type="password"
-							placeholder="Optional password"
-							bind:value={roomPassword}
-							maxlength="32"
-							autocomplete="off"
-						/>
-						<small>
-							Private, Secured
-						</small>
+						<div class="identity-inputs-row">
+							<div class="field-group">
+								<label for="username-input">Username (optional)</label>
+								<input
+									id="username-input"
+									type="text"
+									placeholder="e.g. dizzy_panda"
+									bind:value={guestUsername}
+									maxlength="32"
+									pattern="[-A-Za-z0-9 _]+"
+								/>
+								<small>Optional. Spaces and dashes are normalized to underscores.</small>
+							</div>
+
+							<div class="field-group">
+								<label for="room-password-input">Room Password (optional)</label>
+								<input
+									id="room-password-input"
+									type="password"
+									placeholder="Optional password"
+									bind:value={roomPassword}
+									maxlength="32"
+									autocomplete="off"
+								/>
+								<small>Private, Secured</small>
+							</div>
+						</div>
+
+						<div class="options-row">
+							<div class="field-group option-group">
+								<div class="option-label">AI Assistant</div>
+								<div class="choice-toggle" role="radiogroup" aria-label="AI assistant setting">
+									<button
+										type="button"
+										class:active={aiEnabled}
+										on:click={() => setAiPreference(true)}
+										disabled={e2eEnabled}
+									>
+										Yes
+									</button>
+									<button
+										type="button"
+										class:active={!aiEnabled}
+										on:click={() => setAiPreference(false)}
+									>
+										No
+									</button>
+								</div>
+								<small>Applies by default to rooms and branches you create in this session.</small>
+								<div class="tiered-note">
+									Tiered rules apply.
+									<button
+										type="button"
+										class="tiered-readmore"
+										on:click={() => (showAiTierDetails = !showAiTierDetails)}
+									>
+										{showAiTierDetails ? 'Hide' : 'Read more'}
+									</button>
+								</div>
+								{#if showAiTierDetails}
+									<small class="tiered-detail">
+										Standard tier rules: on the free tier, conversational AI data may be used to
+										improve model training.
+									</small>
+								{/if}
+							</div>
+
+							<div class="field-group option-group">
+								<div class="option-label">End-to-end encryption</div>
+								<div
+									class="choice-toggle"
+									role="radiogroup"
+									aria-label="End-to-end encryption setting"
+								>
+									<button
+										type="button"
+										class:active={e2eEnabled}
+										on:click={() => setE2EPreference(true)}
+									>
+										Yes
+									</button>
+									<button
+										type="button"
+										class:active={!e2eEnabled}
+										on:click={() => setE2EPreference(false)}
+									>
+										No
+									</button>
+								</div>
+								<small>
+									When enabled, new joiners cannot view messages sent before they joined. AI is
+									disabled automatically.
+								</small>
+							</div>
+						</div>
 					</div>
-				</div>
+				{/if}
 
 				<div class="action-row">
 					<button
@@ -251,20 +390,24 @@
 		--home-action-shadow: rgba(147, 197, 253, 0.22);
 	}
 
+	:global(html),
 	:global(body) {
 		margin: 0;
+		min-height: 100%;
 		font-family: sans-serif;
 		background: var(--bg-primary);
 	}
 
 	.container {
-		
 		margin: 0 auto;
-		padding: 16px clamp(12px, 3vw, 24px) 20px;
+		width: 100%;
+		
+		min-height: 100svh;
 		min-height: 100dvh;
 		height: auto;
 		display: flex;
 		flex-direction: column;
+		background: var(--bg-primary);
 		overflow-y: auto;
 		overflow-x: hidden;
 	}
@@ -286,10 +429,19 @@
 		letter-spacing: 0.01em;
 	}
 
+	.logo-mark-wrap {
+		position: relative;
+		width: 34px;
+		height: 34px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
 	.logo-mark {
-		width: 30px;
-		height: 30px;
-		filter: drop-shadow(0 6px 12px rgba(56, 189, 248, 0.24));
+		width: 100%;
+		height: 100%;
+		filter: drop-shadow(0 7px 14px rgba(56, 189, 248, 0.24));
 	}
 
 	main {
@@ -326,6 +478,55 @@
 		gap: 12px;
 	}
 
+	.advanced-toggle {
+		align-self: center;
+		width: fit-content;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		border: 1px solid var(--border-default);
+		background: var(--surface-secondary);
+		color: var(--text-secondary);
+		border-radius: 8px;
+		font-size: 0.82rem;
+		font-weight: 600;
+		padding: 9px 14px;
+		cursor: pointer;
+		text-align: center;
+		transition:
+			border-color 0.2s,
+			background 0.2s;
+	}
+
+	.advanced-toggle-icon {
+		width: 8px;
+		height: 8px;
+		border-right: 2px solid currentColor;
+		border-bottom: 2px solid currentColor;
+		transform: rotate(45deg) translateY(-1px);
+		transition: transform 0.2s ease;
+	}
+
+	.advanced-toggle.is-open .advanced-toggle-icon {
+		transform: rotate(-135deg) translateY(-1px);
+	}
+
+	.advanced-toggle:hover {
+		border-color: var(--border-focus);
+		background: var(--surface-active);
+	}
+
+	.advanced-panel {
+		border: 1px solid var(--border-subtle);
+		border-radius: 10px;
+		padding: 12px;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		background: var(--surface-secondary);
+	}
+
 	.room-inputs-row {
 		display: flex;
 		align-items: stretch;
@@ -344,6 +545,70 @@
 		flex: 1 1 50%;
 	}
 
+	.options-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 10px;
+	}
+
+	.option-group {
+		flex: 1 1 50%;
+		gap: 8px;
+	}
+
+	.choice-toggle {
+		display: inline-flex;
+		width: fit-content;
+		border: 1px solid var(--border-default);
+		border-radius: 999px;
+		padding: 2px;
+		background: var(--surface-primary);
+	}
+
+	.choice-toggle button {
+		border: none;
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 0.79rem;
+		font-weight: 600;
+		border-radius: 999px;
+		padding: 5px 12px;
+		cursor: pointer;
+	}
+
+	.choice-toggle button.active {
+		background: var(--home-action-primary);
+		color: var(--home-action-text);
+	}
+
+	.choice-toggle button:disabled {
+		cursor: not-allowed;
+		opacity: 0.55;
+	}
+
+	.tiered-note {
+		font-size: 0.75rem;
+		color: var(--text-tertiary);
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.tiered-readmore {
+		border: none;
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 0.75rem;
+		font-weight: 600;
+		text-decoration: underline;
+		cursor: pointer;
+		padding: 0;
+	}
+
+	.tiered-detail {
+		line-height: 1.4;
+	}
+
 	.field-group {
 		display: flex;
 		flex-direction: column;
@@ -354,6 +619,12 @@
 	}
 
 	.field-group label {
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.option-label {
 		font-size: 0.82rem;
 		font-weight: 600;
 		color: var(--text-secondary);
@@ -398,7 +669,10 @@
 		font-size: 0.95rem;
 		font-weight: bold;
 		cursor: pointer;
-		transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+		transition:
+			background 0.2s,
+			border-color 0.2s,
+			box-shadow 0.2s;
 		color: var(--home-action-text);
 		border: 1px solid var(--home-action-border);
 		box-shadow: 0 6px 14px var(--home-action-shadow);
@@ -434,7 +708,9 @@
 	.btn-primary-action:focus-visible,
 	.btn-secondary-action:focus-visible {
 		outline: none;
-		box-shadow: 0 0 0 3px var(--home-action-focus), 0 6px 14px var(--home-action-shadow);
+		box-shadow:
+			0 0 0 3px var(--home-action-focus),
+			0 6px 14px var(--home-action-shadow);
 	}
 
 	.error-msg {
@@ -478,6 +754,14 @@
 		}
 
 		.identity-inputs-row .field-group {
+			flex-basis: 100%;
+		}
+
+		.options-row {
+			flex-wrap: wrap;
+		}
+
+		.option-group {
 			flex-basis: 100%;
 		}
 

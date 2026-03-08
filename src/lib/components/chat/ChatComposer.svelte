@@ -102,6 +102,7 @@
 	export let messageLimit = MESSAGE_TEXT_MAX_BYTES;
 	export let currentUsername = 'You';
 	export let roomId = '';
+	export let aiEnabled = true;
 	export let disabled = false;
 	export let mentionCandidates: string[] = [];
 
@@ -362,17 +363,19 @@
 	function buildMentionOptions(query: string) {
 		const normalizedQuery = query.toLowerCase();
 		const options: MentionOption[] = [];
-		const aiMatches =
-			normalizedQuery === '' ||
-			AI_DISPLAY_NAME.toLowerCase().includes(normalizedQuery) ||
-			'tora'.includes(normalizedQuery);
-		if (aiMatches) {
-			options.push({
-				id: 'ai_tora',
-				label: AI_DISPLAY_NAME,
-				insertValue: AI_PRIMARY_MENTION,
-				isAI: true
-			});
+		if (aiEnabled) {
+			const aiMatches =
+				normalizedQuery === '' ||
+				AI_DISPLAY_NAME.toLowerCase().includes(normalizedQuery) ||
+				'tora'.includes(normalizedQuery);
+			if (aiMatches) {
+				options.push({
+					id: 'ai_tora',
+					label: AI_DISPLAY_NAME,
+					insertValue: AI_PRIMARY_MENTION,
+					isAI: true
+				});
+			}
 		}
 
 		for (const name of normalizeMentionCandidateValues()) {
@@ -449,6 +452,9 @@
 	}
 
 	function requiresAITermsForCurrentSend() {
+		if (!aiEnabled) {
+			return false;
+		}
 		if (taskDraftOpen) {
 			return false;
 		}
@@ -470,7 +476,7 @@
 	}
 
 	function onAIButtonClick() {
-		if (composerDisabled) {
+		if (composerDisabled || !aiEnabled) {
 			return;
 		}
 		closeMentionPicker();
@@ -755,7 +761,10 @@
 		return '';
 	}
 
-	function readKlipyFileUrl(fileRecord: Record<string, unknown> | null, preferredFormats: string[]) {
+	function readKlipyFileUrl(
+		fileRecord: Record<string, unknown> | null,
+		preferredFormats: string[]
+	) {
 		if (!fileRecord) {
 			return '';
 		}
@@ -920,8 +929,13 @@
 				toTrimmedString(entry.webp_url) ||
 				toTrimmedString(entry.media_url);
 			const previewUrl =
-				previewFromMediaFormats || previewFromImages || previewFromFile || directPreview || directMedia;
-			const url = mediaFromMediaFormats || mediaFromImages || mediaFromFile || directMedia || previewUrl;
+				previewFromMediaFormats ||
+				previewFromImages ||
+				previewFromFile ||
+				directPreview ||
+				directMedia;
+			const url =
+				mediaFromMediaFormats || mediaFromImages || mediaFromFile || directMedia || previewUrl;
 			if (!url) {
 				continue;
 			}
@@ -1333,9 +1347,7 @@
 		resizeComposerTextarea();
 		syncComposerHighlightScroll();
 		const nextValue =
-			event.currentTarget instanceof HTMLTextAreaElement
-				? event.currentTarget.value
-				: draftMessage;
+			event.currentTarget instanceof HTMLTextAreaElement ? event.currentTarget.value : draftMessage;
 		emitTypingValue(nextValue);
 		updateMentionSuggestionsFromCaret();
 	}
@@ -1834,9 +1846,11 @@
 		<div class="attachment-error">{attachError}</div>
 	{/if}
 	{#if isProcessingAttachment}
-		<div class="attachment-progress">Compressing &amp; Uploading...</div>
+		<div class="attachment-progress" role="status" aria-label="Uploading attachment">
+			<span class="attachment-progress-bar"></span>
+		</div>
 	{/if}
-		<div class="composer-row" class:typing-active={hasComposerInput}>
+	<div class="composer-row" class:typing-active={hasComposerInput}>
 		<input
 			bind:this={mediaInput}
 			type="file"
@@ -1880,6 +1894,7 @@
 				</div>
 			{/if}
 		</div>
+		{#if aiEnabled}
 			<button
 				type="button"
 				class="ai-button"
@@ -1891,60 +1906,68 @@
 				title="Ask AI Privately"
 			>
 				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
+					<path
+						d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"
+					></path>
 				</svg>
 			</button>
-			<div class="media-picker-wrap" bind:this={mediaPickerWrapEl}>
-				<button
-					type="button"
-					class="media-picker-button"
-					on:click={toggleMediaPicker}
-					disabled={composerDisabled}
-					aria-label="Open emoji, GIF, sticker, and meme picker"
-					title="Emoji, GIFs, stickers, memes"
-				>
-					<svg viewBox="0 0 24 24" aria-hidden="true">
-						<rect x="3.5" y="4.5" width="14" height="14" rx="3"></rect>
-						<circle cx="8.8" cy="9.8" r="1"></circle>
-						<circle cx="12.2" cy="9.8" r="1"></circle>
-						<path d="M7.8 13.1c1.1 1 3 1 4.1 0"></path>
-						<path d="M18 6.3v2.1"></path>
-						<path d="M16.95 7.35h2.1"></path>
-					</svg>
-				</button>
-			</div>
+		{/if}
+		<div class="media-picker-wrap" bind:this={mediaPickerWrapEl}>
+			<button
+				type="button"
+				class="media-picker-button"
+				on:click={toggleMediaPicker}
+				disabled={composerDisabled}
+				aria-label="Open emoji, GIF, sticker, and meme picker"
+				title="Emoji, GIFs, stickers, memes"
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<rect x="3.5" y="4.5" width="14" height="14" rx="3"></rect>
+					<circle cx="8.8" cy="9.8" r="1"></circle>
+					<circle cx="12.2" cy="9.8" r="1"></circle>
+					<path d="M7.8 13.1c1.1 1 3 1 4.1 0"></path>
+					<path d="M18 6.3v2.1"></path>
+					<path d="M16.95 7.35h2.1"></path>
+				</svg>
+			</button>
+		</div>
 
-			<div class="composer-input-wrap">
-				<div class="composer-input-highlight" bind:this={composerHighlightEl} aria-hidden="true">
-					<div class="composer-input-highlight-content">
-						{#if composerMentionSegments.length === 0}
-							<span> </span>
-						{:else}
-							{#each composerMentionSegments as segment, segmentIndex (`${segmentIndex}-${segment.value}-${segment.isMention ? 'mention' : 'text'}`)}
-								{#if segment.isMention}
-									<span class="composer-mention-token">{segment.value}</span>
-								{:else}
-									{segment.value}
-								{/if}
-							{/each}
-						{/if}
-					</div>
+		<div class="composer-input-wrap">
+			<div class="composer-input-highlight" bind:this={composerHighlightEl} aria-hidden="true">
+				<div class="composer-input-highlight-content">
+					{#if composerMentionSegments.length === 0}
+						<span> </span>
+					{:else}
+						{#each composerMentionSegments as segment, segmentIndex (`${segmentIndex}-${segment.value}-${segment.isMention ? 'mention' : 'text'}`)}
+							{#if segment.isMention}
+								<span class="composer-mention-token">{segment.value}</span>
+							{:else}
+								{segment.value}
+							{/if}
+						{/each}
+					{/if}
 				</div>
-				<textarea
-					bind:this={composerTextareaEl}
-					bind:value={draftMessage}
-					rows="1"
-					placeholder={composerPlaceholder}
-					on:input={onComposerInput}
-					on:scroll={syncComposerHighlightScroll}
-					on:keydown={onComposerKeyDown}
-					on:click={onComposerCursorActivity}
-					on:keyup={onComposerCursorActivity}
+			</div>
+			<textarea
+				bind:this={composerTextareaEl}
+				bind:value={draftMessage}
+				rows="1"
+				placeholder={composerPlaceholder}
+				on:input={onComposerInput}
+				on:scroll={syncComposerHighlightScroll}
+				on:keydown={onComposerKeyDown}
+				on:click={onComposerCursorActivity}
+				on:keyup={onComposerCursorActivity}
 				disabled={composerDisabled}
 				autocomplete="off"
 			></textarea>
 			{#if showMentionPicker && mentionOptions.length > 0}
-				<div class="mention-picker" bind:this={mentionPickerEl} role="listbox" aria-label="Mention suggestions">
+				<div
+					class="mention-picker"
+					bind:this={mentionPickerEl}
+					role="listbox"
+					aria-label="Mention suggestions"
+				>
 					{#each mentionOptions as option, index (option.id)}
 						<button
 							type="button"
@@ -2163,12 +2186,34 @@
 	}
 
 	.attachment-progress {
-		font-size: 0.79rem;
-		color: var(--accent-primary);
+		width: 100px;
+		height: 4px;
+		border-radius: 999px;
 		background: var(--state-info-bg);
 		border: 1px solid var(--state-info-border);
-		border-radius: 8px;
-		padding: 0.36rem 0.5rem;
+		overflow: hidden;
+		position: relative;
+	}
+
+	.attachment-progress-bar {
+		position: absolute;
+		top: 0;
+		left: -42%;
+		display: block;
+		width: 42%;
+		height: 100%;
+		border-radius: 999px;
+		background: var(--accent-primary);
+		animation: attachment-progress-slide 1s ease-in-out infinite;
+	}
+
+	@keyframes attachment-progress-slide {
+		0% {
+			left: -42%;
+		}
+		100% {
+			left: 100%;
+		}
 	}
 
 	.media-picker-panel {
@@ -2620,7 +2665,7 @@
 		transition:
 			border-color 140ms ease,
 			box-shadow 140ms ease,
-		background 140ms ease;
+			background 140ms ease;
 	}
 
 	.composer-row.typing-active {

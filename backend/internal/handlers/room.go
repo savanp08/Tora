@@ -52,6 +52,8 @@ const (
 	roomNameRetryLimit   = 3
 	roomSoftExpiryTable  = "room_message_soft_expiry"
 	roomPasswordMaxLen   = 64
+	roomDefaultAIEnabled = true
+	roomDefaultE2EE      = false
 )
 
 var (
@@ -65,6 +67,11 @@ type RoomHandler struct {
 	hub    *websocket.Hub
 	redis  *database.RedisStore
 	scylla *database.ScyllaStore
+}
+
+type roomFeatureFlags struct {
+	AIEnabled  bool
+	E2EEnabled bool
 }
 
 func NewRoomHandler(hub *websocket.Hub, redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) *RoomHandler {
@@ -104,6 +111,11 @@ type JoinRoomRequest struct {
 	Type              string  `json:"type"`
 	Mode              string  `json:"mode"`
 	RoomDurationHours float64 `json:"roomDurationHours"`
+	AIEnabled         *bool   `json:"aiEnabled"`
+	AIEnabledAlt      *bool   `json:"ai_enabled"`
+	E2EEnabled        *bool   `json:"e2eEnabled"`
+	E2EEnabledAlt     *bool   `json:"e2e_enabled"`
+	E2EEEnabledAlt    *bool   `json:"e2ee_enabled"`
 }
 
 type JoinRoomResponse struct {
@@ -117,6 +129,8 @@ type JoinRoomResponse struct {
 	ExpiresAt        int64  `json:"expiresAt,omitempty"`
 	IsAdmin          bool   `json:"isAdmin,omitempty"`
 	RequiresPassword bool   `json:"requiresPassword,omitempty"`
+	AIEnabled        bool   `json:"aiEnabled"`
+	E2EEnabled       bool   `json:"e2eEnabled"`
 	ServerNow        int64  `json:"serverNow,omitempty"`
 }
 
@@ -161,6 +175,11 @@ type CreateBreakRoomRequest struct {
 	RoomPassword    string `json:"roomPassword"`
 	UserID          string `json:"userId"`
 	Username        string `json:"username"`
+	AIEnabled       *bool  `json:"aiEnabled"`
+	AIEnabledAlt    *bool  `json:"ai_enabled"`
+	E2EEnabled      *bool  `json:"e2eEnabled"`
+	E2EEnabledAlt   *bool  `json:"e2e_enabled"`
+	E2EEEnabledAlt  *bool  `json:"e2ee_enabled"`
 }
 
 type CreateBreakRoomResponse struct {
@@ -171,6 +190,8 @@ type CreateBreakRoomResponse struct {
 	CreatedAt        int64  `json:"createdAt"`
 	ExpiresAt        int64  `json:"expiresAt,omitempty"`
 	RequiresPassword bool   `json:"requiresPassword,omitempty"`
+	AIEnabled        bool   `json:"aiEnabled"`
+	E2EEnabled       bool   `json:"e2eEnabled"`
 	ServerNow        int64  `json:"serverNow,omitempty"`
 }
 
@@ -187,6 +208,8 @@ type SidebarRoom struct {
 	IsAdmin          bool   `json:"isAdmin,omitempty"`
 	AdminCode        string `json:"adminCode,omitempty"`
 	RequiresPassword bool   `json:"requiresPassword,omitempty"`
+	AIEnabled        bool   `json:"aiEnabled"`
+	E2EEnabled       bool   `json:"e2eEnabled"`
 }
 
 type SidebarRoomsResponse struct {
@@ -204,6 +227,8 @@ type RoomDetailsResponse struct {
 	ExpiresAt        int64  `json:"expiresAt,omitempty"`
 	IsAdmin          bool   `json:"isAdmin,omitempty"`
 	RequiresPassword bool   `json:"requiresPassword,omitempty"`
+	AIEnabled        bool   `json:"aiEnabled"`
+	E2EEnabled       bool   `json:"e2eEnabled"`
 	ServerNow        int64  `json:"serverNow,omitempty"`
 }
 
@@ -266,6 +291,23 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "mode must be 'create' or 'join'"})
 		return
 	}
+	requestedAIEnabled := resolveOptionalBool(req.AIEnabled, req.AIEnabledAlt)
+	requestedE2EEnabled := resolveOptionalBool(req.E2EEnabled, req.E2EEnabledAlt, req.E2EEEnabledAlt)
+	requestedRoomFeatures := normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE)
+	if mode == "create" {
+		resolvedRoomFeatures, featureErr := resolveRequestedRoomFeatureFlags(
+			requestedAIEnabled,
+			requestedE2EEnabled,
+			roomDefaultAIEnabled,
+			roomDefaultE2EE,
+		)
+		if featureErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": featureErr.Error()})
+			return
+		}
+		requestedRoomFeatures = resolvedRoomFeatures
+	}
 	initialRoomTTL, ttlErr := resolveInitialRoomTTL(req.RoomDurationHours)
 	if ttlErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -274,6 +316,10 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	if mode != "create" {
 		initialRoomTTL = roomDefaultTTL
+	}
+	roomFeatures := normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE)
+	if mode == "create" {
+		roomFeatures = requestedRoomFeatures
 	}
 
 	ctx := context.Background()
@@ -417,7 +463,19 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		}
 		finalRoomID = nextRoomID
 
-		created, err := h.tryCreateRoom(ctx, finalRoomID, finalRoomName, roomType, createdAt, "", "", initialRoomTTL, "")
+		created, err := h.tryCreateRoom(
+			ctx,
+			finalRoomID,
+			finalRoomName,
+			roomType,
+			createdAt,
+			"",
+			"",
+			initialRoomTTL,
+			"",
+			roomFeatures.AIEnabled,
+			roomFeatures.E2EEnabled,
+		)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
@@ -430,6 +488,13 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		}
 		security.RecordIPActivity(ctx, clientIP, "rooms_created")
 	}
+	resolvedRoomFeatures, roomFeatureErr := h.getRoomFeatureFlags(ctx, finalRoomID)
+	if roomFeatureErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve room feature settings"})
+		return
+	}
+	roomFeatures = resolvedRoomFeatures
 	requiresPassword, err := h.isRoomPasswordProtected(ctx, finalRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -529,6 +594,8 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:        expiresAt,
 		IsAdmin:          isAdmin,
 		RequiresPassword: requiresPassword,
+		AIEnabled:        roomFeatures.AIEnabled,
+		E2EEnabled:       roomFeatures.E2EEnabled,
 		ServerNow:        time.Now().Unix(),
 	}
 
@@ -571,6 +638,25 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Parent room not found"})
+		return
+	}
+	parentFeatures, featureErr := h.getRoomFeatureFlags(ctx, parentRoomID)
+	if featureErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to resolve parent room settings"})
+		return
+	}
+	requestedBreakAI := resolveOptionalBool(req.AIEnabled, req.AIEnabledAlt)
+	requestedBreakE2E := resolveOptionalBool(req.E2EEnabled, req.E2EEnabledAlt, req.E2EEEnabledAlt)
+	breakRoomFeatures, featureResolveErr := resolveRequestedRoomFeatureFlags(
+		requestedBreakAI,
+		requestedBreakE2E,
+		parentFeatures.AIEnabled,
+		parentFeatures.E2EEnabled,
+	)
+	if featureResolveErr != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": featureResolveErr.Error()})
 		return
 	}
 
@@ -638,6 +724,8 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		originMessageID,
 		roomDefaultTTL,
 		breakRoomPasswordHash,
+		breakRoomFeatures.AIEnabled,
+		breakRoomFeatures.E2EEnabled,
 	)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -702,6 +790,8 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		createdAt,
 		expiresAt,
 		requiresPassword,
+		breakRoomFeatures.AIEnabled,
+		breakRoomFeatures.E2EEnabled,
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -713,6 +803,8 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:        createdAt,
 		ExpiresAt:        expiresAt,
 		RequiresPassword: requiresPassword,
+		AIEnabled:        breakRoomFeatures.AIEnabled,
+		E2EEnabled:       breakRoomFeatures.E2EEnabled,
 		ServerNow:        time.Now().Unix(),
 	})
 }
@@ -987,6 +1079,7 @@ func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
 	memberCount64, _ := strconv.ParseInt(strings.TrimSpace(meta["member_count"]), 10, 64)
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
 	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
+	roomFeatures := parseRoomFeatureFlagsFromMeta(meta)
 	roomCode, codeErr := h.ensureRoomCode(ctx, roomID)
 	if codeErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1028,6 +1121,8 @@ func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:        expiresAt,
 		IsAdmin:          isAdmin,
 		RequiresPassword: requiresPassword,
+		AIEnabled:        roomFeatures.AIEnabled,
+		E2EEnabled:       roomFeatures.E2EEnabled,
 		ServerNow:        time.Now().Unix(),
 	})
 }
@@ -1864,6 +1959,87 @@ func normalizeRoomPasswordHash(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
 }
 
+func boolToFlagString(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func parseFlagString(raw string, defaultValue bool) bool {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return defaultValue
+	}
+	switch normalized {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return defaultValue
+	}
+}
+
+func resolveOptionalBool(values ...*bool) *bool {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func normalizeRoomFeatureFlags(aiEnabled, e2eEnabled bool) roomFeatureFlags {
+	if e2eEnabled {
+		return roomFeatureFlags{
+			AIEnabled:  false,
+			E2EEnabled: true,
+		}
+	}
+	return roomFeatureFlags{
+		AIEnabled:  aiEnabled,
+		E2EEnabled: false,
+	}
+}
+
+func resolveRequestedRoomFeatureFlags(
+	requestedAIEnabled *bool,
+	requestedE2EEnabled *bool,
+	defaultAIEnabled bool,
+	defaultE2EEnabled bool,
+) (roomFeatureFlags, error) {
+	aiEnabled := defaultAIEnabled
+	e2eEnabled := defaultE2EEnabled
+	if requestedAIEnabled != nil {
+		aiEnabled = *requestedAIEnabled
+	}
+	if requestedE2EEnabled != nil {
+		e2eEnabled = *requestedE2EEnabled
+	}
+	if e2eEnabled {
+		if requestedAIEnabled != nil && *requestedAIEnabled {
+			return roomFeatureFlags{}, fmt.Errorf("AI cannot be enabled when end-to-end encryption is enabled")
+		}
+		aiEnabled = false
+	}
+	return normalizeRoomFeatureFlags(aiEnabled, e2eEnabled), nil
+}
+
+func parseRoomFeatureFlagsFromMeta(meta map[string]string) roomFeatureFlags {
+	aiEnabled := roomDefaultAIEnabled
+	e2eEnabled := roomDefaultE2EE
+	if meta != nil {
+		aiEnabled = parseFlagString(meta["ai_enabled"], roomDefaultAIEnabled)
+		rawE2E := strings.TrimSpace(meta["e2ee_enabled"])
+		if rawE2E == "" {
+			rawE2E = strings.TrimSpace(meta["e2e_enabled"])
+		}
+		e2eEnabled = parseFlagString(rawE2E, roomDefaultE2EE)
+	}
+	return normalizeRoomFeatureFlags(aiEnabled, e2eEnabled)
+}
+
 func hashRoomPassword(password string) string {
 	normalized := normalizeRoomPassword(password)
 	if normalized == "" {
@@ -2317,6 +2493,8 @@ func (h *RoomHandler) ensureRoomSchema() {
 		parent_room_id text,
 		origin_message_id text,
 		admin_code text,
+		ai_enabled boolean,
+		e2ee_enabled boolean,
 		canvas_has_data boolean,
 		rolling_summary text,
 		created_at timestamp,
@@ -2331,6 +2509,8 @@ func (h *RoomHandler) ensureRoomSchema() {
 	alterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD ai_enabled boolean`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD e2ee_enabled boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD canvas_has_data boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD rolling_summary text`, roomsTable),
 	}
@@ -2412,6 +2592,12 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 			adminCode = normalizeRoomAdminCode(cachedAdminCode)
 		}
 	}
+	roomFeatures := normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE)
+	if resolvedFeatures, err := h.getRoomFeatureFlags(ctx, roomID); err == nil {
+		roomFeatures = resolvedFeatures
+	} else {
+		log.Printf("[room] upsert room feature lookup failed room=%s err=%v", roomID, err)
+	}
 
 	createdAt := time.Now().UTC()
 	if storedCreatedAt, err := h.getRoomCreatedAt(ctx, roomID); err == nil && storedCreatedAt > 0 {
@@ -2421,7 +2607,7 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 
 	roomsTable := h.scylla.Table("rooms")
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, admin_code, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, admin_code, ai_enabled, e2ee_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		roomsTable,
 		hardScyllaTTLSeconds,
 	)
@@ -2433,6 +2619,8 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 		parentRoomID,
 		originMessageID,
 		adminCode,
+		roomFeatures.AIEnabled,
+		roomFeatures.E2EEnabled,
 		createdAt,
 		updatedAt,
 	).WithContext(ctx).Exec(); err != nil {
@@ -2450,6 +2638,8 @@ func (h *RoomHandler) tryCreateRoom(
 	originMessageID string,
 	roomTTL time.Duration,
 	roomPasswordHash string,
+	aiEnabled bool,
+	e2eEnabled bool,
 ) (bool, error) {
 	exists, err := h.roomExists(ctx, roomID)
 	if err != nil {
@@ -2459,7 +2649,19 @@ func (h *RoomHandler) tryCreateRoom(
 		return false, nil
 	}
 
-	if err := h.createRoom(ctx, roomID, roomName, roomType, createdAt, parentRoomID, originMessageID, roomTTL, roomPasswordHash); err != nil {
+	if err := h.createRoom(
+		ctx,
+		roomID,
+		roomName,
+		roomType,
+		createdAt,
+		parentRoomID,
+		originMessageID,
+		roomTTL,
+		roomPasswordHash,
+		aiEnabled,
+		e2eEnabled,
+	); err != nil {
 		return false, err
 	}
 
@@ -2528,6 +2730,75 @@ func (h *RoomHandler) getRoomPasswordHash(ctx context.Context, roomID string) (s
 		return "", err
 	}
 	return normalizeRoomPasswordHash(rawHash), nil
+}
+
+func (h *RoomHandler) getRoomFeatureFlags(ctx context.Context, roomID string) (roomFeatureFlags, error) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE), nil
+	}
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE), nil
+	}
+
+	values, err := h.redis.Client.HMGet(
+		ctx,
+		roomKey(normalizedRoomID),
+		"ai_enabled",
+		"e2ee_enabled",
+		"e2e_enabled",
+	).Result()
+	if err == redis.Nil {
+		return normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE), nil
+	}
+	if err != nil {
+		return roomFeatureFlags{}, err
+	}
+
+	aiEnabled := roomDefaultAIEnabled
+	e2eEnabled := roomDefaultE2EE
+	if len(values) > 0 {
+		aiEnabled = parseFlagString(toString(values[0]), roomDefaultAIEnabled)
+	}
+	if len(values) > 1 {
+		rawE2E := strings.TrimSpace(toString(values[1]))
+		if rawE2E == "" && len(values) > 2 {
+			rawE2E = strings.TrimSpace(toString(values[2]))
+		}
+		e2eEnabled = parseFlagString(rawE2E, roomDefaultE2EE)
+	}
+	return normalizeRoomFeatureFlags(aiEnabled, e2eEnabled), nil
+}
+
+func (h *RoomHandler) getRoomMemberJoinedAt(
+	ctx context.Context,
+	roomID string,
+	userID string,
+) (time.Time, error) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	normalizedUserID := normalizeIdentifier(userID)
+	if normalizedRoomID == "" || normalizedUserID == "" {
+		return time.Time{}, nil
+	}
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return time.Time{}, nil
+	}
+	rawJoinedAt, err := h.redis.Client.HGet(
+		ctx,
+		roomMemberJoinedAtKey(normalizedRoomID),
+		normalizedUserID,
+	).Result()
+	if err == redis.Nil {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	joinedAtUnix, parseErr := strconv.ParseInt(strings.TrimSpace(rawJoinedAt), 10, 64)
+	if parseErr != nil || joinedAtUnix <= 0 {
+		return time.Time{}, nil
+	}
+	return time.Unix(joinedAtUnix, 0).UTC(), nil
 }
 
 func (h *RoomHandler) isRoomPasswordProtected(ctx context.Context, roomID string) (bool, error) {
@@ -2932,6 +3203,8 @@ func (h *RoomHandler) createRoom(
 	originMessageID string,
 	roomTTL time.Duration,
 	roomPasswordHash string,
+	aiEnabled bool,
+	e2eEnabled bool,
 ) error {
 	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {
@@ -2949,6 +3222,7 @@ func (h *RoomHandler) createRoom(
 	normalizedParentID := normalizeRoomID(parentRoomID)
 	normalizedOriginMessageID := strings.TrimSpace(originMessageID)
 	normalizedRoomPasswordHash := normalizeRoomPasswordHash(roomPasswordHash)
+	normalizedRoomFeatures := normalizeRoomFeatureFlags(aiEnabled, e2eEnabled)
 
 	if err := h.redis.Client.HSet(ctx, roomKey(normalizedRoomID), map[string]interface{}{
 		"id":                 normalizedRoomID,
@@ -2959,6 +3233,9 @@ func (h *RoomHandler) createRoom(
 		"parent_room_id":     normalizedParentID,
 		"origin_message_id":  normalizedOriginMessageID,
 		"room_password_hash": normalizedRoomPasswordHash,
+		"ai_enabled":         boolToFlagString(normalizedRoomFeatures.AIEnabled),
+		"e2ee_enabled":       boolToFlagString(normalizedRoomFeatures.E2EEnabled),
+		"e2e_enabled":        boolToFlagString(normalizedRoomFeatures.E2EEnabled),
 		"member_count":       0,
 	}).Err(); err != nil {
 		return err
@@ -3291,6 +3568,7 @@ func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, mem
 	createdAt, _ := strconv.ParseInt(strings.TrimSpace(meta["created_at"]), 10, 64)
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
 	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
+	roomFeatures := parseRoomFeatureFlagsFromMeta(meta)
 	h.broadcastBreakMetadataUpdate(
 		parentRoomID,
 		originMessageID,
@@ -3300,6 +3578,8 @@ func (h *RoomHandler) syncBreakJoinCount(ctx context.Context, roomID string, mem
 		createdAt,
 		expiresAt,
 		requiresPassword,
+		roomFeatures.AIEnabled,
+		roomFeatures.E2EEnabled,
 	)
 	return nil
 }
@@ -3313,6 +3593,8 @@ func (h *RoomHandler) broadcastBreakMetadataUpdate(
 	createdAt int64,
 	expiresAt int64,
 	requiresPassword bool,
+	aiEnabled bool,
+	e2eEnabled bool,
 ) {
 	normalizedParentRoomID := normalizeRoomID(parentRoomID)
 	normalizedOriginMessageID := strings.TrimSpace(originMessageID)
@@ -3339,6 +3621,11 @@ func (h *RoomHandler) broadcastBreakMetadataUpdate(
 		"break_room_name":   normalizedBreakRoomName,
 		"requiresPassword":  requiresPassword,
 		"requires_password": requiresPassword,
+		"aiEnabled":         aiEnabled,
+		"ai_enabled":        aiEnabled,
+		"e2eEnabled":        e2eEnabled,
+		"e2e_enabled":       e2eEnabled,
+		"e2ee_enabled":      e2eEnabled,
 		"parentRoomId":      normalizedParentRoomID,
 		"parent_room_id":    normalizedParentRoomID,
 		"serverNow":         serverNow,
@@ -3381,6 +3668,7 @@ func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string
 	memberCount64, _ := strconv.ParseInt(meta["member_count"], 10, 64)
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
 	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
+	roomFeatures := parseRoomFeatureFlagsFromMeta(meta)
 
 	return SidebarRoom{
 		RoomID:           roomID,
@@ -3393,6 +3681,8 @@ func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string
 		CreatedAt:        createdAt,
 		ExpiresAt:        expiresAt,
 		RequiresPassword: requiresPassword,
+		AIEnabled:        roomFeatures.AIEnabled,
+		E2EEnabled:       roomFeatures.E2EEnabled,
 	}, true, nil
 }
 

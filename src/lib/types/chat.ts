@@ -102,6 +102,8 @@ export type ChatThread = {
 	isAdmin?: boolean;
 	adminCode?: string;
 	requiresPassword?: boolean;
+	aiEnabled?: boolean;
+	e2eEnabled?: boolean;
 };
 
 export type OnlineMember = {
@@ -130,6 +132,8 @@ export type SidebarRoom = {
 	isAdmin?: boolean;
 	adminCode?: string;
 	requiresPassword?: boolean;
+	aiEnabled?: boolean;
+	e2eEnabled?: boolean;
 };
 
 export type ReplyTarget = {

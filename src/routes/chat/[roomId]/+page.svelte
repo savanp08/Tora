@@ -14,7 +14,14 @@
 	import ChatUiDialog from '$lib/components/chat/ChatUiDialog.svelte';
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
-	import { activeRoomPassword, authToken, currentUser, isDarkMode } from '$lib/store';
+	import {
+		activeRoomPassword,
+		authToken,
+		currentUser,
+		isDarkMode,
+		sessionAIEnabled,
+		sessionE2EEnabled
+	} from '$lib/store';
 	import type {
 		ChatMessage,
 		ChatThread,
@@ -134,6 +141,10 @@
 	import { generateUsername } from '$lib/utils/usernameGenerator';
 	import { clearSessionToken, getSessionToken, setSessionToken } from '$lib/utils/sessionToken';
 	import {
+		readSessionRoomPreferences,
+		writeSessionRoomPreferences
+	} from '$lib/utils/sessionPreferences';
+	import {
 		closeGlobalSocket,
 		globalMessages,
 		initGlobalSocket,
@@ -179,6 +190,11 @@
 		leftAt: number | null;
 	};
 
+	type RoomFeatureFlags = {
+		aiEnabled: boolean;
+		e2eEnabled: boolean;
+	};
+
 	const CALL_SIGNAL_TYPES = new Set([
 		'call_invite',
 		'webrtc_offer',
@@ -198,6 +214,42 @@
 			}
 		}
 		return '#3b82f6';
+	}
+
+	function normalizeRoomFeatureFlags(aiEnabled: boolean, e2eEnabled: boolean): RoomFeatureFlags {
+		const normalizedE2E = Boolean(e2eEnabled);
+		const normalizedAI = normalizedE2E ? false : Boolean(aiEnabled);
+		return {
+			aiEnabled: normalizedAI,
+			e2eEnabled: normalizedE2E
+		};
+	}
+
+	function parseRoomFeatureFlags(
+		source: Record<string, unknown> | null | undefined,
+		fallback: Partial<RoomFeatureFlags> = {}
+	): RoomFeatureFlags {
+		const aiDefault = typeof fallback.aiEnabled === 'boolean' ? fallback.aiEnabled : true;
+		const e2eDefault = typeof fallback.e2eEnabled === 'boolean' ? fallback.e2eEnabled : false;
+		if (!source) {
+			return normalizeRoomFeatureFlags(aiDefault, e2eDefault);
+		}
+		const rawAI = source.aiEnabled ?? source.ai_enabled ?? aiDefault;
+		const rawE2E =
+			source.e2eEnabled ??
+			source.e2e_enabled ??
+			source.e2eeEnabled ??
+			source.e2ee_enabled ??
+			e2eDefault;
+		return normalizeRoomFeatureFlags(toBool(rawAI), toBool(rawE2E));
+	}
+
+	function syncSessionRoomPreferencesFromStorage() {
+		const preferences = readSessionRoomPreferences();
+		const normalized = writeSessionRoomPreferences(preferences);
+		sessionAIEnabled.set(normalized.aiEnabled);
+		sessionE2EEnabled.set(normalized.e2eEnabled);
+		return normalized;
 	}
 
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -388,6 +440,11 @@
 			roomNameFromURL || undefined,
 			roomMemberHint === '1' ? 'joined' : 'discoverable'
 		);
+	$: activeRoomFeatures = normalizeRoomFeatureFlags(
+		activeThread?.aiEnabled ?? $sessionAIEnabled,
+		activeThread?.e2eEnabled ?? $sessionE2EEnabled
+	);
+	$: activeRoomAllowsAI = activeRoomFeatures.aiEnabled && !activeRoomFeatures.e2eEnabled;
 	$: currentMessages = activeThread?.status === 'left' ? [] : (messagesByRoom[roomId] ?? []);
 	$: activeDiscussionTask =
 		(activeDiscussionTaskId &&
@@ -445,9 +502,7 @@
 				.filter(Boolean)
 		);
 		const onlineMemberIDs = new Set(
-			currentOnlineMembers
-				.map((member) => normalizeIdentifier(member.id))
-				.filter(Boolean)
+			currentOnlineMembers.map((member) => normalizeIdentifier(member.id)).filter(Boolean)
 		);
 		const nextRingingUserIDs = callRingingUserIds.filter((userId) => {
 			const normalizedUserID = normalizeIdentifier(userId);
@@ -614,6 +669,9 @@
 		isDiscussionOpen = false;
 		discussionComments = [];
 	}
+	$: if (showPrivateAiChat && !activeRoomAllowsAI) {
+		showPrivateAiChat = false;
+	}
 	$: if (!focusConsumedForRoom && focusMessageIdFromURL) {
 		focusMessageId = focusMessageIdFromURL;
 		focusConsumedForRoom = true;
@@ -645,6 +703,7 @@
 			return;
 		}
 		syncActiveRoomPasswordFromHash();
+		syncSessionRoomPreferencesFromStorage();
 		initializeTrustedDevicePreference();
 		if (trustedCachingEnabled && roomId) {
 			void hydrateOfflineCache(roomId);
@@ -868,8 +927,8 @@
 					source.id ??
 					source.userId ??
 					source.user_id
-				)
-			);
+			)
+		);
 		if (!participantId) {
 			return true;
 		}
@@ -884,14 +943,11 @@
 						source.username ??
 						source.userName ??
 						source.user_name
-					)
-				) || 'User';
+				)
+			) || 'User';
 		const now = Date.now();
 		const remoteExpiresAt = toInt(
-			nestedPayload.expiresAt ??
-				nestedPayload.expires_at ??
-				source.expiresAt ??
-				source.expires_at
+			nestedPayload.expiresAt ?? nestedPayload.expires_at ?? source.expiresAt ?? source.expires_at
 		);
 		const expiresAt =
 			remoteExpiresAt > now && remoteExpiresAt <= now + REMOTE_TYPING_MAX_FUTURE_MS
@@ -1059,6 +1115,10 @@
 			const joinedRequiresPassword = toBool(
 				data.requiresPassword ?? data.requires_password ?? false
 			);
+			const joinedFeatureFlags = parseRoomFeatureFlags(data as Record<string, unknown>, {
+				aiEnabled: true,
+				e2eEnabled: false
+			});
 
 			ensureRoomThread(joinedRoomId, joinedName, 'joined');
 			roomThreads = sortThreads(
@@ -1070,7 +1130,9 @@
 								name: joinedName,
 								isAdmin: joinedIsAdmin,
 								adminCode: joinedIsAdmin ? joinedAdminCode : '',
-								requiresPassword: joinedRequiresPassword
+								requiresPassword: joinedRequiresPassword,
+								aiEnabled: joinedFeatureFlags.aiEnabled,
+								e2eEnabled: joinedFeatureFlags.e2eEnabled
 							}
 						: thread
 				)
@@ -2142,6 +2204,10 @@
 				(data as { requiresPassword?: unknown; requires_password?: unknown }).requiresPassword ??
 					(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password
 			);
+			const joinedFeatureFlags = parseRoomFeatureFlags(data as Record<string, unknown>, {
+				aiEnabled: true,
+				e2eEnabled: false
+			});
 			ensureRoomThread(normalizedRoomId, joinedName, 'joined');
 			roomThreads = sortThreads(
 				roomThreads.map((thread) =>
@@ -2150,7 +2216,9 @@
 								...thread,
 								isAdmin: joinedIsAdmin,
 								adminCode: joinedIsAdmin ? joinedAdminCode : '',
-								requiresPassword: joinedRequiresPassword
+								requiresPassword: joinedRequiresPassword,
+								aiEnabled: joinedFeatureFlags.aiEnabled,
+								e2eEnabled: joinedFeatureFlags.e2eEnabled
 							}
 						: thread
 				)
@@ -2193,9 +2261,25 @@
 				(data as { expiresAt?: unknown; expires_at?: unknown }).expiresAt ??
 					(data as { expiresAt?: unknown; expires_at?: unknown }).expires_at
 			);
+			const roomFeatureFlags = parseRoomFeatureFlags(data as Record<string, unknown>, {
+				aiEnabled: roomThreads.find((thread) => thread.id === normalizedRoomID)?.aiEnabled ?? true,
+				e2eEnabled:
+					roomThreads.find((thread) => thread.id === normalizedRoomID)?.e2eEnabled ?? false
+			});
 			if (createdAt > 0 || expiresAt > 0) {
 				ensureRoomMeta(normalizedRoomID, createdAt, expiresAt);
 			}
+			roomThreads = sortThreads(
+				roomThreads.map((thread) =>
+					thread.id === normalizedRoomID
+						? {
+								...thread,
+								aiEnabled: roomFeatureFlags.aiEnabled,
+								e2eEnabled: roomFeatureFlags.e2eEnabled
+							}
+						: thread
+				)
+			);
 		} catch (error) {
 			clientLog('api-room-details-error', {
 				roomId: normalizedRoomID,
@@ -2250,6 +2334,10 @@
 						prev?.requiresPassword ??
 						false
 				);
+				const roomFeatureFlags = parseRoomFeatureFlags(roomRecord, {
+					aiEnabled: prev?.aiEnabled ?? true,
+					e2eEnabled: prev?.e2eEnabled ?? false
+				});
 				const shouldMaskPreview = roomStatus !== 'joined' && nextRequiresPassword;
 
 				const next: ChatThread = {
@@ -2269,7 +2357,9 @@
 					treeNumber: toInt(room.treeNumber ?? prev?.treeNumber ?? 0),
 					isAdmin: nextIsAdmin,
 					adminCode: nextIsAdmin ? nextAdminCode : '',
-					requiresPassword: nextRequiresPassword
+					requiresPassword: nextRequiresPassword,
+					aiEnabled: roomFeatureFlags.aiEnabled,
+					e2eEnabled: roomFeatureFlags.e2eEnabled
 				};
 
 				acc.push(next);
@@ -2559,6 +2649,24 @@
 				source.requiresPassword ??
 				source.requires_password
 		);
+		const breakFeatureFlags = parseRoomFeatureFlags(
+			{
+				aiEnabled: payload.aiEnabled ?? payload.ai_enabled ?? source.aiEnabled ?? source.ai_enabled,
+				e2eEnabled:
+					payload.e2eEnabled ??
+					payload.e2e_enabled ??
+					payload.e2eeEnabled ??
+					payload.e2ee_enabled ??
+					source.e2eEnabled ??
+					source.e2e_enabled ??
+					source.e2eeEnabled ??
+					source.e2ee_enabled
+			},
+			{
+				aiEnabled: roomThreads.find((thread) => thread.id === breakRoomID)?.aiEnabled ?? true,
+				e2eEnabled: roomThreads.find((thread) => thread.id === breakRoomID)?.e2eEnabled ?? false
+			}
+		);
 
 		const roomMessages = messagesByRoom[parentRoomID] ?? [];
 		let messageUpdated = false;
@@ -2608,6 +2716,8 @@
 					parentRoomId: parentRoomID || thread.parentRoomId,
 					originMessageId: originMessageID || thread.originMessageId,
 					requiresPassword: nextRequiresPassword,
+					aiEnabled: breakFeatureFlags.aiEnabled,
+					e2eEnabled: breakFeatureFlags.e2eEnabled,
 					lastMessage: shouldMaskPreview ? PROTECTED_ROOM_PREVIEW_TEXT : thread.lastMessage || ''
 				};
 			})
@@ -3921,6 +4031,10 @@
 	}
 
 	function openPrivateAiChat() {
+		if (!activeRoomAllowsAI) {
+			showErrorToast('AI is disabled for this room.');
+			return;
+		}
 		showPrivateAiChat = true;
 	}
 
@@ -4014,6 +4128,7 @@
 			return;
 		}
 		const roomMode: RoomMenuMode = action.mode;
+		const sessionPreferences = syncSessionRoomPreferencesFromStorage();
 		let roomPassword = normalizeRoomPasswordValue($activeRoomPassword);
 		let roomAccessPassword = '';
 		let shouldPromptForAccessPassword = false;
@@ -4044,6 +4159,10 @@
 					type: 'ephemeral',
 					mode: roomMode
 				};
+				if (roomMode === 'create') {
+					payload.aiEnabled = sessionPreferences.aiEnabled;
+					payload.e2eEnabled = sessionPreferences.e2eEnabled;
+				}
 				if (roomMode === 'join' && roomAccessPassword) {
 					payload.roomPassword = roomAccessPassword;
 				}
@@ -4094,6 +4213,15 @@
 						(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
 				);
 				const nextRequiresPassword = requiresPassword;
+				const nextFeatureFlags = parseRoomFeatureFlags(data as Record<string, unknown>, {
+					aiEnabled: sessionPreferences.aiEnabled,
+					e2eEnabled: sessionPreferences.e2eEnabled
+				});
+				if (roomMode === 'create') {
+					const normalized = writeSessionRoomPreferences(nextFeatureFlags);
+					sessionAIEnabled.set(normalized.aiEnabled);
+					sessionE2EEnabled.set(normalized.e2eEnabled);
+				}
 
 				ensureRoomThread(nextRoomId, nextRoomName, 'joined');
 				roomThreads = sortThreads(
@@ -4103,7 +4231,9 @@
 									...thread,
 									isAdmin: nextIsAdmin,
 									adminCode: nextIsAdmin ? nextAdminCode : '',
-									requiresPassword: nextRequiresPassword
+									requiresPassword: nextRequiresPassword,
+									aiEnabled: nextFeatureFlags.aiEnabled,
+									e2eEnabled: nextFeatureFlags.e2eEnabled
 								}
 							: thread
 					)
@@ -4197,6 +4327,10 @@
 						(data as { adminCode?: unknown; admin_code?: unknown }).admin_code
 				);
 				const joinedRequiresPassword = requiresPassword;
+				const joinedFeatureFlags = parseRoomFeatureFlags(data as Record<string, unknown>, {
+					aiEnabled: activeThread.aiEnabled ?? true,
+					e2eEnabled: activeThread.e2eEnabled ?? false
+				});
 				ensureRoomThread(roomId, joinedName, 'joined');
 				markRoomMembershipSynced(roomId);
 				ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
@@ -4209,7 +4343,9 @@
 									name: joinedName,
 									isAdmin: joinedIsAdmin,
 									adminCode: joinedIsAdmin ? joinedAdminCode : '',
-									requiresPassword: joinedRequiresPassword
+									requiresPassword: joinedRequiresPassword,
+									aiEnabled: joinedFeatureFlags.aiEnabled,
+									e2eEnabled: joinedFeatureFlags.e2eEnabled
 								}
 							: thread
 					)
@@ -4921,6 +5057,7 @@
 	}
 
 	async function createBreakRoom(message: ChatMessage) {
+		const sessionPreferences = syncSessionRoomPreferencesFromStorage();
 		const shouldProtectBreakRoom = await openConfirmDialog({
 			title: 'Break Room Password',
 			message:
@@ -4950,6 +5087,8 @@
 					parentRoomId: roomId,
 					originMessageId: message.id,
 					roomPassword: breakRoomAccessPassword,
+					aiEnabled: sessionPreferences.aiEnabled,
+					e2eEnabled: sessionPreferences.e2eEnabled,
 					userId: normalizeIdentifier(currentUserId),
 					username: currentUsername
 				})
@@ -4982,6 +5121,10 @@
 					(data as { requiresPassword?: unknown; requires_password?: unknown }).requires_password ??
 					Boolean(breakRoomAccessPassword)
 			);
+			const breakFeatureFlags = parseRoomFeatureFlags(data as Record<string, unknown>, {
+				aiEnabled: sessionPreferences.aiEnabled,
+				e2eEnabled: sessionPreferences.e2eEnabled
+			});
 
 			messagesByRoom = {
 				...messagesByRoom,
@@ -5007,7 +5150,9 @@
 								parentRoomId: breakParentRoomId || undefined,
 								originMessageId: breakOriginMessageId || undefined,
 								treeNumber: breakTreeNumber > 0 ? breakTreeNumber : (thread.treeNumber ?? 0),
-								requiresPassword: breakRequiresPassword
+								requiresPassword: breakRequiresPassword,
+								aiEnabled: breakFeatureFlags.aiEnabled,
+								e2eEnabled: breakFeatureFlags.e2eEnabled
 							}
 						: thread
 				)
@@ -5233,9 +5378,7 @@
 										<path d="M3.8 18.4a4.6 4.6 0 0 1 9.2 0"></path>
 										<path d="M13 18.4a3.7 3.7 0 0 1 7.4 0"></path>
 									</svg>
-									<span
-										>{activeCallMemberPresence.length}/{CALL_MAX_PARTICIPANTS}</span
-									>
+									<span>{activeCallMemberPresence.length}/{CALL_MAX_PARTICIPANTS}</span>
 								</button>
 								<button
 									type="button"
@@ -5494,6 +5637,7 @@
 						{activeReply}
 						isDarkMode={$isDarkMode}
 						{currentUsername}
+						aiEnabled={activeRoomAllowsAI}
 						mentionCandidates={currentOnlineMembers.map((member) => member.name)}
 						messageLimit={MESSAGE_TEXT_MAX_BYTES}
 						on:send={(event) => void sendMessage(event.detail)}

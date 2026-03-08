@@ -147,6 +147,23 @@ func (c *Client) LoadHistory(ctx context.Context, service *MessageService, roomI
 	if len(history) == 0 {
 		return
 	}
+	if c.Hub != nil && c.Hub.isRoomE2EEEnabled(roomID) {
+		joinedAt := c.Hub.getRoomMemberJoinedAt(c.UserID, roomID)
+		if joinedAt.IsZero() {
+			return
+		}
+		filtered := make([]models.Message, 0, len(history))
+		for _, message := range history {
+			if message.CreatedAt.Before(joinedAt) {
+				continue
+			}
+			filtered = append(filtered, message)
+		}
+		history = filtered
+		if len(history) == 0 {
+			return
+		}
+	}
 
 	packet := map[string]interface{}{
 		"type":    "history",
@@ -384,7 +401,7 @@ func (c *Client) readPump() {
 		hasToraMention := containsToraMention(msg.Content)
 		deviceID := extractDeviceIDFromMessagePayload(raw)
 		c.Hub.broadcast <- msg
-		if hasToraMention && c.Hub != nil {
+		if hasToraMention && c.Hub != nil && c.Hub.isRoomAIEnabled(msg.RoomID) {
 			go c.Hub.handlePublicToraMention(msg, c.clientIP, deviceID)
 		}
 	}

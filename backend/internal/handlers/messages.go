@@ -125,6 +125,20 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	userID := normalizeIdentifier(
+		firstNonEmpty(
+			r.URL.Query().Get("userId"),
+			r.URL.Query().Get("user_id"),
+			r.Header.Get("X-User-Id"),
+		),
+	)
+	roomFeatures, featureErr := h.getRoomFeatureFlags(ctx, roomID)
+	if featureErr != nil {
+		log.Printf("[room-messages] room feature lookup failed room=%s err=%v", roomID, featureErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room settings"})
+		return
+	}
 
 	requiresPassword, passwordErr := h.isRoomPasswordProtected(ctx, roomID)
 	if passwordErr != nil {
@@ -133,19 +147,13 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room access settings"})
 		return
 	}
-	if requiresPassword {
-		userID := normalizeIdentifier(
-			firstNonEmpty(
-				r.URL.Query().Get("userId"),
-				r.URL.Query().Get("user_id"),
-				r.Header.Get("X-User-Id"),
-			),
-		)
+	requiresMembership := requiresPassword || roomFeatures.E2EEnabled
+	if requiresMembership {
 		if userID == "" {
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"error":            "Join the room to view messages",
-				"requiresPassword": true,
+				"requiresPassword": requiresPassword,
 			})
 			return
 		}
@@ -160,9 +168,24 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"error":            "Join the room to view messages",
-				"requiresPassword": true,
+				"requiresPassword": requiresPassword,
 			})
 			return
+		}
+	}
+	visibleFrom := time.Time{}
+	if roomFeatures.E2EEnabled {
+		joinedAt, joinedAtErr := h.getRoomMemberJoinedAt(ctx, roomID, userID)
+		if joinedAtErr != nil {
+			log.Printf("[room-messages] joined-at lookup failed room=%s user=%s err=%v", roomID, userID, joinedAtErr)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to enforce room encryption policy"})
+			return
+		}
+		if joinedAt.IsZero() {
+			visibleFrom = time.Now().UTC()
+		} else {
+			visibleFrom = joinedAt
 		}
 	}
 
@@ -171,6 +194,7 @@ func (h *RoomHandler) GetRoomMessages(w http.ResponseWriter, r *http.Request) {
 		roomID,
 		beforeMessageID,
 		beforeCreatedAt,
+		visibleFrom,
 		limit,
 	)
 	if err != nil {
@@ -853,11 +877,16 @@ func (h *RoomHandler) queryRoomMessagesPage(
 	ctx context.Context,
 	roomID, beforeMessageID string,
 	beforeCreatedAt time.Time,
+	visibleFrom time.Time,
 	limit int,
 ) ([]models.Message, bool, error) {
 	softCutoff, err := h.resolveRoomMessageSoftCutoff(ctx, roomID)
 	if err != nil {
 		return nil, false, err
+	}
+	effectiveCutoff := softCutoff
+	if !visibleFrom.IsZero() && visibleFrom.After(effectiveCutoff) {
+		effectiveCutoff = visibleFrom
 	}
 
 	messagesTable := h.scylla.Table("messages")
@@ -865,11 +894,11 @@ func (h *RoomHandler) queryRoomMessagesPage(
 
 	baseSelect := `SELECT room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at FROM %s`
 	query := fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
-	args := []interface{}{roomID, softCutoff, fetchLimit}
+	args := []interface{}{roomID, effectiveCutoff, fetchLimit}
 
 	if !beforeCreatedAt.IsZero() {
 		query = fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at < ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
-		args = []interface{}{roomID, beforeCreatedAt, softCutoff, fetchLimit}
+		args = []interface{}{roomID, beforeCreatedAt, effectiveCutoff, fetchLimit}
 	} else if beforeMessageID != "" {
 		resolvedBeforeCreatedAt, lookupErr := h.lookupMessageCreatedAt(ctx, roomID, beforeMessageID)
 		if lookupErr != nil {
@@ -879,7 +908,7 @@ func (h *RoomHandler) queryRoomMessagesPage(
 			return nil, false, lookupErr
 		}
 		query = fmt.Sprintf(baseSelect+` WHERE room_id = ? AND created_at < ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?`, messagesTable)
-		args = []interface{}{roomID, resolvedBeforeCreatedAt, softCutoff, fetchLimit}
+		args = []interface{}{roomID, resolvedBeforeCreatedAt, effectiveCutoff, fetchLimit}
 	}
 
 	iter := h.scylla.Session.Query(query, args...).WithContext(ctx).Iter()
@@ -924,7 +953,7 @@ func (h *RoomHandler) queryRoomMessagesPage(
 		&replySnippet,
 		&createdAt,
 	) {
-		if createdAt.Before(softCutoff) {
+		if createdAt.Before(effectiveCutoff) {
 			continue
 		}
 		if decrypted, decryptErr := security.DecryptMessage(content); decryptErr == nil {

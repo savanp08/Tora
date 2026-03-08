@@ -3078,6 +3078,7 @@ If the user asks for edits, apply them to the existing code and return the full 
 		showCanvasAIPrompt = true;
 		canvasAIError = '';
 		void tick().then(() => {
+			resizeCanvasAIPromptInput();
 			canvasAIPromptElement?.focus();
 		});
 	}
@@ -3233,6 +3234,37 @@ Return only the final code for this file.`;
 		} finally {
 			isCanvasAIGenerating = false;
 			canvasAIAbortController = null;
+		}
+	}
+
+	function parseCanvasAIPromptPixel(value: string) {
+		const parsed = Number.parseFloat(value);
+		return Number.isFinite(parsed) ? parsed : 0;
+	}
+
+	function resizeCanvasAIPromptInput() {
+		if (!canvasAIPromptElement || typeof window === 'undefined') {
+			return;
+		}
+		const styles = window.getComputedStyle(canvasAIPromptElement);
+		const lineHeight = parseCanvasAIPromptPixel(styles.lineHeight) || 18;
+		const verticalPadding =
+			parseCanvasAIPromptPixel(styles.paddingTop) + parseCanvasAIPromptPixel(styles.paddingBottom);
+		const verticalBorder =
+			parseCanvasAIPromptPixel(styles.borderTopWidth) + parseCanvasAIPromptPixel(styles.borderBottomWidth);
+		const minHeight = lineHeight + verticalPadding + verticalBorder;
+		const maxHeight = lineHeight * 2 + verticalPadding + verticalBorder;
+		canvasAIPromptElement.style.height = 'auto';
+		const nextHeight = Math.max(minHeight, Math.min(canvasAIPromptElement.scrollHeight, maxHeight));
+		canvasAIPromptElement.style.height = `${nextHeight}px`;
+		canvasAIPromptElement.style.overflowY =
+			canvasAIPromptElement.scrollHeight > maxHeight ? 'auto' : 'hidden';
+	}
+
+	function handleCanvasAIPromptInput() {
+		resizeCanvasAIPromptInput();
+		if (canvasAIError) {
+			canvasAIError = '';
 		}
 	}
 
@@ -4895,9 +4927,10 @@ Return only the final code for this file.`;
 							<textarea
 								bind:this={canvasAIPromptElement}
 								bind:value={canvasAIPrompt}
-								rows="3"
+								rows="1"
 								class="canvas-ai-input"
 								placeholder="Describe what code you want in this file..."
+								on:input={handleCanvasAIPromptInput}
 								on:keydown={handleCanvasAIPromptKeydown}
 								disabled={isCanvasAIGenerating}
 							></textarea>
@@ -6161,21 +6194,25 @@ Return only the final code for this file.`;
 		z-index: 8;
 		width: 1.95rem;
 		height: 1.95rem;
-		border: 1px solid rgba(122, 168, 244, 0.75);
-		background: rgba(35, 66, 122, 0.9);
-		color: #ecf4ff;
-		border-radius: 0.5rem;
+		border: 1px solid rgba(168, 203, 255, 0.46);
+		background: linear-gradient(160deg, rgba(82, 130, 212, 0.45), rgba(25, 48, 89, 0.56));
+		color: #f3f8ff;
+		border-radius: 0.65rem;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		padding: 0;
 		cursor: pointer;
-		box-shadow: 0 10px 24px rgba(0, 0, 0, 0.34);
+		backdrop-filter: blur(10px) saturate(130%);
+		-webkit-backdrop-filter: blur(10px) saturate(130%);
+		box-shadow:
+			0 12px 26px rgba(0, 0, 0, 0.36),
+			inset 0 1px 0 rgba(255, 255, 255, 0.25);
 	}
 
 	.canvas-ai-trigger:hover:not(:disabled) {
-		border-color: rgba(155, 197, 255, 0.95);
-		background: rgba(49, 88, 156, 0.96);
+		border-color: rgba(182, 216, 255, 0.82);
+		background: linear-gradient(160deg, rgba(101, 150, 232, 0.52), rgba(36, 62, 108, 0.64));
 	}
 
 	.canvas-ai-trigger:disabled {
@@ -6194,15 +6231,22 @@ Return only the final code for this file.`;
 		top: 3.05rem;
 		right: 0.75rem;
 		z-index: 9;
-		width: min(24.5rem, calc(100% - 1.5rem));
-		padding: 0.64rem;
+		width: min(22.5rem, calc(100% - 1.5rem));
+		
+		padding: 0.58rem;
 		border-radius: 0.62rem;
-		border: 1px solid rgba(122, 154, 205, 0.52);
-		background: rgba(9, 15, 24, 0.96);
-		box-shadow: 0 18px 42px rgba(0, 0, 0, 0.48);
+		border: 1px solid rgba(112, 133, 166, 0.6);
+		background: linear-gradient(180deg, rgba(27, 37, 52, 0.97) 0%, rgba(20, 28, 40, 0.97) 100%);
+		box-shadow:
+			0 18px 30px rgba(0, 0, 0, 0.42),
+			inset 0 1px 0 rgba(255, 255, 255, 0.04);
 		display: flex;
 		flex-direction: column;
-		gap: 0.55rem;
+		gap: 0.44rem;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		backdrop-filter: blur(9px) saturate(110%);
+		-webkit-backdrop-filter: blur(9px) saturate(110%);
 	}
 
 	.canvas-ai-panel-header {
@@ -6210,103 +6254,116 @@ Return only the final code for this file.`;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
-		color: #dce8ff;
-		font-size: 0.73rem;
-		font-weight: 700;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
+		color: #d7e2f5;
+		font-size: 0.72rem;
+		font-weight: 600;
+		letter-spacing: 0.01em;
 	}
 
 	.canvas-ai-close {
-		border: 1px solid rgba(103, 125, 160, 0.52);
-		background: rgba(22, 32, 48, 0.9);
-		color: #dbe6f8;
+		border: 1px solid rgba(101, 121, 151, 0.56);
+		background: rgba(27, 37, 53, 0.9);
+		color: #d6e5fd;
 		border-radius: 0.34rem;
-		width: 1.5rem;
-		height: 1.5rem;
+		width: 1.3rem;
+		height: 1.3rem;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		cursor: pointer;
 		padding: 0;
-		font-size: 1rem;
+		font-size: 0.95rem;
 		line-height: 1;
 	}
 
 	.canvas-ai-close:hover:not(:disabled) {
-		border-color: rgba(139, 168, 211, 0.72);
-		background: rgba(41, 61, 92, 0.92);
+		border-color: rgba(138, 165, 208, 0.78);
+		background: rgba(43, 58, 82, 0.94);
 	}
 
 	.canvas-ai-input {
 		width: 100%;
-		min-height: 5.2rem;
-		border: 1px solid rgba(103, 125, 160, 0.56);
-		background: rgba(15, 23, 36, 0.94);
-		color: #e7efff;
-		border-radius: 0.45rem;
-		padding: 0.56rem 0.62rem;
-		font-size: 0.8rem;
-		line-height: 1.38;
-		resize: vertical;
+		min-height: 0;
+		border: 1px solid rgba(113, 134, 168, 0.56);
+		background: rgba(22, 31, 44, 0.92);
+		color: #eaf2ff;
+		border-radius: 0.42rem;
+		padding: 0.44rem 0.56rem;
+		font-size: 0.74rem;
+		line-height: 1.33;
+		resize: none;
+		overflow-y: hidden;
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+	}
+
+	.canvas-ai-input::placeholder {
+		color: rgba(172, 191, 224, 0.76);
 	}
 
 	.canvas-ai-input:focus {
 		outline: none;
-		border-color: rgba(117, 166, 248, 0.86);
-		box-shadow: 0 0 0 2px rgba(117, 166, 248, 0.24);
+		border-color: rgba(130, 172, 243, 0.88);
+		box-shadow: 0 0 0 2px rgba(117, 166, 248, 0.2);
 	}
 
 	.canvas-ai-error {
-		font-size: 0.72rem;
+		font-size: 0.71rem;
 		font-weight: 500;
-		color: #ffd4d4;
-		background: rgba(131, 35, 35, 0.5);
-		border: 1px solid rgba(231, 138, 138, 0.58);
-		border-radius: 0.42rem;
-		padding: 0.4rem 0.5rem;
+		color: #ffd7d7;
+		background: rgba(132, 33, 33, 0.44);
+		border: 1px solid rgba(227, 134, 134, 0.52);
+		border-radius: 0.44rem;
+		padding: 0.36rem 0.5rem;
 	}
 
 	.canvas-ai-actions {
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
-		gap: 0.4rem;
+		gap: 0.36rem;
+		padding-top: 0.08rem;
 	}
 
 	.canvas-ai-action {
-		border: 1px solid rgba(103, 125, 160, 0.52);
-		border-radius: 0.42rem;
-		padding: 0.34rem 0.64rem;
-		font-size: 0.72rem;
+		border: 1px solid rgba(104, 126, 157, 0.62);
+		border-radius: 0.34rem;
+		padding: 0.28rem 0.58rem;
+		font-size: 0.68rem;
 		font-weight: 600;
 		cursor: pointer;
+		line-height: 1.16;
 	}
 
 	.canvas-ai-action.secondary {
-		background: rgba(24, 35, 52, 0.88);
-		color: #dbe6f8;
+		background: rgba(30, 40, 57, 0.9);
+		color: #d5e2f7;
 	}
 
 	.canvas-ai-action.primary {
-		border-color: rgba(95, 130, 180, 0.72);
-		background: rgba(36, 71, 130, 0.94);
-		color: #f7fbff;
+		border-color: rgba(81, 119, 177, 0.8);
+		background: linear-gradient(180deg, rgba(57, 89, 137, 0.98) 0%, rgba(45, 73, 116, 0.98) 100%);
+		color: #f2f8ff;
 	}
 
 	.canvas-ai-action:hover:not(:disabled) {
-		border-color: rgba(139, 168, 211, 0.72);
-		background: rgba(41, 61, 92, 0.92);
+		border-color: rgba(139, 164, 205, 0.78);
+		background: rgba(43, 58, 80, 0.95);
 	}
 
 	.canvas-ai-action.primary:hover:not(:disabled) {
-		border-color: rgba(122, 168, 244, 0.84);
-		background: rgba(49, 88, 156, 0.98);
+		border-color: rgba(121, 161, 224, 0.88);
+		background: linear-gradient(180deg, rgba(67, 103, 159, 0.98) 0%, rgba(52, 83, 131, 0.98) 100%);
 	}
 
 	.canvas-ai-action:disabled {
 		opacity: 0.56;
 		cursor: not-allowed;
+	}
+
+	@media (max-height: 760px) {
+		.canvas-ai-panel {
+			max-height: min(calc(100% - 3.3rem), calc(100dvh - 6.4rem));
+		}
 	}
 
 	.snippet-composer-overlay {

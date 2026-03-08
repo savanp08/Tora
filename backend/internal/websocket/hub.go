@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1794,4 +1795,94 @@ func (h *Hub) isRoomPasswordProtected(roomID string) bool {
 		return false
 	}
 	return strings.TrimSpace(passwordHash) != ""
+}
+
+func parseBoolFlag(value string, defaultValue bool) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return defaultValue
+	}
+	switch normalized {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return defaultValue
+	}
+}
+
+func (h *Hub) getRoomFeatureFlags(roomID string) (bool, bool) {
+	roomID = normalizeRoomID(roomID)
+	if roomID == "" {
+		return true, false
+	}
+	if h == nil || h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return true, false
+	}
+
+	values, err := h.msgService.Redis.Client.HMGet(
+		context.Background(),
+		roomKeyPrefix+roomID,
+		"ai_enabled",
+		"e2ee_enabled",
+		"e2e_enabled",
+	).Result()
+	if err != nil && err != redis.Nil {
+		log.Printf("[ws] room feature lookup failed room=%s err=%v", roomID, err)
+		return true, false
+	}
+	aiEnabled := true
+	e2eEnabled := false
+	if len(values) > 0 {
+		aiEnabled = parseBoolFlag(toString(values[0]), true)
+	}
+	if len(values) > 1 {
+		rawE2E := strings.TrimSpace(toString(values[1]))
+		if rawE2E == "" && len(values) > 2 {
+			rawE2E = strings.TrimSpace(toString(values[2]))
+		}
+		e2eEnabled = parseBoolFlag(rawE2E, false)
+	}
+	if e2eEnabled {
+		aiEnabled = false
+	}
+	return aiEnabled, e2eEnabled
+}
+
+func (h *Hub) isRoomAIEnabled(roomID string) bool {
+	aiEnabled, _ := h.getRoomFeatureFlags(roomID)
+	return aiEnabled
+}
+
+func (h *Hub) isRoomE2EEEnabled(roomID string) bool {
+	_, e2eEnabled := h.getRoomFeatureFlags(roomID)
+	return e2eEnabled
+}
+
+func (h *Hub) getRoomMemberJoinedAt(userID, roomID string) time.Time {
+	normalizedUserID := strings.TrimSpace(userID)
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedUserID == "" || normalizedRoomID == "" {
+		return time.Time{}
+	}
+	if h == nil || h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return time.Time{}
+	}
+	rawJoinedAt, err := h.msgService.Redis.Client.HGet(
+		context.Background(),
+		roomKeyPrefix+normalizedRoomID+":member_joined_at",
+		normalizedUserID,
+	).Result()
+	if err != nil {
+		if err != redis.Nil {
+			log.Printf("[ws] room member joined-at lookup failed room=%s user=%s err=%v", normalizedRoomID, normalizedUserID, err)
+		}
+		return time.Time{}
+	}
+	joinedAtUnix, parseErr := strconv.ParseInt(strings.TrimSpace(rawJoinedAt), 10, 64)
+	if parseErr != nil || joinedAtUnix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(joinedAtUnix, 0).UTC()
 }
