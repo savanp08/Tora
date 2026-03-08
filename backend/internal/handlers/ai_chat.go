@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,15 +13,29 @@ import (
 
 	"github.com/savanp08/converse/internal/ai"
 	"github.com/savanp08/converse/internal/database"
+	"github.com/savanp08/converse/internal/models"
 )
 
-const privateAIChatLogsTableName = "private_ai_logs"
+const (
+	privateAIChatLogsTableName   = "private_ai_logs"
+	privateAIRoomHistoryPrefix   = "room:history:"
+	privateAIContextMessageLimit = 50
+)
+
+const privateAISystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
+RULES:
+1. Tone: Quirky, witty, lightly sarcastic. Playful "hallucinating entity" persona allowed.
+2. Accuracy: Persona is style only. STRICT FACTUALITY. Never invent data; admit uncertainty. Ground answers in provided room context.
+3. Formatting: NO heavy markdown (**, *, #, ---). Use - or • for lists.
+4. Delivery: Direct, natural. NO meta-commentary ("Here is...", "As an AI..."). Answer first, avoid unprompted summaries. If unclear, ask exactly one concise clarifying question.
+5. You are private to this user; no one else can see this response.`
 
 // DefaultAIRouter serves private chat requests using configured AI providers.
 var DefaultAIRouter = ai.DefaultRouter
 
 var privateAIChatAuditStore struct {
 	mu     sync.RWMutex
+	redis  *database.RedisStore
 	scylla *database.ScyllaStore
 }
 
@@ -32,6 +47,7 @@ var privateAIChatSchemaState struct {
 type privateAIChatRequest struct {
 	Prompt   string `json:"prompt"`
 	DeviceID string `json:"deviceId"`
+	RoomID   string `json:"roomId"`
 }
 
 type privateAIChatResponse struct {
@@ -48,8 +64,9 @@ type privateAIChatAuditRecord struct {
 	Timestamp time.Time
 }
 
-func ConfigureAIChatPersistence(scyllaStore *database.ScyllaStore) {
+func ConfigureAIChatPersistence(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) {
 	privateAIChatAuditStore.mu.Lock()
+	privateAIChatAuditStore.redis = redisStore
 	privateAIChatAuditStore.scylla = scyllaStore
 	privateAIChatAuditStore.mu.Unlock()
 }
@@ -74,6 +91,7 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deviceID := strings.TrimSpace(req.DeviceID)
+	roomID := resolvePrivateAIRoomID(req.RoomID, r)
 
 	userID, username := extractAIChatIdentity(r)
 	if userID == "" || username == "" {
@@ -86,7 +104,8 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 		ipAddress = "unknown"
 	}
 
-	responseText, err := DefaultAIRouter.GenerateChatResponse(r.Context(), prompt)
+	aiPrompt := buildPrivateAIPromptWithRoomContext(r.Context(), roomID, prompt)
+	responseText, err := DefaultAIRouter.GenerateChatResponse(r.Context(), aiPrompt)
 	if err != nil {
 		if errors.Is(err, ai.ErrAllAIProvidersExhausted) {
 			writeAIChatError(w, http.StatusServiceUnavailable, "All AI providers exhausted")
@@ -204,6 +223,225 @@ func activePrivateAIChatScyllaStore() *database.ScyllaStore {
 	privateAIChatAuditStore.mu.RLock()
 	defer privateAIChatAuditStore.mu.RUnlock()
 	return privateAIChatAuditStore.scylla
+}
+
+func activePrivateAIChatStores() (*database.RedisStore, *database.ScyllaStore) {
+	privateAIChatAuditStore.mu.RLock()
+	defer privateAIChatAuditStore.mu.RUnlock()
+	return privateAIChatAuditStore.redis, privateAIChatAuditStore.scylla
+}
+
+func resolvePrivateAIRoomID(rawRoomID string, r *http.Request) string {
+	if r == nil {
+		return normalizeRoomID(rawRoomID)
+	}
+	return normalizeRoomID(firstNonEmpty(
+		rawRoomID,
+		strings.TrimSpace(r.Header.Get("X-Room-Id")),
+		strings.TrimSpace(r.URL.Query().Get("roomId")),
+		strings.TrimSpace(r.URL.Query().Get("room_id")),
+	))
+}
+
+func buildPrivateAIPromptWithRoomContext(ctx context.Context, roomID, prompt string) string {
+	normalizedPrompt := strings.TrimSpace(prompt)
+	normalizedRoomID := normalizeRoomID(roomID)
+	rollingSummary := ""
+	contextMessages := []models.Message{}
+	if normalizedRoomID != "" {
+		rollingSummary = loadPrivateAIRoomSummary(ctx, normalizedRoomID)
+		contextMessages = loadPrivateAIRecentMessages(ctx, normalizedRoomID, privateAIContextMessageLimit)
+	}
+
+	encodedMessages := "[]"
+	if len(contextMessages) > 0 {
+		payload, err := json.Marshal(contextMessages)
+		if err != nil {
+			log.Printf("[private-ai] context marshal failed room=%s err=%v", normalizedRoomID, err)
+		} else {
+			encodedMessages = string(payload)
+		}
+	}
+
+	if strings.TrimSpace(rollingSummary) == "" {
+		rollingSummary = "No saved room summary available."
+	}
+
+	return fmt.Sprintf(
+		"%s\n\nRoom ID: %s\nSystem Context: %s. Recent Chat History: %s. Respond to this new user prompt: %s",
+		privateAISystemInstruction,
+		normalizedRoomID,
+		strings.TrimSpace(rollingSummary),
+		encodedMessages,
+		normalizedPrompt,
+	)
+}
+
+func loadPrivateAIRoomSummary(ctx context.Context, roomID string) string {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	redisStore, scyllaStore := activePrivateAIChatStores()
+	if redisStore != nil {
+		summary, err := redisStore.GetRoomSummary(ctx, normalizedRoomID)
+		if err != nil {
+			log.Printf("[private-ai] redis summary lookup failed room=%s err=%v", normalizedRoomID, err)
+		} else if strings.TrimSpace(summary) != "" {
+			return strings.TrimSpace(summary)
+		}
+	}
+
+	if scyllaStore != nil {
+		summary, err := scyllaStore.GetRoomSummary(ctx, normalizedRoomID)
+		if err != nil {
+			log.Printf("[private-ai] scylla summary lookup failed room=%s err=%v", normalizedRoomID, err)
+		} else if strings.TrimSpace(summary) != "" {
+			if redisStore != nil {
+				if cacheErr := redisStore.SetRoomSummary(ctx, normalizedRoomID, summary); cacheErr != nil {
+					log.Printf("[private-ai] redis summary backfill failed room=%s err=%v", normalizedRoomID, cacheErr)
+				}
+			}
+			return strings.TrimSpace(summary)
+		}
+	}
+	return ""
+}
+
+func loadPrivateAIRecentMessages(ctx context.Context, roomID string, limit int) []models.Message {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return []models.Message{}
+	}
+	if limit <= 0 {
+		limit = privateAIContextMessageLimit
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	redisStore, _ := activePrivateAIChatStores()
+	if redisStore == nil || redisStore.Client == nil {
+		return []models.Message{}
+	}
+
+	rawEntries, err := redisStore.Client.LRange(
+		ctx,
+		privateAIRoomHistoryPrefix+normalizedRoomID,
+		int64(-limit),
+		-1,
+	).Result()
+	if err != nil {
+		log.Printf("[private-ai] redis message context lookup failed room=%s err=%v", normalizedRoomID, err)
+		return []models.Message{}
+	}
+
+	messages := decodePrivateAICachedMessages(rawEntries, normalizedRoomID)
+	if len(messages) > limit {
+		messages = messages[len(messages)-limit:]
+	}
+	return messages
+}
+
+func decodePrivateAICachedMessages(rawMessages []string, roomID string) []models.Message {
+	if len(rawMessages) == 0 {
+		return []models.Message{}
+	}
+	messages := make([]models.Message, 0, len(rawMessages))
+	for _, raw := range rawMessages {
+		var message models.Message
+		if err := json.Unmarshal([]byte(raw), &message); err != nil {
+			continue
+		}
+
+		if message.CreatedAt.IsZero() || strings.TrimSpace(message.SenderName) == "" {
+			var legacy map[string]any
+			if err := json.Unmarshal([]byte(raw), &legacy); err == nil {
+				if strings.TrimSpace(message.SenderName) == "" {
+					message.SenderName = strings.TrimSpace(firstNonEmpty(
+						toString(legacy["senderName"]),
+						toString(legacy["username"]),
+						toString(legacy["senderId"]),
+						toString(legacy["userId"]),
+					))
+				}
+				if strings.TrimSpace(message.SenderID) == "" {
+					message.SenderID = strings.TrimSpace(firstNonEmpty(
+						toString(legacy["senderId"]),
+						toString(legacy["userId"]),
+					))
+				}
+				if strings.TrimSpace(message.Content) == "" {
+					message.Content = strings.TrimSpace(firstNonEmpty(
+						toString(legacy["content"]),
+						toString(legacy["text"]),
+						toString(legacy["message"]),
+					))
+				}
+				if strings.TrimSpace(message.Type) == "" {
+					message.Type = strings.TrimSpace(toString(legacy["type"]))
+				}
+				if message.CreatedAt.IsZero() {
+					message.CreatedAt = parsePrivateAITime(
+						firstNonNil(legacy["createdAt"], legacy["time"], legacy["timestamp"]),
+					)
+				}
+			}
+		}
+
+		if strings.TrimSpace(message.RoomID) == "" {
+			message.RoomID = roomID
+		}
+		if strings.TrimSpace(message.Type) == "" {
+			message.Type = "text"
+		}
+		if strings.TrimSpace(message.SenderName) == "" {
+			message.SenderName = "Unknown"
+		}
+		if strings.TrimSpace(message.Content) == "" && strings.TrimSpace(message.MediaURL) == "" {
+			continue
+		}
+		messages = append(messages, message)
+	}
+	return messages
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func parsePrivateAITime(value any) time.Time {
+	switch typed := value.(type) {
+	case string:
+		candidate := strings.TrimSpace(typed)
+		if candidate == "" {
+			return time.Time{}
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, candidate); err == nil {
+			return parsed.UTC()
+		}
+		if parsed, err := time.Parse(time.RFC3339, candidate); err == nil {
+			return parsed.UTC()
+		}
+	case float64:
+		return time.Unix(int64(typed), 0).UTC()
+	case int64:
+		return time.Unix(typed, 0).UTC()
+	case json.Number:
+		if n, err := typed.Int64(); err == nil {
+			return time.Unix(n, 0).UTC()
+		}
+	}
+	return time.Time{}
 }
 
 func persistPrivateAIChatAuditRecord(ctx context.Context, record privateAIChatAuditRecord) error {

@@ -20,8 +20,11 @@
 	const AI_DISPLAY_NAME = 'ToraAI';
 	const KLIPY_API_KEY_RAW = import.meta.env.VITE_KLIPY_API_KEY as string | undefined;
 	const KLIPY_API_KEY = KLIPY_API_KEY_RAW?.trim() ?? '';
+	const KLIPY_API_BASE = 'https://api.klipy.com';
 	const KLIPY_CLIENT_KEY = 'converse-web';
 	const KLIPY_SEARCH_LIMIT = 24;
+	const KLIPY_DEFAULT_LOCALE = 'us';
+	const KLIPY_CONTENT_FILTER = 'medium';
 	const COMMON_EMOJIS = [
 		'😊',
 		'😀',
@@ -57,11 +60,15 @@
 		'🤖'
 	];
 
-	type GifResult = {
+	type MediaAssetKind = 'gif' | 'sticker' | 'meme';
+	type MediaPickerTab = 'emoji' | 'gif' | 'sticker' | 'meme';
+
+	type MediaAssetResult = {
 		id: string;
 		url: string;
 		previewUrl: string;
 		title: string;
+		kind: MediaAssetKind;
 	};
 
 	type MentionOption = {
@@ -99,8 +106,8 @@
 	let attachedPickerType: 'media' | 'file' = 'file';
 	let attachmentPreviewURL = '';
 	let attachWrapEl: HTMLDivElement | null = null;
-	let gifPickerEl: HTMLDivElement | null = null;
-	let emojiWrapEl: HTMLDivElement | null = null;
+	let mediaPickerEl: HTMLDivElement | null = null;
+	let mediaPickerWrapEl: HTMLDivElement | null = null;
 	let mentionPickerEl: HTMLDivElement | null = null;
 	let composerTextareaEl: HTMLTextAreaElement | null = null;
 	let composerHighlightEl: HTMLDivElement | null = null;
@@ -117,15 +124,21 @@
 	let mediaRecorder: MediaRecorder | null = null;
 	let audioChunks: Blob[] = [];
 	let recordingStream: MediaStream | null = null;
-	let showGifPicker = false;
-	let showEmojiPicker = false;
-	let gifQuery = '';
-	let gifResults: GifResult[] = [];
+	let showMediaPicker = false;
+	let activeMediaTab: MediaPickerTab = 'emoji';
+	let mediaQuery = '';
+	let gifResults: MediaAssetResult[] = [];
+	let stickerResults: MediaAssetResult[] = [];
+	let memeResults: MediaAssetResult[] = [];
 	let gifLoading = false;
+	let stickerLoading = false;
+	let memeLoading = false;
 	let gifError = '';
-	let gifSearchTimer: ReturnType<typeof setTimeout> | null = null;
-	let gifAbortController: AbortController | null = null;
-	let attachedGif: GifResult | null = null;
+	let stickerError = '';
+	let memeError = '';
+	let mediaSearchTimer: ReturnType<typeof setTimeout> | null = null;
+	let mediaAbortController: AbortController | null = null;
+	let attachedMediaAsset: MediaAssetResult | null = null;
 	let hasAcceptedAITerms = false;
 	let showAIDisclaimerModal = false;
 	let pendingAIAction: PendingAIAction = null;
@@ -142,7 +155,37 @@
 	$: isOverMessageLimit = draftMessageBytes > messageLimit;
 	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
 	$: taskDraftReady = taskDraftOpen && taskDraftTitle.trim() !== '' && taskDraftItems.length > 0;
-	$: hasPendingAttachment = Boolean(attachedFile || attachedGif);
+	$: hasPendingAttachment = Boolean(attachedFile || attachedMediaAsset);
+	$: activeMediaResults =
+		activeMediaTab === 'gif'
+			? gifResults
+			: activeMediaTab === 'sticker'
+				? stickerResults
+				: activeMediaTab === 'meme'
+					? memeResults
+					: [];
+	$: activeMediaLoading =
+		activeMediaTab === 'gif'
+			? gifLoading
+			: activeMediaTab === 'sticker'
+				? stickerLoading
+				: activeMediaTab === 'meme'
+					? memeLoading
+					: false;
+	$: activeMediaError =
+		activeMediaTab === 'gif'
+			? gifError
+			: activeMediaTab === 'sticker'
+				? stickerError
+				: activeMediaTab === 'meme'
+					? memeError
+					: '';
+	$: activeMediaSearchPlaceholder =
+		activeMediaTab === 'gif'
+			? 'Search GIFs'
+			: activeMediaTab === 'sticker'
+				? 'Search stickers'
+				: 'Search memes';
 	$: showSendButton =
 		!isRecording && !taskDraftOpen && (hasPendingAttachment || normalizedDraftMessage.length > 0);
 	$: composerDisabled = disabled || isProcessingAttachment || isRecording || taskDraftOpen;
@@ -167,22 +210,20 @@
 		openPrivateAi: void;
 	}>();
 
-	function closeGifPicker(resetQuery = false) {
-		showGifPicker = false;
-		if (gifSearchTimer) {
-			clearTimeout(gifSearchTimer);
-			gifSearchTimer = null;
+	function closeMediaPicker(resetQuery = false) {
+		showMediaPicker = false;
+		if (mediaSearchTimer) {
+			clearTimeout(mediaSearchTimer);
+			mediaSearchTimer = null;
 		}
-		gifAbortController?.abort();
-		gifAbortController = null;
+		mediaAbortController?.abort();
+		mediaAbortController = null;
 		gifLoading = false;
+		stickerLoading = false;
+		memeLoading = false;
 		if (resetQuery) {
-			gifQuery = '';
+			mediaQuery = '';
 		}
-	}
-
-	function closeEmojiPicker() {
-		showEmojiPicker = false;
 	}
 
 	function emitTypingValue(nextValue: string = draftMessage) {
@@ -380,7 +421,7 @@
 			return false;
 		}
 		const textToSend = (draftMessage || '').trim();
-		if (attachedGif) {
+		if (attachedMediaAsset) {
 			return textUsesAI(textToSend);
 		}
 		if (attachedFile) {
@@ -393,8 +434,7 @@
 		pendingAIAction = nextAction;
 		showAIDisclaimerModal = true;
 		showAttachMenu = false;
-		closeGifPicker();
-		closeEmojiPicker();
+		closeMediaPicker();
 	}
 
 	function onAIButtonClick() {
@@ -403,8 +443,7 @@
 		}
 		closeMentionPicker();
 		showAttachMenu = false;
-		closeGifPicker();
-		closeEmojiPicker();
+		closeMediaPicker();
 		if (!hasAcceptedAITerms) {
 			requestAITermsAcceptance('open-private-ai');
 			return;
@@ -434,8 +473,7 @@
 
 	onDestroy(() => {
 		clearAttachmentPreview();
-		closeGifPicker();
-		closeEmojiPicker();
+		closeMediaPicker();
 		closeMentionPicker();
 		if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
 			mediaRecorder.stop();
@@ -457,11 +495,12 @@
 			if (showAttachMenu && attachWrapEl && !attachWrapEl.contains(target)) {
 				showAttachMenu = false;
 			}
-			if (showGifPicker && gifPickerEl && !gifPickerEl.contains(target)) {
-				closeGifPicker();
-			}
-			if (showEmojiPicker && emojiWrapEl && !emojiWrapEl.contains(target)) {
-				closeEmojiPicker();
+			if (
+				showMediaPicker &&
+				(!mediaPickerWrapEl || !mediaPickerWrapEl.contains(target)) &&
+				(!mediaPickerEl || !mediaPickerEl.contains(target))
+			) {
+				closeMediaPicker();
 			}
 			if (showMentionPicker && mentionPickerEl && !mentionPickerEl.contains(target)) {
 				closeMentionPicker();
@@ -479,23 +518,68 @@
 			return;
 		}
 		closeMentionPicker();
-		if (showGifPicker) {
-			closeGifPicker();
-		}
-		if (showEmojiPicker) {
-			closeEmojiPicker();
+		if (showMediaPicker) {
+			closeMediaPicker();
 		}
 		showAttachMenu = !showAttachMenu;
 	}
 
-	function toggleEmojiPicker() {
+	function fetchActiveMediaTab(query = '') {
+		if (activeMediaTab === 'gif') {
+			return fetchKlipyGifs(query);
+		}
+		if (activeMediaTab === 'sticker') {
+			return fetchKlipyStickers(query);
+		}
+		if (activeMediaTab === 'meme') {
+			return fetchKlipyMemes(query);
+		}
+		return Promise.resolve();
+	}
+
+	function getMediaResultsByTab(tab: MediaPickerTab) {
+		if (tab === 'gif') {
+			return gifResults;
+		}
+		if (tab === 'sticker') {
+			return stickerResults;
+		}
+		if (tab === 'meme') {
+			return memeResults;
+		}
+		return [];
+	}
+
+	function openMediaPicker(tab: MediaPickerTab = activeMediaTab) {
 		if (composerDisabled) {
 			return;
 		}
 		closeMentionPicker();
 		showAttachMenu = false;
-		closeGifPicker();
-		showEmojiPicker = !showEmojiPicker;
+		activeMediaTab = tab;
+		showMediaPicker = true;
+		if (tab !== 'emoji' && getMediaResultsByTab(tab).length === 0) {
+			void fetchActiveMediaTab();
+		}
+	}
+
+	function toggleMediaPicker() {
+		if (showMediaPicker) {
+			closeMediaPicker();
+			return;
+		}
+		openMediaPicker(activeMediaTab);
+	}
+
+	function switchMediaTab(tab: MediaPickerTab) {
+		if (tab === activeMediaTab) {
+			return;
+		}
+		activeMediaTab = tab;
+		mediaQuery = '';
+		if (tab !== 'emoji' && getMediaResultsByTab(tab).length === 0) {
+			void fetchActiveMediaTab('');
+		}
 	}
 
 	function insertEmoji(emoji: string) {
@@ -529,23 +613,22 @@
 		emitTypingValue();
 	}
 
-	function chooseAttachmentType(type: 'media' | 'file' | 'task' | 'gif') {
+	function chooseAttachmentType(type: 'media' | 'file' | 'task') {
 		if (disabled) {
 			return;
 		}
 		closeMentionPicker();
 		showAttachMenu = false;
-		closeEmojiPicker();
+		closeMediaPicker();
 		attachError = '';
 		taskDraftError = '';
-		if (type !== 'gif') {
-			gifError = '';
-		}
+		gifError = '';
+		stickerError = '';
+		memeError = '';
 		if (type === 'task') {
-			closeGifPicker();
 			clearAttachmentPreview();
 			attachedFile = null;
-			attachedGif = null;
+			attachedMediaAsset = null;
 			attachedMessageType = null;
 			dispatch('attach', { file: null, type: 'file' });
 			taskDraftOpen = true;
@@ -555,28 +638,6 @@
 			}
 			return;
 		}
-		if (type === 'gif') {
-			taskDraftOpen = false;
-			taskAddInputOpen = false;
-			clearAttachmentPreview();
-			attachedFile = null;
-			attachedGif = null;
-			attachedMessageType = null;
-			dispatch('attach', { file: null, type: 'file' });
-			if (!KLIPY_API_KEY) {
-				const message = 'GIF search is unavailable. Add VITE_KLIPY_API_KEY to enable it.';
-				gifError = message;
-				attachError = message;
-				closeGifPicker();
-				return;
-			}
-			showGifPicker = true;
-			if (gifResults.length === 0) {
-				void fetchTrendingGifs();
-			}
-			return;
-		}
-		closeGifPicker();
 		taskDraftOpen = false;
 		taskAddInputOpen = false;
 		if (type === 'media') {
@@ -613,6 +674,29 @@
 		return typeof value === 'string' ? value.trim() : '';
 	}
 
+	function toScalarString(value: unknown) {
+		if (typeof value === 'string') {
+			return value.trim();
+		}
+		if (typeof value === 'number' || typeof value === 'bigint') {
+			return String(value);
+		}
+		return '';
+	}
+
+	function getKlipyLocale() {
+		if (typeof navigator === 'undefined') {
+			return KLIPY_DEFAULT_LOCALE;
+		}
+		const language = (navigator.language || '').trim().toLowerCase();
+		if (!language) {
+			return KLIPY_DEFAULT_LOCALE;
+		}
+		const parts = language.split('-').filter(Boolean);
+		const countryCode = (parts[1] || parts[0] || KLIPY_DEFAULT_LOCALE).slice(0, 2);
+		return countryCode || KLIPY_DEFAULT_LOCALE;
+	}
+
 	function readMediaUrl(formats: Record<string, unknown> | null, keys: string[]) {
 		if (!formats) {
 			return '';
@@ -638,78 +722,151 @@
 		return '';
 	}
 
-	function parseKlipyGifResults(payload: unknown): GifResult[] {
+	function readKlipyFileUrl(fileRecord: Record<string, unknown> | null, preferredFormats: string[]) {
+		if (!fileRecord) {
+			return '';
+		}
+		const variantKeys = ['hd', 'md', 'sd', 'sm', 'xs', 'tiny', 'preview', 'original'];
+		for (const variantKey of variantKeys) {
+			const variant = toRecord(fileRecord[variantKey]);
+			if (!variant) {
+				continue;
+			}
+			const directVariantUrl = toTrimmedString(variant.url);
+			if (directVariantUrl) {
+				return directVariantUrl;
+			}
+			for (const format of preferredFormats) {
+				const formatRecord = toRecord(variant[format]);
+				const formatUrl = toTrimmedString(formatRecord?.url);
+				if (formatUrl) {
+					return formatUrl;
+				}
+			}
+		}
+
+		for (const format of preferredFormats) {
+			const formatRecord = toRecord(fileRecord[format]);
+			const formatUrl = toTrimmedString(formatRecord?.url);
+			if (formatUrl) {
+				return formatUrl;
+			}
+		}
+		return '';
+	}
+
+	function parseKlipyMediaResults(payload: unknown, kind: MediaAssetKind): MediaAssetResult[] {
 		const source = toRecord(payload);
 		if (!source) {
 			return [];
 		}
+		const nestedData = toRecord(source.data);
 		const entriesRaw = Array.isArray(source.results)
 			? source.results
 			: Array.isArray(source.data)
 				? source.data
-				: Array.isArray(source.gifs)
-					? source.gifs
-					: [];
-		const items: GifResult[] = [];
+				: Array.isArray(nestedData?.data)
+					? nestedData.data
+					: Array.isArray(nestedData?.results)
+						? nestedData.results
+						: Array.isArray(nestedData?.items)
+							? nestedData.items
+							: Array.isArray(source.items)
+								? source.items
+								: Array.isArray(source.gifs)
+									? source.gifs
+									: Array.isArray(source.stickers)
+										? source.stickers
+										: Array.isArray(source.memes)
+											? source.memes
+											: [];
+		const items: MediaAssetResult[] = [];
 		for (let index = 0; index < entriesRaw.length; index += 1) {
 			const entry = toRecord(entriesRaw[index]);
 			if (!entry) {
 				continue;
 			}
-			const mediaFormats = toRecord(entry.media_formats);
-			const images = toRecord(entry.images);
+			const mediaFormats = toRecord(entry.media_formats) ?? toRecord(entry.mediaFormats);
+			const images = toRecord(entry.images) ?? toRecord(entry.image);
+			const fileRecord = toRecord(entry.file);
 			const previewFromMediaFormats = readMediaUrl(mediaFormats, [
 				'tinygif',
 				'nanogif',
 				'tinywebp',
 				'nanowebp',
 				'previewgif',
+				'previewwebp',
+				'tinypng',
+				'thumbnail',
 				'preview'
 			]);
-			const gifFromMediaFormats = readMediaUrl(mediaFormats, [
+			const mediaFromMediaFormats = readMediaUrl(mediaFormats, [
 				'gif',
 				'mediumgif',
 				'fullgif',
 				'largegif',
+				'webp',
+				'mediumwebp',
+				'largewebp',
+				'png',
+				'jpg',
 				'original'
 			]);
 			const previewFromImages = readMediaUrl(images, [
 				'preview_gif',
+				'preview_webp',
+				'thumbnail',
+				'thumb',
 				'fixed_width_small',
 				'downsized_small',
 				'preview',
 				'tiny'
 			]);
-			const gifFromImages = readMediaUrl(images, [
+			const mediaFromImages = readMediaUrl(images, [
 				'original',
+				'original_webp',
 				'downsized_large',
 				'downsized',
 				'fixed_width',
+				'image',
+				'webp',
 				'gif'
 			]);
+			const previewFromFile = readKlipyFileUrl(fileRecord, ['webp', 'jpg', 'png', 'gif']);
+			const mediaFromFile = readKlipyFileUrl(fileRecord, ['gif', 'webp', 'jpg', 'png']);
 			const directPreview =
-				toTrimmedString(entry.preview_url) || toTrimmedString(entry.thumbnail_url);
-			const directGif =
+				toTrimmedString(entry.preview_url) ||
+				toTrimmedString(entry.thumbnail_url) ||
+				toTrimmedString(entry.thumb_url);
+			const directMedia =
 				toTrimmedString(entry.url) ||
 				toTrimmedString(entry.gif_url) ||
+				toTrimmedString(entry.image_url) ||
+				toTrimmedString(entry.webp_url) ||
 				toTrimmedString(entry.media_url);
-			const previewUrl = previewFromMediaFormats || previewFromImages || directPreview || directGif;
-			const url = gifFromMediaFormats || gifFromImages || directGif || previewUrl;
+			const previewUrl =
+				previewFromMediaFormats || previewFromImages || previewFromFile || directPreview || directMedia;
+			const url = mediaFromMediaFormats || mediaFromImages || mediaFromFile || directMedia || previewUrl;
 			if (!url) {
 				continue;
 			}
 			const id =
-				toTrimmedString(entry.id) || toTrimmedString(entry.gif_id) || `gif_${Date.now()}_${index}`;
+				toScalarString(entry.id) ||
+				toScalarString(entry.gif_id) ||
+				toTrimmedString(entry.slug) ||
+				`${kind}_${Date.now()}_${index}`;
+			const fallbackTitle = kind === 'gif' ? 'GIF' : kind === 'sticker' ? 'Sticker' : 'Meme';
 			const title =
 				toTrimmedString(entry.content_description) ||
 				toTrimmedString(entry.title) ||
 				toTrimmedString(entry.alt_text) ||
-				'GIF';
+				fallbackTitle;
 			items.push({
 				id,
 				url,
 				previewUrl: previewUrl || url,
-				title
+				title,
+				kind
 			});
 		}
 		return items;
@@ -717,10 +874,12 @@
 
 	async function fetchKlipyGifs(query: string) {
 		if (!KLIPY_API_KEY) {
+			gifError = 'GIF search is unavailable. Add VITE_KLIPY_API_KEY to enable it.';
+			gifResults = [];
 			return;
 		}
-		gifAbortController?.abort();
-		gifAbortController = new AbortController();
+		mediaAbortController?.abort();
+		mediaAbortController = new AbortController();
 		gifLoading = true;
 		gifError = '';
 		try {
@@ -735,8 +894,8 @@
 			if (query) {
 				params.set('q', query);
 			}
-			const response = await fetch(`https://api.klipy.com${endpointPath}?${params.toString()}`, {
-				signal: gifAbortController.signal
+			const response = await fetch(`${KLIPY_API_BASE}${endpointPath}?${params.toString()}`, {
+				signal: mediaAbortController.signal
 			});
 			const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
 			if (!response.ok) {
@@ -746,7 +905,7 @@
 						: `GIF request failed (${response.status})`
 				);
 			}
-			gifResults = parseKlipyGifResults(payload);
+			gifResults = parseKlipyMediaResults(payload, 'gif');
 		} catch (error) {
 			const isAbortError =
 				typeof error === 'object' &&
@@ -763,63 +922,189 @@
 		}
 	}
 
-	async function fetchTrendingGifs() {
-		await fetchKlipyGifs('');
-	}
-
-	function onGifQueryInput() {
-		if (!showGifPicker || !KLIPY_API_KEY) {
+	async function fetchKlipyStickers(query: string) {
+		if (!KLIPY_API_KEY) {
+			stickerError = 'Sticker search is unavailable. Add VITE_KLIPY_API_KEY to enable it.';
+			stickerResults = [];
 			return;
 		}
-		if (gifSearchTimer) {
-			clearTimeout(gifSearchTimer);
-			gifSearchTimer = null;
+		mediaAbortController?.abort();
+		mediaAbortController = new AbortController();
+		stickerLoading = true;
+		stickerError = '';
+		try {
+			const endpointPath = query ? 'search' : 'trending';
+			const params = new URLSearchParams({
+				page: '1',
+				per_page: String(KLIPY_SEARCH_LIMIT),
+				customer_id: KLIPY_CLIENT_KEY,
+				locale: getKlipyLocale(),
+				content_filter: KLIPY_CONTENT_FILTER
+			});
+			if (query) {
+				params.set('q', query);
+			}
+			const response = await fetch(
+				`${KLIPY_API_BASE}/api/v1/${encodeURIComponent(KLIPY_API_KEY)}/stickers/${endpointPath}?${params.toString()}`,
+				{
+					signal: mediaAbortController.signal,
+					headers: {
+						'Content-Type': 'application/json'
+					}
+				}
+			);
+			const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!response.ok) {
+				throw new Error(
+					typeof payload.error === 'string'
+						? payload.error
+						: `Sticker request failed (${response.status})`
+				);
+			}
+			stickerResults = parseKlipyMediaResults(payload, 'sticker');
+		} catch (error) {
+			const isAbortError =
+				typeof error === 'object' &&
+				error !== null &&
+				'name' in error &&
+				(error as { name?: string }).name === 'AbortError';
+			if (isAbortError) {
+				return;
+			}
+			stickerError = error instanceof Error ? error.message : 'Failed to load stickers.';
+			stickerResults = [];
+		} finally {
+			stickerLoading = false;
 		}
-		const normalizedQuery = gifQuery.trim();
-		gifSearchTimer = setTimeout(() => {
-			void fetchKlipyGifs(normalizedQuery);
+	}
+
+	async function fetchKlipyMemes(query: string) {
+		if (!KLIPY_API_KEY) {
+			memeError = 'Meme search is unavailable. Add VITE_KLIPY_API_KEY to enable it.';
+			memeResults = [];
+			return;
+		}
+		mediaAbortController?.abort();
+		mediaAbortController = new AbortController();
+		memeLoading = true;
+		memeError = '';
+		try {
+			const endpointPath = query ? 'search' : 'trending';
+			const params = new URLSearchParams({
+				page: '1',
+				per_page: String(KLIPY_SEARCH_LIMIT),
+				customer_id: KLIPY_CLIENT_KEY,
+				locale: getKlipyLocale()
+			});
+			if (query) {
+				params.set('q', query);
+			}
+			const response = await fetch(
+				`${KLIPY_API_BASE}/api/v1/${encodeURIComponent(KLIPY_API_KEY)}/static-memes/${endpointPath}?${params.toString()}`,
+				{
+					signal: mediaAbortController.signal,
+					headers: {
+						'Content-Type': 'application/json'
+					}
+				}
+			);
+			const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!response.ok) {
+				throw new Error(
+					typeof payload.error === 'string'
+						? payload.error
+						: `Meme request failed (${response.status})`
+				);
+			}
+			memeResults = parseKlipyMediaResults(payload, 'meme');
+		} catch (error) {
+			const isAbortError =
+				typeof error === 'object' &&
+				error !== null &&
+				'name' in error &&
+				(error as { name?: string }).name === 'AbortError';
+			if (isAbortError) {
+				return;
+			}
+			memeError = error instanceof Error ? error.message : 'Failed to load memes.';
+			memeResults = [];
+		} finally {
+			memeLoading = false;
+		}
+	}
+
+	function onMediaQueryInput() {
+		if (!showMediaPicker || !KLIPY_API_KEY || activeMediaTab === 'emoji') {
+			return;
+		}
+		if (mediaSearchTimer) {
+			clearTimeout(mediaSearchTimer);
+			mediaSearchTimer = null;
+		}
+		const normalizedQuery = mediaQuery.trim();
+		mediaSearchTimer = setTimeout(() => {
+			void fetchActiveMediaTab(normalizedQuery);
 		}, 300);
 	}
 
-	function toGifFileName(gif: GifResult) {
-		const normalizedTitle = (gif.title || 'gif').trim();
+	function toMediaAssetFileName(asset: MediaAssetResult) {
+		const normalizedTitle = (asset.title || asset.kind).trim();
 		const safeBaseName = normalizedTitle
 			.replace(/\.[^./\\\s]+$/, '')
 			.replace(/[^a-zA-Z0-9-_ ]+/g, '')
 			.trim()
 			.replace(/\s+/g, '-')
 			.slice(0, 64);
-		return `${safeBaseName || 'gif'}.gif`;
+		let extension = asset.kind === 'gif' ? 'gif' : asset.kind === 'sticker' ? 'webp' : 'png';
+		try {
+			const assetUrl = new URL(asset.url);
+			const match = assetUrl.pathname.match(/\.([A-Za-z0-9]{2,5})$/);
+			if (match && match[1]) {
+				extension = match[1].toLowerCase();
+			}
+		} catch {
+			// ignore invalid URL parsing and use fallback extension
+		}
+		const baseName = safeBaseName || asset.kind;
+		if (asset.kind === 'sticker') {
+			const stickerBaseName = baseName.toLowerCase().startsWith('sticker-')
+				? baseName
+				: `sticker-${baseName}`;
+			return `${stickerBaseName}.${extension}`;
+		}
+		return `${baseName}.${extension}`;
 	}
 
-	function selectGifAttachment(gif: GifResult) {
-		if (!gif || !gif.url || disabled || isProcessingAttachment || isRecording) {
+	function selectMediaAssetAttachment(asset: MediaAssetResult) {
+		if (!asset || !asset.url || disabled || isProcessingAttachment || isRecording) {
 			return;
 		}
 		clearAttachmentPreview();
 		attachedFile = null;
-		attachedGif = gif;
+		attachedMediaAsset = asset;
 		attachedMessageType = 'image';
 		attachedPickerType = 'media';
 		attachError = '';
 		gifError = '';
-		closeGifPicker();
+		stickerError = '';
+		memeError = '';
+		closeMediaPicker();
 		dispatch('attach', { file: null, type: 'media' });
 	}
 
-	function sendGifAttachment() {
-		if (!attachedGif) {
+	function sendMediaAssetAttachment() {
+		if (!attachedMediaAsset) {
 			dispatch('send', undefined);
 			return;
 		}
 		dispatch('send', {
 			type: 'image',
-			content: attachedGif.url,
-			fileName: toGifFileName(attachedGif),
+			content: attachedMediaAsset.url,
+			fileName: toMediaAssetFileName(attachedMediaAsset),
 			text: draftMessage.trim()
 		});
 		draftMessage = '';
-		attachedGif = null;
+		attachedMediaAsset = null;
 		attachedMessageType = null;
 		dispatch('attach', { file: null, type: 'media' });
 	}
@@ -842,7 +1127,7 @@
 		if (disabled) {
 			return;
 		}
-		showGifPicker = false;
+		closeMediaPicker();
 		const target = event.currentTarget as HTMLInputElement;
 		const selected = target.files?.[0] ?? null;
 		target.value = '';
@@ -853,7 +1138,7 @@
 		const messageType = resolveMessageType(selected, pickerType);
 		attachError = '';
 		attachedFile = selected;
-		attachedGif = null;
+		attachedMediaAsset = null;
 		attachedMessageType = messageType;
 		attachedPickerType = pickerType;
 		setAttachmentPreview(selected, messageType);
@@ -892,7 +1177,7 @@
 	function removeAttachment() {
 		clearAttachmentPreview();
 		attachedFile = null;
-		attachedGif = null;
+		attachedMediaAsset = null;
 		attachedMessageType = null;
 		attachError = '';
 		dispatch('removeAttachment');
@@ -914,8 +1199,8 @@
 			void sendAttachment();
 			return;
 		}
-		if (attachedGif) {
-			sendGifAttachment();
+		if (attachedMediaAsset) {
+			sendMediaAssetAttachment();
 			return;
 		}
 		dispatch('send', undefined);
@@ -1059,10 +1344,10 @@
 	}
 
 	async function toggleRecording() {
-		if (disabled || isProcessingAttachment || attachedFile || attachedGif || taskDraftOpen) {
+		if (disabled || isProcessingAttachment || attachedFile || attachedMediaAsset || taskDraftOpen) {
 			return;
 		}
-		closeEmojiPicker();
+		closeMediaPicker();
 
 		if (!isRecording) {
 			if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
@@ -1329,16 +1614,16 @@
 			<button type="button" class="reply-preview-cancel" on:click={cancelReply}>Cancel</button>
 		</div>
 	{/if}
-	{#if attachedFile || attachedGif}
+	{#if attachedFile || attachedMediaAsset}
 		<div class="attachment-preview-panel">
 			<div class="attachment-preview-header">
 				<div class="attachment-preview-title">{getAttachmentLabel(attachedMessageType)}</div>
 				<button type="button" class="preview-remove" on:click={removeAttachment}>x</button>
 			</div>
-			{#if attachedGif}
+			{#if attachedMediaAsset}
 				<img
-					src={attachedGif.previewUrl || attachedGif.url}
-					alt={attachedGif.title || 'GIF'}
+					src={attachedMediaAsset.previewUrl || attachedMediaAsset.url}
+					alt={attachedMediaAsset.title || 'Media'}
 					class="attachment-preview-image"
 				/>
 			{:else if attachedMessageType === 'image' && attachmentPreviewURL && attachedFile}
@@ -1359,41 +1644,94 @@
 			{/if}
 		</div>
 	{/if}
-	{#if showGifPicker}
-		<div class="gif-picker-panel" bind:this={gifPickerEl}>
-			<div class="gif-picker-header">
-				<input
-					type="text"
-					placeholder="Search GIFs"
-					bind:value={gifQuery}
-					on:input={onGifQueryInput}
-				/>
+	{#if showMediaPicker}
+		<div class="media-picker-panel" bind:this={mediaPickerEl}>
+			<div class="media-picker-tabs" role="tablist" aria-label="Media picker tabs">
 				<button
 					type="button"
-					class="gif-picker-close"
-					on:click={() => closeGifPicker()}
-					aria-label="Close GIF picker"
+					class="media-picker-tab {activeMediaTab === 'emoji' ? 'active' : ''}"
+					role="tab"
+					aria-selected={activeMediaTab === 'emoji'}
+					on:click={() => switchMediaTab('emoji')}
+				>
+					Emoji
+				</button>
+				<button
+					type="button"
+					class="media-picker-tab {activeMediaTab === 'gif' ? 'active' : ''}"
+					role="tab"
+					aria-selected={activeMediaTab === 'gif'}
+					on:click={() => switchMediaTab('gif')}
+				>
+					GIFs
+				</button>
+				<button
+					type="button"
+					class="media-picker-tab {activeMediaTab === 'sticker' ? 'active' : ''}"
+					role="tab"
+					aria-selected={activeMediaTab === 'sticker'}
+					on:click={() => switchMediaTab('sticker')}
+				>
+					Stickers
+				</button>
+				<button
+					type="button"
+					class="media-picker-tab {activeMediaTab === 'meme' ? 'active' : ''}"
+					role="tab"
+					aria-selected={activeMediaTab === 'meme'}
+					on:click={() => switchMediaTab('meme')}
+				>
+					Memes
+				</button>
+			</div>
+			<div class="media-picker-header">
+				{#if activeMediaTab !== 'emoji'}
+					<input
+						type="text"
+						placeholder={activeMediaSearchPlaceholder}
+						bind:value={mediaQuery}
+						on:input={onMediaQueryInput}
+					/>
+				{/if}
+				<button
+					type="button"
+					class="media-picker-close"
+					on:click={() => closeMediaPicker()}
+					aria-label="Close media picker"
 				>
 					Close
 				</button>
 			</div>
-			{#if gifError}
-				<div class="gif-picker-error">{gifError}</div>
-			{:else if gifLoading}
-				<div class="gif-picker-loading">Loading GIFs...</div>
-			{:else if gifResults.length === 0}
-				<div class="gif-picker-empty">No GIFs found. Try another search.</div>
-			{:else}
-				<div class="gif-grid">
-					{#each gifResults as gif (gif.id)}
+			{#if activeMediaTab === 'emoji'}
+				<div class="emoji-picker" role="dialog" aria-label="Emoji picker">
+					{#each COMMON_EMOJIS as emoji}
 						<button
 							type="button"
-							class="gif-card"
-							on:click={() => selectGifAttachment(gif)}
-							title={`Attach GIF: ${gif.title}`}
-							aria-label={`Attach GIF: ${gif.title}`}
+							class="emoji-option"
+							on:click={() => insertEmoji(emoji)}
+							aria-label={`Insert ${emoji}`}
 						>
-							<img src={gif.previewUrl} alt={gif.title || 'GIF'} loading="lazy" />
+							{emoji}
+						</button>
+					{/each}
+				</div>
+			{:else if activeMediaError}
+				<div class="media-picker-error">{activeMediaError}</div>
+			{:else if activeMediaLoading}
+				<div class="media-picker-loading">Loading...</div>
+			{:else if activeMediaResults.length === 0}
+				<div class="media-picker-empty">No results found. Try another search.</div>
+			{:else}
+				<div class="media-grid">
+					{#each activeMediaResults as asset (asset.id)}
+						<button
+							type="button"
+							class="media-card"
+							on:click={() => selectMediaAssetAttachment(asset)}
+							title={`Attach ${asset.title}`}
+							aria-label={`Attach ${asset.title}`}
+						>
+							<img src={asset.previewUrl} alt={asset.title || 'Media'} loading="lazy" />
 						</button>
 					{/each}
 				</div>
@@ -1447,10 +1785,6 @@
 						<IconSet name="list-vertical" size={14} />
 						<span>Task</span>
 					</button>
-					<button type="button" on:click={() => chooseAttachmentType('gif')}>
-						<span class="gif-pill">GIF</span>
-						<span>GIF</span>
-					</button>
 				</div>
 			{/if}
 		</div>
@@ -1468,32 +1802,25 @@
 					<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
 				</svg>
 			</button>
-			<div class="emoji-wrap" bind:this={emojiWrapEl}>
+			<div class="media-picker-wrap" bind:this={mediaPickerWrapEl}>
 				<button
 					type="button"
-					class="emoji-button"
-					on:click={toggleEmojiPicker}
+					class="media-picker-button"
+					on:click={toggleMediaPicker}
 					disabled={composerDisabled}
-					aria-label="Insert emoji"
-					title="Insert emoji"
+					aria-label="Open emoji, GIF, sticker, and meme picker"
+					title="Emoji, GIFs, stickers, memes"
 				>
-				<span aria-hidden="true">😊</span>
-			</button>
-			{#if showEmojiPicker}
-				<div class="emoji-picker" role="dialog" aria-label="Emoji picker">
-					{#each COMMON_EMOJIS as emoji}
-						<button
-							type="button"
-							class="emoji-option"
-							on:click={() => insertEmoji(emoji)}
-							aria-label={`Insert ${emoji}`}
-						>
-							{emoji}
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<rect x="3.5" y="4.5" width="14" height="14" rx="3"></rect>
+						<circle cx="8.8" cy="9.8" r="1"></circle>
+						<circle cx="12.2" cy="9.8" r="1"></circle>
+						<path d="M7.8 13.1c1.1 1 3 1 4.1 0"></path>
+						<path d="M18 6.3v2.1"></path>
+						<path d="M16.95 7.35h2.1"></path>
+					</svg>
+				</button>
+			</div>
 
 			<div class="composer-input-wrap">
 				<div class="composer-input-highlight" bind:this={composerHighlightEl} aria-hidden="true">
@@ -1752,7 +2079,7 @@
 		padding: 0.36rem 0.5rem;
 	}
 
-	.gif-picker-panel {
+	.media-picker-panel {
 		border: 1px solid var(--border-default);
 		background: var(--surface-primary);
 		border-radius: 12px;
@@ -1765,13 +2092,37 @@
 		min-height: 0;
 	}
 
-	.gif-picker-header {
+	.media-picker-tabs {
+		display: flex;
+		align-items: center;
+		gap: 0.36rem;
+		flex-wrap: wrap;
+	}
+
+	.media-picker-tab {
+		border: 1px solid var(--border-default);
+		background: var(--surface-secondary);
+		color: var(--text-secondary);
+		border-radius: 8px;
+		padding: 0.25rem 0.56rem;
+		font-size: 0.72rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.media-picker-tab.active {
+		border-color: var(--accent-primary);
+		background: var(--state-info-bg);
+		color: var(--accent-primary);
+	}
+
+	.media-picker-header {
 		display: flex;
 		align-items: center;
 		gap: 0.45rem;
 	}
 
-	.gif-picker-header input {
+	.media-picker-header input {
 		flex: 1;
 		min-width: 0;
 		border: 1px solid var(--border-default);
@@ -1782,7 +2133,7 @@
 		font-size: 0.8rem;
 	}
 
-	.gif-picker-close {
+	.media-picker-close {
 		border: 1px solid var(--border-default);
 		background: var(--surface-secondary);
 		color: var(--text-secondary);
@@ -1792,34 +2143,33 @@
 		cursor: pointer;
 	}
 
-	.gif-picker-loading,
-	.gif-picker-empty,
-	.gif-picker-error {
+	.media-picker-loading,
+	.media-picker-empty,
+	.media-picker-error {
 		font-size: 0.78rem;
 		color: var(--text-secondary);
 	}
 
-	.gif-picker-error {
+	.media-picker-error {
 		color: var(--accent-danger);
 	}
 
-	.gif-grid {
+	.media-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
 		grid-auto-rows: minmax(96px, auto);
 		grid-auto-flow: row;
 		align-content: start;
 		flex: 1 1 auto;
-		overflow: auto;
+		overflow-y: auto;
+		overflow-x: hidden;
 		max-height: 100%;
 		gap: 0.42rem;
-		
-		
 		padding-right: 0.08rem;
 		-webkit-overflow-scrolling: touch;
 	}
 
-	.gif-card {
+	.media-card {
 		position: relative;
 		display: block;
 		border: 1px solid var(--border-default);
@@ -1833,7 +2183,7 @@
 		height: 100%;
 	}
 
-	.gif-card img {
+	.media-card img {
 		display: block;
 		position: relative;
 		inset: auto;
@@ -2187,7 +2537,7 @@
 	}
 
 	.attach-button,
-	.emoji-button,
+	.media-picker-button,
 	.ai-button,
 	.mic-button,
 	.send-button {
@@ -2210,7 +2560,7 @@
 	}
 
 	.attach-button:disabled,
-	.emoji-button:disabled,
+	.media-picker-button:disabled,
 	.ai-button:disabled,
 	.mic-button:disabled,
 	.send-button:disabled {
@@ -2219,7 +2569,7 @@
 	}
 
 	.attach-button:hover:not(:disabled),
-	.emoji-button:hover:not(:disabled),
+	.media-picker-button:hover:not(:disabled),
 	.ai-button:hover:not(:disabled),
 	.mic-button:hover:not(:disabled),
 	.send-button:hover:not(:disabled) {
@@ -2246,13 +2596,18 @@
 		border-color: var(--accent-primary-hover);
 	}
 
-	.emoji-wrap {
+	.media-picker-wrap {
 		position: relative;
 	}
 
-	.emoji-button {
-		font-size: 1.1rem;
-		line-height: 1;
+	.media-picker-button svg {
+		width: 1rem;
+		height: 1rem;
+		stroke: currentColor;
+		fill: none;
+		stroke-width: 1.7;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.ai-button svg {
@@ -2282,21 +2637,13 @@
 	}
 
 	.emoji-picker {
-		position: absolute;
-		left: 0;
-		bottom: calc(100% + 8px);
-		z-index: 121;
 		display: grid;
 		grid-template-columns: repeat(8, minmax(0, 1fr));
 		gap: 0.22rem;
-		width: min(18rem, calc(100vw - 1.6rem));
-		max-height: min(40vh, 220px);
-		overflow: auto;
-		border: 1px solid var(--border-default);
-		background: var(--surface-primary);
-		border-radius: 10px;
-		padding: 0.38rem;
-		box-shadow: var(--shadow-md);
+		max-height: min(42vh, 240px);
+		overflow-y: auto;
+		overflow-x: hidden;
+		padding-right: 0.08rem;
 	}
 
 	.emoji-option {
@@ -2346,19 +2693,6 @@
 
 	.attach-menu button:hover {
 		background: var(--surface-hover);
-	}
-
-	.gif-pill {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		min-width: 2.1rem;
-		padding: 0.08rem 0.32rem;
-		border-radius: 999px;
-		border: 1px solid var(--border-default);
-		font-size: 0.66rem;
-		font-weight: 700;
-		letter-spacing: 0.02em;
 	}
 
 	.composer-input-wrap {
@@ -2505,7 +2839,7 @@
 		}
 
 		.attach-button,
-		.emoji-button,
+		.media-picker-button,
 		.ai-button,
 		.mic-button,
 		.send-button {
@@ -2517,15 +2851,11 @@
 			font-size: 0.86rem;
 		}
 
-		.gif-picker-panel {
+		.media-picker-panel {
 			max-height: min(48vh, 320px);
 		}
 
-		.gif-grid {
-			
-		}
-
-		.gif-card {
+		.media-card {
 			min-height: 84px;
 		}
 	}

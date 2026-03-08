@@ -1077,6 +1077,18 @@
 		);
 	}
 
+	function isStickerMessage(message: ChatMessage) {
+		if (!message || message.type !== 'image') {
+			return false;
+		}
+		const mediaMode = (message.mediaType || '').trim().toLowerCase();
+		if (mediaMode === 'sticker') {
+			return true;
+		}
+		const normalizedFileName = (message.fileName || '').trim().toLowerCase();
+		return normalizedFileName.startsWith('sticker-') || normalizedFileName.includes('-sticker');
+	}
+
 	function isLikelyURL(value: string) {
 		const trimmed = value.trim();
 		return (
@@ -1101,6 +1113,19 @@
 			return '';
 		}
 		return content;
+	}
+
+	function cleanAiText(value: string) {
+		if (!value) {
+			return '';
+		}
+		let cleaned = value.replace(/\r\n/g, '\n');
+		cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
+		cleaned = cleaned.replace(/^\s*---+\s*$/gm, '');
+		cleaned = cleaned.replace(/\*\*([^*]+)\*\*/g, '$1');
+		cleaned = cleaned.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, '$1$2');
+		cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+		return cleaned.trim();
 	}
 
 	function splitMessageTextByEmoji(value: string): MessageTextSegment[] {
@@ -1703,6 +1728,7 @@
 						? 'pending'
 						: ''} {isSelectionMode ? 'selectable' : ''}"
 					class:media-bubble={isMediaBubble(message)}
+					class:sticker-bubble={isStickerMessage(message)}
 					class:call-log-bubble={isCallLogMessage(message)}
 					class:deleted={isDeletedMessage(message)}
 					class:has-reactions={reactionEntries.length > 0}
@@ -1842,6 +1868,7 @@
 									src={getMediaURL(message)}
 									alt={getFileName(message)}
 									class="media-preview image-preview"
+									class:sticker-preview={isStickerMessage(message)}
 									loading="lazy"
 									on:error={() => onMediaError(message.id)}
 								/>
@@ -1916,6 +1943,7 @@
 										src={getMediaURL(message)}
 										alt={getFileName(message)}
 										class="media-preview image-preview file-inline-preview"
+										class:sticker-preview={isStickerMessage(message)}
 										loading="lazy"
 										on:error={() => onMediaError(message.id)}
 									/>
@@ -1994,7 +2022,7 @@
 						{:else if isCodeBlock(message.content)}
 							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
 						{:else}
-							{#each splitMessageTextByEmoji(message.content) as segment}
+							{#each splitMessageTextByEmoji(cleanAiText(message.content)) as segment}
 								{#if segment.isEmoji}
 									<span class="emoji-boost">{segment.value}</span>
 								{:else if segment.isMention}
@@ -2753,6 +2781,11 @@
 		min-width: 0;
 	}
 
+	.bubble.media-bubble.sticker-bubble {
+		width: fit-content;
+		max-width: min(184px, calc(100% - var(--meta-gutter-size) - 0.6rem));
+	}
+
 	.bubble.media-bubble .bubble-content {
 		display: flex;
 		flex-direction: column;
@@ -3068,6 +3101,15 @@
 		max-height: 460px;
 		object-fit: contain;
 		background: #dbe2ec;
+	}
+
+	.image-preview.sticker-preview {
+		width: min(160px, 42vw);
+		max-width: 160px;
+		max-height: 160px;
+		border: none;
+		background: transparent;
+		border-radius: 10px;
 	}
 
 	.video-preview {
@@ -3918,12 +3960,22 @@
 			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--bubble-max-width));
 		}
 
+		.bubble.media-bubble.sticker-bubble {
+			max-width: min(148px, calc(100% - var(--meta-gutter-size) - 0.45rem));
+		}
+
 		.gutter-stat {
 			padding: 0.1rem 0.14rem;
 		}
 
 		.video-preview {
 			max-height: 300px;
+		}
+
+		.image-preview.sticker-preview {
+			width: min(132px, 46vw);
+			max-width: 132px;
+			max-height: 132px;
 		}
 
 		.pdf-preview {

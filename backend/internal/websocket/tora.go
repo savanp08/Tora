@@ -3,8 +3,10 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,13 @@ const (
 	toraRequestTimeout      = 25 * time.Second
 	toraSummaryTimeout      = 20 * time.Second
 )
+
+const toraSystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
+RULES:
+1. Tone: Quirky, witty, lightly sarcastic. Playful "hallucinating entity" persona allowed.
+2. Accuracy: Persona is style only. STRICT FACTUALITY. Never invent data; admit uncertainty. Ground answers in provided room context.
+3. Formatting: NO heavy markdown (**, *, #, ---). Use - or • for lists.
+4. Delivery: Direct, natural. NO meta-commentary ("Here is...", "As an AI..."). Answer first, avoid unprompted summaries. If unclear, ask exactly one concise clarifying question.`
 
 var toraAuditSchemaState struct {
 	mu      sync.Mutex
@@ -50,6 +59,8 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 		return
 	}
 	prompt = stripToraMentionTokens(prompt)
+	releaseTyping := h.beginToraTyping(roomID)
+	defer releaseTyping()
 
 	ctx, cancel := context.WithTimeout(context.Background(), toraRequestTimeout)
 	defer cancel()
@@ -69,11 +80,23 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 			Response:  "ERROR: " + strings.TrimSpace(err.Error()),
 			Timestamp: time.Now().UTC(),
 		})
+		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(err))
 		return
 	}
 
 	responseText := strings.TrimSpace(aiResponse)
 	if responseText == "" {
+		fallbackError := errors.New("empty ai response")
+		_ = h.persistToraAuditRecord(context.Background(), toraAuditRecord{
+			UserID:    strings.TrimSpace(userMessage.SenderID),
+			Username:  strings.TrimSpace(userMessage.SenderName),
+			IPAddress: strings.TrimSpace(ipAddress),
+			DeviceID:  strings.TrimSpace(deviceID),
+			Prompt:    prompt,
+			Response:  "ERROR: empty ai response",
+			Timestamp: time.Now().UTC(),
+		})
+		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(fallbackError))
 		return
 	}
 
@@ -89,17 +112,115 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 		log.Printf("[ws] tora mention audit log failed room=%s user=%s err=%v", roomID, userMessage.SenderID, err)
 	}
 
-	h.broadcast <- models.Message{
+	h.broadcast <- newToraBotMessage(roomID, responseText)
+
+	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+}
+
+func newToraBotMessage(roomID, content string) models.Message {
+	return models.Message{
 		ID:         fmt.Sprintf("%s_tora_%d", roomID, time.Now().UTC().UnixNano()),
 		RoomID:     roomID,
 		SenderID:   toraBotSenderID,
 		SenderName: toraBotSenderName,
-		Content:    responseText,
+		Content:    strings.TrimSpace(content),
 		Type:       "text",
 		CreatedAt:  time.Now().UTC(),
 	}
+}
 
-	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+func buildToraFailureResponse(err error) string {
+	if err == nil {
+		return "Tora got tangled in thoughts for a second. Please retry soon.\n• Error: retry later"
+	}
+	if errors.Is(err, ai.ErrAllAIProvidersExhausted) {
+		return "I hit my provider limits and my circuits need a breather. Please try again shortly.\n• Error: limits reached, retry later"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "I stared into the void a bit too long. Try me again in a moment.\n• Error: request timed out, retry later"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "The signal dropped mid-thought. Please send that again.\n• Error: request canceled, retry later"
+	}
+	var statusErr *ai.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		if statusErr.StatusCode() == http.StatusTooManyRequests || statusErr.StatusCode() == http.StatusServiceUnavailable {
+			return "I’m currently rate limited, so my brain is in queue mode. Please retry in a bit.\n• Error: limits reached, retry later"
+		}
+	}
+	return "Tora is hallucinating a little and dropped the thread. Please retry later.\n• Error: temporary AI issue, retry later"
+}
+
+func (h *Hub) beginToraTyping(roomID string) func() {
+	if h == nil {
+		return func() {}
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return func() {}
+	}
+
+	shouldEmitStart := false
+	h.toraTypingMu.Lock()
+	if h.toraTypingByRoom == nil {
+		h.toraTypingByRoom = make(map[string]int)
+	}
+	activeCount := h.toraTypingByRoom[normalizedRoomID]
+	h.toraTypingByRoom[normalizedRoomID] = activeCount + 1
+	if activeCount == 0 {
+		shouldEmitStart = true
+	}
+	h.toraTypingMu.Unlock()
+
+	if shouldEmitStart {
+		h.emitToraTyping(roomID, true)
+	}
+
+	return func() {
+		shouldEmitStop := false
+		h.toraTypingMu.Lock()
+		if current := h.toraTypingByRoom[normalizedRoomID]; current <= 1 {
+			delete(h.toraTypingByRoom, normalizedRoomID)
+			shouldEmitStop = true
+		} else {
+			h.toraTypingByRoom[normalizedRoomID] = current - 1
+		}
+		h.toraTypingMu.Unlock()
+		if shouldEmitStop {
+			h.emitToraTyping(roomID, false)
+		}
+	}
+}
+
+func (h *Hub) emitToraTyping(roomID string, isTyping bool) {
+	if h == nil {
+		return
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return
+	}
+
+	event := TypingRedisEvent{
+		RoomID:    normalizedRoomID,
+		UserID:    toraBotSenderID,
+		UserName:  toraBotSenderName,
+		IsTyping:  isTyping,
+		UpdatedAt: time.Now().UTC().UnixMilli(),
+	}
+	if isTyping {
+		event.ExpiresAt = time.Now().UTC().Add(toraRequestTimeout + (5 * time.Second)).UnixMilli()
+	}
+
+	h.broadcastTypingToLocal(event)
+	if h.msgService == nil || h.msgService.Redis == nil || h.msgService.Redis.Client == nil {
+		return
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	_ = h.msgService.Redis.Client.Publish(context.Background(), chatTypingChannel, payload).Err()
 }
 
 func containsToraMention(content string) bool {
@@ -239,7 +360,8 @@ func buildToraPrompt(rollingSummary string, contextMessages []models.Message, pr
 		}
 	}
 	return fmt.Sprintf(
-		"System Context: %s. Recent Chat History: %s. Respond to this new user prompt: %s",
+		"%s\n\nSystem Context: %s. Recent Chat History: %s. Respond to this new user prompt: %s",
+		toraSystemInstruction,
 		strings.TrimSpace(rollingSummary),
 		encodedMessages,
 		strings.TrimSpace(prompt),

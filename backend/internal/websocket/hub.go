@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -42,6 +43,9 @@ type Hub struct {
 
 	msgService *MessageService
 	tracker    *monitor.UsageTracker
+
+	toraTypingMu     sync.Mutex
+	toraTypingByRoom map[string]int
 }
 
 type ClientTypingEvent struct {
@@ -56,6 +60,7 @@ type TypingRedisEvent struct {
 	UserName  string `json:"userName"`
 	IsTyping  bool   `json:"isTyping"`
 	UpdatedAt int64  `json:"updatedAt"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
 }
 
 type ClientBoardEvent struct {
@@ -154,6 +159,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		rooms:                make(map[string]map[*Client]bool),
 		msgService:           service,
 		tracker:              tracker,
+		toraTypingByRoom:     make(map[string]int),
 	}
 
 	if service != nil && service.CanPersistToDisk() {
@@ -1320,6 +1326,12 @@ func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 			"isTyping":  event.IsTyping,
 			"is_typing": event.IsTyping,
 		},
+	}
+	if event.ExpiresAt > 0 {
+		if nestedPayload, ok := payload["payload"].(map[string]interface{}); ok {
+			nestedPayload["expiresAt"] = event.ExpiresAt
+			nestedPayload["expires_at"] = event.ExpiresAt
+		}
 	}
 	for roomClient := range clients {
 		if roomClient.UserID == userID {

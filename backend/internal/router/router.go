@@ -50,7 +50,7 @@ func New(
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
 	handlers.ConfigureCanvasPersistence(redisStore, scyllaStore, r2Client, usageTracker)
-	handlers.ConfigureAIChatPersistence(scyllaStore)
+	handlers.ConfigureAIChatPersistence(redisStore, scyllaStore)
 	promoteLimiter := security.NewLimiter(5, time.Minute, 5, time.Minute)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {

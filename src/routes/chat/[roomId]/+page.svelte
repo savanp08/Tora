@@ -150,6 +150,7 @@
 	const TYPING_PING_INTERVAL_MS = 3000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
+	const REMOTE_TYPING_MAX_FUTURE_MS = 120000;
 	const DISCUSSION_MAX_REPLY_DEPTH = 4;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const PROTECTED_ROOM_PREVIEW_TEXT = 'Protected room. Join with password to preview messages.';
@@ -795,6 +796,9 @@
 		if (!cleaned) {
 			return 'User';
 		}
+		if (cleaned.toLowerCase().includes('tora')) {
+			return 'ToraAI';
+		}
 		if (cleaned.length <= maxChars) {
 			return cleaned;
 		}
@@ -882,8 +886,19 @@
 						source.user_name
 					)
 				) || 'User';
+		const now = Date.now();
+		const remoteExpiresAt = toInt(
+			nestedPayload.expiresAt ??
+				nestedPayload.expires_at ??
+				source.expiresAt ??
+				source.expires_at
+		);
+		const expiresAt =
+			remoteExpiresAt > now && remoteExpiresAt <= now + REMOTE_TYPING_MAX_FUTURE_MS
+				? remoteExpiresAt
+				: now + TYPING_SAFETY_TIMEOUT_MS;
 		if (kind === 'typing_start') {
-			setTypingIndicator(targetRoomId, participantId, participantName);
+			setTypingIndicator(targetRoomId, participantId, participantName, expiresAt);
 		} else {
 			clearTypingIndicator(targetRoomId, participantId);
 		}
@@ -5561,6 +5576,7 @@
 <PrivateAiChat
 	open={showPrivateAiChat}
 	isDarkMode={$isDarkMode}
+	{roomId}
 	{currentUserId}
 	{currentUsername}
 	on:close={closePrivateAiChat}

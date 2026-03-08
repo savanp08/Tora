@@ -11,6 +11,7 @@
 	export let isDarkMode = false;
 	export let currentUserId = '';
 	export let currentUsername = 'You';
+	export let roomId = '';
 
 	const dispatch = createEventDispatcher<{
 		close: void;
@@ -74,7 +75,7 @@
 			'X-User-Id': currentUserId || '',
 			'X-Username': currentUsername || ''
 		};
-		const body = JSON.stringify({ prompt, deviceId });
+		const body = JSON.stringify({ prompt, deviceId, roomId });
 
 		let response = await fetch(`${API_BASE}/api/ai/chat`, {
 			method: 'POST',
