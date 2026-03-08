@@ -668,6 +668,104 @@
 		});
 	}
 
+	function isLikelyURL(value: string) {
+		const candidate = (value || '').trim();
+		if (!candidate) {
+			return false;
+		}
+		try {
+			const parsed = new URL(candidate);
+			return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+		} catch {
+			return false;
+		}
+	}
+
+	function getPinnedMediaURL(message: ChatMessage) {
+		const direct = (message.mediaUrl || '').trim();
+		if (direct) {
+			return direct;
+		}
+		const fallback = (message.content || '').trim();
+		if (isLikelyURL(fallback)) {
+			return fallback;
+		}
+		return '';
+	}
+
+	function getPinnedCaption(message: ChatMessage) {
+		const content = (message.content || '').trim();
+		if (!content) {
+			return '';
+		}
+		const mediaURL = getPinnedMediaURL(message);
+		if (mediaURL && content === mediaURL) {
+			return '';
+		}
+		return content;
+	}
+
+	function getPinnedFileName(message: ChatMessage) {
+		const provided = (message.fileName || '').trim();
+		if (provided) {
+			return provided;
+		}
+		const mediaURL = getPinnedMediaURL(message);
+		if (!mediaURL) {
+			return 'attachment';
+		}
+		try {
+			const parsed = new URL(mediaURL);
+			const base = decodeURIComponent(parsed.pathname.split('/').pop() || '');
+			return base || 'attachment';
+		} catch {
+			const base = decodeURIComponent(mediaURL.split('/').pop() || '');
+			return base || 'attachment';
+		}
+	}
+
+	function getPinnedFileExtension(message: ChatMessage) {
+		const fileName = getPinnedFileName(message);
+		const dot = fileName.lastIndexOf('.');
+		if (dot <= 0 || dot === fileName.length - 1) {
+			return '';
+		}
+		return fileName.slice(dot + 1).toLowerCase();
+	}
+
+	function isPinnedImageMessage(message: ChatMessage) {
+		if (message.type === 'image') {
+			return true;
+		}
+		const ext = getPinnedFileExtension(message);
+		const mediaType = (message.mediaType || '').toLowerCase();
+		return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext) || mediaType.startsWith('image/');
+	}
+
+	function isPinnedVideoMessage(message: ChatMessage) {
+		if (message.type === 'video') {
+			return true;
+		}
+		const ext = getPinnedFileExtension(message);
+		const mediaType = (message.mediaType || '').toLowerCase();
+		return ['mp4', 'webm', 'mov', 'm4v', 'ogg'].includes(ext) || mediaType.startsWith('video/');
+	}
+
+	function isPinnedAudioMessage(message: ChatMessage) {
+		if (message.type === 'audio') {
+			return true;
+		}
+		const ext = getPinnedFileExtension(message);
+		const mediaType = (message.mediaType || '').toLowerCase();
+		return ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'webm', 'opus'].includes(ext) || mediaType.startsWith('audio/');
+	}
+
+	function isPinnedPDFMessage(message: ChatMessage) {
+		const ext = getPinnedFileExtension(message);
+		const mediaType = (message.mediaType || '').toLowerCase();
+		return ext === 'pdf' || mediaType.includes('pdf');
+	}
+
 	function pinnedContentLabel(message: ChatMessage) {
 		if (message.type === 'image') {
 			return 'Pinned image';
@@ -739,19 +837,61 @@
 										on:addTask={(event) => dispatch('addTask', event.detail)}
 									/>
 								{:else}
-									<div class="pinned-message-block">
-										<div class="pinned-meta">
-											<strong>{pinnedMessage.senderName}</strong>
-											<time>{formatPinnedTimestamp(pinnedMessage.createdAt)}</time>
+										<div class="pinned-message-block">
+											<div class="pinned-meta">
+												<strong>{pinnedMessage.senderName}</strong>
+												<time>{formatPinnedTimestamp(pinnedMessage.createdAt)}</time>
+											</div>
+											<div class="pinned-label">{pinnedContentLabel(pinnedMessage)}</div>
+											<div class="pinned-body-scroll">
+												{#if getPinnedMediaURL(pinnedMessage) && isPinnedImageMessage(pinnedMessage)}
+													<img
+														src={getPinnedMediaURL(pinnedMessage)}
+														alt={getPinnedFileName(pinnedMessage)}
+														class="pinned-media-preview pinned-image-preview"
+														loading="lazy"
+													/>
+												{:else if getPinnedMediaURL(pinnedMessage) && isPinnedVideoMessage(pinnedMessage)}
+													<!-- svelte-ignore a11y_media_has_caption -->
+													<video
+														src={getPinnedMediaURL(pinnedMessage)}
+														class="pinned-media-preview pinned-video-preview"
+														controls
+														preload="metadata"
+													></video>
+												{:else if getPinnedMediaURL(pinnedMessage) && isPinnedAudioMessage(pinnedMessage)}
+													<!-- svelte-ignore a11y_media_has_caption -->
+													<audio
+														src={getPinnedMediaURL(pinnedMessage)}
+														class="pinned-audio-preview"
+														controls
+														preload="metadata"
+													></audio>
+												{:else if getPinnedMediaURL(pinnedMessage) && isPinnedPDFMessage(pinnedMessage)}
+													<iframe
+														class="pinned-pdf-preview"
+														src={getPinnedMediaURL(pinnedMessage)}
+														title={getPinnedFileName(pinnedMessage)}
+														loading="lazy"
+													></iframe>
+												{:else if getPinnedMediaURL(pinnedMessage) && pinnedMessage.type === 'file'}
+													<div class="pinned-file-card">
+														<div class="pinned-file-name">{getPinnedFileName(pinnedMessage)}</div>
+														<div class="pinned-file-ext">
+															{getPinnedFileExtension(pinnedMessage).toUpperCase() || 'FILE'}
+														</div>
+													</div>
+												{/if}
+												{#if getPinnedCaption(pinnedMessage)}
+													<p>{getPinnedCaption(pinnedMessage)}</p>
+												{:else if !getPinnedMediaURL(pinnedMessage)}
+													<p>{(pinnedMessage.content || '').trim() || 'No message body'}</p>
+												{/if}
+											</div>
+											{#if getPinnedMediaURL(pinnedMessage)}
+												<a href={getPinnedMediaURL(pinnedMessage)} target="_blank" rel="noreferrer">Open attachment</a>
+											{/if}
 										</div>
-										<div class="pinned-label">{pinnedContentLabel(pinnedMessage)}</div>
-										<div class="pinned-body-scroll">
-											<p>{(pinnedMessage.content || '').trim() || 'No message body'}</p>
-										</div>
-										{#if pinnedMessage.mediaUrl}
-											<a href={pinnedMessage.mediaUrl} target="_blank" rel="noreferrer">Open attachment</a>
-										{/if}
-									</div>
 								{/if}
 							{:else}
 								<div class="empty-pinned-message">No pinned message selected.</div>
@@ -1141,6 +1281,53 @@
 		max-height: 8.5rem;
 		overflow-y: auto;
 		padding-right: 0.18rem;
+	}
+
+	.pinned-media-preview {
+		width: 100%;
+		max-height: 12.5rem;
+		border-radius: 10px;
+		border: 1px solid var(--border-default);
+		background: var(--surface-secondary);
+		display: block;
+		object-fit: cover;
+	}
+
+	.pinned-video-preview {
+		object-fit: contain;
+	}
+
+	.pinned-audio-preview {
+		width: 100%;
+	}
+
+	.pinned-pdf-preview {
+		width: 100%;
+		height: 12.5rem;
+		border: 1px solid var(--border-default);
+		border-radius: 10px;
+		background: var(--surface-secondary);
+	}
+
+	.pinned-file-card {
+		border: 1px solid var(--border-default);
+		border-radius: 10px;
+		padding: 0.5rem 0.62rem;
+		background: var(--surface-secondary);
+	}
+
+	.pinned-file-name {
+		font-size: 0.78rem;
+		font-weight: 600;
+		color: var(--text-primary);
+		word-break: break-word;
+	}
+
+	.pinned-file-ext {
+		margin-top: 0.2rem;
+		font-size: 0.68rem;
+		color: var(--text-secondary);
+		letter-spacing: 0.04em;
 	}
 
 	.pinned-message-block a {

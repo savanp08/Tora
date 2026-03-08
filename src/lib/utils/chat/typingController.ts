@@ -162,15 +162,19 @@ export function createTypingController({
 		if (!targetRoomId) {
 			return [];
 		}
+		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
 		const roomIndicators = getTypingUsersByRoom()[targetRoomId] ?? {};
 		const now = Date.now();
 		const active = Object.entries(roomIndicators)
 			.filter(([userId, entry]) => {
+				if (normalizedCurrentUserID && normalizeIdentifier(userId) === normalizedCurrentUserID) {
+					return false;
+				}
 				if (!entry || entry.expiresAt <= now) {
 					clearTypingIndicator(targetRoomId, userId);
 					return false;
 				}
-				return normalizeIdentifier(userId) !== normalizeIdentifier(currentUserId);
+				return true;
 			})
 			.map(([, entry]) => entry.name);
 		return active;

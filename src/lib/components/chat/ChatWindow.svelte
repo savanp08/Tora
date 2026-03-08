@@ -1635,9 +1635,9 @@
 						? 'compact-gutter'
 						: ''}"
 				>
-					{#if isMine}
-						<aside class="message-gutter mine">
-							{#if message.isPinned}
+						{#if isMine}
+							<aside class="message-gutter mine">
+								{#if message.isPinned}
 								<button
 									type="button"
 									class="gutter-pin-btn"
@@ -1647,23 +1647,30 @@
 										dispatch('openPinnedDiscussion', { messageId: message.id })}
 								>
 									<span class="gutter-pin-emoji" aria-hidden="true">📌</span>
-								</button>
-							{/if}
-							{#if totalReplies > 1}
-								<div class="gutter-stat" title={`${totalReplies} replies`}>
-									<IconSet name="reply" size={10} className="gutter-icon" />
-								<strong>{totalReplies}</strong>
-							</div>
-						{/if}
-						{#if branchesCreated > 1}
-							<div class="gutter-stat" title={`${branchesCreated} branches`}>
-								<IconSet name="break" size={10} className="gutter-icon" />
-								<strong>{branchesCreated}</strong>
-							</div>
-						{/if}
-						{#if !isDeletedMessage(message)}
-							<div class="gutter-actions mine-actions">
-								<button
+									</button>
+								{/if}
+								{#if totalReplies > 1 || branchesCreated > 1}
+									<div
+										class="gutter-stat"
+										title={totalReplies > 1 && branchesCreated > 1
+											? `${totalReplies} replies • ${branchesCreated} branches`
+											: totalReplies > 1
+												? `${totalReplies} replies`
+												: `${branchesCreated} branches`}
+									>
+										{#if totalReplies > 1}
+											<IconSet name="reply" size={10} className="gutter-icon" />
+											<strong>{totalReplies}</strong>
+										{/if}
+										{#if branchesCreated > 1}
+											<IconSet name="break" size={10} className="gutter-icon" />
+											<strong>{branchesCreated}</strong>
+										{/if}
+									</div>
+								{/if}
+							{#if !isDeletedMessage(message)}
+								<div class="gutter-actions mine-actions">
+									<button
 									type="button"
 									class="gutter-action-btn"
 									title="Reply"
@@ -2105,8 +2112,8 @@
 					</div>
 				{/if}
 					{#if !isMine}
-						<aside class="message-gutter theirs">
-							{#if message.isPinned}
+							<aside class="message-gutter theirs">
+								{#if message.isPinned}
 								<button
 									type="button"
 									class="gutter-pin-btn"
@@ -2116,23 +2123,30 @@
 										dispatch('openPinnedDiscussion', { messageId: message.id })}
 								>
 									<span class="gutter-pin-emoji" aria-hidden="true">📌</span>
-								</button>
-							{/if}
-							{#if totalReplies > 1}
-								<div class="gutter-stat" title={`${totalReplies} replies`}>
-									<IconSet name="reply" size={10} className="gutter-icon" />
-								<strong>{totalReplies}</strong>
-							</div>
-						{/if}
-						{#if branchesCreated > 1}
-							<div class="gutter-stat" title={`${branchesCreated} branches`}>
-								<IconSet name="break" size={10} className="gutter-icon" />
-								<strong>{branchesCreated}</strong>
-							</div>
-						{/if}
-						{#if !isDeletedMessage(message)}
-							<div class="gutter-actions">
-								<button
+									</button>
+								{/if}
+								{#if totalReplies > 1 || branchesCreated > 1}
+									<div
+										class="gutter-stat"
+										title={totalReplies > 1 && branchesCreated > 1
+											? `${totalReplies} replies • ${branchesCreated} branches`
+											: totalReplies > 1
+												? `${totalReplies} replies`
+												: `${branchesCreated} branches`}
+									>
+										{#if totalReplies > 1}
+											<IconSet name="reply" size={10} className="gutter-icon" />
+											<strong>{totalReplies}</strong>
+										{/if}
+										{#if branchesCreated > 1}
+											<IconSet name="break" size={10} className="gutter-icon" />
+											<strong>{branchesCreated}</strong>
+										{/if}
+									</div>
+								{/if}
+							{#if !isDeletedMessage(message)}
+								<div class="gutter-actions">
+									<button
 									type="button"
 									class="gutter-action-btn"
 									title="Reply"
@@ -2261,6 +2275,7 @@
 
 	.messages {
 		--meta-gutter-size: clamp(2.6rem, 7vw, 3.1rem);
+		--bubble-max-width: 470px;
 		--action-icon-size: clamp(1.2rem, 2.8vw, 1.5rem);
 		--action-hit-size: clamp(1.76rem, 3.7vw, 2.2rem);
 		--copy-icon-size: calc(var(--action-icon-size) * 0.84);
@@ -2425,6 +2440,7 @@
 		align-items: flex-start;
 		gap: 0.5rem;
 		width: 100%;
+		position: relative;
 	}
 
 	.message-row.mine {
@@ -2677,7 +2693,7 @@
 
 	.bubble {
 		position: relative;
-		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), 40rem);
+		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--bubble-max-width));
 		width: fit-content;
 		border-radius: 12px;
 		padding: 0.76rem 0.86rem;
@@ -2731,9 +2747,16 @@
 	}
 
 	.bubble.media-bubble {
-		width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), 42rem);
-		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), 42rem);
+		display: block;
+		width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--bubble-max-width));
+		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--bubble-max-width));
 		min-width: 0;
+	}
+
+	.bubble.media-bubble .bubble-content {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
 	}
 
 	.bubble.pending {
@@ -2848,15 +2871,22 @@
 	}
 
 	.bubble-meta {
-		display: flex;
-		justify-content: space-between;
-		gap: 0.75rem;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		column-gap: 0.75rem;
 		font-size: 0.74rem;
 		color: #5f6d83;
 		margin-bottom: 0.44rem;
+		min-width: 0;
 	}
 
 	.bubble-sender-name {
+		display: block;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 		font-weight: 600;
 		letter-spacing: 0.01em;
 	}
@@ -2877,6 +2907,8 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.35rem;
+		flex-shrink: 0;
+		white-space: nowrap;
 	}
 
 	.time-meta {
@@ -3173,6 +3205,10 @@
 		color: #243146;
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+	.bubble.media-bubble .media-caption {
+		margin-top: 0;
 	}
 
 	.messages-shell.theme-dark .media-caption {
@@ -3873,13 +3909,13 @@
 		}
 
 		.bubble {
-			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), 36rem);
+			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--bubble-max-width));
 			padding: 0.68rem 0.72rem;
 		}
 
 		.bubble.media-bubble {
-			width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), 36rem);
-			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), 36rem);
+			width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--bubble-max-width));
+			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--bubble-max-width));
 		}
 
 		.gutter-stat {

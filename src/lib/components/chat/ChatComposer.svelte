@@ -155,9 +155,6 @@
 				: hasPendingAttachment
 					? 'Add a caption (optional)'
 					: 'Type a message';
-	$: if (hasComposerInput && showEmojiPicker) {
-		closeEmojiPicker();
-	}
 
 	const dispatch = createEventDispatcher<{
 		send:
@@ -188,11 +185,11 @@
 		showEmojiPicker = false;
 	}
 
-	function emitTypingValue() {
+	function emitTypingValue(nextValue: string = draftMessage) {
 		if (disabled) {
 			return;
 		}
-		dispatch('typing', { value: draftMessage });
+		dispatch('typing', { value: nextValue });
 	}
 
 	function loadHasAcceptedAITerms() {
@@ -969,9 +966,13 @@
 		}
 	}
 
-	function onComposerInput() {
+	function onComposerInput(event: Event) {
 		syncComposerHighlightScroll();
-		emitTypingValue();
+		const nextValue =
+			event.currentTarget instanceof HTMLTextAreaElement
+				? event.currentTarget.value
+				: draftMessage;
+		emitTypingValue(nextValue);
 		updateMentionSuggestionsFromCaret();
 	}
 
@@ -1467,13 +1468,12 @@
 					<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
 				</svg>
 			</button>
-			<div class="emoji-wrap" class:slot-hidden={hasComposerInput} bind:this={emojiWrapEl}>
+			<div class="emoji-wrap" bind:this={emojiWrapEl}>
 				<button
 					type="button"
 					class="emoji-button"
 					on:click={toggleEmojiPicker}
-					disabled={composerDisabled || hasComposerInput}
-					aria-hidden={hasComposerInput}
+					disabled={composerDisabled}
 					aria-label="Insert emoji"
 					title="Insert emoji"
 				>
@@ -1762,6 +1762,7 @@
 		gap: 0.46rem;
 		max-height: min(54vh, 380px);
 		overflow: hidden;
+		min-height: 0;
 	}
 
 	.gif-picker-header {
@@ -1805,12 +1806,22 @@
 	.gif-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+		grid-auto-rows: minmax(96px, auto);
+		grid-auto-flow: row;
+		align-content: start;
+		flex: 1 1 auto;
+		
+		max-height: 100%;
 		gap: 0.42rem;
-		overflow: auto;
+		
+		
 		padding-right: 0.08rem;
+		-webkit-overflow-scrolling: touch;
 	}
 
 	.gif-card {
+		position: relative;
+		display: block;
 		border: 1px solid var(--border-default);
 		background: var(--surface-secondary);
 		border-radius: 9px;
@@ -1818,10 +1829,14 @@
 		overflow: hidden;
 		cursor: pointer;
 		aspect-ratio: 1 / 1;
+		min-height: 96px;
+		height: 100%;
 	}
 
 	.gif-card img {
 		display: block;
+		position: relative;
+		inset: auto;
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
@@ -2138,7 +2153,7 @@
 	}
 
 	.composer-row.typing-active {
-		grid-template-columns: 2.2rem 0 0 minmax(0, 1fr) 2.2rem;
+		grid-template-columns: 2.2rem 0 2.2rem minmax(0, 1fr) 2.2rem;
 	}
 
 	.composer[data-mode='dark'] .composer-row {
@@ -2250,8 +2265,7 @@
 		stroke-linejoin: round;
 	}
 
-	.ai-button.slot-hidden,
-	.emoji-wrap.slot-hidden {
+	.ai-button.slot-hidden {
 		visibility: hidden;
 		pointer-events: none;
 	}
@@ -2265,18 +2279,6 @@
 
 	.ai-button.slot-hidden svg {
 		display: none;
-	}
-
-	.emoji-wrap.slot-hidden {
-		width: 0;
-		overflow: hidden;
-	}
-
-	.emoji-wrap.slot-hidden .emoji-button {
-		width: 0;
-		height: 0;
-		border: 0;
-		padding: 0;
 	}
 
 	.emoji-picker {
@@ -2513,6 +2515,18 @@
 
 		.composer-input-wrap textarea {
 			font-size: 0.86rem;
+		}
+
+		.gif-picker-panel {
+			max-height: min(48vh, 320px);
+		}
+
+		.gif-grid {
+			
+		}
+
+		.gif-card {
+			min-height: 84px;
 		}
 	}
 

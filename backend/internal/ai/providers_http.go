@@ -16,16 +16,24 @@ import (
 )
 
 const (
-	defaultOpenAIModel = "gpt-4o-mini"
-	defaultCohereModel = "command-r"
+	defaultOpenAIModel  = "gpt-4o-mini"
+	defaultCohereModel  = "command-r"
+	defaultMistralModel = "codestral-latest"
 )
 
 var (
 	defaultGeminiModels = []string{
-		"gemini-2.5-flash",
 		"gemini-3.1-pro",
 		"gemini-3.1-flash",
 		"gemini-3.1-flash-lite",
+	}
+	defaultMistralModels = []string{
+		defaultMistralModel,
+		"mistral-small-latest",
+	}
+	defaultGroqModels = []string{
+		"llama-3.3-70b-versatile",
+		"llama-3.1-8b-instant",
 	}
 	defaultXAIModels = []string{
 		"grok-2-latest",
@@ -34,27 +42,28 @@ var (
 )
 
 // buildDefaultProvidersFromEnv returns providers in fixed fallback order:
-// Gemini -> OpenAI -> xAI -> Cohere.
+// Gemini -> Mistral -> Groq.
 func buildDefaultProvidersFromEnv() []Summarizer {
-	providers := make([]Summarizer, 0, 4)
+	providers := make([]Summarizer, 0, 3)
 
 	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewGeminiProvider(apiKey, parseModelCascadeFromEnv(
-			os.Getenv("GEMINI_MODELS"),
-			os.Getenv("GEMINI_MODEL"),
-		)))
+		providers = append(providers, NewGeminiProvider(apiKey, []string{
+			"gemini-3.1-pro",
+			"gemini-3.1-flash",
+			"gemini-3.1-flash-lite",
+		}))
 	}
-	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewOpenAIProvider(apiKey, strings.TrimSpace(os.Getenv("OPENAI_MODEL"))))
+	if apiKey := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")); apiKey != "" {
+		providers = append(providers, NewMistralProvider(apiKey, []string{
+			"codestral-latest",
+			"mistral-small-latest",
+		}))
 	}
-	if apiKey := strings.TrimSpace(os.Getenv("XAI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewXAIProvider(apiKey, parseModelCascadeFromEnv(
-			os.Getenv("XAI_MODELS"),
-			os.Getenv("XAI_MODEL"),
-		)))
-	}
-	if apiKey := strings.TrimSpace(os.Getenv("COHERE_API_KEY")); apiKey != "" {
-		providers = append(providers, NewCohereProvider(apiKey, strings.TrimSpace(os.Getenv("COHERE_MODEL"))))
+	if apiKey := strings.TrimSpace(os.Getenv("GROQ_API_KEY")); apiKey != "" {
+		providers = append(providers, NewGroqProvider(apiKey, []string{
+			"llama-3.3-70b-versatile",
+			"llama-3.1-8b-instant",
+		}))
 	}
 
 	return providers
@@ -146,6 +155,91 @@ func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string
 		}
 
 		text := strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text)
+		if text == "" {
+			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+		}
+		return text, nil
+	}
+	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+}
+
+type MistralProvider struct {
+	apiKey string
+	models []string
+	client *http.Client
+}
+
+func NewMistralProvider(apiKey string, models []string) *MistralProvider {
+	return &MistralProvider{
+		apiKey: strings.TrimSpace(apiKey),
+		models: mergeModelCascade(models, defaultMistralModels),
+		client: newProviderHTTPClient(),
+	}
+}
+
+func (p *MistralProvider) GenerateRollingSummary(
+	ctx context.Context,
+	previousState []byte,
+	newMessages []Message,
+) ([]byte, error) {
+	response, err := p.GenerateChatResponse(ctx, buildRollingSummaryPrompt(previousState, newMessages))
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSpace(response)), nil
+}
+
+func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", fmt.Errorf("mistral prompt is empty")
+	}
+
+	providerLabel := "mistral"
+	for _, model := range p.models {
+		payload := map[string]any{
+			"model": model,
+			"messages": []map[string]string{
+				{
+					"role":    "user",
+					"content": prompt,
+				},
+			},
+			"temperature": 0.2,
+		}
+
+		statusCode, body, err := postJSON(ctx, p.client, "https://codestral.mistral.ai/v1/chat/completions", map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
+		}, payload)
+		if err != nil {
+			return "", err
+		}
+
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+
+		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+			if statusCode == http.StatusTooManyRequests {
+				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				continue
+			}
+			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+		}
+		if len(parsed.Choices) == 0 {
+			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+		}
+
+		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
 			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
@@ -276,6 +370,91 @@ func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (
 		}
 
 		statusCode, body, err := postJSON(ctx, p.client, "https://api.x.ai/v1/chat/completions", map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
+		}, payload)
+		if err != nil {
+			return "", err
+		}
+
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+
+		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				continue
+			}
+			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+		}
+		if len(parsed.Choices) == 0 {
+			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+		}
+
+		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
+		if text == "" {
+			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+		}
+		return text, nil
+	}
+	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+}
+
+type GroqProvider struct {
+	apiKey string
+	models []string
+	client *http.Client
+}
+
+func NewGroqProvider(apiKey string, models []string) *GroqProvider {
+	return &GroqProvider{
+		apiKey: strings.TrimSpace(apiKey),
+		models: mergeModelCascade(models, defaultGroqModels),
+		client: newProviderHTTPClient(),
+	}
+}
+
+func (p *GroqProvider) GenerateRollingSummary(
+	ctx context.Context,
+	previousState []byte,
+	newMessages []Message,
+) ([]byte, error) {
+	response, err := p.GenerateChatResponse(ctx, buildRollingSummaryPrompt(previousState, newMessages))
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSpace(response)), nil
+}
+
+func (p *GroqProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", fmt.Errorf("groq prompt is empty")
+	}
+
+	providerLabel := "groq"
+	for _, model := range p.models {
+		payload := map[string]any{
+			"model": model,
+			"messages": []map[string]string{
+				{
+					"role":    "user",
+					"content": prompt,
+				},
+			},
+			"temperature": 0.2,
+		}
+
+		statusCode, body, err := postJSON(ctx, p.client, "https://api.groq.com/openai/v1/chat/completions", map[string]string{
 			"Authorization": "Bearer " + p.apiKey,
 		}, payload)
 		if err != nil {

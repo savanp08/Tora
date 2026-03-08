@@ -370,6 +370,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.38rem;
+		color: #1f2937;
 	}
 
 	.role-indicator {
@@ -631,5 +632,19 @@
 		color: #607087;
 		font-size: 0.84rem;
 		padding: 1rem;
+	}
+
+	:global(.chat-shell.theme-dark) .room-details-panel {
+		background: #101826;
+		border-color: #2b3a51;
+		color: #dbe7fb;
+	}
+
+	:global(.chat-shell.theme-dark) .room-details-panel header {
+		border-bottom-color: #2f415d;
+	}
+
+	:global(.chat-shell.theme-dark) .room-details-panel header h3 {
+		color: #f1f5ff;
 	}
 </style>

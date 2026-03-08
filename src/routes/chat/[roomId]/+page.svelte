@@ -147,7 +147,7 @@
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
-	const TYPING_PING_INTERVAL_MS = 5000;
+	const TYPING_PING_INTERVAL_MS = 1200;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
 	const DISCUSSION_MAX_REPLY_DEPTH = 4;
@@ -252,6 +252,10 @@
 	let onlineByRoom: Record<string, OnlineMember[]> = {};
 	let roomMetaById: Record<string, RoomMeta> = {};
 	let typingUsersByRoom: Record<string, Record<string, { name: string; expiresAt: number }>> = {};
+	let activeTypingUsers: string[] = [];
+	let typingNamesPreview = '';
+	let typingIndicatorText = '';
+	let hasTypingUsers = false;
 	let historyLoadingByRoom: Record<string, boolean> = {};
 	let historyHasMoreByRoom: Record<string, boolean> = {};
 	let offlineHydratedByRoom: Record<string, boolean> = {};
@@ -501,9 +505,22 @@
 	$: activeUnreadCount = activeThread?.unread ?? 0;
 	$: activeFirstUnreadMessageId = getUnreadStartMessageId(roomId);
 	$: activeLastReadTimestamp = getLastReadTimestamp(roomId);
-	$: activeTypingUsers = getActiveTypingUsers(roomId);
+	$: {
+		typingUsersByRoom;
+		activeTypingUsers = getActiveTypingUsers(roomId);
+	}
 	$: typingNamesPreview = formatTypingNamePreview(activeTypingUsers);
+	$: typingIndicatorText = formatTypingIndicatorText(activeTypingUsers);
 	$: hasTypingUsers = activeTypingUsers.length > 0;
+	$: if (browser) {
+		console.log('[typing] active typing users state:', {
+			roomId,
+			activeTypingUsers,
+			hasTypingUsers,
+			typingNamesPreview,
+			typingIndicatorText
+		});
+	}
 	$: activeRoomCreatedAtMs = roomId ? (roomMetaById[roomId]?.createdAt ?? 0) : 0;
 	$: activeRoomExpiresAtMs = roomId ? (roomMetaById[roomId]?.expiresAt ?? 0) : 0;
 	$: activeRoomRemainingMs =
@@ -558,6 +575,13 @@
 			const source = payload as Record<string, unknown>;
 			const payloadType = toStringValue(source.type).toLowerCase();
 			const payloadRoomID = normalizeRoomIDValue(toStringValue(source.roomId ?? source.room_id));
+			if (payloadType === 'typing_start' || payloadType === 'typing_stop') {
+				console.log('[typing] received typing update:', {
+					type: payloadType,
+					roomId: payloadRoomID,
+					payload: source.payload ?? null
+				});
+			}
 			if (payloadType === 'text' && payloadRoomID) {
 				void (async () => {
 					const directMessage = await parseIncomingMessageWithE2EE(source, payloadRoomID);
@@ -761,7 +785,15 @@
 	}
 
 	function onComposerTyping(event: CustomEvent<{ value: string }>) {
-		typingController.onComposerTyping((event.detail?.value || '').trim());
+		const rawValue = event.detail?.value || '';
+		console.log('[typing] user typing in composer:', {
+			user: currentUsername,
+			roomId,
+			isMember,
+			rawLength: rawValue.length,
+			normalizedLength: rawValue.trim().length
+		});
+		typingController.onComposerTyping(rawValue);
 	}
 
 	function setTypingIndicator(
@@ -803,6 +835,20 @@
 		return visible.join(', ');
 	}
 
+	function formatTypingIndicatorText(names: string[]) {
+		if (!names || names.length === 0) {
+			return '';
+		}
+		const visible = names.slice(0, 2).map((name) => truncateTypingName(name));
+		if (visible.length === 1) {
+			return `${visible[0]} is typing...`;
+		}
+		if (names.length > visible.length) {
+			return `${visible.join(', ')} and ${names.length - visible.length} others are typing...`;
+		}
+		return `${visible.join(', ')} are typing...`;
+	}
+
 	function handleTypingSignalPayload(payload: unknown) {
 		if (!payload || typeof payload !== 'object') {
 			return false;
@@ -831,6 +877,11 @@
 			)
 		);
 		if (!targetRoomId) {
+			console.log('[typing] received typing update but dropped: missing room', {
+				kind,
+				sourceRoomId: toStringValue(source.roomId ?? source.room_id),
+				payloadRoomId: toStringValue(nestedPayload.roomId ?? nestedPayload.room_id)
+			});
 			return true;
 		}
 		const participantId = normalizeIdentifier(
@@ -841,9 +892,14 @@
 					source.id ??
 					source.userId ??
 					source.user_id
-			)
-		);
+				)
+			);
 		if (!participantId) {
+			console.log('[typing] received typing update but dropped: missing user', {
+				kind,
+				roomId: targetRoomId,
+				payload: nestedPayload
+			});
 			return true;
 		}
 		const participantName =
@@ -857,8 +913,14 @@
 						source.username ??
 						source.userName ??
 						source.user_name
-				)
-			) || 'User';
+					)
+				) || 'User';
+		console.log('[typing] received typing update and applying:', {
+			kind,
+			roomId: targetRoomId,
+			userId: participantId,
+			userName: participantName
+		});
 		if (kind === 'typing_start') {
 			setTypingIndicator(targetRoomId, participantId, participantName);
 		} else {
@@ -5103,6 +5165,7 @@
 						{showTrustedDevicePrompt}
 						{isSelectionMode}
 						{messageActionMode}
+						{typingIndicatorText}
 						selectedDeleteCount={selectedDeleteMessageIds.length}
 						{showRoomSearch}
 						bind:roomMessageSearch
@@ -5433,17 +5496,17 @@
 				</div>
 
 				{#if !showBoardView}
-					<div
-						class="composer-typing-slot"
-						class:active={hasTypingUsers}
-						role="status"
-						aria-live="polite"
-						aria-atomic="true"
-					>
-						<div class="composer-typing-card">
-							<div class="composer-typing-names">{hasTypingUsers ? typingNamesPreview : '\u00A0'}</div>
-							<div class="composer-typing-status">{hasTypingUsers ? 'typing ...' : '\u00A0'}</div>
-						</div>
+					<div class="composer-typing-slot" role="status" aria-live="polite" aria-atomic="true">
+						{#if hasTypingUsers}
+							{#key `${roomId}:${typingIndicatorText}`}
+								<div class="composer-typing-card is-visible">
+									<div class="composer-typing-names">{typingNamesPreview}</div>
+									<div class="composer-typing-status">{typingIndicatorText}</div>
+								</div>
+							{/key}
+						{:else}
+							<div class="composer-typing-placeholder" aria-hidden="true"></div>
+						{/if}
 					</div>
 				{/if}
 				{#if isMember && !showBoardView}
