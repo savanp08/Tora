@@ -25,6 +25,11 @@
 	const KLIPY_SEARCH_LIMIT = 24;
 	const KLIPY_DEFAULT_LOCALE = 'us';
 	const KLIPY_CONTENT_FILTER = 'medium';
+	const KLIPY_AD_MIN_WIDTH = '50';
+	const KLIPY_AD_MAX_WIDTH = '150';
+	const KLIPY_AD_MIN_HEIGHT = '50';
+	const KLIPY_AD_MAX_HEIGHT = '150';
+	const KLIPY_AD_INSERT_POSITIONS = [1, 4] as const;
 	const COMPOSER_MAX_VISIBLE_LINES = 3;
 	const COMMON_EMOJIS = [
 		'😊',
@@ -70,6 +75,8 @@
 		previewUrl: string;
 		title: string;
 		kind: MediaAssetKind;
+		isAd?: boolean;
+		adContent?: string;
 	};
 
 	type MentionOption = {
@@ -781,6 +788,31 @@
 		return '';
 	}
 
+	function applyKlipyAdParams(params: URLSearchParams) {
+		params.set('ad-min-width', KLIPY_AD_MIN_WIDTH);
+		params.set('ad-max-width', KLIPY_AD_MAX_WIDTH);
+		params.set('ad-min-height', KLIPY_AD_MIN_HEIGHT);
+		params.set('ad-max-height', KLIPY_AD_MAX_HEIGHT);
+	}
+
+	function placeKlipyAds(items: MediaAssetResult[]) {
+		const adItems = items.filter((asset) => asset.isAd && (asset.adContent || '').trim() !== '');
+		if (adItems.length === 0) {
+			return items;
+		}
+		const mediaItems = items.filter((asset) => !asset.isAd);
+		if (mediaItems.length === 0) {
+			return adItems;
+		}
+		const orderedItems = [...mediaItems];
+		for (let index = 0; index < adItems.length; index += 1) {
+			const targetIndex = KLIPY_AD_INSERT_POSITIONS[index] ?? orderedItems.length;
+			const boundedIndex = Math.max(0, Math.min(targetIndex, orderedItems.length));
+			orderedItems.splice(boundedIndex, 0, adItems[index]);
+		}
+		return orderedItems;
+	}
+
 	function parseKlipyMediaResults(payload: unknown, kind: MediaAssetKind): MediaAssetResult[] {
 		const source = toRecord(payload);
 		if (!source) {
@@ -810,6 +842,23 @@
 		for (let index = 0; index < entriesRaw.length; index += 1) {
 			const entry = toRecord(entriesRaw[index]);
 			if (!entry) {
+				continue;
+			}
+			const entryType = toTrimmedString(entry.type).toLowerCase();
+			if (entryType === 'ad') {
+				const adContent = toTrimmedString(entry.content);
+				if (!adContent) {
+					continue;
+				}
+				items.push({
+					id: `klipy_ad_${Date.now()}_${index}`,
+					url: '',
+					previewUrl: '',
+					title: 'Advertisement',
+					kind,
+					isAd: true,
+					adContent
+				});
 				continue;
 			}
 			const mediaFormats = toRecord(entry.media_formats) ?? toRecord(entry.mediaFormats);
@@ -895,7 +944,7 @@
 				kind
 			});
 		}
-		return items;
+		return placeKlipyAds(items);
 	}
 
 	async function fetchKlipyGifs(query: string) {
@@ -917,6 +966,7 @@
 				media_filter: 'tinygif,gif',
 				contentfilter: 'medium'
 			});
+			applyKlipyAdParams(params);
 			if (query) {
 				params.set('q', query);
 			}
@@ -967,6 +1017,7 @@
 				locale: getKlipyLocale(),
 				content_filter: KLIPY_CONTENT_FILTER
 			});
+			applyKlipyAdParams(params);
 			if (query) {
 				params.set('q', query);
 			}
@@ -1022,6 +1073,7 @@
 				customer_id: KLIPY_CLIENT_KEY,
 				locale: getKlipyLocale()
 			});
+			applyKlipyAdParams(params);
 			if (query) {
 				params.set('q', query);
 			}
@@ -1756,15 +1808,23 @@
 			{:else}
 				<div class="media-grid">
 					{#each activeMediaResults as asset (asset.id)}
-						<button
-							type="button"
-							class="media-card"
-							on:click={() => selectMediaAssetAttachment(asset)}
-							title={`Attach ${asset.title}`}
-							aria-label={`Attach ${asset.title}`}
-						>
-							<img src={asset.previewUrl} alt={asset.title || 'Media'} loading="lazy" />
-						</button>
+						{#if asset.isAd}
+							<div class="media-card ad-card" aria-label="Advertisement">
+								<div class="media-ad-slot">
+									{@html asset.adContent ?? ''}
+								</div>
+							</div>
+						{:else}
+							<button
+								type="button"
+								class="media-card"
+								on:click={() => selectMediaAssetAttachment(asset)}
+								title={`Attach ${asset.title}`}
+								aria-label={`Attach ${asset.title}`}
+							>
+								<img src={asset.previewUrl} alt={asset.title || 'Media'} loading="lazy" />
+							</button>
+						{/if}
 					{/each}
 				</div>
 			{/if}
@@ -2219,6 +2279,35 @@
 		display: block;
 		position: relative;
 		inset: auto;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
+	.media-card.ad-card {
+		cursor: default;
+	}
+
+	.media-ad-slot {
+		width: 100%;
+		height: 100%;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		overflow: hidden;
+	}
+
+	.media-ad-slot :global(*) {
+		max-width: 100%;
+		max-height: 100%;
+		box-sizing: border-box;
+	}
+
+	.media-ad-slot :global(iframe),
+	.media-ad-slot :global(img),
+	.media-ad-slot :global(video),
+	.media-ad-slot :global(canvas) {
+		border: 0;
 		width: 100%;
 		height: 100%;
 		object-fit: cover;

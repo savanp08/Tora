@@ -92,6 +92,14 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 	deviceID := strings.TrimSpace(req.DeviceID)
 	roomID := resolvePrivateAIRoomID(req.RoomID, r)
+	if roomID == "" {
+		writeAIChatError(w, http.StatusBadRequest, "roomId is required")
+		return
+	}
+	if deviceID == "" {
+		writeAIChatError(w, http.StatusBadRequest, "deviceId is required")
+		return
+	}
 
 	userID, username := extractAIChatIdentity(r)
 	if userID == "" || username == "" {
@@ -102,6 +110,16 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 	ipAddress := strings.TrimSpace(extractClientIP(r))
 	if ipAddress == "" {
 		ipAddress = "unknown"
+	}
+
+	if limitErr := enforcePrivateAIRequestLimits(r.Context(), userID, roomID, ipAddress, deviceID); limitErr != nil {
+		var exceeded *privateAILimitExceededError
+		if errors.As(limitErr, &exceeded) {
+			writeAIChatError(w, http.StatusTooManyRequests, exceeded.PublicMessage())
+			return
+		}
+		writeAIChatError(w, http.StatusServiceUnavailable, "AI limiter unavailable")
+		return
 	}
 
 	aiPrompt := buildPrivateAIPromptWithRoomContext(r.Context(), roomID, prompt)

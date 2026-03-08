@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -285,40 +284,13 @@ func (m *ExecutionManager) executeAgainstPiston(
 
 	secureRequest, err := normalizePistonRequest(request)
 	if err != nil {
-		log.Printf(
-			"[execution][server] Could not normalize execution request language=%q files=%d: %v",
-			request.Language,
-			len(request.Files),
-			err,
-		)
 		return ExecutionResponse{}, err
-	}
-	log.Printf(
-		"[execution][server] Normalized request for Piston frontend_language=%q runtime_language=%q version=%q files=%d source_bytes=%d",
-		request.Language,
-		secureRequest.Language,
-		secureRequest.Version,
-		len(secureRequest.Files),
-		totalSourceBytes(secureRequest.Files),
-	)
-	if len(secureRequest.Files) > 0 {
-		log.Printf(
-			"[execution][server] First source file heading name=%q preview=%q",
-			secureRequest.Files[0].Name,
-			bodySnippet(secureRequest.Files[0].Content, 180),
-		)
 	}
 
 	payload, err := json.Marshal(secureRequest)
 	if err != nil {
-		log.Printf("[execution][server] Failed to encode Piston payload: %v", err)
 		return ExecutionResponse{}, err
 	}
-	log.Printf(
-		"[execution][server] Prepared Piston request endpoint=%q payload_bytes=%d",
-		m.pistonEndpoint,
-		len(payload),
-	)
 
 	requestCtx, cancel := context.WithTimeout(jobCtx, m.requestTimeout)
 	defer cancel()
@@ -330,23 +302,12 @@ func (m *ExecutionManager) executeAgainstPiston(
 		bytes.NewReader(payload),
 	)
 	if err != nil {
-		log.Printf("[execution][server] Failed building HTTP request for Piston: %v", err)
 		return ExecutionResponse{}, err
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
-	log.Printf(
-		"[execution][server] Sending HTTP request to Piston endpoint=%q timeout_ms=%d",
-		m.pistonEndpoint,
-		m.requestTimeout.Milliseconds(),
-	)
 
 	httpResponse, err := m.httpClient.Do(httpRequest)
 	if err != nil {
-		log.Printf(
-			"[execution][server] HTTP request to Piston failed endpoint=%q error=%v",
-			m.pistonEndpoint,
-			err,
-		)
 		if errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
 			return ExecutionResponse{}, &ManagerError{
 				StatusCode: http.StatusGatewayTimeout,
@@ -364,30 +325,15 @@ func (m *ExecutionManager) executeAgainstPiston(
 		}
 	}
 	defer httpResponse.Body.Close()
-	log.Printf(
-		"[execution][server] Received HTTP response from Piston status=%d",
-		httpResponse.StatusCode,
-	)
 
 	responseBody, readErr := io.ReadAll(io.LimitReader(httpResponse.Body, maxPistonResponseBytes))
 	if readErr != nil {
-		log.Printf(
-			"[execution][server] Failed reading Piston response body status=%d error=%v",
-			httpResponse.StatusCode,
-			readErr,
-		)
 		return ExecutionResponse{}, &ManagerError{
 			StatusCode: http.StatusBadGateway,
 			Message:    responseReadErrorMessage,
 			Err:        readErr,
 		}
 	}
-	log.Printf(
-		"[execution][server] Piston response received status=%d body_bytes=%d body_preview=%q",
-		httpResponse.StatusCode,
-		len(responseBody),
-		bodySnippet(string(responseBody), 320),
-	)
 
 	response := ExecutionResponse{
 		StatusCode: httpResponse.StatusCode,
@@ -400,27 +346,6 @@ func (m *ExecutionManager) executeAgainstPiston(
 		}
 	}
 	return response, nil
-}
-
-func totalSourceBytes(files []ExecutionFile) int {
-	total := 0
-	for _, file := range files {
-		total += len(file.Content)
-	}
-	return total
-}
-
-func bodySnippet(value string, limit int) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	sanitized := strings.ReplaceAll(trimmed, "\n", "\\n")
-	sanitized = strings.ReplaceAll(sanitized, "\r", "")
-	if limit <= 0 || len(sanitized) <= limit {
-		return sanitized
-	}
-	return sanitized[:limit] + "...(truncated)"
 }
 
 func normalizePistonRequest(request ExecutionRequest) (ExecutionRequest, error) {

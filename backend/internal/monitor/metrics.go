@@ -52,6 +52,13 @@ var (
 		Help:      "Total AI requests grouped by provider and status.",
 	}, []string{"provider", "status"})
 
+	AILimitChecksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "converse",
+		Subsystem: "ai",
+		Name:      "limit_checks_total",
+		Help:      "Total AI limiter checks grouped by scope and decision.",
+	}, []string{"scope", "decision"})
+
 	CodeExecutionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "converse",
 		Subsystem: "execution",

@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
@@ -45,14 +44,12 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	log.Printf("[execution][server] Received code execution request method=%s path=%s remote=%s", r.Method, r.URL.Path, r.RemoteAddr)
 
 	var req codeExecutionRequest
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		recordExecutionStatus("", "error")
-		log.Printf("[execution][server] Request body JSON decode failed: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
@@ -60,14 +57,8 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Language = strings.TrimSpace(req.Language)
-	log.Printf(
-		"[execution][server] Parsed request language=%q encoded_code_bytes=%d",
-		req.Language,
-		len(req.Code),
-	)
 	if req.Language == "" {
 		recordExecutionStatus(req.Language, "error")
-		log.Printf("[execution][server] Rejecting execution request because language is missing")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "language is required"})
@@ -77,7 +68,6 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 	decodedCodeBytes, decodeErr := base64.StdEncoding.DecodeString(req.Code)
 	if decodeErr != nil {
 		recordExecutionStatus(req.Language, "error")
-		log.Printf("[execution][server] Base64 decode failed for language=%q: %v", req.Language, decodeErr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Code must be valid Base64"})
@@ -85,13 +75,6 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 	}
 	decodedCode := string(decodedCodeBytes)
 	selectedFilename := defaultSourceFilename(req.Language)
-	log.Printf(
-		"[execution][server] Decoded source code successfully language=%q decoded_bytes=%d filename=%q preview=%q",
-		req.Language,
-		len(decodedCodeBytes),
-		selectedFilename,
-		logSnippet(decodedCode, 180),
-	)
 
 	executionRequest := execution.ExecutionRequest{
 		Language: req.Language,
@@ -103,16 +86,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	log.Printf("[execution][server] Sending request to execution manager language=%q file=%q", req.Language, selectedFilename)
 	response, err := DefaultExecutionManager.Execute(r.Context(), executionRequest)
-	log.Printf(
-		"[execution][server] Execution manager finished language=%q status=%d err=%v piston_body_bytes=%d piston_body_preview=%q",
-		req.Language,
-		response.StatusCode,
-		err,
-		len(response.Body),
-		logSnippet(string(response.Body), 280),
-	)
 	if err != nil {
 
 		statusCode := execution.HTTPStatus(err)
@@ -136,12 +110,6 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 			metricStatus = "rate_limit"
 		}
 		recordExecutionStatus(req.Language, metricStatus)
-		log.Printf(
-			"[execution][server] Returning execution error to client language=%q status=%d message=%q",
-			req.Language,
-			statusCode,
-			message,
-		)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
@@ -152,25 +120,11 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 	result, parseErr := parseExecutionResponse(response.Body)
 	if parseErr != nil {
 		recordExecutionStatus(req.Language, "error")
-		log.Printf(
-			"[execution][server] Failed parsing execution engine response language=%q parse_error=%v body_preview=%q",
-			req.Language,
-			parseErr,
-			logSnippet(string(response.Body), 280),
-		)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid execution engine response"})
 		return
 	}
-	log.Printf(
-		"[execution][server] Returning execution output to client language=%q stdout_bytes=%d stderr_bytes=%d stdout_preview=%q stderr_preview=%q",
-		req.Language,
-		len(result.Stdout),
-		len(result.Stderr),
-		logSnippet(result.Stdout, 180),
-		logSnippet(result.Stderr, 180),
-	)
 	recordExecutionStatus(req.Language, "success")
 
 	w.Header().Set("Content-Type", "application/json")
@@ -264,19 +218,6 @@ func joinExecutionPhaseOutput(parts ...string) string {
 		filtered = append(filtered, trimmed)
 	}
 	return strings.Join(filtered, "\n")
-}
-
-func logSnippet(value string, limit int) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	sanitized := strings.ReplaceAll(trimmed, "\n", "\\n")
-	sanitized = strings.ReplaceAll(sanitized, "\r", "")
-	if limit <= 0 || len(sanitized) <= limit {
-		return sanitized
-	}
-	return sanitized[:limit] + "...(truncated)"
 }
 
 func recordExecutionStatus(language string, status string) {
