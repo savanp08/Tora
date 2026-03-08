@@ -20,10 +20,6 @@ const chatMutationChannel = "chat:message_mutation"
 const chatDiscussionChannel = "chat:discussion_comment"
 const chatRoomEventChannel = "chat:room_event"
 
-func typingDebugLog(format string, args ...interface{}) {
-	log.Printf("[typing] "+format, args...)
-}
-
 type Hub struct {
 	rooms                map[string]map[*Client]bool
 	broadcast            chan models.Message
@@ -711,35 +707,16 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 
 func (h *Hub) handleClientTypingEvent(event *ClientTypingEvent) {
 	if event == nil || event.Client == nil {
-		typingDebugLog("received typing update but dropped reason=nil_event")
 		return
 	}
 	roomID := normalizeRoomID(event.RoomID)
 	client := event.Client
-	eventType := "typing_stop"
-	if event.IsTyping {
-		eventType = "typing_start"
-	}
 	isSubscribed := client.isSubscribedToRoom(roomID)
 	canWrite := client.canWriteToRoom(roomID)
 	if roomID == "" || !isSubscribed || !canWrite {
-		typingDebugLog(
-			"received typing update but dropped user=%s room=%s kind=%s subscribed=%t writable=%t reason=room_or_membership_check_failed",
-			client.UserID,
-			roomID,
-			eventType,
-			isSubscribed,
-			canWrite,
-		)
 		return
 	}
 	if !h.isClientRoomMember(client.UserID, roomID) {
-		typingDebugLog(
-			"received typing update but dropped user=%s room=%s kind=%s reason=not_room_member",
-			client.UserID,
-			roomID,
-			eventType,
-		)
 		client.subscribeToRoom(roomID, false)
 		return
 	}
@@ -751,39 +728,22 @@ func (h *Hub) handleClientTypingEvent(event *ClientTypingEvent) {
 		IsTyping:  event.IsTyping,
 		UpdatedAt: time.Now().UTC().UnixMilli(),
 	}
-	typingDebugLog(
-		"received typing update and accepted user=%s room=%s kind=%s",
-		client.UserID,
-		roomID,
-		eventType,
-	)
 
 	// Broadcast immediately to this process so typing indicators stay responsive
 	// even if Redis pub/sub delivery is delayed.
 	h.broadcastTypingToLocal(typingEvent)
-	typingDebugLog(
-		"forwarding typing update to local clients user=%s room=%s kind=%s",
-		client.UserID,
-		roomID,
-		eventType,
-	)
 
 	if h.msgService != nil && h.msgService.Redis != nil && h.msgService.Redis.Client != nil {
 		payload, err := json.Marshal(typingEvent)
 		if err != nil {
 			log.Printf("redis typing marshal error: %v", err)
-			typingDebugLog("failed to marshal typing update for redis user=%s room=%s kind=%s err=%v", client.UserID, roomID, eventType, err)
 			return
 		}
 		if err := h.msgService.Redis.Client.Publish(context.Background(), chatTypingChannel, payload).Err(); err != nil {
 			log.Printf("redis typing publish error: %v", err)
-			typingDebugLog("failed to publish typing update to redis user=%s room=%s kind=%s err=%v", client.UserID, roomID, eventType, err)
-		} else {
-			typingDebugLog("published typing update to redis user=%s room=%s kind=%s", client.UserID, roomID, eventType)
 		}
 		return
 	}
-	typingDebugLog("redis unavailable while forwarding typing update user=%s room=%s kind=%s", client.UserID, roomID, eventType)
 }
 
 func (h *Hub) handleClientBoardEvent(event *ClientBoardEvent) {
@@ -1333,12 +1293,10 @@ func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 	roomID := normalizeRoomID(event.RoomID)
 	userID := strings.TrimSpace(event.UserID)
 	if roomID == "" || userID == "" {
-		typingDebugLog("local typing broadcast dropped room=%s user=%s reason=missing_room_or_user", roomID, userID)
 		return
 	}
 	clients, ok := h.rooms[roomID]
 	if !ok {
-		typingDebugLog("local typing broadcast dropped room=%s user=%s reason=no_local_clients", roomID, userID)
 		return
 	}
 	envelopeType := "typing_stop"
@@ -1363,33 +1321,17 @@ func (h *Hub) broadcastTypingToLocal(event TypingRedisEvent) {
 			"is_typing": event.IsTyping,
 		},
 	}
-	delivered := 0
-	dropped := 0
-	skippedSender := 0
 	for roomClient := range clients {
 		if roomClient.UserID == userID {
-			skippedSender++
 			continue
 		}
 		select {
 		case roomClient.Send <- payload:
-			delivered++
 		default:
-			dropped++
 			h.removeClientFromAllRooms(roomClient, true)
 			roomClient.closeSendChannel()
 		}
 	}
-	typingDebugLog(
-		"local typing broadcast complete room=%s kind=%s sender=%s delivered=%d dropped=%d skipped_sender=%d total_clients=%d",
-		roomID,
-		envelopeType,
-		userID,
-		delivered,
-		dropped,
-		skippedSender,
-		len(clients),
-	)
 }
 
 func (h *Hub) broadcastDiscussionCommentToLocal(event DiscussionCommentEvent) {

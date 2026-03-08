@@ -147,7 +147,7 @@
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
-	const TYPING_PING_INTERVAL_MS = 1200;
+	const TYPING_PING_INTERVAL_MS = 3000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
 	const DISCUSSION_MAX_REPLY_DEPTH = 4;
@@ -512,15 +512,6 @@
 	$: typingNamesPreview = formatTypingNamePreview(activeTypingUsers);
 	$: typingIndicatorText = formatTypingIndicatorText(activeTypingUsers);
 	$: hasTypingUsers = activeTypingUsers.length > 0;
-	$: if (browser) {
-		console.log('[typing] active typing users state:', {
-			roomId,
-			activeTypingUsers,
-			hasTypingUsers,
-			typingNamesPreview,
-			typingIndicatorText
-		});
-	}
 	$: activeRoomCreatedAtMs = roomId ? (roomMetaById[roomId]?.createdAt ?? 0) : 0;
 	$: activeRoomExpiresAtMs = roomId ? (roomMetaById[roomId]?.expiresAt ?? 0) : 0;
 	$: activeRoomRemainingMs =
@@ -575,13 +566,6 @@
 			const source = payload as Record<string, unknown>;
 			const payloadType = toStringValue(source.type).toLowerCase();
 			const payloadRoomID = normalizeRoomIDValue(toStringValue(source.roomId ?? source.room_id));
-			if (payloadType === 'typing_start' || payloadType === 'typing_stop') {
-				console.log('[typing] received typing update:', {
-					type: payloadType,
-					roomId: payloadRoomID,
-					payload: source.payload ?? null
-				});
-			}
 			if (payloadType === 'text' && payloadRoomID) {
 				void (async () => {
 					const directMessage = await parseIncomingMessageWithE2EE(source, payloadRoomID);
@@ -786,13 +770,6 @@
 
 	function onComposerTyping(event: CustomEvent<{ value: string }>) {
 		const rawValue = event.detail?.value || '';
-		console.log('[typing] user typing in composer:', {
-			user: currentUsername,
-			roomId,
-			isMember,
-			rawLength: rawValue.length,
-			normalizedLength: rawValue.trim().length
-		});
 		typingController.onComposerTyping(rawValue);
 	}
 
@@ -877,11 +854,6 @@
 			)
 		);
 		if (!targetRoomId) {
-			console.log('[typing] received typing update but dropped: missing room', {
-				kind,
-				sourceRoomId: toStringValue(source.roomId ?? source.room_id),
-				payloadRoomId: toStringValue(nestedPayload.roomId ?? nestedPayload.room_id)
-			});
 			return true;
 		}
 		const participantId = normalizeIdentifier(
@@ -895,11 +867,6 @@
 				)
 			);
 		if (!participantId) {
-			console.log('[typing] received typing update but dropped: missing user', {
-				kind,
-				roomId: targetRoomId,
-				payload: nestedPayload
-			});
 			return true;
 		}
 		const participantName =
@@ -915,12 +882,6 @@
 						source.user_name
 					)
 				) || 'User';
-		console.log('[typing] received typing update and applying:', {
-			kind,
-			roomId: targetRoomId,
-			userId: participantId,
-			userName: participantName
-		});
 		if (kind === 'typing_start') {
 			setTypingIndicator(targetRoomId, participantId, participantName);
 		} else {

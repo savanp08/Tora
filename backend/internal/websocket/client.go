@@ -256,28 +256,12 @@ func (c *Client) readPump() {
 			continue
 		}
 		if typing, isTyping := parseTypingPayload(raw); isTyping {
-			eventType := "typing_stop"
-			if typing.IsTyping {
-				eventType = "typing_start"
-			}
-			typingDebugLog(
-				"received typing update from user=%s room=%s kind=%s",
-				c.UserID,
-				typing.RoomID,
-				eventType,
-			)
 			if c.Hub != nil {
 				c.Hub.typing <- &ClientTypingEvent{
 					Client:   c,
 					RoomID:   typing.RoomID,
 					IsTyping: typing.IsTyping,
 				}
-				typingDebugLog(
-					"forwarding typing update to hub user=%s room=%s kind=%s",
-					c.UserID,
-					typing.RoomID,
-					eventType,
-				)
 			}
 			continue
 		}

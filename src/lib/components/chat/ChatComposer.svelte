@@ -1810,7 +1810,7 @@
 		grid-auto-flow: row;
 		align-content: start;
 		flex: 1 1 auto;
-		
+		overflow: auto;
 		max-height: 100%;
 		gap: 0.42rem;
 		
