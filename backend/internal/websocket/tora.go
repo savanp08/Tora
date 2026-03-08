@@ -44,7 +44,7 @@ type toraAuditRecord struct {
 	IPAddress string
 	DeviceID  string
 	Prompt    string
-	Response  string
+	Response  string 
 	Timestamp time.Time
 }
 
