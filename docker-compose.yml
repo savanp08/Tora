@@ -26,6 +26,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      piston:
+        condition: service_started
   piston:
     image: ghcr.io/engineer-man/piston
     restart: unless-stopped
