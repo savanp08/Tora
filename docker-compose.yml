@@ -13,6 +13,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      
   backend:
     build: ./backend
     restart: unless-stopped
@@ -28,8 +29,10 @@ services:
         condition: service_healthy
       piston:
         condition: service_started
+        
   piston:
     image: ghcr.io/engineer-man/piston
+    platform: linux/amd64 
     restart: unless-stopped
     ports:
       - "127.0.0.1:2000:2000"
@@ -40,6 +43,22 @@ services:
         limits:
           memory: 5G
           cpus: "1.0"
+          
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -56,8 +75,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
-
-
+  prometheus_data:
 
   # cassandra:
   #   image: cassandra:latest

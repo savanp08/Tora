@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/savanp08/converse/internal/monitor"
 )
 
 const (
@@ -125,6 +127,7 @@ func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string
 
 		statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
 		if err != nil {
+			recordAIRequest(providerLabel, "error")
 			return "", err
 		}
 
@@ -146,18 +149,23 @@ func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string
 			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
 			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				recordAIRequest(providerLabel, "rate_limit")
 				continue
 			}
+			recordAIRequest(providerLabel, "error")
 			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
+			recordAIRequest(providerLabel, "error")
 			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text)
 		if text == "" {
+			recordAIRequest(providerLabel, "error")
 			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
+		recordAIRequest(providerLabel, "success")
 		return text, nil
 	}
 	return "", newModelCascadeExhaustedError(providerLabel, p.models)
@@ -212,6 +220,7 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 			"Authorization": "Bearer " + p.apiKey,
 		}, payload)
 		if err != nil {
+			recordAIRequest(providerLabel, "error")
 			return "", err
 		}
 
@@ -231,18 +240,23 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
 			if statusCode == http.StatusTooManyRequests {
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				recordAIRequest(providerLabel, "rate_limit")
 				continue
 			}
+			recordAIRequest(providerLabel, "error")
 			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Choices) == 0 {
+			recordAIRequest(providerLabel, "error")
 			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
+			recordAIRequest(providerLabel, "error")
 			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
+		recordAIRequest(providerLabel, "success")
 		return text, nil
 	}
 	return "", newModelCascadeExhaustedError(providerLabel, p.models)
@@ -458,6 +472,7 @@ func (p *GroqProvider) GenerateChatResponse(ctx context.Context, prompt string) 
 			"Authorization": "Bearer " + p.apiKey,
 		}, payload)
 		if err != nil {
+			recordAIRequest(providerLabel, "error")
 			return "", err
 		}
 
@@ -477,18 +492,23 @@ func (p *GroqProvider) GenerateChatResponse(ctx context.Context, prompt string) 
 			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
 			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				recordAIRequest(providerLabel, "rate_limit")
 				continue
 			}
+			recordAIRequest(providerLabel, "error")
 			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Choices) == 0 {
+			recordAIRequest(providerLabel, "error")
 			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
+			recordAIRequest(providerLabel, "error")
 			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
+		recordAIRequest(providerLabel, "success")
 		return text, nil
 	}
 	return "", newModelCascadeExhaustedError(providerLabel, p.models)
@@ -752,4 +772,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func recordAIRequest(provider string, status string) {
+	normalizedProvider := strings.TrimSpace(strings.ToLower(provider))
+	if normalizedProvider == "" {
+		normalizedProvider = "unknown"
+	}
+	normalizedStatus := strings.TrimSpace(strings.ToLower(status))
+	if normalizedStatus == "" {
+		normalizedStatus = "error"
+	}
+	monitor.AIRequestsTotal.WithLabelValues(normalizedProvider, normalizedStatus).Inc()
 }

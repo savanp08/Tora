@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/savanp08/converse/internal/execution"
+	"github.com/savanp08/converse/internal/monitor"
 )
 
 // DefaultExecutionManager serves execution requests using the local Piston runtime.
@@ -50,6 +51,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
+		recordExecutionStatus("", "error")
 		log.Printf("[execution][server] Request body JSON decode failed: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -64,6 +66,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		len(req.Code),
 	)
 	if req.Language == "" {
+		recordExecutionStatus(req.Language, "error")
 		log.Printf("[execution][server] Rejecting execution request because language is missing")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -73,6 +76,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 
 	decodedCodeBytes, decodeErr := base64.StdEncoding.DecodeString(req.Code)
 	if decodeErr != nil {
+		recordExecutionStatus(req.Language, "error")
 		log.Printf("[execution][server] Base64 decode failed for language=%q: %v", req.Language, decodeErr)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -113,9 +117,11 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 
 		statusCode := execution.HTTPStatus(err)
 		message := err.Error()
+		metricStatus := "error"
 
 		if errors.Is(err, execution.ErrServerBusy) {
 			statusCode = http.StatusTooManyRequests
+			metricStatus = "rate_limit"
 		}
 
 		if strings.TrimSpace(message) == "" {
@@ -125,6 +131,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		if parsedMessage := parseExecutionErrorBody(response.Body); parsedMessage != "" {
 			message = parsedMessage
 		}
+		recordExecutionStatus(req.Language, metricStatus)
 		log.Printf(
 			"[execution][server] Returning execution error to client language=%q status=%d message=%q",
 			req.Language,
@@ -140,6 +147,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 
 	result, parseErr := parseExecutionResponse(response.Body)
 	if parseErr != nil {
+		recordExecutionStatus(req.Language, "error")
 		log.Printf(
 			"[execution][server] Failed parsing execution engine response language=%q parse_error=%v body_preview=%q",
 			req.Language,
@@ -159,6 +167,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		logSnippet(result.Stdout, 180),
 		logSnippet(result.Stderr, 180),
 	)
+	recordExecutionStatus(req.Language, "success")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -264,4 +273,16 @@ func logSnippet(value string, limit int) string {
 		return sanitized
 	}
 	return sanitized[:limit] + "...(truncated)"
+}
+
+func recordExecutionStatus(language string, status string) {
+	normalizedLanguage := strings.ToLower(strings.TrimSpace(language))
+	if normalizedLanguage == "" {
+		normalizedLanguage = "unknown"
+	}
+	normalizedStatus := strings.ToLower(strings.TrimSpace(status))
+	if normalizedStatus == "" {
+		normalizedStatus = "error"
+	}
+	monitor.CodeExecutionsTotal.WithLabelValues(normalizedLanguage, normalizedStatus).Inc()
 }

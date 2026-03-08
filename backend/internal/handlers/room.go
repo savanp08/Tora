@@ -428,6 +428,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create room, retry"})
 			return
 		}
+		security.RecordIPActivity(ctx, clientIP, "rooms_created")
 	}
 	requiresPassword, err := h.isRoomPasswordProtected(ctx, finalRoomID)
 	if err != nil {
@@ -648,6 +649,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create break room, retry"})
 		return
 	}
+	security.RecordIPActivity(ctx, clientIP, "rooms_created")
 	finalRoomName := branchRoomName
 	requiresPassword := breakRoomPasswordHash != ""
 

@@ -273,11 +273,14 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 
 	fileURL, fileID, err := h.r2.PutObject(r.Context(), filename, reader, fileSize, fileType)
 	if err != nil {
+		monitor.TotalUploads.WithLabelValues("error").Inc()
 		log.Printf("[upload] proxy upload failed filename=%s err=%v", filename, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to upload file"})
 		return
 	}
+	monitor.TotalUploads.WithLabelValues("success").Inc()
+	monitor.UploadBytes.Observe(float64(fileSize))
 
 	alreadyCounted := strings.TrimSpace(r.URL.Query().Get("counted")) == "1"
 	if h.tracker != nil && !alreadyCounted {

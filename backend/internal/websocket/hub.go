@@ -587,7 +587,7 @@ func (h *Hub) broadcastExpiredRooms() {
 			}
 		}
 
-		delete(h.rooms, normalizedRoomID)
+		h.removeRoom(normalizedRoomID)
 	}
 }
 
@@ -657,6 +657,7 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 
 		if _, ok := h.rooms[roomID]; !ok {
 			h.rooms[roomID] = make(map[*Client]bool)
+			monitor.ActiveRooms.Inc()
 		}
 		alreadySubscribed := h.rooms[roomID][client]
 		alreadyWritable := client.canWriteToRoom(roomID)
@@ -1684,9 +1685,20 @@ func (h *Hub) removeClientFromAllRooms(client *Client, broadcastUserLeft bool) {
 		}
 
 		if len(clients) == 0 {
-			delete(h.rooms, roomID)
+			h.removeRoom(roomID)
 		}
 	}
+}
+
+func (h *Hub) removeRoom(roomID string) {
+	if h == nil {
+		return
+	}
+	if _, exists := h.rooms[roomID]; !exists {
+		return
+	}
+	delete(h.rooms, roomID)
+	monitor.ActiveRooms.Dec()
 }
 
 func (h *Hub) collectWritableOnlineMembers(roomID string) []map[string]interface{} {

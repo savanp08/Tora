@@ -1,11 +1,23 @@
 package security
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+	"github.com/savanp08/converse/internal/monitor"
 	"golang.org/x/time/rate"
+)
+
+var (
+	redisClientMu sync.RWMutex
+	redisClient   *redis.Client
 )
 
 type keyLimiter struct {
@@ -91,4 +103,71 @@ func (l *Limiter) cleanupStale(now time.Time) {
 		}
 	}
 	l.lastCleanup = now
+}
+
+func ConfigureRedisClient(client *redis.Client) {
+	redisClientMu.Lock()
+	redisClient = client
+	redisClientMu.Unlock()
+}
+
+func RecordIPActivity(ctx context.Context, ip string, action string) {
+	normalizedIP := strings.TrimSpace(ip)
+	if normalizedIP == "" {
+		return
+	}
+
+	normalizedAction := strings.TrimSpace(strings.ToLower(action))
+	if normalizedAction == "" {
+		normalizedAction = "activity"
+	}
+	switch normalizedAction {
+	case "rooms_created", "connections":
+	default:
+		normalizedAction = "activity"
+	}
+
+	redisClientMu.RLock()
+	client := redisClient
+	redisClientMu.RUnlock()
+	if client == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	hashedIP := hashIP(normalizedIP)
+	baseKey := fmt.Sprintf("stats:ip:%s", hashedIP)
+	pipe := client.TxPipeline()
+	pipe.HIncrBy(ctx, baseKey, normalizedAction, 1)
+	pipe.Expire(ctx, baseKey, 24*time.Hour)
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Printf("[security] redis ip activity write failed action=%s err=%v", normalizedAction, err)
+		return
+	}
+
+	if normalizedAction != "rooms_created" {
+		return
+	}
+
+	hourlyKey := fmt.Sprintf("stats:ip:%s:rooms_created:%s", hashedIP, time.Now().UTC().Format("2006010215"))
+	count, err := client.Incr(ctx, hourlyKey).Result()
+	if err != nil {
+		log.Printf("[security] redis ip hourly room counter failed err=%v", err)
+		return
+	}
+	_ = client.Expire(ctx, hourlyKey, time.Hour).Err()
+	if count > 50 {
+		monitor.SecurityBlocksTotal.WithLabelValues("ip_room_spam").Inc()
+	}
+}
+
+func hashIP(ip string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(ip)))
+	encoded := hex.EncodeToString(sum[:])
+	if len(encoded) > 24 {
+		return encoded[:24]
+	}
+	return encoded
 }

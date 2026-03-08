@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/monitor"
 	"github.com/savanp08/converse/internal/security"
 	"golang.org/x/time/rate"
 )
@@ -211,6 +212,8 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	client.Hub.register <- client
+	monitor.ActiveConnections.Inc()
+	security.RecordIPActivity(r.Context(), clientIP, "connections")
 
 	go client.writePump()
 	go client.readPump()
@@ -1813,6 +1816,7 @@ func (c *Client) cleanupConnectionTracking() {
 		if c.onDisconnect != nil {
 			c.onDisconnect()
 		}
+		monitor.ActiveConnections.Dec()
 	})
 }
 

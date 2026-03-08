@@ -8,11 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/savanp08/converse/internal/ai"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/monitor"
 	"github.com/savanp08/converse/internal/router"
+	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
 	"github.com/savanp08/converse/internal/websocket"
 )
@@ -29,6 +31,7 @@ func main() {
 	}
 	defer redisStore.Close()
 	log.Println("✅ Connected to Redis")
+	security.ConfigureRedisClient(redisStore.Client)
 
 	var scyllaStore *database.ScyllaStore
 	if (cfg.AstraToken != "" && cfg.AstraDatabaseID != "") || len(cfg.ScyllaHosts) > 0 {
@@ -66,6 +69,7 @@ func main() {
 	}
 
 	mainRouter := router.New(hub, redisStore, scyllaStore, r2Client, usageTracker)
+	mainRouter.Get("/metrics", promhttp.Handler().ServeHTTP)
 	go startRoomExpiryCleanupWorker(redisStore, scyllaStore, r2Client)
 
 	log.Printf("📡 Server listening on port %s", cfg.Port)
