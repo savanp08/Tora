@@ -25,6 +25,7 @@
 	const KLIPY_SEARCH_LIMIT = 24;
 	const KLIPY_DEFAULT_LOCALE = 'us';
 	const KLIPY_CONTENT_FILTER = 'medium';
+	const COMPOSER_MAX_VISIBLE_LINES = 3;
 	const COMMON_EMOJIS = [
 		'😊',
 		'😀',
@@ -300,6 +301,30 @@
 		composerHighlightEl.scrollLeft = composerTextareaEl.scrollLeft;
 	}
 
+	function parsePixel(value: string) {
+		const parsed = Number.parseFloat(value);
+		return Number.isFinite(parsed) ? parsed : 0;
+	}
+
+	function resizeComposerTextarea() {
+		if (!composerTextareaEl || typeof window === 'undefined') {
+			return;
+		}
+		const styles = window.getComputedStyle(composerTextareaEl);
+		const lineHeight = parsePixel(styles.lineHeight) || 19;
+		const verticalPadding = parsePixel(styles.paddingTop) + parsePixel(styles.paddingBottom);
+		const verticalBorder = parsePixel(styles.borderTopWidth) + parsePixel(styles.borderBottomWidth);
+		const minHeight = lineHeight + verticalPadding + verticalBorder;
+		const maxHeight = lineHeight * COMPOSER_MAX_VISIBLE_LINES + verticalPadding + verticalBorder;
+
+		composerTextareaEl.style.height = 'auto';
+		const nextHeight = Math.max(minHeight, Math.min(composerTextareaEl.scrollHeight, maxHeight));
+		composerTextareaEl.style.height = `${nextHeight}px`;
+		composerTextareaEl.style.overflowY =
+			composerTextareaEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
+		syncComposerHighlightScroll();
+	}
+
 	function textUsesAI(text: string) {
 		for (const token of AI_MENTION_TOKENS) {
 			if (text.includes(token)) {
@@ -484,6 +509,7 @@
 	onMount(() => {
 		hasAcceptedAITerms = loadHasAcceptedAITerms();
 		requestAnimationFrame(() => {
+			resizeComposerTextarea();
 			syncComposerHighlightScroll();
 		});
 
@@ -1252,6 +1278,7 @@
 	}
 
 	function onComposerInput(event: Event) {
+		resizeComposerTextarea();
 		syncComposerHighlightScroll();
 		const nextValue =
 			event.currentTarget instanceof HTMLTextAreaElement
@@ -1264,6 +1291,11 @@
 	function onComposerCursorActivity() {
 		syncComposerHighlightScroll();
 		updateMentionSuggestionsFromCaret();
+	}
+
+	$: if (composerTextareaEl) {
+		draftMessage;
+		resizeComposerTextarea();
 	}
 
 	function stopRecordingStream() {
@@ -2743,7 +2775,7 @@
 		min-width: 0;
 		resize: none;
 		min-height: 2.1rem;
-		max-height: 110px;
+		max-height: none;
 		border: 1px solid transparent;
 		border-radius: 10px;
 		padding: 0.44rem 0.56rem;
@@ -2755,6 +2787,7 @@
 		-webkit-text-fill-color: transparent;
 		caret-color: var(--text-primary);
 		box-sizing: border-box;
+		overflow-y: hidden;
 	}
 
 	.composer-input-wrap textarea:focus {
