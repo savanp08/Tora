@@ -159,7 +159,7 @@
 							maxlength="20"
 							on:focus={onRoomNameFocus}
 						/>
-						<small>Used as display name (max 20 chars).</small>
+						<small>Used as display name (max 20 chars). Spaces are converted to underscores.</small>
 					</div>
 					<div class="or-divider" aria-hidden="true">or</div>
 					<div class="field-group room-code-group">

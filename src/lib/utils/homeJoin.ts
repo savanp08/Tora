@@ -5,7 +5,7 @@ export function normalizeRoomNameInput(value: string) {
 	if (!trimmed) {
 		return '';
 	}
-	return trimmed.replace(/\s+/g, ' ').slice(0, 20);
+	return trimmed.replace(/\s+/g, '_').replace(/_+/g, '_').slice(0, 20);
 }
 
 export function normalizeRoomIdValue(value: string) {

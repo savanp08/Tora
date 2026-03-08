@@ -4814,12 +4814,11 @@
 	}
 </script>
 
-<section class="board-root">
-	<div class="board-toolbar" bind:this={boardToolbarEl}>
-		{#if openToolbarHintText}
-			<div class="toolbar-open-hint" role="status" aria-live="polite">{openToolbarHintText}</div>
-		{/if}
-		<div class="toolbar-primary-group" bind:this={toolbarPrimaryEl}>
+	<section class="board-root">
+		<div class="board-toolbar" bind:this={boardToolbarEl}>
+			{#if openToolbarHintText}
+				<div class="toolbar-open-hint" role="status" aria-live="polite">{openToolbarHintText}</div>
+			{/if}
 			<button
 				type="button"
 				class="tool-icon-button board-close-button"
@@ -4829,11 +4828,12 @@
 			>
 				<span aria-hidden="true">×</span>
 			</button>
-			<button
-				type="button"
-				class="tool-icon-button"
-				class:active={activeTool === 'draw'}
-				on:click={() => toggleToolMode('draw')}
+			<div class="toolbar-primary-group" bind:this={toolbarPrimaryEl}>
+				<button
+					type="button"
+					class="tool-icon-button"
+					class:active={activeTool === 'draw'}
+					on:click={() => toggleToolMode('draw')}
 				title="Free draw"
 			>
 				<svg class="tool-icon" viewBox="0 0 24 24">
@@ -5375,10 +5375,12 @@
 		flex-wrap: wrap;
 		gap: 0.45rem;
 		padding: 0.55rem;
+		padding-right: 2.8rem;
 		border-radius: 10px;
 		border: 1px solid var(--border-subtle);
 		background: var(--bg-secondary);
 		overflow: visible;
+		position: relative;
 	}
 
 	.toolbar-open-hint {
@@ -5386,7 +5388,7 @@
 		order: -1;
 		display: inline-flex;
 		align-items: center;
-		padding: 0.34rem 0.5rem;
+		padding: 0.34rem 2.6rem 0.34rem 0.5rem;
 		border-radius: 8px;
 		border: 1px solid color-mix(in srgb, #38bdf8 42%, transparent);
 		background: color-mix(in srgb, var(--bg-secondary) 82%, #38bdf8 18%);
@@ -5466,6 +5468,10 @@
 		color: #fff !important;
 		font-size: 1.05rem;
 		font-weight: 800;
+		position: absolute;
+		top: 0.55rem;
+		right: 0.55rem;
+		z-index: 8;
 	}
 
 	.board-close-button:hover {
@@ -6141,11 +6147,12 @@
 			align-items: stretch;
 			gap: 0.3rem;
 			padding: 0.42rem;
+			padding-right: 2.5rem;
 			width: 88vw;
 		}
 
 		.toolbar-open-hint {
-			padding: 0.28rem 0.44rem;
+			padding: 0.28rem 2.3rem 0.28rem 0.44rem;
 			font-size: 0.68rem;
 		}
 
@@ -6191,6 +6198,11 @@
 		.tool-icon-button {
 			width: 30px;
 			height: 30px;
+		}
+
+		.board-close-button {
+			top: 0.42rem;
+			right: 0.42rem;
 		}
 
 		.insert-toggle {

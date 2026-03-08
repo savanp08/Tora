@@ -69,6 +69,7 @@
 		reject: ((reason?: unknown) => void) | null;
 	};
 
+	type CanvasSidebarView = 'explorer' | 'search';
 	type MobileCanvasPane = 'explorer' | 'editor';
 	type CanvasSocketPayload = string | ArrayBufferLike | Blob | ArrayBufferView;
 	type CanvasDebugWebSocket = WebSocket & {
@@ -81,6 +82,40 @@
 		message: string;
 		fileName: string;
 	};
+
+	type SidebarSearchResultKind = 'file' | 'folder' | 'text';
+
+	type SidebarSearchResult = {
+		key: string;
+		kind: SidebarSearchResultKind;
+		path: string;
+		preview: string;
+		lineNumber?: number;
+		startColumn?: number;
+		endColumn?: number;
+		range?: any;
+	};
+
+	type SidebarSearchHighlightSegment = {
+		value: string;
+		isMatch: boolean;
+	};
+
+	type FileIconKind =
+		| 'generic'
+		| 'javascript'
+		| 'typescript'
+		| 'python'
+		| 'c'
+		| 'cpp'
+		| 'java'
+		| 'go'
+		| 'rust'
+		| 'json'
+		| 'html'
+		| 'css'
+		| 'markdown'
+		| 'shell';
 
 	const DEFAULT_PROJECT_FILE_NAME = 'main.js';
 	const DEFAULT_PROJECT_FILE_CONTENT = "console.log('Hello from Converse canvas');\n";
@@ -103,6 +138,36 @@ If the user asks for edits, apply them to the existing code and return the full 
 	const EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
 	const EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS = 1400;
+	const FILE_ICON_SVG: Record<FileIconKind, string> = {
+		generic:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#9FB2CC" d="M7 2.75h7.6L20.5 8.7V20a1.25 1.25 0 0 1-1.25 1.25h-12.5A1.25 1.25 0 0 1 5.5 20V4A1.25 1.25 0 0 1 6.75 2.75Zm7.1 1.6V8.4h4.07z"/><path fill="#6E84A3" d="M8 13h8v1.4H8zm0 3.2h8v1.4H8z"/></svg>',
+		javascript:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.2" y="3.2" width="17.6" height="17.6" rx="2.2" fill="#F7DF1E"/><path fill="#1F2328" d="M9.2 16.8c.35.58.82 1 1.73 1 1 0 1.64-.5 1.64-1.2 0-.84-.66-1.14-1.78-1.63l-.38-.16c-1.1-.47-1.82-1.06-1.82-2.3 0-1.14.87-2.02 2.23-2.02.97 0 1.66.34 2.16 1.22l-1.18.76c-.26-.47-.55-.66-.98-.66-.45 0-.73.29-.73.66 0 .46.29.64.95.93l.38.16c1.29.55 2.01 1.12 2.01 2.4 0 1.38-1.08 2.13-2.54 2.13-1.43 0-2.36-.68-2.82-1.57Zm5.48-.13c.31.55.6 1.01 1.29 1.01.66 0 1.08-.26 1.08-1.27V10.6h1.58v5.82c0 1.76-1.03 2.56-2.52 2.56-1.35 0-2.13-.7-2.52-1.54Z"/></svg>',
+		typescript:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.2" y="3.2" width="17.6" height="17.6" rx="2.2" fill="#3178C6"/><path fill="#FFFFFF" d="M9.23 10.7H6.9V9.35h6.22v1.35h-2.33v7.12H9.23Zm5.1 5.57c.42.7 1 1.2 2 1.2.85 0 1.4-.42 1.4-1.01 0-.7-.55-.95-1.47-1.35l-.5-.21c-1.43-.6-2.37-1.34-2.37-2.9 0-1.45 1.1-2.55 2.83-2.55 1.22 0 2.1.42 2.74 1.53l-1.34.86c-.3-.53-.61-.73-1.1-.73-.5 0-.82.32-.82.73 0 .52.32.73 1.06 1.05l.5.21c1.68.72 2.63 1.46 2.63 3.12 0 1.78-1.4 2.76-3.29 2.76-1.85 0-3.05-.88-3.64-2.03Z"/></svg>',
+		python:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#3776AB" d="M12.1 3.2c-4.3 0-4.03 1.86-4.03 1.86v1.93h4.1v.58H6.43S3.7 7.25 3.7 12.13c0 4.9 2.4 4.73 2.4 4.73h1.43v-2.02s-.08-2.4 2.35-2.4h4.07s2.3.04 2.3-2.22V6.3s.35-3.1-4.15-3.1Zm-2.27 1.78a.78.78 0 1 1 0 1.56.78.78 0 0 1 0-1.56Z"/><path fill="#FFD43B" d="M11.9 20.8c4.3 0 4.03-1.86 4.03-1.86V17h-4.1v-.58h5.74s2.73.32 2.73-4.56c0-4.9-2.4-4.73-2.4-4.73h-1.43v2.02s.08 2.4-2.35 2.4h-4.07s-2.3-.04-2.3 2.22v3.92s-.35 3.1 4.15 3.1Zm2.27-1.78a.78.78 0 1 1 0-1.56.78.78 0 0 1 0 1.56Z"/></svg>',
+		c:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4A5FB5" d="m12 2.2 8.49 4.9v9.8L12 21.8 3.5 16.9V7.1Z"/><path fill="#FFFFFF" d="M14.8 15.7a4.2 4.2 0 1 1 0-7.4l-.86 1.17a2.73 2.73 0 1 0 0 5.06z"/></svg>',
+		cpp:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#659AD2" d="m12 2.2 8.49 4.9v9.8L12 21.8 3.5 16.9V7.1Z"/><path fill="#FFFFFF" d="M11.38 15.68a4.2 4.2 0 1 1 0-7.36l-.86 1.17a2.73 2.73 0 1 0 0 5.02Zm3.1-4.08h1.03v-1.02h1.04v1.02h1.03v1.04h-1.03v1.03H15.5v-1.03h-1.03Zm3.34 0h1.03v-1.02h1.03v1.02h1.04v1.04h-1.04v1.03h-1.03v-1.03h-1.03Z"/></svg>',
+		java:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E76F00" d="M12.8 3.9c1.4 1-.86 2.03-.86 3.2 0 .62.57 1.1.92 1.7.58 1.02-.34 1.65-1.06 2.26 1.77-.48 2.9-1.45 2.9-2.76 0-1.06-.72-1.74-1.9-4.4Z"/><path fill="#4A89C7" d="M7.1 14.7h9.8c.76 0 1.36.6 1.36 1.36v.12c0 1.76-1.42 3.18-3.18 3.18h-6.16a3.18 3.18 0 0 1-3.18-3.18v-.12c0-.76.6-1.36 1.36-1.36Zm1.55-2.7c2.05 1.17 5 1.16 7.12-.02l.42.86c-2.33 1.36-5.64 1.37-8 .02Z"/></svg>',
+		go:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#00ADD8" d="M4.2 12.9c0-2.86 2.31-5.18 5.17-5.18h5.15c2.86 0 5.18 2.32 5.18 5.18s-2.32 5.18-5.18 5.18H9.37A5.18 5.18 0 0 1 4.2 12.9Z"/><circle cx="10.05" cy="12.9" r="1.05" fill="#FFFFFF"/><circle cx="14.28" cy="12.9" r="1.05" fill="#FFFFFF"/><path fill="#FFFFFF" d="M7.4 15.3h9.2v1.12H7.4z"/></svg>',
+		rust:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#D9D9D9" d="m12 3.2 2.04.56 1.96-.78 1.16 1.78 2.09.2.2 2.08 1.78 1.17-.78 1.95L21.01 12l-.56 2.05.78 1.95-1.78 1.17-.2 2.08-2.09.2-1.16 1.78-1.96-.78-2.04.56-2.05-.56-1.96.78-1.16-1.78-2.09-.2-.2-2.08-1.78-1.17.78-1.95L2.99 12l.56-2.04-.78-1.96 1.78-1.17.2-2.08 2.09-.2 1.16-1.78 1.96.78Z"/><circle cx="12" cy="12" r="3.15" fill="#111827"/><path fill="#111827" d="M11.12 10.24h1.56c1.15 0 1.88.6 1.88 1.58 0 .73-.42 1.27-1.08 1.5l1.2 1.95h-1.24l-1.06-1.77h-.18v1.77h-1.08Zm1.42 2.43c.55 0 .86-.28.86-.75s-.31-.73-.86-.73h-.34v1.48Z"/></svg>',
+		json:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#F7C948" d="M5.8 4.2h12.4a1.4 1.4 0 0 1 1.4 1.4v12.8a1.4 1.4 0 0 1-1.4 1.4H5.8a1.4 1.4 0 0 1-1.4-1.4V5.6a1.4 1.4 0 0 1 1.4-1.4Z"/><path fill="#1F2937" d="M8.35 8.2h1.18v1.62c0 .34-.08.62-.23.84-.16.22-.37.38-.63.48.26.1.47.26.63.47.15.22.23.5.23.84v1.63H8.35v-1.63c0-.34-.08-.58-.25-.72-.16-.14-.43-.2-.8-.2v-1.06c.37 0 .64-.07.8-.2.17-.14.25-.38.25-.72Zm7.3 0h-1.18v1.62c0 .34.08.62.23.84.16.22.37.38.63.48-.26.1-.47.26-.63.47-.15.22-.23.5-.23.84v1.63h1.18v-1.63c0-.34.08-.58.25-.72.16-.14.43-.2.8-.2v-1.06c-.37 0-.64-.07-.8-.2-.17-.14-.25-.38-.25-.72Z"/></svg>',
+		html:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E34F26" d="m4.1 3.6 1.6 16.8L12 22.2l6.3-1.8 1.6-16.8Z"/><path fill="#F16529" d="m12 20.73 5.07-1.45 1.37-14.3H12Z"/><path fill="#EBEBEB" d="M12 11.2H8.9l-.21-2.3H12V6.65H6.22l.06.63.58 6.17H12Zm0 5.87-.01.01-2.14-.6-.14-1.56H7.78l.27 2.97 3.94 1.1Z"/><path fill="#FFFFFF" d="M11.99 11.2v2.25h2.86l-.27 3.02-2.59.71v2.34l3.94-1.1.03-.32.54-5.65.06-.63Zm0-4.55V8.9h4.2l.03-.34.06-.65.14-1.57.06-.63Z"/></svg>',
+		css:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#1572B6" d="m4.1 3.6 1.6 16.8L12 22.2l6.3-1.8 1.6-16.8Z"/><path fill="#33A9DC" d="m12 20.73 5.07-1.45 1.37-14.3H12Z"/><path fill="#EBEBEB" d="M12 11.1H8.93l-.2-2.2H12V6.65H6.2l.05.62.56 6.08H12Zm0 5.83-.01.01-2.12-.59-.14-1.53H7.8l.27 2.93 3.92 1.09Z"/><path fill="#FFFFFF" d="M12 11.1v2.2h2.72l-.26 2.86-2.46.67v2.29l3.9-1.09.03-.31.53-5.5.05-.62Zm0-4.45V8.9h4.07l.03-.33.06-.65.13-1.54.05-.62Z"/></svg>',
+		markdown:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.4" y="4.5" width="17.2" height="15" rx="2" fill="#6B7280"/><path fill="#FFFFFF" d="M6.9 8h2.05l1.8 2.23L12.55 8h2.05v7.96h-2.05v-4.8l-1.8 2.2-1.8-2.2v4.8H6.9Zm8.8 4.25h1.6V9.92h1.56v2.33h1.61L18 15.96Z"/></svg>',
+		shell:
+			'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.2" fill="#111827"/><path fill="#9CA3AF" d="m7.1 9.03 3.02 2.7-3.02 2.71-1.02-1.14 1.75-1.57-1.75-1.56Zm4.15 4.75h5.65v1.45h-5.65z"/></svg>'
+	};
 	let currentFile = '';
 	let openTabs: string[] = [];
 	let fileExplorerError = '';
@@ -144,6 +209,18 @@ If the user asks for edits, apply them to the existing code and return the full 
 	let remoteSelectionDecorations: string[] = [];
 	let showReadOnlyWarning = false;
 	let explorerClipboard: { path: string; isDir: boolean } | null = null;
+	let activeSidebarView: CanvasSidebarView = 'explorer';
+	let sidebarSearchQuery = '';
+	let sidebarReplaceQuery = '';
+	let sidebarSearchMatchCase = false;
+	let sidebarSearchUseRegex = false;
+	let sidebarSearchResults: SidebarSearchResult[] = [];
+	let sidebarActiveSearchIndex = -1;
+	let sidebarFileResultCount = 0;
+	let sidebarFolderResultCount = 0;
+	let sidebarTextResultCount = 0;
+	let searchInputElement: HTMLInputElement | null = null;
+	let dirtyFiles: string[] = [];
 	let contextMenuOpen = false;
 	let contextMenuX = 0;
 	let contextMenuY = 0;
@@ -725,6 +802,407 @@ If the user asks for edits, apply them to the existing code and return the full 
 		return normalizeProjectName(filename).split('.').pop()?.toLowerCase() || '';
 	}
 
+	function getFileIconKind(filename: string): FileIconKind {
+		const ext = getFileExtension(filename);
+		if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return 'javascript';
+		if (ext === 'ts' || ext === 'tsx') return 'typescript';
+		if (ext === 'py') return 'python';
+		if (ext === 'c') return 'c';
+		if (ext === 'cc' || ext === 'cpp' || ext === 'h' || ext === 'hpp') return 'cpp';
+		if (ext === 'java') return 'java';
+		if (ext === 'go') return 'go';
+		if (ext === 'rs') return 'rust';
+		if (ext === 'json') return 'json';
+		if (ext === 'html') return 'html';
+		if (ext === 'css' || ext === 'scss') return 'css';
+		if (ext === 'md' || ext === 'markdown') return 'markdown';
+		if (ext === 'sh' || ext === 'zsh' || ext === 'bash') return 'shell';
+		return 'generic';
+	}
+
+	function getFileIconSVG(filename: string) {
+		const iconKind = getFileIconKind(filename);
+		return FILE_ICON_SVG[iconKind] || FILE_ICON_SVG.generic;
+	}
+
+	function markFileDirty(fileName: string) {
+		const normalized = normalizeProjectName(fileName);
+		if (!normalized || dirtyFiles.includes(normalized)) {
+			return;
+		}
+		dirtyFiles = [...dirtyFiles, normalized];
+	}
+
+	function clearFileDirty(fileName: string) {
+		const normalized = normalizeProjectName(fileName);
+		if (!normalized) {
+			return;
+		}
+		dirtyFiles = dirtyFiles.filter((path) => path !== normalized);
+	}
+
+	function isFileDirty(fileName: string) {
+		const normalized = normalizeProjectName(fileName);
+		return Boolean(normalized && dirtyFiles.includes(normalized));
+	}
+
+	function closeEditorFindWidget() {
+		if (!editor) {
+			return;
+		}
+		editor.trigger('canvas-search', 'closeFindWidget', null);
+	}
+
+	function setActiveSidebarView(view: CanvasSidebarView) {
+		activeSidebarView = view;
+		if (view !== 'search') {
+			return;
+		}
+		if (sidebarSearchQuery.trim()) {
+			updateSidebarSearchResults();
+		}
+		void tick().then(() => {
+			searchInputElement?.focus();
+		});
+	}
+
+	function buildSidebarSearchPattern(rawQuery: string) {
+		const trimmed = rawQuery.trim();
+		if (!trimmed) {
+			return '';
+		}
+		return trimmed;
+	}
+
+	function escapeRegExp(value: string) {
+		return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	}
+
+	function buildSidebarQueryRegExp(pattern: string, global = false) {
+		const source = sidebarSearchUseRegex ? pattern : escapeRegExp(pattern);
+		const flags = `${sidebarSearchMatchCase ? '' : 'i'}${global ? 'g' : ''}`;
+		try {
+			return new RegExp(source, flags);
+		} catch {
+			return null;
+		}
+	}
+
+	function collectSidebarSearchHighlights(value: string): SidebarSearchHighlightSegment[] {
+		if (!value) {
+			return [{ value, isMatch: false }];
+		}
+		const pattern = buildSidebarSearchPattern(sidebarSearchQuery);
+		if (!pattern) {
+			return [{ value, isMatch: false }];
+		}
+		const regex = buildSidebarQueryRegExp(pattern, true);
+		if (!regex) {
+			return [{ value, isMatch: false }];
+		}
+		const segments: SidebarSearchHighlightSegment[] = [];
+		let cursor = 0;
+		let guard = 0;
+		let match: RegExpExecArray | null = null;
+		while ((match = regex.exec(value)) !== null && guard < 500) {
+			guard += 1;
+			const start = match.index ?? 0;
+			const matchedText = match[0] ?? '';
+			if (!matchedText) {
+				regex.lastIndex = start + 1;
+				continue;
+			}
+			if (start > cursor) {
+				segments.push({ value: value.slice(cursor, start), isMatch: false });
+			}
+			segments.push({ value: matchedText, isMatch: true });
+			cursor = start + matchedText.length;
+		}
+		if (cursor < value.length) {
+			segments.push({ value: value.slice(cursor), isMatch: false });
+		}
+		return segments.length > 0 ? segments : [{ value, isMatch: false }];
+	}
+
+	function getSidebarTextResultIndexes() {
+		const indexes: number[] = [];
+		for (let index = 0; index < sidebarSearchResults.length; index += 1) {
+			const candidate = sidebarSearchResults[index];
+			if (candidate.kind === 'text' && candidate.range) {
+				indexes.push(index);
+			}
+		}
+		return indexes;
+	}
+
+	function updateSidebarSearchResults() {
+		const pattern = buildSidebarSearchPattern(sidebarSearchQuery);
+		if (!pattern) {
+			sidebarSearchResults = [];
+			sidebarActiveSearchIndex = -1;
+			sidebarFileResultCount = 0;
+			sidebarFolderResultCount = 0;
+			sidebarTextResultCount = 0;
+			return;
+		}
+		const queryRegExp = buildSidebarQueryRegExp(pattern);
+		if (!queryRegExp) {
+			fileExplorerError = 'Invalid search pattern';
+			sidebarSearchResults = [];
+			sidebarActiveSearchIndex = -1;
+			sidebarFileResultCount = 0;
+			sidebarFolderResultCount = 0;
+			sidebarTextResultCount = 0;
+			return;
+		}
+		fileExplorerError = '';
+
+		const fileAndFolderResults: SidebarSearchResult[] = fileTree
+			.filter((entry) => {
+				const relativePath = entry.relativePath || entry.name;
+				return queryRegExp.test(entry.name) || queryRegExp.test(relativePath);
+			})
+			.map((entry) => {
+				const relativePath = entry.relativePath || entry.name;
+				return {
+					key: `${entry.isDir ? 'folder' : 'file'}:${relativePath}`,
+					kind: entry.isDir ? 'folder' : 'file',
+					path: relativePath,
+					preview: relativePath
+				} satisfies SidebarSearchResult;
+			})
+			.sort((left, right) => {
+				if (left.kind !== right.kind) {
+					return left.kind === 'folder' ? -1 : 1;
+				}
+				return left.path.localeCompare(right.path);
+			});
+
+		let textResults: SidebarSearchResult[] = [];
+		if (!editor || !monacoApi) {
+			sidebarSearchResults = fileAndFolderResults;
+			sidebarFileResultCount = fileAndFolderResults.filter((result) => result.kind === 'file').length;
+			sidebarFolderResultCount = fileAndFolderResults.filter((result) => result.kind === 'folder').length;
+			sidebarTextResultCount = 0;
+			sidebarActiveSearchIndex = sidebarSearchResults.length > 0 ? 0 : -1;
+			return;
+		}
+
+		const model = editor.getModel?.();
+		if (!model) {
+			sidebarSearchResults = fileAndFolderResults;
+			sidebarFileResultCount = fileAndFolderResults.filter((result) => result.kind === 'file').length;
+			sidebarFolderResultCount = fileAndFolderResults.filter((result) => result.kind === 'folder').length;
+			sidebarTextResultCount = 0;
+			sidebarActiveSearchIndex = sidebarSearchResults.length > 0 ? 0 : -1;
+			return;
+		}
+
+		let matches: any[] = [];
+		try {
+			matches = model.findMatches(
+				pattern,
+				true,
+				sidebarSearchUseRegex,
+				sidebarSearchMatchCase,
+				null,
+				false,
+				400
+			);
+		} catch (error) {
+			fileExplorerError = error instanceof Error ? error.message : 'Invalid search pattern';
+			sidebarSearchResults = [];
+			sidebarActiveSearchIndex = -1;
+			sidebarFileResultCount = 0;
+			sidebarFolderResultCount = 0;
+			sidebarTextResultCount = 0;
+			return;
+		}
+		textResults = matches.map((match, index) => ({
+			key: `text:${currentFile || 'active'}:${match.range.startLineNumber}:${match.range.startColumn}:${index}`,
+			kind: 'text',
+			path: currentFile || 'active-file',
+			lineNumber: match.range.startLineNumber,
+			startColumn: match.range.startColumn,
+			endColumn: match.range.endColumn,
+			preview: String(model.getLineContent(match.range.startLineNumber) || '').trim(),
+			range: match.range
+		}));
+
+		sidebarSearchResults = [...fileAndFolderResults, ...textResults];
+		sidebarFileResultCount = fileAndFolderResults.filter((result) => result.kind === 'file').length;
+		sidebarFolderResultCount = fileAndFolderResults.filter((result) => result.kind === 'folder').length;
+		sidebarTextResultCount = textResults.length;
+		if (sidebarSearchResults.length === 0) {
+			sidebarActiveSearchIndex = -1;
+			return;
+		}
+		if (
+			sidebarActiveSearchIndex < 0 ||
+			sidebarActiveSearchIndex >= sidebarSearchResults.length
+		) {
+			sidebarActiveSearchIndex = 0;
+		}
+	}
+
+	async function focusSidebarSearchResult(nextIndex: number) {
+		if (sidebarSearchResults.length === 0) {
+			return;
+		}
+		const wrappedIndex =
+			((nextIndex % sidebarSearchResults.length) + sidebarSearchResults.length) %
+			sidebarSearchResults.length;
+		sidebarActiveSearchIndex = wrappedIndex;
+		const target = sidebarSearchResults[wrappedIndex];
+		if (!target) {
+			return;
+		}
+		if (target.kind === 'folder') {
+			expandedDirectories = {
+				...ensureExpandedDirectoriesForPath(target.path, expandedDirectories),
+				[target.path]: true
+			};
+			setActiveSidebarView('explorer');
+			if (isCompactCanvasLayout) {
+				showExplorerPane();
+			}
+			return;
+		}
+		if (target.kind === 'file') {
+			await switchToFile(target.path);
+			return;
+		}
+		if (!editor || !target.range) {
+			return;
+		}
+		editor.setSelection(target.range);
+		editor.revealRangeInCenter(target.range);
+		editor.focus();
+	}
+
+	async function searchNextResult() {
+		if (!sidebarSearchResults.length) {
+			updateSidebarSearchResults();
+		}
+		const textResultIndexes = getSidebarTextResultIndexes();
+		if (!textResultIndexes.length) {
+			return;
+		}
+		const currentTextIndex = textResultIndexes.findIndex((index) => index === sidebarActiveSearchIndex);
+		const nextIndex =
+			currentTextIndex >= 0
+				? textResultIndexes[(currentTextIndex + 1) % textResultIndexes.length]
+				: textResultIndexes[0];
+		await focusSidebarSearchResult(nextIndex);
+	}
+
+	async function searchPreviousResult() {
+		if (!sidebarSearchResults.length) {
+			updateSidebarSearchResults();
+		}
+		const textResultIndexes = getSidebarTextResultIndexes();
+		if (!textResultIndexes.length) {
+			return;
+		}
+		const currentTextIndex = textResultIndexes.findIndex((index) => index === sidebarActiveSearchIndex);
+		const previousIndex =
+			currentTextIndex >= 0
+				? textResultIndexes[
+						(currentTextIndex - 1 + textResultIndexes.length) % textResultIndexes.length
+					]
+				: textResultIndexes[textResultIndexes.length - 1];
+		await focusSidebarSearchResult(previousIndex);
+	}
+
+	function replaceCurrentResult() {
+		if (!editor || !sidebarSearchResults.length) {
+			return;
+		}
+		const textResultIndexes = getSidebarTextResultIndexes();
+		if (textResultIndexes.length === 0) {
+			return;
+		}
+		const activeResultIndex = textResultIndexes.includes(sidebarActiveSearchIndex)
+			? sidebarActiveSearchIndex
+			: textResultIndexes[0];
+		const activeResult = sidebarSearchResults[activeResultIndex];
+		if (activeResult.kind !== 'text' || !activeResult.range) {
+			return;
+		}
+		editor.executeEdits('canvas-sidebar-replace', [
+			{
+				range: activeResult.range,
+				text: sidebarReplaceQuery,
+				forceMoveMarkers: true
+			}
+		]);
+		markFileDirty(currentFile);
+		updateSidebarSearchResults();
+		const refreshedTextIndexes = getSidebarTextResultIndexes();
+		if (refreshedTextIndexes.length > 0) {
+			void focusSidebarSearchResult(refreshedTextIndexes[0]);
+		}
+	}
+
+	function replaceAllResults() {
+		if (!editor || sidebarSearchResults.length === 0) {
+			return;
+		}
+		const textResults = sidebarSearchResults.filter(
+			(result): result is SidebarSearchResult =>
+				result.kind === 'text' && Boolean(result.range) && typeof result.lineNumber === 'number'
+		);
+		if (textResults.length === 0) {
+			return;
+		}
+		const sortedEdits = [...textResults]
+			.sort((left, right) => {
+				const leftLine = left.lineNumber ?? 0;
+				const rightLine = right.lineNumber ?? 0;
+				if (leftLine !== rightLine) {
+					return rightLine - leftLine;
+				}
+				return (right.startColumn ?? 0) - (left.startColumn ?? 0);
+			})
+			.map((result) => ({
+				range: result.range,
+				text: sidebarReplaceQuery,
+				forceMoveMarkers: true
+			}));
+		editor.pushUndoStop();
+		editor.executeEdits('canvas-sidebar-replace-all', sortedEdits);
+		editor.pushUndoStop();
+		markFileDirty(currentFile);
+		updateSidebarSearchResults();
+	}
+
+	async function saveAllDirtyFiles() {
+		const dirtySnapshot = [...dirtyFiles];
+		if (dirtySnapshot.length === 0) {
+			return;
+		}
+		try {
+			await ensureProjectDirectory();
+			for (const relativePath of dirtySnapshot) {
+				if (!relativePath) {
+					continue;
+				}
+				if (relativePath === currentFile) {
+					await persistCurrentFileToFS({ clearDirty: true });
+					continue;
+				}
+				const yText = ydoc?.getText?.(yTextKeyForFile(relativePath));
+				const content = typeof yText?.toString === 'function' ? yText.toString() : '';
+				await getActiveFS().promises.writeFile(`/project/${relativePath}`, content);
+				clearFileDirty(relativePath);
+			}
+			scheduleCanvasSnapshotSave();
+			writeTerminalLine('\x1b[36m> Saved all pending files.\x1b[0m');
+		} catch (error) {
+			fileExplorerError = error instanceof Error ? error.message : 'Unable to save changed files';
+		}
+	}
+
 	function resolveExecutionLanguageForEntry(entry: ProjectFileEntry) {
 		const modelLanguageId =
 			entry.relativePath === currentFile ? editor?.getModel?.()?.getLanguageId?.() || '' : '';
@@ -1300,6 +1778,7 @@ If the user asks for edits, apply them to the existing code and return the full 
 	}
 
 	function showExplorerPane() {
+		activeSidebarView = 'explorer';
 		mobileCanvasPane = 'explorer';
 	}
 
@@ -2815,7 +3294,7 @@ Return only the final code for this file.`;
 		await openContextMenuAtPosition(event.clientX, event.clientY, target);
 	}
 
-	async function persistCurrentFileToFS() {
+	async function persistCurrentFileToFS(options?: { clearDirty?: boolean }) {
 		if (!editor) {
 			return;
 		}
@@ -2829,6 +3308,9 @@ Return only the final code for this file.`;
 		}
 		await ensureProjectDirectory();
 		await getActiveFS().promises.writeFile(`/project/${normalized}`, model.getValue());
+		if (options?.clearDirty) {
+			clearFileDirty(normalized);
+		}
 	}
 
 	async function recreateBindingForCurrentFile() {
@@ -2941,6 +3423,8 @@ Return only the final code for this file.`;
 			return;
 		}
 		if (isCompactCanvasLayout) {
+			closeCanvasAIPromptPanel();
+			closeEditorFindWidget();
 			showEditorPane();
 		}
 		ensureTabOpen(normalized);
@@ -2961,6 +3445,9 @@ Return only the final code for this file.`;
 				monacoApi.editor.setModelLanguage(model, getLanguageFromExtension(normalized));
 			}
 			await recreateBindingForCurrentFile();
+			if (activeSidebarView === 'search' && sidebarSearchQuery.trim()) {
+				updateSidebarSearchResults();
+			}
 			updateEditorAccessMode();
 		} catch (error) {
 			fileExplorerError = error instanceof Error ? error.message : 'Unable to open file';
@@ -3354,6 +3841,47 @@ Return only the final code for this file.`;
 		showReadOnlyWarning = shouldBeReadOnly;
 	}
 
+	function registerVSCodeStyleShortcuts(editorInstance: any, monaco: any) {
+		if (!editorInstance || !monaco?.KeyMod || !monaco?.KeyCode) {
+			return;
+		}
+		const bindCommand = (keybinding: number, commandId: string) => {
+			editorInstance.addCommand(keybinding, () => {
+				editorInstance.trigger('keyboard-shortcut', commandId, null);
+			});
+		};
+		// Keep standard IDE shortcuts available inside Monaco even when app-level key capture is active.
+		bindCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA, 'editor.action.selectAll');
+		bindCommand(
+			monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyD,
+			'editor.action.addSelectionToNextFindMatch'
+		);
+		bindCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyF, 'actions.find');
+		bindCommand(
+			monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyH,
+			'editor.action.startFindReplaceAction'
+		);
+		bindCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, 'editor.action.commentLine');
+		bindCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL, 'expandLineSelection');
+		editorInstance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+			void persistCurrentFileToFS({ clearDirty: true });
+			scheduleCanvasSnapshotSave();
+			writeTerminalLine('\x1b[36m> File saved.\x1b[0m');
+		});
+		editorInstance.addCommand(
+			monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF,
+			() => {
+				setActiveSidebarView('search');
+			}
+		);
+		editorInstance.addCommand(
+			monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE,
+			() => {
+				setActiveSidebarView('explorer');
+			}
+		);
+	}
+
 	async function handleAwarenessChange() {
 		updateEditorAccessMode();
 		if (!awareness) {
@@ -3377,6 +3905,13 @@ Return only the final code for this file.`;
 	$: visibleFileTree = fileTree.filter((entry) =>
 		isExplorerEntryVisible(entry, expandedDirectories)
 	);
+
+	$: if (activeSidebarView === 'search') {
+		sidebarSearchQuery;
+		sidebarSearchMatchCase;
+		sidebarSearchUseRegex;
+		updateSidebarSearchResults();
+	}
 
 	$: if (canvasEditorBodyElement) {
 		const { min, max } = getTerminalResizeBounds();
@@ -3403,6 +3938,16 @@ Return only the final code for this file.`;
 				!event.altKey &&
 				!event.shiftKey &&
 				event.key.toLowerCase() === 'i';
+			const isSidebarSearchShortcut =
+				(event.metaKey || event.ctrlKey) &&
+				event.shiftKey &&
+				!event.altKey &&
+				event.key.toLowerCase() === 'f';
+			if (isSidebarSearchShortcut) {
+				event.preventDefault();
+				setActiveSidebarView('search');
+				return;
+			}
 			if (isAIPromptShortcut) {
 				event.preventDefault();
 				if (showCanvasAIPrompt) {
@@ -3500,6 +4045,7 @@ Return only the final code for this file.`;
 				roundedSelection: true,
 				renderLineHighlight: 'all'
 			});
+			registerVSCodeStyleShortcuts(editor, monaco);
 
 			const model = editor.getModel();
 			if (!model) {
@@ -3513,6 +4059,10 @@ Return only the final code for this file.`;
 			editorContentChangeDisposable = model.onDidChangeContent(() => {
 				renderRemoteSelections();
 				scheduleCurrentFilePersistToFS();
+				markFileDirty(currentFile);
+				if (activeSidebarView === 'search' && sidebarSearchQuery.trim()) {
+					updateSidebarSearchResults();
+				}
 				updateSelectionSnippetAction();
 			});
 			editorScrollDisposable = editor.onDidScrollChange(() => {
@@ -3813,219 +4363,396 @@ Return only the final code for this file.`;
 			</div>
 		</div>
 	{/if}
-	<aside
-		class="canvas-sidebar"
-		class:drag-over={isSidebarDragOver}
-		bind:this={sidebarElement}
-		on:dragenter={handleSidebarDragEnter}
-		on:dragover={handleSidebarDragOver}
-		on:dragleave={handleSidebarDragLeave}
-		on:drop={handleSidebarDrop}
-	>
-		<div class="file-explorer-header">
-			<span>Explorer</span>
-			<div class="file-explorer-actions">
-				<button
-					type="button"
-					class="file-action-label-btn"
-					title="Export Workspace Zip"
-					aria-label="Export Workspace Zip"
-					on:click={() => void exportWorkspaceZip()}
-				>
-					Export
-				</button>
-				<button
-					type="button"
-					class="file-action-label-btn"
-					title="Import Workspace Zip"
-					aria-label="Import Workspace Zip"
-					on:click={triggerImportZip}
-				>
-					Import
-				</button>
-				<button
-					type="button"
-					class="file-action-btn"
-					title="New File"
-					aria-label="New File"
-					on:click={() => void createNewFile()}
-				>
-					<svg viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M12 5v14M5 12h14" />
-					</svg>
-				</button>
-				<button
-					type="button"
-					class="file-action-btn"
-					title="New Folder"
-					aria-label="New Folder"
-					on:click={() => void createNewFolder()}
-				>
-					<svg viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M3.5 7.5h6l2 2h9v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z" />
-					</svg>
-				</button>
-			</div>
-		</div>
-		<div class="github-import-row">
-			<input
-				type="url"
-				class="github-import-input"
-				placeholder="https://github.com/user/repo"
-				bind:value={githubRepoURL}
-				on:keydown={(event) => {
-					if (event.key === 'Enter') {
-						event.preventDefault();
-						void importFromGitHub();
-					}
-				}}
-			/>
+	<div class="canvas-side-region">
+		<nav class="canvas-activity-bar" aria-label="Canvas activity bar">
 			<button
 				type="button"
-				class="github-import-btn"
-				on:click={() => void importFromGitHub()}
-				disabled={isImportingRepo}
+				class="activity-button"
+				class:active={activeSidebarView === 'explorer'}
+				aria-label="Explorer"
+				title="Explorer"
+				on:click={() => setActiveSidebarView('explorer')}
 			>
-				{isImportingRepo ? 'Importing...' : 'Import Repo'}
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M4 5h16v5H4zM4 14h16v5H4z" />
+				</svg>
 			</button>
-		</div>
-		<input
-			type="file"
-			accept=".zip"
-			class="zip-import-input"
-			bind:this={importZipInput}
-			on:change={handleZipImportChange}
-		/>
-		{#if fileExplorerError}
-			<div class="file-error" role="status" aria-live="polite">{fileExplorerError}</div>
-		{/if}
-
-		<div
-			class="file-list"
-			role="presentation"
-			on:contextmenu={(event) => void openContextMenu(event, null)}
+			<button
+				type="button"
+				class="activity-button"
+				class:active={activeSidebarView === 'search'}
+				aria-label="Search"
+				title="Search"
+				on:click={() => setActiveSidebarView('search')}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<circle cx="11" cy="11" r="6.5" />
+					<path d="m16 16 4 4" />
+				</svg>
+			</button>
+		</nav>
+		<aside
+			class="canvas-sidebar"
+			class:drag-over={isSidebarDragOver}
+			bind:this={sidebarElement}
+			on:dragenter={handleSidebarDragEnter}
+			on:dragover={handleSidebarDragOver}
+			on:dragleave={handleSidebarDragLeave}
+			on:drop={handleSidebarDrop}
 		>
-			{#if fileTree.length === 0}
-				<div class="file-list-empty">No files yet</div>
-			{:else}
-				{#each visibleFileTree as entry (entry.path)}
-						<div
-							class="file-entry-row"
-							class:is-dir={entry.isDir}
-							class:active={!entry.isDir && entry.relativePath === currentFile}
-							class:contains-active={folderContainsCurrentFile(entry)}
-							role="presentation"
-							on:contextmenu={(event) => void openContextMenu(event, entry)}
-							on:touchstart={(event) => onExplorerEntryTouchStart(event, entry)}
-							on:touchmove={onExplorerEntryTouchMove}
-							on:touchend={onExplorerEntryTouchEnd}
-							on:touchcancel={onExplorerEntryTouchCancel}
+			{#if activeSidebarView === 'explorer'}
+				<div class="file-explorer-header">
+					<span>Explorer</span>
+					<div class="file-explorer-actions">
+						<button
+							type="button"
+							class="file-action-label-btn"
+							title="Export Workspace Zip"
+							aria-label="Export Workspace Zip"
+							on:click={() => void exportWorkspaceZip()}
 						>
-						<div
-							class="file-entry-main"
-							class:is-dir={entry.isDir}
-							style:padding-left={`${0.48 + entry.depth * 0.82}rem`}
+							Export
+						</button>
+						<button
+							type="button"
+							class="file-action-label-btn"
+							title="Import Workspace Zip"
+							aria-label="Import Workspace Zip"
+							on:click={triggerImportZip}
 						>
-							{#if entry.isDir}
-									<button
-										type="button"
-										class="file-entry-chevron-button"
-									aria-label={isFolderExpanded(entry)
-										? `Collapse ${entry.name}`
-										: `Expand ${entry.name}`}
-									aria-expanded={isFolderExpanded(entry)}
-										on:click|stopPropagation={(event) => {
-											if (consumeSuppressedExplorerClick(event)) {
-												return;
-											}
-											toggleFolder(entry);
-										}}
-										on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
-									>
-									<span class="file-entry-chevron" aria-hidden="true">
-										<svg viewBox="0 0 24 24" class:expanded={isFolderExpanded(entry)}>
-											<path d="M9 6l6 6-6 6" />
-										</svg>
-									</span>
-								</button>
-							{:else}
-								<span class="file-entry-chevron-spacer" aria-hidden="true"></span>
-							{/if}
-								<button
-									type="button"
-									class="file-entry-trigger"
-									class:is-dir={entry.isDir}
-									aria-expanded={entry.isDir ? isFolderExpanded(entry) : undefined}
-									on:click={(event) => handleExplorerEntryClick(event, entry)}
-									on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
-								>
-								<span class="file-entry-icon" class:is-dir={entry.isDir} aria-hidden="true">
-									{#if entry.isDir}
-										{#if isFolderExpanded(entry)}
-											<svg viewBox="0 0 24 24">
-												<path
-													d="M3.5 9h6l2 2h9l-2 7.2a2 2 0 0 1-1.92 1.46H5.4a2 2 0 0 1-1.95-1.57L2 11.3A2 2 0 0 1 3.5 9Z"
-												/>
-											</svg>
-										{:else}
-											<svg viewBox="0 0 24 24">
-												<path d="M3.5 7.5h6l2 2h9v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z" />
-											</svg>
-										{/if}
-									{:else}
-										<svg viewBox="0 0 24 24">
-											<path
-												d="M7.5 3.5h6l4 4v12.8a1.7 1.7 0 0 1-1.7 1.7H8.2a1.7 1.7 0 0 1-1.7-1.7V5.2a1.7 1.7 0 0 1 1-1.7Z"
-											/>
-											<path d="M13.5 3.5v4h4" />
-										</svg>
-									{/if}
-								</span>
-								<span class="file-entry-label">{entry.name}</span>
-							</button>
-						</div>
-							<button
-								type="button"
-								class="file-entry-more"
-								title="More Options"
-								aria-label="More Options"
-								on:click|stopPropagation={(event) => {
-									if (consumeSuppressedExplorerClick(event)) {
-										return;
-									}
-									void openContextMenu(event, entry);
-								}}
-							>
+							Import
+						</button>
+						<button
+							type="button"
+							class="file-action-btn"
+							title="New File"
+							aria-label="New File"
+							on:click={() => void createNewFile()}
+						>
 							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path
-									d="M12 5.5a1.5 1.5 0 1 0 0 .01M12 12a1.5 1.5 0 1 0 0 .01M12 18.5a1.5 1.5 0 1 0 0 .01"
-								/>
+								<path d="M12 5v14M5 12h14" />
 							</svg>
 						</button>
-							<button
-								type="button"
-								class="file-entry-delete"
-								title={`Delete ${entry.name}`}
-								aria-label={`Delete ${entry.name}`}
-								on:click|stopPropagation={(event) => {
-									if (consumeSuppressedExplorerClick(event)) {
-										return;
-									}
-									openDeleteConfirmation(entry);
-								}}
-							>
+						<button
+							type="button"
+							class="file-action-btn"
+							title="New Folder"
+							aria-label="New Folder"
+							on:click={() => void createNewFolder()}
+						>
 							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M4.5 7.5h15" />
-								<path d="M9.5 7.5v-2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2" />
-								<path d="M7.5 7.5l.8 11a1.5 1.5 0 0 0 1.5 1.4h4.4a1.5 1.5 0 0 0 1.5-1.4l.8-11" />
-								<path d="M10 11v5.5M14 11v5.5" />
+								<path d="M3.5 7.5h6l2 2h9v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z" />
 							</svg>
 						</button>
 					</div>
-				{/each}
+				</div>
+				<div class="github-import-row">
+					<input
+						type="url"
+						class="github-import-input"
+						placeholder="https://github.com/user/repo"
+						bind:value={githubRepoURL}
+						on:keydown={(event) => {
+							if (event.key === 'Enter') {
+								event.preventDefault();
+								void importFromGitHub();
+							}
+						}}
+					/>
+					<button
+						type="button"
+						class="github-import-btn"
+						on:click={() => void importFromGitHub()}
+						disabled={isImportingRepo}
+					>
+						{isImportingRepo ? 'Importing...' : 'Import Repo'}
+					</button>
+				</div>
+				<input
+					type="file"
+					accept=".zip"
+					class="zip-import-input"
+					bind:this={importZipInput}
+					on:change={handleZipImportChange}
+				/>
+
+				<div
+					class="file-list"
+					role="presentation"
+					on:contextmenu={(event) => void openContextMenu(event, null)}
+				>
+					{#if fileTree.length === 0}
+						<div class="file-list-empty">No files yet</div>
+					{:else}
+						{#each visibleFileTree as entry (entry.path)}
+							<div
+								class="file-entry-row"
+								class:is-dir={entry.isDir}
+								class:active={!entry.isDir && entry.relativePath === currentFile}
+								class:contains-active={folderContainsCurrentFile(entry)}
+								role="presentation"
+								on:contextmenu={(event) => void openContextMenu(event, entry)}
+								on:touchstart={(event) => onExplorerEntryTouchStart(event, entry)}
+								on:touchmove={onExplorerEntryTouchMove}
+								on:touchend={onExplorerEntryTouchEnd}
+								on:touchcancel={onExplorerEntryTouchCancel}
+							>
+								<div
+									class="file-entry-main"
+									class:is-dir={entry.isDir}
+									style:padding-left={`${0.48 + entry.depth * 0.82}rem`}
+								>
+									{#if entry.isDir}
+										<button
+											type="button"
+											class="file-entry-chevron-button"
+											aria-label={isFolderExpanded(entry)
+												? `Collapse ${entry.name}`
+												: `Expand ${entry.name}`}
+											aria-expanded={isFolderExpanded(entry)}
+											on:click|stopPropagation={(event) => {
+												if (consumeSuppressedExplorerClick(event)) {
+													return;
+												}
+												toggleFolder(entry);
+											}}
+											on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
+										>
+											<span class="file-entry-chevron" aria-hidden="true">
+												<svg viewBox="0 0 24 24" class:expanded={isFolderExpanded(entry)}>
+													<path d="M9 6l6 6-6 6" />
+												</svg>
+											</span>
+										</button>
+									{:else}
+										<span class="file-entry-chevron-spacer" aria-hidden="true"></span>
+									{/if}
+									<button
+										type="button"
+										class="file-entry-trigger"
+										class:is-dir={entry.isDir}
+										aria-expanded={entry.isDir ? isFolderExpanded(entry) : undefined}
+										on:click={(event) => handleExplorerEntryClick(event, entry)}
+										on:keydown={(event) => handleExplorerEntryKeydown(event, entry)}
+									>
+										<span class="file-entry-icon" class:is-dir={entry.isDir} aria-hidden="true">
+											{#if entry.isDir}
+												{#if isFolderExpanded(entry)}
+													<svg viewBox="0 0 24 24">
+														<path
+															d="M3.5 9h6l2 2h9l-2 7.2a2 2 0 0 1-1.92 1.46H5.4a2 2 0 0 1-1.95-1.57L2 11.3A2 2 0 0 1 3.5 9Z"
+														/>
+													</svg>
+												{:else}
+													<svg viewBox="0 0 24 24">
+														<path
+															d="M3.5 7.5h6l2 2h9v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z"
+														/>
+													</svg>
+												{/if}
+											{:else}
+												<span class="file-extension-symbol" aria-hidden="true">
+													{@html getFileIconSVG(entry.name)}
+												</span>
+											{/if}
+										</span>
+										<span class="file-entry-label">{entry.name}</span>
+									</button>
+								</div>
+								<button
+									type="button"
+									class="file-entry-more"
+									title="More Options"
+									aria-label="More Options"
+									on:click|stopPropagation={(event) => {
+										if (consumeSuppressedExplorerClick(event)) {
+											return;
+										}
+										void openContextMenu(event, entry);
+									}}
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path
+											d="M12 5.5a1.5 1.5 0 1 0 0 .01M12 12a1.5 1.5 0 1 0 0 .01M12 18.5a1.5 1.5 0 1 0 0 .01"
+										/>
+									</svg>
+								</button>
+								<button
+									type="button"
+									class="file-entry-delete"
+									title={`Delete ${entry.name}`}
+									aria-label={`Delete ${entry.name}`}
+									on:click|stopPropagation={(event) => {
+										if (consumeSuppressedExplorerClick(event)) {
+											return;
+										}
+										openDeleteConfirmation(entry);
+									}}
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M4.5 7.5h15" />
+										<path d="M9.5 7.5v-2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2" />
+										<path d="M7.5 7.5l.8 11a1.5 1.5 0 0 0 1.5 1.4h4.4a1.5 1.5 0 0 0 1.5-1.4l.8-11" />
+										<path d="M10 11v5.5M14 11v5.5" />
+									</svg>
+								</button>
+							</div>
+						{/each}
+					{/if}
+				</div>
+			{:else}
+				<div class="sidebar-panel-header">
+					<span>Search & Replace</span>
+					<button
+						type="button"
+						class="sidebar-panel-close"
+						aria-label="Close search"
+						on:click={() => setActiveSidebarView('explorer')}
+					>
+						×
+					</button>
+				</div>
+				<div class="sidebar-search-row">
+					<input
+						bind:this={searchInputElement}
+						type="search"
+						class="sidebar-filter-input"
+						placeholder="Search files, folders, and text..."
+						bind:value={sidebarSearchQuery}
+						on:keydown={(event) => {
+							if (event.key === 'Enter') {
+								event.preventDefault();
+								if (event.shiftKey) {
+									void searchPreviousResult();
+									return;
+								}
+								void searchNextResult();
+							}
+						}}
+					/>
+					<input
+						type="text"
+						class="sidebar-filter-input"
+						placeholder="Replace with..."
+						bind:value={sidebarReplaceQuery}
+					/>
+				</div>
+				<div class="sidebar-search-options">
+					<button
+						type="button"
+						class="sidebar-toggle-chip"
+						class:active={sidebarSearchMatchCase}
+						on:click={() => (sidebarSearchMatchCase = !sidebarSearchMatchCase)}
+					>
+						Match Case
+					</button>
+					<button
+						type="button"
+						class="sidebar-toggle-chip"
+						class:active={sidebarSearchUseRegex}
+						on:click={() => (sidebarSearchUseRegex = !sidebarSearchUseRegex)}
+					>
+						Regex
+					</button>
+				</div>
+				<div class="sidebar-search-actions">
+					<button
+						type="button"
+						class="sidebar-action-btn"
+						on:click={() => void searchPreviousResult()}
+						disabled={sidebarTextResultCount === 0}
+					>
+						Prev
+					</button>
+					<button
+						type="button"
+						class="sidebar-action-btn"
+						on:click={() => void searchNextResult()}
+						disabled={sidebarTextResultCount === 0}
+					>
+						Next
+					</button>
+					<button
+						type="button"
+						class="sidebar-action-btn"
+						on:click={replaceCurrentResult}
+						disabled={sidebarTextResultCount === 0}
+					>
+						Replace
+					</button>
+					<button
+						type="button"
+						class="sidebar-action-btn"
+						on:click={replaceAllResults}
+						disabled={sidebarTextResultCount === 0}
+					>
+						Replace All
+					</button>
+				</div>
+				<div class="sidebar-search-status">
+					{#if sidebarSearchResults.length > 0}
+						{sidebarSearchResults.length} results:
+						{sidebarFolderResultCount} folders, {sidebarFileResultCount} files, {sidebarTextResultCount}
+						text
+					{:else if sidebarSearchQuery.trim()}
+						No files, folders, or text matches
+					{:else}
+						Start typing to search your workspace
+					{/if}
+				</div>
+				<div class="sidebar-search-results" role="list">
+					{#if sidebarSearchResults.length === 0}
+						<div class="sidebar-search-empty">Nothing to show</div>
+					{:else}
+						{#each sidebarSearchResults as result, index (result.key)}
+							<button
+								type="button"
+								class="sidebar-result-item"
+								class:active={index === sidebarActiveSearchIndex}
+								on:click={() => void focusSidebarSearchResult(index)}
+							>
+								<span class={`sidebar-result-kind ${result.kind}`}>{result.kind}</span>
+								<span class="sidebar-result-content">
+									<span class="sidebar-result-path">
+										{#each collectSidebarSearchHighlights(result.path) as segment, segmentIndex (`path-${result.key}-${segmentIndex}`)}
+											{#if segment.isMatch}
+												<mark class="sidebar-result-highlight">{segment.value}</mark>
+											{:else}
+												{segment.value}
+											{/if}
+										{/each}
+									</span>
+									{#if result.kind === 'text'}
+										<span class="sidebar-result-line">
+											Ln {result.lineNumber}, Col {result.startColumn}
+										</span>
+									{/if}
+									<span class="sidebar-result-preview">
+										{#if result.kind === 'text'}
+											{#each collectSidebarSearchHighlights(result.preview) as segment, segmentIndex (`preview-${result.key}-${segmentIndex}`)}
+												{#if segment.isMatch}
+													<mark class="sidebar-result-highlight">{segment.value}</mark>
+												{:else}
+													{segment.value}
+												{/if}
+											{/each}
+										{:else if result.kind === 'folder'}
+											Open folder
+										{:else}
+											Open file
+										{/if}
+									</span>
+								</span>
+							</button>
+						{/each}
+					{/if}
+				</div>
 			{/if}
-		</div>
-	</aside>
+			{#if fileExplorerError}
+				<div class="file-error" role="status" aria-live="polite">{fileExplorerError}</div>
+			{/if}
+		</aside>
+	</div>
 	<div class="canvas-editor">
 		<div class="editor-tabs-bar">
 			{#if isCompactCanvasLayout}
@@ -4055,7 +4782,13 @@ Return only the final code for this file.`;
 								title={tab}
 								on:click={() => void switchToFile(tab)}
 							>
+								<span class="editor-tab-symbol" aria-hidden="true">
+									{@html getFileIconSVG(tab)}
+								</span>
 								{getTabLabel(tab)}
+								{#if isFileDirty(tab)}
+									<span class="editor-tab-dirty-dot" aria-hidden="true"></span>
+								{/if}
 							</button>
 							<button
 								type="button"
@@ -4071,6 +4804,27 @@ Return only the final code for this file.`;
 					{/each}
 				{/if}
 			</div>
+		</div>
+		<div class="editor-breadcrumb-bar">
+			{#if currentFile}
+				<div class="editor-breadcrumb-path">
+					{#each currentFile.split('/') as segment, index (`${segment}-${index}`)}
+						<span class="editor-breadcrumb-segment">{segment}</span>
+						{#if index < currentFile.split('/').length - 1}
+							<span class="editor-breadcrumb-separator">/</span>
+						{/if}
+					{/each}
+				</div>
+				<button
+					type="button"
+					class="editor-breadcrumb-copy"
+					on:click={() => void copyEntryPathToClipboard(currentFileEntry())}
+				>
+					Copy Path
+				</button>
+			{:else}
+				<div class="editor-breadcrumb-empty">No file selected</div>
+			{/if}
 		</div>
 			<div class="canvas-editor-body" bind:this={canvasEditorBodyElement}>
 				<div
@@ -4411,16 +5165,71 @@ Return only the final code for this file.`;
 		overflow: hidden;
 	}
 
+	.canvas-side-region {
+		width: 294px;
+		flex: 0 0 294px;
+		min-width: 0;
+		min-height: 0;
+		display: flex;
+		border-right: 1px solid rgba(120, 134, 160, 0.35);
+		background: rgba(10, 14, 22, 0.72);
+	}
+
+	.canvas-activity-bar {
+		width: 40px;
+		flex: 0 0 40px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.5rem 0.28rem;
+		border-right: 1px solid rgba(120, 134, 160, 0.3);
+		background: rgba(8, 12, 18, 0.85);
+	}
+
+	.activity-button {
+		border: 1px solid rgba(102, 122, 154, 0.42);
+		background: rgba(22, 31, 46, 0.88);
+		color: #cad9ef;
+		border-radius: 0.45rem;
+		width: 1.8rem;
+		height: 1.8rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		cursor: pointer;
+	}
+
+	.activity-button:hover {
+		border-color: rgba(142, 169, 210, 0.75);
+		background: rgba(37, 54, 83, 0.95);
+	}
+
+	.activity-button.active {
+		border-color: rgba(123, 168, 244, 0.9);
+		background: rgba(44, 75, 126, 0.95);
+		color: #eff5ff;
+	}
+
+	.activity-button svg {
+		width: 0.95rem;
+		height: 0.95rem;
+		stroke: currentColor;
+		stroke-width: 1.9;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
 	.canvas-sidebar {
-		width: 250px;
-		flex: 0 0 250px;
+		flex: 1;
 		min-width: 0;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 0.55rem;
-		border-right: 1px solid rgba(120, 134, 160, 0.35);
-		background: rgba(10, 14, 22, 0.72);
+		background: transparent;
 		padding: 0.55rem;
 		transition:
 			border-color 0.14s ease,
@@ -4429,8 +5238,7 @@ Return only the final code for this file.`;
 	}
 
 	.canvas-sidebar.drag-over {
-		border-right-color: rgba(106, 166, 255, 0.9);
-		background: rgba(16, 27, 44, 0.88);
+		background: rgba(16, 27, 44, 0.5);
 		box-shadow: inset 0 0 0 1px rgba(106, 166, 255, 0.45);
 	}
 
@@ -4442,6 +5250,7 @@ Return only the final code for this file.`;
 		border: 1px solid rgba(226, 126, 126, 0.55);
 		padding: 0.4rem 0.5rem;
 		border-radius: 0.42rem;
+		margin-top: auto;
 	}
 
 	.file-explorer-header {
@@ -4462,10 +5271,227 @@ Return only the final code for this file.`;
 		gap: 0.3rem;
 	}
 
+	.sidebar-panel-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.45rem;
+		color: #dfe8f7;
+		font-size: 0.72rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+	}
+
+	.sidebar-panel-close {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+		border-radius: 0.35rem;
+		width: 1.4rem;
+		height: 1.4rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		font-size: 0.9rem;
+		line-height: 1;
+		cursor: pointer;
+	}
+
+	.sidebar-panel-close:hover {
+		border-color: rgba(139, 168, 211, 0.68);
+		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.sidebar-filter-input {
+		width: 100%;
+		min-width: 0;
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(18, 27, 42, 0.86);
+		color: #dbe6f8;
+		border-radius: 0.35rem;
+		padding: 0.4rem 0.5rem;
+		font-size: 0.72rem;
+		line-height: 1.2;
+	}
+
+	.sidebar-filter-input:focus {
+		outline: none;
+		border-color: rgba(117, 166, 248, 0.78);
+		box-shadow: 0 0 0 2px rgba(117, 166, 248, 0.2);
+	}
+
 	.github-import-row {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
 		gap: 0.3rem;
+	}
+
+	.sidebar-search-row {
+		display: grid;
+		grid-template-columns: 1fr;
+		gap: 0.32rem;
+	}
+
+	.sidebar-search-options {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+	}
+
+	.sidebar-toggle-chip {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+		border-radius: 999px;
+		padding: 0.2rem 0.5rem;
+		font-size: 0.66rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.sidebar-toggle-chip.active {
+		border-color: rgba(120, 174, 255, 0.86);
+		background: rgba(42, 77, 132, 0.92);
+	}
+
+	.sidebar-search-actions {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.3rem;
+	}
+
+	.sidebar-action-btn {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+		border-radius: 0.35rem;
+		padding: 0.26rem 0.42rem;
+		font-size: 0.67rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.sidebar-action-btn:hover:not(:disabled) {
+		border-color: rgba(139, 168, 211, 0.68);
+		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.sidebar-action-btn:disabled {
+		opacity: 0.52;
+		cursor: not-allowed;
+	}
+
+	.sidebar-search-status {
+		font-size: 0.67rem;
+		color: rgba(205, 220, 245, 0.82);
+	}
+
+	.sidebar-search-results {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		min-height: 0;
+		overflow: auto;
+	}
+
+	.sidebar-search-empty {
+		font-size: 0.72rem;
+		color: rgba(205, 220, 245, 0.72);
+		padding: 0.5rem 0.22rem;
+	}
+
+	.sidebar-result-item {
+		border: 1px solid rgba(103, 125, 160, 0.4);
+		background: rgba(24, 35, 52, 0.72);
+		color: #e0e9fb;
+		border-radius: 0.35rem;
+		padding: 0.32rem 0.42rem;
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr);
+		gap: 0.4rem;
+		align-items: flex-start;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.sidebar-result-item.active {
+		border-color: rgba(118, 170, 255, 0.84);
+		background: rgba(42, 72, 124, 0.9);
+	}
+
+	.sidebar-result-item:hover {
+		border-color: rgba(139, 168, 211, 0.68);
+	}
+
+	.sidebar-result-kind {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 2.85rem;
+		padding: 0.12rem 0.34rem;
+		border-radius: 999px;
+		border: 1px solid rgba(112, 134, 170, 0.6);
+		background: rgba(27, 40, 61, 0.86);
+		color: #d8e6ff;
+		font-size: 0.58rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		line-height: 1.15;
+	}
+
+	.sidebar-result-kind.file {
+		border-color: rgba(90, 134, 211, 0.68);
+		background: rgba(30, 56, 102, 0.84);
+	}
+
+	.sidebar-result-kind.folder {
+		border-color: rgba(117, 154, 96, 0.66);
+		background: rgba(43, 72, 37, 0.82);
+	}
+
+	.sidebar-result-kind.text {
+		border-color: rgba(183, 132, 83, 0.68);
+		background: rgba(86, 58, 31, 0.82);
+	}
+
+	.sidebar-result-content {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.14rem;
+	}
+
+	.sidebar-result-path {
+		min-width: 0;
+		font-size: 0.69rem;
+		color: #f0f5ff;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.sidebar-result-line {
+		font-size: 0.62rem;
+		color: rgba(171, 197, 238, 0.88);
+	}
+
+	.sidebar-result-preview {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.67rem;
+		color: rgba(203, 219, 246, 0.9);
+	}
+
+	.sidebar-result-highlight {
+		background: rgba(255, 226, 126, 0.35);
+		color: #fdf6d9;
+		border-radius: 0.18rem;
+		padding: 0 0.08rem;
 	}
 
 	.github-import-input {
@@ -4723,6 +5749,21 @@ Return only the final code for this file.`;
 		color: #e8bf63;
 	}
 
+	.file-extension-symbol {
+		width: 1rem;
+		height: 1rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex: 0 0 auto;
+	}
+
+	.file-extension-symbol :global(svg) {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
 	.file-entry-label {
 		min-width: 0;
 		overflow: hidden;
@@ -4863,6 +5904,32 @@ Return only the final code for this file.`;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+
+	.editor-tab-symbol {
+		flex: 0 0 auto;
+		width: 1rem;
+		height: 1rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.editor-tab-symbol :global(svg) {
+		width: 100%;
+		height: 100%;
+		display: block;
+	}
+
+	.editor-tab-dirty-dot {
+		width: 0.36rem;
+		height: 0.36rem;
+		border-radius: 999px;
+		background: #8fd0ff;
+		flex: 0 0 auto;
 	}
 
 	.editor-tab-close {
@@ -4893,6 +5960,57 @@ Return only the final code for this file.`;
 		fill: none;
 		stroke-linecap: round;
 		stroke-linejoin: round;
+	}
+
+	.editor-breadcrumb-bar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.26rem 0.55rem;
+		border-bottom: 1px solid rgba(120, 134, 160, 0.25);
+		background: rgba(13, 19, 30, 0.7);
+	}
+
+	.editor-breadcrumb-path {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.22rem;
+		min-width: 0;
+		overflow-x: auto;
+	}
+
+	.editor-breadcrumb-segment {
+		font-size: 0.68rem;
+		color: rgba(220, 231, 248, 0.88);
+		white-space: nowrap;
+	}
+
+	.editor-breadcrumb-separator {
+		font-size: 0.66rem;
+		color: rgba(164, 181, 210, 0.84);
+	}
+
+	.editor-breadcrumb-copy {
+		border: 1px solid rgba(103, 125, 160, 0.52);
+		background: rgba(24, 35, 52, 0.88);
+		color: #dbe6f8;
+		border-radius: 0.35rem;
+		padding: 0.2rem 0.46rem;
+		font-size: 0.64rem;
+		font-weight: 600;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+
+	.editor-breadcrumb-copy:hover {
+		border-color: rgba(139, 168, 211, 0.68);
+		background: rgba(41, 61, 92, 0.92);
+	}
+
+	.editor-breadcrumb-empty {
+		font-size: 0.67rem;
+		color: rgba(199, 214, 239, 0.72);
 	}
 
 	.canvas-editor-body {
@@ -5673,7 +6791,7 @@ Return only the final code for this file.`;
 			flex-direction: column;
 		}
 
-		.canvas-sidebar {
+		.canvas-side-region {
 			width: 100%;
 			flex: 1 1 auto;
 			max-height: none;
@@ -5681,15 +6799,25 @@ Return only the final code for this file.`;
 			border-bottom: none;
 		}
 
+		.canvas-activity-bar {
+			width: 40px;
+			flex: 0 0 40px;
+			flex-direction: column;
+			justify-content: flex-start;
+			border-right: 1px solid rgba(120, 134, 160, 0.3);
+			border-bottom: none;
+			padding: 0.5rem 0.28rem;
+		}
+
 		.canvas-shell.show-mobile-explorer .canvas-editor {
 			display: none;
 		}
 
-		.canvas-shell.show-mobile-editor .canvas-sidebar {
+		.canvas-shell.show-mobile-editor .canvas-side-region {
 			display: none;
 		}
 
-		.canvas-shell.show-mobile-explorer .canvas-sidebar,
+		.canvas-shell.show-mobile-explorer .canvas-side-region,
 		.canvas-shell.show-mobile-editor .canvas-editor {
 			flex: 1 1 auto;
 			min-height: 0;

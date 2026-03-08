@@ -13,6 +13,8 @@ type WorkerOutboundMessage = {
 	stream?: 'stdout' | 'stderr';
 	output?: string;
 	error?: string;
+	stdout?: string;
+	stderr?: string;
 };
 
 type WorkerFactory = () => Promise<Worker>;
@@ -102,11 +104,153 @@ class RemoteExecutionError extends Error {
 	}
 }
 
+type RoutedExecutionResult = {
+	output: string;
+	error: string;
+};
+
 function createExecutionId() {
 	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
 		return crypto.randomUUID();
 	}
 	return `exec-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function encodeCodeAsBase64(code: string) {
+	return btoa(unescape(encodeURIComponent(code)));
+}
+
+export async function executeCodeWithRouter(
+	code: string,
+	language: string,
+	options?: {
+		pythonWorker?: Worker;
+		signal?: AbortSignal;
+		endpoint?: string;
+	}
+): Promise<RoutedExecutionResult> {
+	const normalizedLanguage = (language || '').trim().toLowerCase();
+	const signal = options?.signal;
+	if (normalizedLanguage === 'python' || normalizedLanguage === 'py') {
+		let worker = options?.pythonWorker ?? null;
+		let ownsWorker = false;
+		if (!worker) {
+			worker = new Worker(new URL('../workers/pyodide.worker.ts', import.meta.url), {
+				type: 'module'
+			});
+			ownsWorker = true;
+		}
+
+		const runId = createExecutionId();
+		let stdout = '';
+		let stderr = '';
+		return await new Promise<RoutedExecutionResult>((resolve, reject) => {
+			if (!worker) {
+				reject(new Error('Python worker is not available'));
+				return;
+			}
+			const cleanup = () => {
+				worker?.removeEventListener('message', onMessage);
+				worker?.removeEventListener('error', onError);
+				signal?.removeEventListener('abort', onAbort);
+				if (ownsWorker && worker) {
+					worker.terminate();
+				}
+			};
+			const finishResolve = (value: RoutedExecutionResult) => {
+				cleanup();
+				resolve(value);
+			};
+			const finishReject = (error: Error) => {
+				cleanup();
+				reject(error);
+			};
+			const onMessage = (event: MessageEvent<WorkerOutboundMessage>) => {
+				const payload = event.data;
+				if (!payload || payload.id !== runId) {
+					return;
+				}
+				if (payload.status === 'running') {
+					if (payload.stream === 'stderr') {
+						stderr += payload.output || '';
+					} else {
+						stdout += payload.output || '';
+					}
+					return;
+				}
+				if (payload.stdout) {
+					stdout = payload.stdout;
+				}
+				if (payload.stderr) {
+					stderr = payload.stderr;
+				}
+				if (payload.status === 'error') {
+					const errorMessage =
+						(payload.error || stderr || 'Python execution failed').trim() ||
+						'Python execution failed';
+					finishReject(new Error(errorMessage));
+					return;
+				}
+				finishResolve({
+					output: stdout,
+					error: stderr
+				});
+			};
+			const onError = (event: ErrorEvent) => {
+				const message = event.message || 'Python worker crashed';
+				finishReject(new Error(message));
+			};
+			const onAbort = () => {
+				finishReject(new Error('Execution aborted'));
+			};
+
+			worker.addEventListener('message', onMessage);
+			worker.addEventListener('error', onError);
+			if (signal) {
+				if (signal.aborted) {
+					onAbort();
+					return;
+				}
+				signal.addEventListener('abort', onAbort, { once: true });
+			}
+
+			worker.postMessage({
+				id: runId,
+				code
+			} satisfies WorkerInboundMessage);
+		});
+	}
+
+	if (normalizedLanguage === 'cpp' || normalizedLanguage === 'c' || normalizedLanguage === 'java') {
+		const endpoint = (options?.endpoint || EXECUTE_ENDPOINT).trim() || EXECUTE_ENDPOINT;
+		const response = await fetch(endpoint, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({
+				language: normalizedLanguage,
+				code: encodeCodeAsBase64(code)
+			}),
+			signal
+		});
+		const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+		const stdout = typeof payload?.stdout === 'string' ? payload.stdout : '';
+		const stderr = typeof payload?.stderr === 'string' ? payload.stderr : '';
+		if (!response.ok) {
+			const errorMessage =
+				typeof payload?.error === 'string' && payload.error.trim()
+					? payload.error.trim()
+					: `Execution request failed (${response.status})`;
+			throw new Error(errorMessage);
+		}
+		return {
+			output: stdout,
+			error: stderr
+		};
+	}
+
+	throw new Error(`Unsupported language "${language}"`);
 }
 
 export class ExecutionManager {
@@ -424,7 +568,7 @@ export class ExecutionManager {
 	}
 
 	private async runRemote(code: string, language: string, runId: string, signal: AbortSignal) {
-		const base64Code = btoa(unescape(encodeURIComponent(code)));
+		const base64Code = encodeCodeAsBase64(code);
 		console.info(
 			`[execution][client] Sending execution request to server runId=${runId} endpoint=${EXECUTE_ENDPOINT} language=${language} source_chars=${code.length} base64_chars=${base64Code.length}`
 		);

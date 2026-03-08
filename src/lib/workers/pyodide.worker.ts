@@ -95,6 +95,14 @@ async function initPyodide() {
 	return pyodideReady;
 }
 
+void initPyodide().catch((error) => {
+	emit({
+		id: '__worker_init__',
+		status: 'error',
+		error: error instanceof Error ? error.message : String(error)
+	});
+});
+
 async function resolveLoadPyodide(): Promise<LoadPyodideFn> {
 	if (loadPyodideFn) {
 		return loadPyodideFn;

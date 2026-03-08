@@ -1583,7 +1583,7 @@ func normalizeRoomName(raw string) string {
 	}
 
 	var builder strings.Builder
-	lastWasSpace := false
+	lastWasUnderscore := false
 	for _, ch := range trimmed {
 		if ch == '\n' || ch == '\r' || ch == '\t' {
 			ch = ' '
@@ -1592,15 +1592,23 @@ func normalizeRoomName(raw string) string {
 			continue
 		}
 		if ch == ' ' {
-			if builder.Len() == 0 || lastWasSpace {
+			if builder.Len() == 0 || lastWasUnderscore {
 				continue
 			}
-			builder.WriteByte(' ')
-			lastWasSpace = true
+			builder.WriteByte('_')
+			lastWasUnderscore = true
+			continue
+		}
+		if ch == '_' {
+			if builder.Len() == 0 || lastWasUnderscore {
+				continue
+			}
+			builder.WriteByte('_')
+			lastWasUnderscore = true
 			continue
 		}
 		builder.WriteRune(ch)
-		lastWasSpace = false
+		lastWasUnderscore = false
 	}
 
 	return truncateRunes(strings.TrimSpace(builder.String()), roomNameMaxLength)
