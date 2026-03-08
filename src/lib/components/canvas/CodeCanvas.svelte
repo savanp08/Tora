@@ -138,6 +138,7 @@ If the user asks for edits, apply them to the existing code and return the full 
 	const EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
 	const EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS = 1400;
+	const MAX_FILE_EDITORS = 3;
 	const FILE_ICON_SVG: Record<FileIconKind, string> = {
 		generic:
 			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#9FB2CC" d="M7 2.75h7.6L20.5 8.7V20a1.25 1.25 0 0 1-1.25 1.25h-12.5A1.25 1.25 0 0 1 5.5 20V4A1.25 1.25 0 0 1 6.75 2.75Zm7.1 1.6V8.4h4.07z"/><path fill="#6E84A3" d="M8 13h8v1.4H8zm0 3.2h8v1.4H8z"/></svg>',
@@ -1958,6 +1959,24 @@ If the user asks for edits, apply them to the existing code and return the full 
 		return false;
 	}
 
+	function countRemoteEditorsForFile(fileName: string) {
+		const normalizedFile = normalizeProjectName(fileName);
+		if (!awareness || !normalizedFile) {
+			return 0;
+		}
+		let totalEditors = 0;
+		for (const [clientId, state] of awareness.getStates().entries()) {
+			if (isSelfPresenceState(clientId, state)) {
+				continue;
+			}
+			const remoteCurrentFile = normalizeProjectName(String(state?.currentFile || ''));
+			if (remoteCurrentFile === normalizedFile) {
+				totalEditors += 1;
+			}
+		}
+		return totalEditors;
+	}
+
 	function syncLocalPresenceMetadata() {
 		if (!awareness) {
 			return;
@@ -3422,13 +3441,6 @@ Return only the final code for this file.`;
 		if (!normalized) {
 			return;
 		}
-		if (isCompactCanvasLayout) {
-			closeCanvasAIPromptPanel();
-			closeEditorFindWidget();
-			showEditorPane();
-		}
-		ensureTabOpen(normalized);
-		expandedDirectories = ensureExpandedDirectoriesForPath(normalized);
 		if (normalized === currentFile) {
 			const model = editor?.getModel?.();
 			if (model && monacoApi) {
@@ -3436,6 +3448,21 @@ Return only the final code for this file.`;
 			}
 			return;
 		}
+		const remoteEditors = countRemoteEditorsForFile(normalized);
+		if (remoteEditors >= MAX_FILE_EDITORS) {
+			if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+				window.alert('Maximum 3 users can edit this file at once');
+			}
+			showExplorerPane();
+			return;
+		}
+		if (isCompactCanvasLayout) {
+			closeCanvasAIPromptPanel();
+			closeEditorFindWidget();
+			showEditorPane();
+		}
+		ensureTabOpen(normalized);
+		expandedDirectories = ensureExpandedDirectoriesForPath(normalized);
 		fileExplorerError = '';
 		try {
 			await persistCurrentFileToFS();

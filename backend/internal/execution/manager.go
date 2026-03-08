@@ -18,8 +18,9 @@ import (
 const (
 	defaultPistonEndpoint    = "http://127.0.0.1:2000/api/v2/execute"
 	pistonEndpointEnvVar     = "PISTON_ENDPOINT"
-	defaultWorkerCount       = 20
-	defaultQueueSize         = 20
+	defaultWorkerCount       = 10
+	defaultQueueSize         = 200
+	defaultQueueWaitTimeout  = 30 * time.Second
 	defaultRequestTimeout    = 10 * time.Second
 	maxPistonResponseBytes   = 4 * 1024 * 1024
 	defaultRunTimeoutMs      = 3000
@@ -27,7 +28,8 @@ const (
 	defaultMemoryLimitBytes  = 209715200
 	defaultMaxProcessCount   = 64
 	defaultMaxOpenFiles      = 64
-	queueBusyErrorMessage    = "server busy"
+	queueBusyErrorMessage    = "execution queue is full"
+	shutdownErrorMessage     = "execution service is shutting down"
 	timeoutErrorMessage      = "execution timed out"
 	transportErrorMessage    = "failed to reach execution engine"
 	responseReadErrorMessage = "failed to read execution response"
@@ -64,8 +66,13 @@ func (e *ManagerError) Unwrap() error {
 }
 
 var ErrServerBusy = &ManagerError{
-	StatusCode: http.StatusTooManyRequests,
+	StatusCode: http.StatusServiceUnavailable,
 	Message:    queueBusyErrorMessage,
+}
+
+var ErrManagerShuttingDown = &ManagerError{
+	StatusCode: http.StatusServiceUnavailable,
+	Message:    shutdownErrorMessage,
 }
 
 // ExecutionFile mirrors a single file entry for Piston's execute API.
@@ -113,11 +120,14 @@ type ExecutionManager struct {
 	pistonEndpoint string
 	httpClient     *http.Client
 	requestTimeout time.Duration
+	queueWait      time.Duration
 
 	jobs chan ExecutionJob
 
-	shutdownOnce sync.Once
-	workersWG    sync.WaitGroup
+	submitMu        sync.RWMutex
+	shutdownStarted bool
+	shutdownOnce    sync.Once
+	workersWG       sync.WaitGroup
 }
 
 type pistonRuntimeSpec struct {
@@ -161,6 +171,7 @@ func NewExecutionManagerWithOptions(pistonEndpoint string, httpClient *http.Clie
 		pistonEndpoint: strings.TrimSpace(pistonEndpoint),
 		httpClient:     httpClient,
 		requestTimeout: defaultRequestTimeout,
+		queueWait:      defaultQueueWaitTimeout,
 		jobs:           make(chan ExecutionJob, defaultQueueSize),
 	}
 	if manager.pistonEndpoint == "" {
@@ -196,7 +207,7 @@ func (m *ExecutionManager) workerLoop() {
 	}
 }
 
-// Submit queues a job immediately or returns ErrServerBusy if the queue is full.
+// Submit queues a job, waiting up to queueWait for capacity before failing.
 func (m *ExecutionManager) Submit(ctx context.Context, request ExecutionRequest) (<-chan ExecutionResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -209,11 +220,32 @@ func (m *ExecutionManager) Submit(ctx context.Context, request ExecutionRequest)
 		ResultCh: resultCh,
 	}
 
+	m.submitMu.RLock()
+	if m.shutdownStarted {
+		m.submitMu.RUnlock()
+		return nil, ErrManagerShuttingDown
+	}
+
+	queueTimer := time.NewTimer(m.queueWait)
+	defer queueTimer.Stop()
+
 	select {
 	case m.jobs <- job:
+		m.submitMu.RUnlock()
 		return resultCh, nil
-	default:
+	case <-queueTimer.C:
+		m.submitMu.RUnlock()
 		return nil, ErrServerBusy
+	case <-ctx.Done():
+		m.submitMu.RUnlock()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, &ManagerError{
+				StatusCode: http.StatusGatewayTimeout,
+				Message:    timeoutErrorMessage,
+				Err:        ctx.Err(),
+			}
+		}
+		return nil, ctx.Err()
 	}
 }
 
@@ -438,7 +470,10 @@ func resolvePistonRuntime(frontendLanguage string) (pistonRuntimeSpec, error) {
 // Shutdown drains workers gracefully. Do not submit jobs after shutdown.
 func (m *ExecutionManager) Shutdown() {
 	m.shutdownOnce.Do(func() {
+		m.submitMu.Lock()
+		m.shutdownStarted = true
 		close(m.jobs)
+		m.submitMu.Unlock()
 		m.workersWG.Wait()
 	})
 }

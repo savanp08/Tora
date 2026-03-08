@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -17,6 +18,11 @@ import (
 )
 
 const presignedPutTTL = 10 * time.Minute
+
+var (
+	ErrUploadTooLarge = errors.New("upload exceeds size limit")
+	ErrEmptyUpload    = errors.New("upload is empty")
+)
 
 type R2Client struct {
 	Client        *minio.Client
@@ -76,17 +82,20 @@ func (r *R2Client) PutObject(
 	ctx context.Context,
 	filename string,
 	reader io.Reader,
-	size int64,
 	contentType string,
-) (string, string, error) {
+	maxBytes int64,
+) (string, string, int64, error) {
 	if r == nil || r.Client == nil {
-		return "", "", fmt.Errorf("r2 client is not configured")
+		return "", "", 0, fmt.Errorf("r2 client is not configured")
 	}
 	if reader == nil {
-		return "", "", fmt.Errorf("reader is required")
+		return "", "", 0, fmt.Errorf("reader is required")
 	}
-	if size < 0 {
-		return "", "", fmt.Errorf("size must be non-negative")
+	if maxBytes <= 0 {
+		return "", "", 0, fmt.Errorf("maxBytes must be positive")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	safeName := sanitizeFilename(filename)
@@ -100,11 +109,98 @@ func (r *R2Client) PutObject(
 		opts.ContentType = "application/octet-stream"
 	}
 
-	if _, err := r.Client.PutObject(ctx, r.Bucket, objectKey, reader, size, opts); err != nil {
-		return "", "", fmt.Errorf("put object: %w", err)
+	limitedReader := newMaxBytesAbortReader(reader, maxBytes)
+	uploadInfo, err := r.Client.PutObject(ctx, r.Bucket, objectKey, limitedReader, -1, opts)
+	if err != nil {
+		_ = r.removeObjectWithTimeout(objectKey)
+		if limitedReader.Exceeded() {
+			return "", "", 0, ErrUploadTooLarge
+		}
+		return "", "", 0, fmt.Errorf("put object: %w", err)
+	}
+	uploadedBytes := uploadInfo.Size
+	if uploadedBytes <= 0 {
+		uploadedBytes = limitedReader.BytesRead()
+	}
+	if limitedReader.Exceeded() || uploadedBytes > maxBytes {
+		_ = r.removeObjectWithTimeout(objectKey)
+		return "", "", 0, ErrUploadTooLarge
+	}
+	if uploadedBytes <= 0 {
+		_ = r.removeObjectWithTimeout(objectKey)
+		return "", "", 0, ErrEmptyUpload
 	}
 
-	return r.buildViewURL(objectKey), fileID, nil
+	return r.buildViewURL(objectKey), fileID, uploadedBytes, nil
+}
+
+type maxBytesAbortReader struct {
+	reader    io.Reader
+	maxBytes  int64
+	bytesRead int64
+	exceeded  bool
+}
+
+func newMaxBytesAbortReader(reader io.Reader, maxBytes int64) *maxBytesAbortReader {
+	return &maxBytesAbortReader{
+		reader:   reader,
+		maxBytes: maxBytes,
+	}
+}
+
+func (r *maxBytesAbortReader) Read(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+
+	remaining := r.maxBytes - r.bytesRead
+	if remaining <= 0 {
+		var probe [1]byte
+		readBytes, err := r.reader.Read(probe[:])
+		if readBytes > 0 {
+			r.exceeded = true
+			return 0, ErrUploadTooLarge
+		}
+		if errors.Is(err, io.EOF) {
+			return 0, io.EOF
+		}
+		if err != nil {
+			return 0, err
+		}
+		return 0, io.EOF
+	}
+
+	if int64(len(buffer)) > remaining {
+		buffer = buffer[:remaining]
+	}
+
+	readBytes, err := r.reader.Read(buffer)
+	r.bytesRead += int64(readBytes)
+	return readBytes, err
+}
+
+func (r *maxBytesAbortReader) Exceeded() bool {
+	return r.exceeded
+}
+
+func (r *maxBytesAbortReader) BytesRead() int64 {
+	return r.bytesRead
+}
+
+func (r *R2Client) removeObjectWithTimeout(objectKey string) error {
+	if r == nil || r.Client == nil {
+		return nil
+	}
+
+	key := strings.TrimSpace(strings.TrimPrefix(objectKey, "/"))
+	if key == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	return r.Client.RemoveObject(ctx, r.Bucket, key, minio.RemoveObjectOptions{})
 }
 
 func sanitizeFilename(raw string) string {

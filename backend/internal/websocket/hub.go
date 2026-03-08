@@ -20,6 +20,7 @@ const chatTypingChannel = "chat:typing"
 const chatMutationChannel = "chat:message_mutation"
 const chatDiscussionChannel = "chat:discussion_comment"
 const chatRoomEventChannel = "chat:room_event"
+const maxConnectionsPerRoom = 6
 
 type Hub struct {
 	rooms                map[string]map[*Client]bool
@@ -655,17 +656,38 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 			continue
 		}
 
-		if _, ok := h.rooms[roomID]; !ok {
-			h.rooms[roomID] = make(map[*Client]bool)
+		roomClients, roomExists := h.rooms[roomID]
+		if !roomExists {
+			roomClients = make(map[*Client]bool)
+			h.rooms[roomID] = roomClients
 			monitor.ActiveRooms.Inc()
 		}
-		alreadySubscribed := h.rooms[roomID][client]
+
+		alreadySubscribed := roomClients[client]
+		if !alreadySubscribed && len(roomClients) >= maxConnectionsPerRoom {
+			select {
+			case client.Send <- map[string]interface{}{
+				"type":   "room_limit_exceeded",
+				"roomId": roomID,
+				"payload": map[string]interface{}{
+					"code":    "room_full",
+					"limit":   maxConnectionsPerRoom,
+					"message": "Room is full. Maximum 6 users are allowed in this room.",
+				},
+			}:
+			default:
+			}
+			h.removeClientFromAllRooms(client, true)
+			client.closeSendChannel()
+			return
+		}
+
 		alreadyWritable := client.canWriteToRoom(roomID)
 		if alreadySubscribed && alreadyWritable == canWrite {
 			continue
 		}
 
-		h.rooms[roomID][client] = true
+		roomClients[client] = true
 		client.subscribeToRoom(roomID, canWrite)
 
 		if canWrite {
@@ -693,7 +715,7 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 					"joinedAt": client.JoinedAt.UnixMilli(),
 				},
 			}
-			for roomClient := range h.rooms[roomID] {
+			for roomClient := range roomClients {
 				if roomClient == client || !roomClient.canWriteToRoom(roomID) {
 					continue
 				}

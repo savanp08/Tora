@@ -324,24 +324,17 @@ func (c *Client) readPump() {
 			}
 			continue
 		}
+		if boardEvents, isBoardEventBatch := parseBoardEventBatchPayload(raw); isBoardEventBatch {
+			if c.Hub != nil {
+				for _, boardEvent := range boardEvents {
+					c.dispatchBoardEvent(boardEvent)
+				}
+			}
+			continue
+		}
 		if boardEvent, isBoardEvent := parseBoardEventPayload(raw); isBoardEvent {
 			if c.Hub != nil {
-				if boardEvent.Type == boardCursorMoveType {
-					c.forwardBoardCursorMove(boardEvent)
-					continue
-				}
-				if boardEvent.Type == boardClearType {
-					c.handleBoardClear(boardEvent)
-					continue
-				}
-				c.Hub.boardEvent <- &ClientBoardEvent{
-					Client:    c,
-					Type:      boardEvent.Type,
-					RoomID:    boardEvent.RoomID,
-					Payload:   boardEvent.Payload,
-					Element:   boardEvent.Element,
-					ElementID: boardEvent.ElementID,
-				}
+				c.dispatchBoardEvent(boardEvent)
 			}
 			continue
 		}
@@ -409,6 +402,28 @@ func (c *Client) sendRateLimitWarning() {
 	select {
 	case c.Send <- warning:
 	default:
+	}
+}
+
+func (c *Client) dispatchBoardEvent(boardEvent clientBoardEventPayload) {
+	if c == nil || c.Hub == nil {
+		return
+	}
+	if boardEvent.Type == boardCursorMoveType {
+		c.forwardBoardCursorMove(boardEvent)
+		return
+	}
+	if boardEvent.Type == boardClearType {
+		c.handleBoardClear(boardEvent)
+		return
+	}
+	c.Hub.boardEvent <- &ClientBoardEvent{
+		Client:    c,
+		Type:      boardEvent.Type,
+		RoomID:    boardEvent.RoomID,
+		Payload:   boardEvent.Payload,
+		Element:   boardEvent.Element,
+		ElementID: boardEvent.ElementID,
 	}
 }
 
@@ -725,6 +740,14 @@ type boardEventEnvelope struct {
 	ElementID  string          `json:"elementId"`
 	ElementID2 string          `json:"element_id"`
 	Payload    json.RawMessage `json:"payload"`
+}
+
+type boardEventBatchEnvelope struct {
+	Type    string          `json:"type"`
+	RoomID  string          `json:"roomId"`
+	RoomID2 string          `json:"room_id"`
+	Payload json.RawMessage `json:"payload"`
+	Events  json.RawMessage `json:"events"`
 }
 
 type signalingEnvelope struct {
@@ -1239,6 +1262,98 @@ func parseSignalingPayload(raw []byte) (clientSignalingPayload, bool) {
 		TargetUserID: targetUserID,
 		Payload:      broadcastPayload,
 	}, true
+}
+
+func parseBoardEventBatchPayload(raw []byte) ([]clientBoardEventPayload, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+
+	var envelope boardEventBatchEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, false
+	}
+
+	if strings.ToLower(strings.TrimSpace(envelope.Type)) != boardEventBatchType {
+		return nil, false
+	}
+
+	var envelopeMap map[string]interface{}
+	if err := json.Unmarshal(raw, &envelopeMap); err != nil {
+		return nil, false
+	}
+
+	roomID := normalizeRoomID(envelope.RoomID)
+	if roomID == "" {
+		roomID = normalizeRoomID(envelope.RoomID2)
+	}
+	if roomID == "" {
+		roomID = normalizeRoomID(readStringFromMap(envelopeMap, "roomId", "room_id"))
+	}
+	if roomID == "" {
+		return nil, false
+	}
+
+	rawEvents, hasPayload := envelopeMap["payload"]
+	if !hasPayload {
+		rawEvents = envelopeMap["events"]
+	}
+	eventList, ok := rawEvents.([]interface{})
+	if !ok || len(eventList) == 0 {
+		return nil, false
+	}
+
+	events := make([]clientBoardEventPayload, 0, len(eventList))
+	for _, rawEvent := range eventList {
+		eventMap, ok := rawEvent.(map[string]interface{})
+		if !ok || eventMap == nil {
+			continue
+		}
+
+		eventType := strings.ToLower(strings.TrimSpace(readStringFromMap(eventMap, "type")))
+		if eventType != boardElementAddType &&
+			eventType != boardElementMoveType &&
+			eventType != boardElementDeleteType {
+			continue
+		}
+
+		eventPayload := map[string]interface{}{}
+		if nestedPayload, ok := eventMap["payload"].(map[string]interface{}); ok && nestedPayload != nil {
+			for key, value := range nestedPayload {
+				eventPayload[key] = value
+			}
+		} else {
+			for key, value := range eventMap {
+				loweredKey := strings.ToLower(strings.TrimSpace(key))
+				if loweredKey == "type" || loweredKey == "roomid" || loweredKey == "room_id" {
+					continue
+				}
+				eventPayload[key] = value
+			}
+		}
+
+		eventEnvelope := map[string]interface{}{
+			"type":    eventType,
+			"roomId":  roomID,
+			"payload": eventPayload,
+		}
+		eventRaw, err := json.Marshal(eventEnvelope)
+		if err != nil {
+			continue
+		}
+
+		parsed, ok := parseBoardEventPayload(eventRaw)
+		if !ok {
+			continue
+		}
+		events = append(events, parsed)
+	}
+
+	if len(events) == 0 {
+		return nil, false
+	}
+
+	return events, true
 }
 
 func parseBoardEventPayload(raw []byte) (clientBoardEventPayload, bool) {

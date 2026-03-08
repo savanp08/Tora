@@ -113,14 +113,13 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		len(response.Body),
 		logSnippet(string(response.Body), 280),
 	)
-	if err != nil && response.Body != nil {
+	if err != nil {
 
 		statusCode := execution.HTTPStatus(err)
 		message := err.Error()
 		metricStatus := "error"
 
 		if errors.Is(err, execution.ErrServerBusy) {
-			statusCode = http.StatusTooManyRequests
 			metricStatus = "rate_limit"
 		}
 
@@ -128,8 +127,13 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 			message = "Failed to execute code"
 		}
 
-		if parsedMessage := parseExecutionErrorBody(response.Body); parsedMessage != "" {
-			message = parsedMessage
+		if len(response.Body) > 0 {
+			if parsedMessage := parseExecutionErrorBody(response.Body); parsedMessage != "" {
+				message = parsedMessage
+			}
+		}
+		if errors.Is(err, execution.ErrManagerShuttingDown) {
+			metricStatus = "rate_limit"
 		}
 		recordExecutionStatus(req.Language, metricStatus)
 		log.Printf(

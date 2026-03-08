@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -26,9 +27,10 @@ import (
 )
 
 const (
-	maxUploadFileSize = 50 * 1024 * 1024
-	maxImageFileSize  = 12 * 1024 * 1024
-	maxMultipartBytes = maxUploadFileSize + (8 * 1024 * 1024)
+	maxUploadFileSize  = 5 * 1024 * 1024
+	maxImageFileSize   = maxUploadFileSize
+	maxMultipartBytes  = maxUploadFileSize + (1 * 1024 * 1024)
+	maxFormFieldLength = 1024
 )
 
 var (
@@ -125,14 +127,14 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 	if req.FileSize > maxUploadFileSize {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "File is larger than allowed limit (50MB)",
+			"error": "File is larger than allowed limit (5MB)",
 		})
 		return
 	}
 	if strings.HasPrefix(fileType, "image/") && req.FileSize > maxImageFileSize {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "Image is larger than allowed limit (12MB)",
+			"error": "Image is larger than allowed limit (5MB)",
 		})
 		return
 	}
@@ -191,94 +193,138 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxMultipartBytes)
-	if err := r.ParseMultipartForm(8 * 1024 * 1024); err != nil {
-		message := "Invalid multipart upload payload"
-		status := http.StatusBadRequest
-		if strings.Contains(strings.ToLower(err.Error()), "too large") {
-			status = http.StatusRequestEntityTooLarge
-			message = "File is larger than allowed limit (50MB)"
-		}
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	multipartReader, err := r.MultipartReader()
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid multipart upload payload"})
 		return
 	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
+	var (
+		fileURL        string
+		fileID         string
+		fileSize       int64
+		roomIDFromForm string
+		uploaded       bool
+	)
+
+	for {
+		part, partErr := multipartReader.NextPart()
+		if errors.Is(partErr, io.EOF) {
+			break
+		}
+		if partErr != nil {
+			message := "Invalid multipart upload payload"
+			status := http.StatusBadRequest
+			if strings.Contains(strings.ToLower(partErr.Error()), "too large") {
+				status = http.StatusRequestEntityTooLarge
+				message = "File is larger than allowed limit (5MB)"
+			}
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+			return
+		}
+
+		fieldName := strings.TrimSpace(part.FormName())
+		switch fieldName {
+		case "roomId":
+			if roomIDFromForm == "" {
+				value, readErr := readSmallMultipartField(part, maxFormFieldLength)
+				if readErr != nil {
+					_ = part.Close()
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "roomId field is invalid"})
+					return
+				}
+				roomIDFromForm = value
+			}
+			_ = part.Close()
+		case "file":
+			if uploaded {
+				_ = part.Close()
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Only one file can be uploaded at a time"})
+				return
+			}
+
+			filename := strings.TrimSpace(part.FileName())
+			if filename == "" {
+				_ = part.Close()
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "filename is required"})
+				return
+			}
+
+			fileType := normalizeFileType(part.Header.Get("Content-Type"))
+			if fileType == "" {
+				fileType = normalizeFileType(mime.TypeByExtension(strings.ToLower(filepath.Ext(filename))))
+			}
+
+			fileReader, detectedFileType, detectErr := detectUploadContentType(part, fileType)
+			if detectErr != nil {
+				_ = part.Close()
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to inspect uploaded file"})
+				return
+			}
+			fileType = normalizeFileType(detectedFileType)
+
+			if !isAllowedUploadType(fileType) {
+				_ = part.Close()
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "Unsupported file type",
+				})
+				return
+			}
+
+			var uploadErr error
+			fileURL, fileID, fileSize, uploadErr = h.r2.PutObject(
+				r.Context(),
+				filename,
+				fileReader,
+				fileType,
+				maxUploadFileSize,
+			)
+			_ = part.Close()
+			if uploadErr != nil {
+				monitor.TotalUploads.WithLabelValues("error").Inc()
+				log.Printf("[upload] proxy upload failed filename=%s err=%v", filename, uploadErr)
+				switch {
+				case errors.Is(uploadErr, storage.ErrUploadTooLarge):
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "File is larger than allowed limit (5MB)"})
+				case errors.Is(uploadErr, storage.ErrEmptyUpload):
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "file must not be empty"})
+				default:
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to upload file"})
+				}
+				return
+			}
+
+			if strings.HasPrefix(fileType, "image/") && fileSize > maxImageFileSize {
+				_ = h.r2.DeleteObjects(r.Context(), []string{h.resolveObjectKeyFromFileURL(fileURL)})
+				monitor.TotalUploads.WithLabelValues("error").Inc()
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "Image is larger than allowed limit (5MB)",
+				})
+				return
+			}
+			uploaded = true
+		default:
+			_ = part.Close()
+		}
+	}
+
+	if !uploaded {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "file field is required"})
 		return
 	}
-	defer file.Close()
 
-	filename := strings.TrimSpace(header.Filename)
-	if filename == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "filename is required"})
-		return
-	}
-
-	fileSize := header.Size
-	if fileSize < 0 {
-		fileSize = 0
-	}
-
-	fileType := normalizeFileType(header.Header.Get("Content-Type"))
-	if fileType == "" {
-		fileType = normalizeFileType(mime.TypeByExtension(strings.ToLower(filepath.Ext(filename))))
-	}
-
-	var reader io.Reader = file
-	var payload []byte
-	if fileSize == 0 {
-		payload, err = io.ReadAll(io.LimitReader(file, maxUploadFileSize+1))
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to read uploaded file"})
-			return
-		}
-		fileSize = int64(len(payload))
-		reader = bytes.NewReader(payload)
-		if fileType == "" && len(payload) > 0 {
-			fileType = normalizeFileType(http.DetectContentType(payload))
-		}
-	}
-
-	if fileSize <= 0 {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "file must not be empty"})
-		return
-	}
-	if fileSize > maxUploadFileSize {
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "File is larger than allowed limit (50MB)",
-		})
-		return
-	}
-	if strings.HasPrefix(fileType, "image/") && fileSize > maxImageFileSize {
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "Image is larger than allowed limit (12MB)",
-		})
-		return
-	}
-	if !isAllowedUploadType(fileType) {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "Unsupported file type",
-		})
-		return
-	}
-
-	fileURL, fileID, err := h.r2.PutObject(r.Context(), filename, reader, fileSize, fileType)
-	if err != nil {
-		monitor.TotalUploads.WithLabelValues("error").Inc()
-		log.Printf("[upload] proxy upload failed filename=%s err=%v", filename, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to upload file"})
-		return
-	}
 	monitor.TotalUploads.WithLabelValues("success").Inc()
 	monitor.UploadBytes.Observe(float64(fileSize))
 
@@ -295,7 +341,7 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 		FileID:    fileID,
 	})
 
-	normalizedRoomID := normalizeRoomID(firstNonEmpty(r.URL.Query().Get("roomId"), r.FormValue("roomId")))
+	normalizedRoomID := normalizeRoomID(firstNonEmpty(r.URL.Query().Get("roomId"), roomIDFromForm))
 	if normalizedRoomID != "" {
 		objectKey := h.resolveObjectKeyFromFileURL(fileURL)
 		h.trackUploadedFile(r.Context(), normalizedRoomID, objectKey)
@@ -435,6 +481,42 @@ func candidateObjectKeys(rawKey, bucket string) []string {
 
 func normalizeFileType(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func detectUploadContentType(reader io.Reader, fallbackType string) (io.Reader, string, error) {
+	normalizedFallback := normalizeFileType(fallbackType)
+	if normalizedFallback != "" {
+		return reader, normalizedFallback, nil
+	}
+
+	header := make([]byte, 512)
+	readBytes, err := io.ReadFull(reader, header)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, "", err
+	}
+
+	detectedType := normalizedFallback
+	if readBytes > 0 {
+		detectedType = normalizeFileType(http.DetectContentType(header[:readBytes]))
+	}
+
+	return io.MultiReader(bytes.NewReader(header[:readBytes]), reader), detectedType, nil
+}
+
+func readSmallMultipartField(reader io.Reader, maxBytes int64) (string, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxFormFieldLength
+	}
+
+	var builder strings.Builder
+	written, err := io.Copy(&builder, io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if written > maxBytes {
+		return "", fmt.Errorf("multipart field exceeds %d bytes", maxBytes)
+	}
+	return strings.TrimSpace(builder.String()), nil
 }
 
 func isAllowedUploadType(fileType string) bool {

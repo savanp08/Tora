@@ -26,7 +26,9 @@
 	const MAX_ZOOM = 4;
 	const DOUBLE_TAP_MS = 340;
 	const TAP_MOVE_TOLERANCE = 8;
-	const CURSOR_MOVE_THROTTLE_MS = 250;
+	const CURSOR_MOVE_THROTTLE_MS = 1000;
+	const BOARD_UPDATE_STACK_FLUSH_MS = 1000;
+	const BOARD_EVENT_BATCH_TYPE = 'board_event_batch';
 	const REMOTE_CURSOR_STALE_MS = 8000;
 	const HISTORY_LIMIT = 80;
 	const BRUSH_WIDTH_PRESETS = [1.5, 3, 5, 8] as const;
@@ -78,6 +80,13 @@
 		| 'board_element_add'
 		| 'board_element_move'
 		| 'board_element_delete';
+	type StackedBoardEventType = 'board_element_add' | 'board_element_move' | 'board_element_delete';
+
+	type PendingBoardUpdate = {
+		roomId: string;
+		type: StackedBoardEventType;
+		payload: Record<string, unknown>;
+	};
 
 	type DusterScreenMetrics = {
 		left: number;
@@ -232,6 +241,8 @@
 	let panLastX = 0;
 	let panLastY = 0;
 	let lastCursorMoveBroadcastAt = 0;
+	let pendingBoardUpdates: PendingBoardUpdate[] = [];
+	let boardUpdateFlushInterval: ReturnType<typeof setInterval> | null = null;
 	let remoteCursors: BoardCursorWire[] = [];
 	let remoteCursorByUserId = new Map<string, BoardCursorWire>();
 	let zControlVisible = false;
@@ -296,6 +307,7 @@
 	}
 
 	$: if (boardReady && normalizedRoomId && normalizedRoomId !== initializedRoomId) {
+		flushPendingBoardUpdates();
 		void loadBoard(normalizedRoomId);
 	}
 	$: openToolbarHintText = showInsertMenu
@@ -350,6 +362,7 @@
 			return;
 		}
 
+		startBoardUpdateFlushLoop();
 		registerWindowGuards();
 		registerToolbarLayoutGuards();
 		void initializeBoard();
@@ -371,6 +384,8 @@
 	});
 
 	function cleanupBoard() {
+		flushPendingBoardUpdates();
+		stopBoardUpdateFlushLoop();
 		pendingTapGesture = null;
 		cancelPendingOperation(false);
 		stopDusterDrag();
@@ -2250,9 +2265,85 @@
 		});
 	}
 
+	function isStackedBoardEventType(type: BoardEventType): type is StackedBoardEventType {
+		return type === 'board_element_add' || type === 'board_element_move' || type === 'board_element_delete';
+	}
+
+	function enqueuePendingBoardUpdate(type: StackedBoardEventType, payload: Record<string, unknown>) {
+		if (!normalizedRoomId) {
+			return;
+		}
+		pendingBoardUpdates = [
+			...pendingBoardUpdates,
+			{
+				roomId: normalizedRoomId,
+				type,
+				payload: { ...payload }
+			}
+		];
+	}
+
+	function flushPendingBoardUpdates() {
+		if (pendingBoardUpdates.length === 0) {
+			return;
+		}
+
+		const updatesToFlush = pendingBoardUpdates.slice();
+		pendingBoardUpdates = [];
+
+		const updatesByRoom = new Map<string, PendingBoardUpdate[]>();
+		for (const update of updatesToFlush) {
+			const roomKey = normalizeRoomIDValue(update.roomId);
+			if (!roomKey) {
+				continue;
+			}
+			const roomUpdates = updatesByRoom.get(roomKey) ?? [];
+			roomUpdates.push(update);
+			updatesByRoom.set(roomKey, roomUpdates);
+		}
+
+		for (const [roomId, roomUpdates] of updatesByRoom.entries()) {
+			if (roomUpdates.length === 0) {
+				continue;
+			}
+			sendSocketPayload({
+				type: BOARD_EVENT_BATCH_TYPE,
+				roomId,
+				payload: roomUpdates.map((update) => ({
+					type: update.type,
+					payload: update.payload
+				}))
+			});
+		}
+	}
+
+	function startBoardUpdateFlushLoop() {
+		if (!browser || boardUpdateFlushInterval) {
+			return;
+		}
+		boardUpdateFlushInterval = setInterval(() => {
+			flushPendingBoardUpdates();
+		}, BOARD_UPDATE_STACK_FLUSH_MS);
+	}
+
+	function stopBoardUpdateFlushLoop() {
+		if (!boardUpdateFlushInterval) {
+			return;
+		}
+		clearInterval(boardUpdateFlushInterval);
+		boardUpdateFlushInterval = null;
+	}
+
 	function sendBoardEnvelope(type: BoardEventType, payload: Record<string, unknown>) {
 		if (!normalizedRoomId || !canEdit) {
 			return;
+		}
+		if (isStackedBoardEventType(type)) {
+			enqueuePendingBoardUpdate(type, payload);
+			return;
+		}
+		if (type === 'board_clear') {
+			flushPendingBoardUpdates();
 		}
 		sendSocketPayload({
 			type,

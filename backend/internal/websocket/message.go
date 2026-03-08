@@ -40,6 +40,7 @@ const (
 	boardElementAddType        = "board_element_add"
 	boardElementMoveType       = "board_element_move"
 	boardElementDeleteType     = "board_element_delete"
+	boardEventBatchType        = "board_event_batch"
 	boardMaxStorageBytes       = int64(10 * 1024 * 1024)
 	boardSizeTotalPrefix       = "board:size:total:"
 	boardSizeElementsPrefix    = "board:size:elements:"

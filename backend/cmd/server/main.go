@@ -2,16 +2,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/savanp08/converse/internal/ai"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
+	"github.com/savanp08/converse/internal/handlers"
 	"github.com/savanp08/converse/internal/monitor"
 	"github.com/savanp08/converse/internal/router"
 	"github.com/savanp08/converse/internal/security"
@@ -73,8 +78,42 @@ func main() {
 	go startRoomExpiryCleanupWorker(redisStore, scyllaStore, r2Client)
 
 	log.Printf("📡 Server listening on port %s", cfg.Port)
-	if err := http.ListenAndServe(":"+cfg.Port, mainRouter); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	server := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: mainRouter,
+	}
+
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		serverErrCh <- server.ListenAndServe()
+	}()
+
+	var listenErr error
+	select {
+	case <-signalCtx.Done():
+		log.Println("🛑 Shutdown signal received")
+	case err := <-serverErrCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			listenErr = err
+			log.Printf("Server failed: %v", err)
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil &&
+		!errors.Is(err, context.Canceled) &&
+		!errors.Is(err, http.ErrServerClosed) {
+		log.Printf("Server shutdown encountered an error: %v", err)
+	}
+	handlers.DefaultExecutionManager.Shutdown()
+
+	if listenErr != nil {
+		return
 	}
 }
 
