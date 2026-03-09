@@ -433,8 +433,8 @@ export const LIMITS: AppLimits = {
 		imageCompressionMaxWidthOrHeight: 1920
 	},
 	workspace: {
-		// Keep max 2 active boards besides dashboard.
-		maxActiveNonDashboardModules: 2
+		// Allow all currently available non-dashboard boards.
+		maxActiveNonDashboardModules: 3
 	},
 	ws: {
 		// Backpressure queue cap per ws client.

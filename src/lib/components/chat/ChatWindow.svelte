@@ -65,7 +65,6 @@
 		joinRoom: void;
 		messageSelect: { messageId: string };
 		openDiscussion: { messageId: string };
-		pinToDashboard: { messageId: string };
 		focusHandled: { messageId: string };
 		reply: { messageId: string; senderName: string; content: string };
 		editSelected: { messageId: string };
@@ -1646,13 +1645,6 @@
 			action
 		});
 	}
-
-	function onPinToDashboardRequest(messageId: string) {
-		if (!isMember || !messageId) {
-			return;
-		}
-		dispatch('pinToDashboard', { messageId });
-	}
 </script>
 
 <div
@@ -1819,18 +1811,6 @@
 											on:click|stopPropagation={() => void copyMessage(message)}
 										>
 											<IconSet name="copy" size={12} className="copy-icon" />
-										</button>
-									{/if}
-									{#if isMember}
-										<button
-											type="button"
-											class="copy-btn"
-											class:pin-dashboard-btn={message.type !== 'task'}
-											title="Pin to dashboard"
-											aria-label="Pin to dashboard"
-											on:click|stopPropagation={() => onPinToDashboardRequest(message.id)}
-										>
-											<IconSet name="pin" size={12} className="copy-icon" />
 										</button>
 									{/if}
 								</span>
@@ -2063,19 +2043,26 @@
 								on:addTask={(event) => dispatch('addTask', event.detail)}
 							/>
 						{:else if beaconPayload}
-							<div class="beacon-inline-meta">
-								<IconSet name="beacon" size={13} />
-								<span>{getBeaconLabel(message)}</span>
+							<div class="beacon-card">
+								<div class="beacon-card-head">
+									<span class="beacon-card-kind">
+										<IconSet name="beacon" size={13} />
+										Beacon
+									</span>
+									<span class="beacon-card-time">{getBeaconLabel(message)}</span>
+								</div>
+								<div class="beacon-card-text">
+									{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
+										{#if segment.isEmoji}
+											<span class="emoji-boost">{segment.value}</span>
+										{:else if segment.isMention}
+											<span class="mention-tag">{segment.value}</span>
+										{:else}
+											{segment.value}
+										{/if}
+									{/each}
+								</div>
 							</div>
-							{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
-								{#if segment.isEmoji}
-									<span class="emoji-boost">{segment.value}</span>
-								{:else if segment.isMention}
-									<span class="mention-tag">{segment.value}</span>
-								{:else}
-									{segment.value}
-								{/if}
-							{/each}
 						{:else if isCallLogMessage(message)}
 							<div class="call-log-entry">
 								<svg
@@ -2979,11 +2966,6 @@
 		opacity: 1;
 	}
 
-	.pin-dashboard-btn {
-		left: calc(50% + (var(--copy-hit-size) * 0.82));
-		background: rgba(86, 46, 24, 0.88);
-	}
-
 	.copied-tip {
 		position: absolute;
 		left: calc(100% + 0.25rem);
@@ -3058,13 +3040,13 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		color: #2563eb;
+		color: #556175;
 		margin-left: 0.22rem;
 		opacity: 0.88;
 	}
 
 	.messages-shell.theme-dark .beacon-meta {
-		color: #93c5fd;
+		color: #b8c5da;
 	}
 
 	.reply-snippet {
@@ -3345,24 +3327,87 @@
 		color: #b3bfd3;
 	}
 
-	.beacon-inline-meta {
+	.beacon-card {
+		display: grid;
+		gap: 0.42rem;
+		border: 1px solid #cad5e4;
+		border-radius: 0.72rem;
+		background: linear-gradient(180deg, #f5f8fc 0%, #edf2f8 100%);
+		padding: 0.5rem 0.58rem;
+	}
+
+	.beacon-card-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.46rem;
+	}
+
+	.beacon-card-kind {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.36rem;
-		margin-bottom: 0.38rem;
-		padding: 0.18rem 0.42rem;
+		gap: 0.3rem;
+		font-size: 0.69rem;
+		font-weight: 700;
+		color: #2f425d;
+	}
+
+	.beacon-card-time {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.14rem 0.44rem;
 		border-radius: 999px;
-		border: 1px solid rgba(37, 99, 235, 0.28);
-		background: rgba(37, 99, 235, 0.08);
-		color: #1d4ed8;
-		font-size: 0.68rem;
+		border: 1px solid #b9c9de;
+		background: #f7fbff;
+		color: #1f3553;
+		font-size: 0.67rem;
 		font-weight: 700;
 	}
 
-	.messages-shell.theme-dark .beacon-inline-meta {
-		border-color: rgba(125, 211, 252, 0.35);
-		background: rgba(59, 130, 246, 0.16);
-		color: #bfdbfe;
+	.beacon-card-text {
+		font-size: 0.89rem;
+		line-height: 1.48;
+		color: #1f2f46;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.bubble.mine .beacon-card {
+		border-color: rgba(230, 238, 249, 0.45);
+		background: rgba(255, 255, 255, 0.14);
+	}
+
+	.bubble.mine .beacon-card-kind {
+		color: #eef5ff;
+	}
+
+	.bubble.mine .beacon-card-time {
+		border-color: rgba(233, 241, 252, 0.58);
+		background: rgba(255, 255, 255, 0.2);
+		color: #f4f8ff;
+	}
+
+	.bubble.mine .beacon-card-text {
+		color: #eef4fd;
+	}
+
+	.messages-shell.theme-dark .beacon-card {
+		border-color: #3f536f;
+		background: linear-gradient(180deg, #152033 0%, #101a2b 100%);
+	}
+
+	.messages-shell.theme-dark .beacon-card-kind {
+		color: #d2e1f6;
+	}
+
+	.messages-shell.theme-dark .beacon-card-time {
+		border-color: #607a9b;
+		background: rgba(18, 33, 54, 0.8);
+		color: #d8e8ff;
+	}
+
+	.messages-shell.theme-dark .beacon-card-text {
+		color: #d6e3f8;
 	}
 
 	.media-caption {
@@ -3399,21 +3444,27 @@
 
 	.mention-tag {
 		display: inline;
-		color: #1d4ed8;
+		color: #28364b;
 		font-weight: 600;
 		text-decoration: none;
+		background: rgba(32, 46, 67, 0.12);
+		border-radius: 0.34rem;
+		padding: 0.03rem 0.24rem;
 	}
 
 	.messages-shell.theme-dark .mention-tag {
-		color: #9bc2ff;
+		color: #d5e4fb;
+		background: rgba(118, 141, 173, 0.24);
 	}
 
 	.bubble.mine .mention-tag {
-		color: #2d63d9;
+		color: #f3f7ff;
+		background: rgba(236, 244, 255, 0.2);
 	}
 
 	.messages-shell.theme-dark .bubble.mine .mention-tag {
-		color: #afd1ff;
+		color: #ecf4ff;
+		background: rgba(236, 244, 255, 0.16);
 	}
 
 	.bubble.has-reactions {

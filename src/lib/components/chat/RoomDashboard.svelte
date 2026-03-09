@@ -12,8 +12,11 @@
 	export let currentUserId = '';
 	export let organizePreview: RoomDashboardOrganizeSections | null = null;
 
+	type DashboardAddItemKind = 'note' | 'beacon' | 'task';
+
 	const dispatch = createEventDispatcher<{
 		editNote: { itemId: string; note: string };
+		addItemRequest: { kind: DashboardAddItemKind };
 		aiOrganizePreview: RoomDashboardOrganizeSections;
 		aiOrganizeError: { message: string };
 	}>();
@@ -30,6 +33,8 @@
 	let isOrganizing = false;
 	let nowMs = Date.now();
 	let ticker: ReturnType<typeof setInterval> | null = null;
+	let addMenuOpen = false;
+	let addMenuRef: HTMLElement | null = null;
 
 	$: scopedItems = items.filter((item) => item.roomId === roomId);
 	$: scheduledItemsComputed = scopedItems
@@ -53,10 +58,12 @@
 	$: groupedPinnedItems = organizePreview?.pinnedItems ?? groupedPinnedItemsComputed;
 
 	onMount(() => {
+		document.addEventListener('pointerdown', onDocumentPointerDown);
 		ticker = setInterval(() => {
 			nowMs = Date.now();
 		}, 30000);
 		return () => {
+			document.removeEventListener('pointerdown', onDocumentPointerDown);
 			if (ticker) {
 				clearInterval(ticker);
 				ticker = null;
@@ -270,6 +277,33 @@
 			isOrganizing = false;
 		}
 	}
+
+	function toggleAddMenu() {
+		addMenuOpen = !addMenuOpen;
+	}
+
+	function onDocumentPointerDown(event: PointerEvent) {
+		if (!addMenuOpen || !addMenuRef) {
+			return;
+		}
+		const target = event.target;
+		if (target instanceof Node && addMenuRef.contains(target)) {
+			return;
+		}
+		addMenuOpen = false;
+	}
+
+	function onAddMenuKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape' && addMenuOpen) {
+			event.preventDefault();
+			addMenuOpen = false;
+		}
+	}
+
+	function onAddMenuSelect(kind: DashboardAddItemKind) {
+		addMenuOpen = false;
+		dispatch('addItemRequest', { kind });
+	}
 </script>
 
 <section class="room-dashboard {isDarkMode ? 'theme-dark' : ''}">
@@ -278,20 +312,47 @@
 			<h3>Room Dashboard</h3>
 			<p>Snapshot of priorities, pinned context, and expired beacons.</p>
 		</div>
-		<button
-			type="button"
-			class="ai-organize-btn"
-			disabled={isOrganizing || scopedItems.length === 0}
-			aria-busy={isOrganizing}
-			on:click={onAIOrganizeClick}
-		>
-			{#if isOrganizing}
-				<span class="btn-spinner" aria-hidden="true"></span>
-				Organizing...
-			{:else}
-				AI Organize
-			{/if}
-		</button>
+		<div class="header-actions">
+			<div class="add-actions" bind:this={addMenuRef}>
+				<button
+					type="button"
+					class="add-action-btn"
+					aria-haspopup="menu"
+					aria-expanded={addMenuOpen}
+					on:click={toggleAddMenu}
+					on:keydown={onAddMenuKeydown}
+				>
+					+ Add
+				</button>
+				{#if addMenuOpen}
+					<div class="add-menu" role="menu" aria-label="Add item to room dashboard">
+						<button type="button" role="menuitem" on:click={() => onAddMenuSelect('note')}>
+							Note
+						</button>
+						<button type="button" role="menuitem" on:click={() => onAddMenuSelect('beacon')}>
+							Schedule Beacon
+						</button>
+						<button type="button" role="menuitem" on:click={() => onAddMenuSelect('task')}>
+							Create Task
+						</button>
+					</div>
+				{/if}
+			</div>
+			<button
+				type="button"
+				class="ai-organize-btn"
+				disabled={isOrganizing || scopedItems.length === 0}
+				aria-busy={isOrganizing}
+				on:click={onAIOrganizeClick}
+			>
+				{#if isOrganizing}
+					<span class="btn-spinner" aria-hidden="true"></span>
+					Organizing...
+				{:else}
+					AI Organize
+				{/if}
+			</button>
+		</div>
 	</header>
 
 	<section class="dashboard-section">
@@ -483,6 +544,16 @@
 		gap: 0.8rem;
 	}
 
+	.header-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.add-actions {
+		position: relative;
+	}
+
 	.dashboard-title-wrap h3 {
 		margin: 0;
 		font-size: 0.96rem;
@@ -501,6 +572,71 @@
 
 	.room-dashboard.theme-dark .dashboard-title-wrap p {
 		color: #a4b6d2;
+	}
+
+	.add-action-btn {
+		border: 1px solid #b8c8dd;
+		background: rgba(245, 250, 255, 0.9);
+		color: #20395a;
+		border-radius: 0.55rem;
+		font-size: 0.73rem;
+		font-weight: 700;
+		padding: 0.36rem 0.66rem;
+		cursor: pointer;
+	}
+
+	.add-menu {
+		position: absolute;
+		top: calc(100% + 0.3rem);
+		right: 0;
+		min-width: 11rem;
+		display: grid;
+		gap: 0.18rem;
+		padding: 0.28rem;
+		border: 1px solid rgba(177, 196, 220, 0.9);
+		border-radius: 0.62rem;
+		background: rgba(250, 253, 255, 0.98);
+		box-shadow: 0 12px 30px rgba(16, 36, 66, 0.14);
+		z-index: 20;
+	}
+
+	.add-menu button {
+		border: 0;
+		background: transparent;
+		color: #2e4465;
+		font-size: 0.72rem;
+		font-weight: 600;
+		text-align: left;
+		padding: 0.36rem 0.44rem;
+		border-radius: 0.42rem;
+		cursor: pointer;
+	}
+
+	.add-menu button:hover,
+	.add-menu button:focus-visible {
+		background: rgba(223, 235, 251, 0.92);
+		outline: none;
+	}
+
+	.room-dashboard.theme-dark .add-action-btn {
+		border-color: rgba(89, 115, 151, 0.88);
+		background: rgba(16, 27, 45, 0.9);
+		color: #dce9fb;
+	}
+
+	.room-dashboard.theme-dark .add-menu {
+		border-color: rgba(67, 92, 126, 0.9);
+		background: rgba(12, 22, 38, 0.97);
+		box-shadow: 0 14px 34px rgba(0, 0, 0, 0.48);
+	}
+
+	.room-dashboard.theme-dark .add-menu button {
+		color: #d3e2f8;
+	}
+
+	.room-dashboard.theme-dark .add-menu button:hover,
+	.room-dashboard.theme-dark .add-menu button:focus-visible {
+		background: rgba(39, 58, 88, 0.9);
 	}
 
 	.ai-organize-btn {

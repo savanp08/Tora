@@ -20,6 +20,7 @@
 	const LARGE_PANEL_SIZE = 350;
 	const LARGE_PANEL_BREAKPOINT = 600;
 	const VIEWPORT_MARGIN = 12;
+	const DESKTOP_DEFAULT_TOP_OFFSET_PX = 80;
 	const DRAG_THRESHOLD_PX = 8;
 
 	let shellEl: HTMLDivElement | null = null;
@@ -28,7 +29,7 @@
 	let boxSizePx = SMALL_BOX_SIZE;
 	let panelSizePx = BASE_PANEL_SIZE;
 	let positionX = 0;
-	let positionY = 112;
+	let positionY = DESKTOP_DEFAULT_TOP_OFFSET_PX;
 	let dragging = false;
 	let activePointerId: number | null = null;
 	let pointerStartX = 0;
@@ -112,8 +113,9 @@
 		if (typeof window === 'undefined') {
 			return VIEWPORT_MARGIN;
 		}
-		const currentHeight = shellEl?.offsetHeight ?? boxSizePx;
-		return Math.max(VIEWPORT_MARGIN, window.innerHeight - currentHeight - VIEWPORT_MARGIN);
+		// Keep drag bounds tied to the visible button size so the box can traverse
+		// the full viewport even if shell height is affected by surrounding layout.
+		return Math.max(VIEWPORT_MARGIN, window.innerHeight - boxSizePx - VIEWPORT_MARGIN);
 	}
 
 	function resetToRightEdge() {
@@ -123,7 +125,7 @@
 		positionX = maxPositionX();
 		positionY = Math.max(
 			VIEWPORT_MARGIN,
-			Math.min(maxPositionY(), Math.round(window.innerHeight * 0.28))
+			Math.min(maxPositionY(), DESKTOP_DEFAULT_TOP_OFFSET_PX)
 		);
 	}
 
@@ -216,7 +218,7 @@
 		if (addableModules.length === 0) {
 			showAddMenu = true;
 			dispatch('limitReached', {
-				message: 'You can only keep 2 active boards at once. Close one first.'
+				message: 'All boards are already active for this room.'
 			});
 			return;
 		}
@@ -378,9 +380,9 @@
 		--activity-box-size: 64px;
 		--activity-icon-size: clamp(1.05rem, calc(var(--activity-box-size) * 0.34), 1.45rem);
 		--activity-shell-text: #132742;
-		--activity-shell-border: rgba(255, 255, 255, 0.82);
-		--activity-shell-glass: rgba(255, 255, 255, 0.36);
-		--activity-shell-shadow: rgba(43, 73, 116, 0.34);
+		--activity-shell-border: rgba(255, 255, 255, 0.56);
+		--activity-shell-glass: rgba(255, 255, 255, 0.2);
+		--activity-shell-shadow: rgba(43, 73, 116, 0.24);
 		position: fixed;
 		left: 0;
 		top: 0;
@@ -396,9 +398,9 @@
 	:global(:root[data-theme='dark']) .activity-box-shell,
 	:global(.theme-dark) .activity-box-shell {
 		--activity-shell-text: #f3f8ff;
-		--activity-shell-border: rgba(212, 228, 255, 0.5);
-		--activity-shell-glass: rgba(29, 44, 68, 0.42);
-		--activity-shell-shadow: rgba(5, 14, 32, 0.52);
+		--activity-shell-border: rgba(212, 228, 255, 0.34);
+		--activity-shell-glass: rgba(29, 44, 68, 0.24);
+		--activity-shell-shadow: rgba(5, 14, 32, 0.4);
 	}
 
 	.activity-box-shell:active {
@@ -412,15 +414,15 @@
 			height: var(--activity-box-size);
 			border-radius: clamp(18px, calc(var(--activity-box-size) * 0.3), 24px);
 			border: 1px solid var(--activity-shell-border);
-			background:
-				radial-gradient(circle at 22% 14%, rgba(255, 255, 255, 0.62), transparent 48%),
-				linear-gradient(
-					150deg,
-					rgba(255, 255, 255, 0.42),
-					rgba(198, 217, 245, 0.15) 58%,
-					rgba(173, 202, 236, 0.1)
-				),
-				var(--activity-shell-glass);
+		background:
+			radial-gradient(circle at 22% 14%, rgba(255, 255, 255, 0.34), transparent 48%),
+			linear-gradient(
+				150deg,
+				rgba(255, 255, 255, 0.2),
+				rgba(198, 217, 245, 0.08) 58%,
+				rgba(173, 202, 236, 0.06)
+			),
+			var(--activity-shell-glass);
 		backdrop-filter: blur(22px) saturate(180%);
 		-webkit-backdrop-filter: blur(22px) saturate(180%);
 		color: var(--activity-shell-text);
@@ -430,8 +432,8 @@
 		cursor: pointer;
 		box-shadow:
 			0 18px 36px var(--activity-shell-shadow),
-			inset 0 1px 0 rgba(255, 255, 255, 0.55),
-			inset 0 -1px 0 rgba(120, 154, 202, 0.2);
+			inset 0 1px 0 rgba(255, 255, 255, 0.3),
+			inset 0 -1px 0 rgba(120, 154, 202, 0.14);
 		padding: 0;
 		transform: translateY(0);
 		transition:
@@ -446,8 +448,8 @@
 		inset: 0;
 		background: linear-gradient(
 			145deg,
-			rgba(255, 255, 255, 0.66) 0%,
-			rgba(255, 255, 255, 0.12) 46%,
+			rgba(255, 255, 255, 0.34) 0%,
+			rgba(255, 255, 255, 0.08) 46%,
 			transparent 76%
 		);
 		pointer-events: none;
@@ -457,8 +459,8 @@
 		transform: translateY(-2px);
 		box-shadow:
 			0 24px 42px var(--activity-shell-shadow),
-			inset 0 1px 0 rgba(255, 255, 255, 0.62),
-			inset 0 -1px 0 rgba(120, 154, 202, 0.24);
+			inset 0 1px 0 rgba(255, 255, 255, 0.38),
+			inset 0 -1px 0 rgba(120, 154, 202, 0.16);
 	}
 
 	.activity-box-main:focus-visible {
@@ -484,8 +486,8 @@
 		position: fixed;
 		inset: 0;
 		background:
-			radial-gradient(circle at 20% 12%, rgba(210, 224, 246, 0.36), transparent 36%),
-			rgba(146, 165, 194, 0.24);
+			radial-gradient(circle at 20% 12%, rgba(210, 224, 246, 0.24), transparent 36%),
+			rgba(146, 165, 194, 0.16);
 		backdrop-filter: blur(7px) saturate(130%);
 		-webkit-backdrop-filter: blur(7px) saturate(130%);
 		border: 0;
@@ -497,22 +499,22 @@
 	:global(:root[data-theme='dark']) .activity-panel-backdrop,
 	:global(.theme-dark) .activity-panel-backdrop {
 		background:
-			radial-gradient(circle at 22% 15%, rgba(86, 126, 186, 0.34), transparent 40%),
-			rgba(5, 11, 20, 0.42);
+			radial-gradient(circle at 22% 15%, rgba(86, 126, 186, 0.22), transparent 40%),
+			rgba(5, 11, 20, 0.26);
 	}
 
 	.activity-panel {
 		--panel-text: #152740;
 		--panel-muted: rgba(40, 62, 92, 0.76);
-		--panel-border: rgba(255, 255, 255, 0.8);
-		--panel-glass: rgba(255, 255, 255, 0.48);
-		--panel-highlight: rgba(255, 255, 255, 0.8);
+		--panel-border: rgba(255, 255, 255, 0.56);
+		--panel-glass: rgba(255, 255, 255, 0.28);
+		--panel-highlight: rgba(255, 255, 255, 0.42);
 		--panel-shadow: rgba(37, 69, 115, 0.32);
-		--panel-button-bg: rgba(255, 255, 255, 0.48);
-		--panel-button-border: rgba(255, 255, 255, 0.72);
-		--panel-button-hover: rgba(255, 255, 255, 0.62);
-		--panel-active-bg: rgba(149, 200, 255, 0.38);
-		--panel-active-border: rgba(106, 164, 236, 0.7);
+		--panel-button-bg: rgba(255, 255, 255, 0.28);
+		--panel-button-border: rgba(255, 255, 255, 0.5);
+		--panel-button-hover: rgba(255, 255, 255, 0.38);
+		--panel-active-bg: rgba(149, 200, 255, 0.26);
+		--panel-active-border: rgba(106, 164, 236, 0.58);
 		position: fixed;
 		left: 50%;
 		top: 50%;
@@ -523,20 +525,20 @@
 		border-radius: 30px;
 		border: 1px solid var(--panel-border);
 		background:
-			radial-gradient(circle at 14% 10%, rgba(255, 255, 255, 0.86), transparent 42%),
+			radial-gradient(circle at 14% 10%, rgba(255, 255, 255, 0.46), transparent 42%),
 			linear-gradient(
 				154deg,
 				var(--panel-highlight) 0%,
-				rgba(231, 240, 255, 0.26) 52%,
-				rgba(197, 220, 250, 0.18) 100%
+				rgba(231, 240, 255, 0.16) 52%,
+				rgba(197, 220, 250, 0.12) 100%
 			),
 			var(--panel-glass);
 		backdrop-filter: blur(30px) saturate(190%);
 		-webkit-backdrop-filter: blur(30px) saturate(190%);
 		box-shadow:
 			0 36px 78px var(--panel-shadow),
-			inset 0 1px 0 rgba(255, 255, 255, 0.82),
-			inset 0 -1px 0 rgba(124, 162, 211, 0.22);
+			inset 0 1px 0 rgba(255, 255, 255, 0.5),
+			inset 0 -1px 0 rgba(124, 162, 211, 0.16);
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr);
 		gap: 0.72rem;
@@ -548,15 +550,15 @@
 	:global(.theme-dark) .activity-panel {
 		--panel-text: #f2f7ff;
 		--panel-muted: rgba(210, 225, 246, 0.84);
-		--panel-border: rgba(208, 227, 255, 0.54);
-		--panel-glass: rgba(18, 30, 48, 0.56);
-		--panel-highlight: rgba(112, 155, 222, 0.22);
+		--panel-border: rgba(208, 227, 255, 0.36);
+		--panel-glass: rgba(18, 30, 48, 0.34);
+		--panel-highlight: rgba(112, 155, 222, 0.14);
 		--panel-shadow: rgba(3, 9, 22, 0.58);
-		--panel-button-bg: rgba(30, 44, 65, 0.46);
-		--panel-button-border: rgba(185, 211, 249, 0.42);
-		--panel-button-hover: rgba(45, 65, 96, 0.58);
-		--panel-active-bg: rgba(83, 141, 215, 0.44);
-		--panel-active-border: rgba(156, 206, 255, 0.74);
+		--panel-button-bg: rgba(30, 44, 65, 0.3);
+		--panel-button-border: rgba(185, 211, 249, 0.3);
+		--panel-button-hover: rgba(45, 65, 96, 0.36);
+		--panel-active-bg: rgba(83, 141, 215, 0.3);
+		--panel-active-border: rgba(156, 206, 255, 0.56);
 	}
 
 	.activity-panel-body {
@@ -660,20 +662,20 @@
 	.add-action {
 		background: linear-gradient(
 			145deg,
-			rgba(184, 242, 230, 0.45),
-			rgba(149, 229, 213, 0.28)
+			rgba(184, 242, 230, 0.26),
+			rgba(149, 229, 213, 0.16)
 		);
-		border-color: rgba(103, 194, 170, 0.64);
+		border-color: rgba(103, 194, 170, 0.48);
 	}
 
 	:global(:root[data-theme='dark']) .add-action,
 	:global(.theme-dark) .add-action {
 		background: linear-gradient(
 			145deg,
-			rgba(27, 101, 92, 0.52),
-			rgba(20, 74, 74, 0.44)
+			rgba(27, 101, 92, 0.38),
+			rgba(20, 74, 74, 0.3)
 		);
-		border-color: rgba(130, 221, 195, 0.56);
+		border-color: rgba(130, 221, 195, 0.42);
 	}
 
 	.module-add-menu {
@@ -682,7 +684,7 @@
 		padding: 0.58rem;
 		border-radius: 16px;
 		border: 1px solid var(--panel-button-border);
-		background: rgba(255, 255, 255, 0.3);
+		background: rgba(255, 255, 255, 0.2);
 		backdrop-filter: blur(18px) saturate(165%);
 		-webkit-backdrop-filter: blur(18px) saturate(165%);
 		min-width: 0;
@@ -690,7 +692,7 @@
 
 	:global(:root[data-theme='dark']) .module-add-menu,
 	:global(.theme-dark) .module-add-menu {
-		background: rgba(25, 40, 61, 0.52);
+		background: rgba(25, 40, 61, 0.34);
 	}
 
 	.module-add-option {
@@ -729,10 +731,32 @@
 		}
 	}
 
-	@media (max-width: 600px) {
-		.activity-panel {
-			padding: 0.75rem;
-			border-radius: 24px;
+		@media (max-width: 600px) {
+			.activity-panel {
+				padding: 0.75rem;
+				border-radius: 24px;
+			}
 		}
-	}
-</style>
+
+		@media (min-width: 601px) {
+			:global(:root[data-theme='dark']) .activity-box-main,
+			:global(.theme-dark) .activity-box-main {
+				background: var(--activity-shell-glass);
+			}
+
+			:global(:root[data-theme='dark']) .activity-box-main::before,
+			:global(.theme-dark) .activity-box-main::before {
+				background: none;
+			}
+
+			:global(:root[data-theme='dark']) .activity-panel,
+			:global(.theme-dark) .activity-panel {
+				background: var(--panel-glass);
+			}
+
+			:global(:root[data-theme='dark']) .add-action,
+			:global(.theme-dark) .add-action {
+				background: var(--panel-button-bg);
+			}
+		}
+	</style>

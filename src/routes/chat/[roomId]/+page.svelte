@@ -220,6 +220,8 @@
 		| 'open-board-code'
 		| 'open-board-tasks'
 		| 'mark-active-read';
+	type BoardWorkspaceModule = Exclude<WorkspaceModule, 'code'>;
+	type DashboardAddItemKind = 'note' | 'beacon' | 'task';
 
 	const CALL_SIGNAL_TYPES = new Set([
 		'call_invite',
@@ -237,8 +239,8 @@
 		Math.round(TASK_BOARD_LIMIT_BYTES / (1024 * 1024))
 	)}MB) reached.`;
 	const DASHBOARD_STORAGE_PREFIX = 'converse:room-dashboard:v1';
-	const MAX_ACTIVE_NON_DASHBOARD_MODULES = APP_LIMITS.workspace.maxActiveNonDashboardModules;
 	const WORKSPACE_MODULES: WorkspaceModule[] = ['dashboard', 'draw', 'code', 'tasks'];
+	const BOARD_WORKSPACE_MODULES: BoardWorkspaceModule[] = ['dashboard', 'draw', 'tasks'];
 	const COMPACT_NAV_BREAKPOINT = 600;
 
 	function getCanvasPresenceColor(user: { color?: unknown } | null | undefined) {
@@ -438,6 +440,7 @@
 	let showRoomSearch = false;
 	let showRoomDetails = false;
 	let selectedWorkspaceModule: WorkspaceModule | null = null;
+	let visibleBoardModules: BoardWorkspaceModule[] = [];
 	let activeWorkspaceModules: WorkspaceModule[] = ['dashboard'];
 	let roomDashboardItems: RoomDashboardItem[] = [];
 	let roomDashboardOrganizePreview: RoomDashboardOrganizeSections | null = null;
@@ -618,22 +621,14 @@
 	);
 	$: activeRoomAllowsAI = activeRoomFeatures.aiEnabled && !activeRoomFeatures.e2eEnabled;
 	$: currentMessages = activeThread?.status === 'left' ? [] : (messagesByRoom[roomId] ?? []);
-	$: isDrawBoardActive = selectedWorkspaceModule === 'draw';
-	$: isTaskBoardActive = selectedWorkspaceModule === 'tasks';
-	$: isDashboardActive = selectedWorkspaceModule === 'dashboard';
-	$: addableWorkspaceModules =
-		activeWorkspaceModules.filter((module) => module !== 'dashboard').length >=
-		MAX_ACTIVE_NON_DASHBOARD_MODULES
-			? []
-			: WORKSPACE_MODULES.filter(
-					(module) => module !== 'dashboard' && !activeWorkspaceModules.includes(module)
-				);
+	$: isDrawBoardActive = visibleBoardModules.includes('draw');
+	$: isTaskBoardActive = visibleBoardModules.includes('tasks');
+	$: isDashboardActive = visibleBoardModules.includes('dashboard');
+	$: addableWorkspaceModules = WORKSPACE_MODULES.filter(
+		(module) => module !== 'dashboard' && !activeWorkspaceModules.includes(module)
+	);
 	$: if (selectedWorkspaceModule === 'code' && !isCanvasOpen) {
 		isCanvasOpen = true;
-	}
-	$: if (selectedWorkspaceModule !== 'code' && isCanvasOpen) {
-		isCanvasOpen = false;
-		isCanvasFullscreen = false;
 	}
 	$: activeDiscussionTask =
 		(activeDiscussionTaskId &&
@@ -765,7 +760,7 @@
 			return !seenIds.has(entryId);
 		}).length;
 	}
-	$: if (roomId && selectedWorkspaceModule === 'dashboard') {
+	$: if (roomId && isDashboardActive) {
 		markDashboardItemsSeen(roomId, roomDashboardItems);
 	}
 	$: activeFirstUnreadMessageId = getUnreadStartMessageId(roomId);
@@ -895,6 +890,7 @@
 		isSelectionMode = false;
 		selectedActionMessageId = '';
 		selectedWorkspaceModule = null;
+		visibleBoardModules = [];
 		activeWorkspaceModules = ['dashboard'];
 		const initialDashboardItems = readRoomDashboardItems(roomId);
 		roomDashboardItems = initialDashboardItems;
@@ -1060,7 +1056,7 @@
 				toggleRoomSearch();
 				return;
 			case 'toggle-discussion-mode':
-				toggleDiscussionSelectionMode();
+				void openLatestDiscussionFromTaskbar();
 				return;
 			case 'open-board-dashboard':
 				if (isMobileView) {
@@ -2832,29 +2828,61 @@
 		return 'Dashboard';
 	}
 
+	function isBoardWorkspaceModule(module: WorkspaceModule): module is BoardWorkspaceModule {
+		return BOARD_WORKSPACE_MODULES.includes(module as BoardWorkspaceModule);
+	}
+
+	function setVisibleBoardModulesOnOpen(
+		module: BoardWorkspaceModule,
+		previousSelectedModule: WorkspaceModule | null
+	) {
+		if (visibleBoardModules.includes(module)) {
+			return;
+		}
+		if (visibleBoardModules.length === 0) {
+			visibleBoardModules = [module];
+			return;
+		}
+		if (visibleBoardModules.length === 1) {
+			visibleBoardModules = [...visibleBoardModules, module];
+			return;
+		}
+		const selectedBoardModule =
+			previousSelectedModule && isBoardWorkspaceModule(previousSelectedModule)
+				? previousSelectedModule
+				: visibleBoardModules[visibleBoardModules.length - 1];
+		const anchorModule =
+			selectedBoardModule && selectedBoardModule !== module
+				? selectedBoardModule
+				: (visibleBoardModules.find((entry) => entry !== module) ?? module);
+		const nextPair = [anchorModule, module].filter(
+			(entry, index, collection) => collection.indexOf(entry) === index
+		);
+		visibleBoardModules = nextPair.slice(0, 2);
+	}
+
 	function activateWorkspaceModule(module: WorkspaceModule) {
 		if (activeWorkspaceModules.includes(module)) {
 			return true;
-		}
-		if (module !== 'dashboard') {
-			const nonDashboardCount = activeWorkspaceModules.filter(
-				(entry) => entry !== 'dashboard'
-			).length;
-			if (nonDashboardCount >= MAX_ACTIVE_NON_DASHBOARD_MODULES) {
-				showErrorToast('Close one active board before adding another.');
-				return false;
-			}
 		}
 		activeWorkspaceModules = [...activeWorkspaceModules, module];
 		return true;
 	}
 
 	function deactivateWorkspaceModule(module: WorkspaceModule) {
-		if (module === 'dashboard') {
-			selectedWorkspaceModule = null;
+		if (module !== 'dashboard') {
+			activeWorkspaceModules = activeWorkspaceModules.filter((entry) => entry !== module);
+		}
+		if (isBoardWorkspaceModule(module)) {
+			visibleBoardModules = visibleBoardModules.filter((entry) => entry !== module);
+			if (selectedWorkspaceModule === module) {
+				selectedWorkspaceModule =
+					visibleBoardModules.length > 0
+						? visibleBoardModules[visibleBoardModules.length - 1]
+						: null;
+			}
 			return;
 		}
-		activeWorkspaceModules = activeWorkspaceModules.filter((entry) => entry !== module);
 		if (selectedWorkspaceModule === module) {
 			selectedWorkspaceModule = null;
 		}
@@ -2874,8 +2902,9 @@
 		if (!activated) {
 			return false;
 		}
-		selectedWorkspaceModule = module;
-		if (module === 'draw' || module === 'dashboard' || module === 'tasks') {
+		const previousSelectedModule = selectedWorkspaceModule;
+		if (isBoardWorkspaceModule(module)) {
+			setVisibleBoardModulesOnOpen(module, previousSelectedModule);
 			setMessageActionMode('none');
 			showRoomSearch = false;
 			activeReply = null;
@@ -2884,6 +2913,7 @@
 			isCanvasOpen = true;
 			isCanvasFullscreen = !options?.allowSplitCanvas;
 		}
+		selectedWorkspaceModule = module;
 		return true;
 	}
 
@@ -2906,19 +2936,27 @@
 	}
 
 	function onWorkspaceModuleLimit(event: CustomEvent<{ message: string }>) {
-		showErrorToast(event.detail.message || 'Close one active board before adding another.');
+		showErrorToast(event.detail.message || 'All boards are already active for this room.');
 	}
 
 	function toggleBoardView() {
-		if (selectedWorkspaceModule === 'draw') {
+		if (isDrawBoardActive) {
 			deactivateWorkspaceModule('draw');
 			return;
 		}
 		openWorkspaceModule('draw');
 	}
 
+	function toggleDashboardView() {
+		if (isDashboardActive) {
+			deactivateWorkspaceModule('dashboard');
+			return;
+		}
+		openWorkspaceModule('dashboard');
+	}
+
 	function toggleCanvas() {
-		if (selectedWorkspaceModule === 'code') {
+		if (isCanvasOpen) {
 			deactivateWorkspaceModule('code');
 			return;
 		}
@@ -4073,6 +4111,231 @@
 		persistCurrentRoomDashboardItems(nextItems);
 	}
 
+	function toLocalDateInputValue(date: Date) {
+		const year = date.getFullYear();
+		const month = `${date.getMonth() + 1}`.padStart(2, '0');
+		const day = `${date.getDate()}`.padStart(2, '0');
+		return `${year}-${month}-${day}`;
+	}
+
+	function toLocalTimeInputValue(date: Date) {
+		const hours = `${date.getHours()}`.padStart(2, '0');
+		const minutes = `${date.getMinutes()}`.padStart(2, '0');
+		return `${hours}:${minutes}`;
+	}
+
+	function toDashboardDateTimePromptValue(timestamp: number) {
+		const date = new Date(timestamp);
+		return `${toLocalDateInputValue(date)} ${toLocalTimeInputValue(date)}`;
+	}
+
+	function parseDashboardDateTimePromptValue(value: string) {
+		const normalized = value.trim().replace(/\s+/, 'T');
+		const parsed = parseOptionalTimestamp(normalized);
+		if (parsed > 0) {
+			return parsed;
+		}
+		return parseOptionalTimestamp(value.trim());
+	}
+
+	function buildManualDashboardItem(input: {
+		kind: RoomDashboardItem['kind'];
+		messageText: string;
+		note?: string;
+		beaconAt?: number | null;
+		beaconLabel?: string;
+		beaconData?: Record<string, unknown> | null;
+		taskTitle?: string;
+		topic?: string;
+	}) {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		const normalizedUsername = normalizeUsernameValue(currentUsername) || 'User';
+		if (!normalizedRoomID || !normalizedUserID) {
+			return null;
+		}
+		const now = Date.now();
+		const generatedId = createMessageId(normalizedRoomID);
+		const beaconAt = parseOptionalTimestamp(input.beaconAt);
+		const topic = toStringValue(input.topic).trim();
+		return {
+			id: generatedId,
+			roomId: normalizedRoomID,
+			messageId: generatedId,
+			kind: input.kind,
+			senderId: normalizedUserID,
+			senderName: normalizedUsername,
+			pinnedByUserId: normalizedUserID,
+			pinnedByName: normalizedUsername,
+			originalCreatedAt: now,
+			pinnedAt: now,
+			messageText: toStringValue(input.messageText).trim(),
+			mediaUrl: '',
+			mediaType: '',
+			fileName: '',
+			note: toStringValue(input.note).trim(),
+			beaconAt: beaconAt > 0 ? beaconAt : null,
+			beaconLabel: toStringValue(input.beaconLabel).trim(),
+			beaconData:
+				input.beaconData && typeof input.beaconData === 'object' && !Array.isArray(input.beaconData)
+					? { ...input.beaconData }
+					: null,
+			taskTitle: toStringValue(input.taskTitle).trim(),
+			topic: topic || undefined
+		} satisfies RoomDashboardItem;
+	}
+
+	function canAddDashboardItem() {
+		if (!roomId || !isMember) {
+			showErrorToast('Join the room to add dashboard items.');
+			return false;
+		}
+		if (isRoomExpired) {
+			showErrorToast('Room is expired. Dashboard updates are disabled.');
+			return false;
+		}
+		return true;
+	}
+
+	async function addDashboardNoteItem() {
+		const noteRaw = await openPromptDialog({
+			title: 'Add Note',
+			message: 'Create a note for this room dashboard.',
+			initialValue: '',
+			placeholder: 'Write note',
+			maxLength: 600,
+			confirmLabel: 'Add Note',
+			cancelLabel: 'Cancel',
+			multiline: true
+		});
+		if (noteRaw === null) {
+			return;
+		}
+		const noteText = noteRaw.trim();
+		if (!noteText) {
+			showErrorToast('Note cannot be empty.');
+			return;
+		}
+		const dashboardItem = buildManualDashboardItem({
+			kind: 'note',
+			messageText: noteText
+		});
+		if (!dashboardItem) {
+			showErrorToast('Unable to add note right now.');
+			return;
+		}
+		upsertRoomDashboardItem(dashboardItem);
+		showErrorToast('Note added to dashboard.');
+	}
+
+	async function addDashboardBeaconItem() {
+		const beaconTextRaw = await openPromptDialog({
+			title: 'Schedule Beacon',
+			message: 'Add beacon text for the dashboard item.',
+			initialValue: '',
+			placeholder: 'Beacon text',
+			maxLength: 500,
+			confirmLabel: 'Next',
+			cancelLabel: 'Cancel',
+			multiline: true
+		});
+		if (beaconTextRaw === null) {
+			return;
+		}
+		const beaconText = beaconTextRaw.trim();
+		if (!beaconText) {
+			showErrorToast('Beacon text cannot be empty.');
+			return;
+		}
+
+		const defaultBeaconAt = Date.now() + 10 * 60 * 1000;
+		const scheduleRaw = await openPromptDialog({
+			title: 'Schedule Beacon',
+			message: 'Set local date and time as YYYY-MM-DD HH:mm.',
+			initialValue: toDashboardDateTimePromptValue(defaultBeaconAt),
+			placeholder: 'YYYY-MM-DD HH:mm',
+			maxLength: 32,
+			confirmLabel: 'Schedule',
+			cancelLabel: 'Cancel',
+			multiline: false
+		});
+		if (scheduleRaw === null) {
+			return;
+		}
+		const beaconAt = parseDashboardDateTimePromptValue(scheduleRaw);
+		if (beaconAt <= Date.now()) {
+			showErrorToast('Choose a future date/time for the beacon.');
+			return;
+		}
+		const beaconLabel = formatBeaconTimestamp(beaconAt);
+		const dashboardItem = buildManualDashboardItem({
+			kind: 'message',
+			messageText: beaconText,
+			note: beaconText,
+			beaconAt,
+			beaconLabel,
+			beaconData: {
+				kind: 'beacon',
+				text: beaconText
+			}
+		});
+		if (!dashboardItem) {
+			showErrorToast('Unable to schedule beacon right now.');
+			return;
+		}
+		upsertRoomDashboardItem(dashboardItem);
+		showErrorToast(`Beacon scheduled for ${beaconLabel || formatDateTime(beaconAt)}.`);
+	}
+
+	async function addDashboardTaskItem() {
+		const taskTitleRaw = await openPromptDialog({
+			title: 'Create Task',
+			message: 'Add a task title.',
+			initialValue: '',
+			placeholder: 'Task title',
+			maxLength: APP_LIMITS.tasks.maxTitleLength,
+			confirmLabel: 'Next',
+			cancelLabel: 'Cancel',
+			multiline: false
+		});
+		if (taskTitleRaw === null) {
+			return;
+		}
+		const taskTitle = taskTitleRaw.trim();
+		if (!taskTitle) {
+			showErrorToast('Task title cannot be empty.');
+			return;
+		}
+
+		const taskDetailRaw = await openPromptDialog({
+			title: 'Create Task',
+			message: 'Add task details (optional).',
+			initialValue: '',
+			placeholder: 'Task details',
+			maxLength: 700,
+			confirmLabel: 'Create Task',
+			emptyConfirmLabel: 'Create without details',
+			cancelLabel: 'Cancel',
+			multiline: true,
+			allowEmptySubmit: true
+		});
+		if (taskDetailRaw === null) {
+			return;
+		}
+		const taskDetail = taskDetailRaw.trim();
+		const dashboardItem = buildManualDashboardItem({
+			kind: 'task',
+			messageText: taskDetail,
+			taskTitle
+		});
+		if (!dashboardItem) {
+			showErrorToast('Unable to create task right now.');
+			return;
+		}
+		upsertRoomDashboardItem(dashboardItem);
+		showErrorToast('Task added to dashboard.');
+	}
+
 	function addBeaconMessageToDashboard(message: ChatMessage) {
 		const normalizedActiveRoomID = normalizeRoomIDValue(roomId);
 		const normalizedMessageRoomID = normalizeRoomIDValue(message.roomId);
@@ -5127,6 +5390,120 @@
 		setMessageActionMode(nextMode);
 	}
 
+	function isDiscussionAnchorMessage(message: ChatMessage) {
+		const normalizedType = (message.type || '').toLowerCase();
+		const normalizedContent = (message.content || '').trim();
+		return (
+			normalizeMessageID(message.id) !== '' &&
+			normalizedType !== 'deleted' &&
+			normalizedContent !== DELETED_MESSAGE_PLACEHOLDER
+		);
+	}
+
+	function findLatestLocalDiscussionAnchor(targetRoomId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return null as ChatMessage | null;
+		}
+		const roomMessages = messagesByRoom[normalizedRoomID] ?? [];
+		const messageById = new Map<string, ChatMessage>();
+		const activityByMessageId = new Map<string, number>();
+
+		for (const message of roomMessages) {
+			const messageId = normalizeMessageID(message.id);
+			if (!messageId || !isDiscussionAnchorMessage(message)) {
+				continue;
+			}
+			messageById.set(messageId, message);
+			if (Boolean(message.isPinned)) {
+				activityByMessageId.set(
+					messageId,
+					Math.max(
+						activityByMessageId.get(messageId) ?? 0,
+						parseOptionalTimestamp(message.createdAt)
+					)
+				);
+			}
+		}
+
+		const cachePrefix = `${normalizedRoomID}::`;
+		for (const [cacheKey, comments] of Object.entries(discussionCommentsCacheByTaskKey)) {
+			if (!cacheKey.startsWith(cachePrefix)) {
+				continue;
+			}
+			const messageId = normalizeMessageID(cacheKey.slice(cachePrefix.length));
+			if (!messageId || !messageById.has(messageId) || !Array.isArray(comments)) {
+				continue;
+			}
+			const latestCommentAt = comments.reduce((latest, comment) => {
+				return Math.max(latest, parseOptionalTimestamp(comment.createdAt));
+			}, 0);
+			activityByMessageId.set(
+				messageId,
+				Math.max(activityByMessageId.get(messageId) ?? 0, latestCommentAt)
+			);
+		}
+
+		let latestAnchor: ChatMessage | null = null;
+		let latestActivityAt = 0;
+		for (const [messageId, activityAt] of activityByMessageId.entries()) {
+			const anchor = messageById.get(messageId);
+			if (!anchor) {
+				continue;
+			}
+			if (
+				activityAt > latestActivityAt ||
+				(activityAt === latestActivityAt &&
+					parseOptionalTimestamp(anchor.createdAt) >
+						parseOptionalTimestamp(latestAnchor?.createdAt))
+			) {
+				latestAnchor = anchor;
+				latestActivityAt = activityAt;
+			}
+		}
+		return latestAnchor;
+	}
+
+	async function openLatestDiscussionFromTaskbar() {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		if (!normalizedRoomID) {
+			return;
+		}
+
+		if (isMobileView) {
+			mobilePane = 'chat';
+		}
+		setMessageActionMode('none');
+
+		const localAnchor = findLatestLocalDiscussionAnchor(normalizedRoomID);
+		if (localAnchor) {
+			openDiscussionForMessage(localAnchor.id);
+			return;
+		}
+
+		const latestCursor = Date.now() + 365 * 24 * 60 * 60 * 1000;
+		try {
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/pins/navigate?before=${encodeURIComponent(String(latestCursor))}`
+			);
+			const body = (await response
+				.json()
+				.catch(() => ({}))) as Record<string, unknown>;
+			if (!response.ok) {
+				throw new Error(toStringValue(body.error) || 'Failed to load latest discussion');
+			}
+			const parsed = await parseIncomingMessageWithE2EE(body.message, normalizedRoomID);
+			if (!parsed || !isDiscussionAnchorMessage(parsed)) {
+				showErrorToast('No discussions in this room yet.');
+				return;
+			}
+			mergeMessages(normalizedRoomID, [parsed]);
+			openDiscussionForMessage(parsed.id);
+		} catch (error) {
+			showErrorToast(error instanceof Error ? error.message : 'Failed to open latest discussion');
+		}
+	}
+
 	function toggleReplySelectionMode() {
 		const nextMode: MessageActionMode = messageActionMode === 'reply' ? 'none' : 'reply';
 		setMessageActionMode(nextMode);
@@ -5749,25 +6126,28 @@
 		openDiscussionForMessage(messageId);
 	}
 
-	async function onMessagePinToDashboard(event: CustomEvent<{ messageId: string }>) {
-		if (!roomId || !isMember) {
-			return;
-		}
-		const messageId = normalizeMessageID(event.detail.messageId);
-		if (!messageId) {
-			return;
-		}
-		const message = (messagesByRoom[roomId] ?? []).find(
-			(entry) => normalizeMessageID(entry.id) === messageId
-		);
-		if (!message) {
-			return;
-		}
-		await openDashboardPinPrompt(message);
-	}
-
 	function onDashboardItemNoteEdit(event: CustomEvent<{ itemId: string; note: string }>) {
 		updateRoomDashboardItemNote(event.detail.itemId, event.detail.note);
+	}
+
+	async function onDashboardAddItemRequest(
+		event: CustomEvent<{ kind: DashboardAddItemKind }>
+	) {
+		if (!canAddDashboardItem()) {
+			return;
+		}
+		const kind = event.detail.kind;
+		if (kind === 'note') {
+			await addDashboardNoteItem();
+			return;
+		}
+		if (kind === 'beacon') {
+			await addDashboardBeaconItem();
+			return;
+		}
+		if (kind === 'task') {
+			await addDashboardTaskItem();
+		}
 	}
 
 	function onDashboardOrganizePreview(event: CustomEvent<RoomDashboardOrganizeSections>) {
@@ -6044,10 +6424,11 @@
 					{isActiveRoomAdmin}
 					{isMobileView}
 					isDarkMode={$isDarkMode}
-					{messageActionMode}
-					{showRoomSearch}
-					isBoardView={isDrawBoardActive}
-					{isCanvasOpen}
+						{messageActionMode}
+						{showRoomSearch}
+						isDashboardView={isDashboardActive}
+						isBoardView={isDrawBoardActive}
+						{isCanvasOpen}
 					hasMinimizedCall={activeCall && isCallMinimized}
 					minimizedCallLabel={callDurationLabel}
 					minimizedCallType={callType}
@@ -6055,10 +6436,11 @@
 					on:showMobileList={showMobileRoomList}
 					on:openRoomDetails={openRoomDetails}
 					on:startAudioCall={() => void startOutgoingCall('audio')}
-					on:startVideoCall={() => void startOutgoingCall('video')}
-					on:restoreMinimizedCall={restoreMinimizedCall}
-					on:toggleBoardView={toggleBoardView}
-					on:toggleCanvas={toggleCanvas}
+						on:startVideoCall={() => void startOutgoingCall('video')}
+						on:restoreMinimizedCall={restoreMinimizedCall}
+						on:toggleDashboardView={toggleDashboardView}
+						on:toggleBoardView={toggleBoardView}
+						on:toggleCanvas={toggleCanvas}
 					on:toggleRoomSearch={toggleRoomSearch}
 					on:renameRoom={() => void renameRoom(roomId)}
 					on:toggleBreakSelectionMode={toggleBreakSelectionMode}
@@ -6354,32 +6736,41 @@
 				{/if}
 
 				<div class="chat-window-shell" class:is-expired={isRoomExpired}>
-					{#if isDrawBoardActive}
-						<Board
-							{roomId}
-							messages={currentMessages}
-							isDarkMode={$isDarkMode}
-							canEdit={isMember && !isRoomExpired}
-							{canModerateBoard}
-							{currentUserId}
-							{currentUsername}
-							isEphemeralRoom={isActiveRoomEphemeral}
-							on:close={() => deactivateWorkspaceModule('draw')}
-							on:toastError={(event) => showErrorToast(event.detail.message)}
-						/>
-					{:else if isDashboardActive}
-						<RoomDashboard
-							{roomId}
-							items={roomDashboardItems}
-							isDarkMode={$isDarkMode}
-							currentUserId={currentUserId}
-							organizePreview={roomDashboardOrganizePreview}
-							on:editNote={onDashboardItemNoteEdit}
-							on:aiOrganizePreview={onDashboardOrganizePreview}
-							on:aiOrganizeError={onDashboardOrganizeError}
-						/>
-					{:else if isTaskBoardActive}
-						<TaskBoard {roomId} canEdit={isMember && !isRoomExpired} />
+					{#if visibleBoardModules.length > 0}
+						<div class="board-view-grid" class:is-split={visibleBoardModules.length > 1}>
+							{#each visibleBoardModules as boardModule (boardModule)}
+								<section class="board-view-pane" class:is-split={visibleBoardModules.length > 1}>
+									{#if boardModule === 'draw'}
+										<Board
+											{roomId}
+											messages={currentMessages}
+											isDarkMode={$isDarkMode}
+											canEdit={isMember && !isRoomExpired}
+											{canModerateBoard}
+											{currentUserId}
+											{currentUsername}
+											isEphemeralRoom={isActiveRoomEphemeral}
+											on:close={() => deactivateWorkspaceModule('draw')}
+											on:toastError={(event) => showErrorToast(event.detail.message)}
+										/>
+									{:else if boardModule === 'dashboard'}
+										<RoomDashboard
+											{roomId}
+											items={roomDashboardItems}
+											isDarkMode={$isDarkMode}
+											currentUserId={currentUserId}
+											organizePreview={roomDashboardOrganizePreview}
+											on:editNote={onDashboardItemNoteEdit}
+											on:addItemRequest={(event) => void onDashboardAddItemRequest(event)}
+											on:aiOrganizePreview={onDashboardOrganizePreview}
+											on:aiOrganizeError={onDashboardOrganizeError}
+										/>
+									{:else}
+										<TaskBoard {roomId} canEdit={isMember && !isRoomExpired} />
+									{/if}
+								</section>
+							{/each}
+						</div>
 					{:else}
 						<ChatWindow
 							bind:this={chatWindowRef}
@@ -6404,13 +6795,12 @@
 							hasMoreOlder={hasMoreOlderHistory}
 							on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
 							on:joinBreakRoom={onJoinBreakRoom}
-							on:joinRoom={() => void joinCurrentRoom()}
-							on:messageSelect={onMessageSelected}
-							on:openDiscussion={onDiscussionOpen}
-							on:pinToDashboard={(event) => void onMessagePinToDashboard(event)}
-							on:reply={onReplyRequest}
-							on:toggleReaction={onMessageReactionToggle}
-							on:messageContextAction={onMessageContextAction}
+								on:joinRoom={() => void joinCurrentRoom()}
+								on:messageSelect={onMessageSelected}
+								on:openDiscussion={onDiscussionOpen}
+								on:reply={onReplyRequest}
+								on:toggleReaction={onMessageReactionToggle}
+								on:messageContextAction={onMessageContextAction}
 							on:editSelected={onSelectedMessageEdit}
 							on:deleteSelected={onSelectedMessageDelete}
 							on:requestOlder={onRequestOlderHistory}

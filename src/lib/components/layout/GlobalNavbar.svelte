@@ -10,16 +10,18 @@
 	export let scrollY = 0;
 
 	type NavLink = { label: string; href: string };
+	type BoardQuickAction =
+		| 'open-board-dashboard'
+		| 'open-board-draw'
+		| 'open-board-code'
+		| 'open-board-tasks';
 	type QuickAction =
 		| 'create-room'
 		| 'open-room-list'
 		| 'open-chat-pane'
 		| 'toggle-search'
 		| 'toggle-discussion-mode'
-		| 'open-board-dashboard'
-		| 'open-board-draw'
-		| 'open-board-code'
-		| 'open-board-tasks'
+		| BoardQuickAction
 		| 'mark-active-read';
 	type ChatQuickState = {
 		isCompact: boolean;
@@ -48,6 +50,13 @@
 	const MOBILE_BREAKPOINT = 600;
 	const FAB_SIZE_PX = 56;
 	const FAB_PADDING_PX = 15;
+	const FAB_DEFAULT_TOP_OFFSET_PX = 80;
+	const BOARD_MENU_ACTIONS: Array<{ label: string; action: BoardQuickAction }> = [
+		{ label: 'Dashboard Board', action: 'open-board-dashboard' },
+		{ label: 'Draw Board', action: 'open-board-draw' },
+		{ label: 'Task Board', action: 'open-board-tasks' },
+		{ label: 'Code Board', action: 'open-board-code' }
+	];
 
 	let isHovered = false;
 	let innerWidth = 0;
@@ -86,6 +95,7 @@
 	let dragOffset = { x: 0, y: 0 };
 	let fabElement: HTMLButtonElement | null = null;
 	let isSnapping = false;
+	let suppressToggleAfterDrag = false;
 
 	// --- SMART MENU POSITIONING ---
 	$: menuPosition = (() => {
@@ -176,58 +186,20 @@
 				discussionUnread: 0,
 				boardUnread: 0
 			};
-			if (normalizedState.pane === 'list') {
-				const items: MobileMenuItem[] = [
-					{ label: 'Create Room', quickAction: 'create-room' },
-					{
-						label: 'Unread Messages',
-						quickAction: 'open-chat-pane',
-						badge: normalizedState.totalUnread
-					},
-					{
-						label: 'Board Changes',
-						quickAction: 'open-board-dashboard',
-						badge: normalizedState.boardUnread
-					},
-					{
-						label: 'Discussion Updates',
-						quickAction: 'toggle-discussion-mode',
-						badge: normalizedState.discussionUnread
-					},
-					{ label: 'Home', href: '/' }
-				];
-				return {
-					title: 'EPHEMERAL_LIST',
-					items
-				};
-			}
 			const chatItems: MobileMenuItem[] = [
-				{ label: 'Dashboard Board', quickAction: 'open-board-dashboard' },
-				{ label: 'Draw Board', quickAction: 'open-board-draw' },
-				{ label: 'Task Board', quickAction: 'open-board-tasks' },
-				{ label: 'Code Board', quickAction: 'open-board-code' },
-				{ label: 'Search', quickAction: 'toggle-search' },
 				{
 					label: 'Discussions',
 					quickAction: 'toggle-discussion-mode',
 					badge: normalizedState.discussionUnread
 				},
-				{
-					label: 'Rooms',
-					quickAction: 'open-room-list',
-					badge: normalizedState.totalUnread
-				},
-				{ label: 'Create Room', quickAction: 'create-room' }
+				...BOARD_MENU_ACTIONS.map((board, index) => ({
+					label: board.label,
+					quickAction: board.action,
+					badge: index === 0 ? normalizedState.boardUnread : 0
+				}))
 			];
-			if (normalizedState.activeUnread > 0) {
-				chatItems.push({
-					label: 'Mark Active Read',
-					quickAction: 'mark-active-read',
-					badge: normalizedState.activeUnread
-				});
-			}
 			return {
-				title: 'EPHEMERAL_CHAT',
+				title: normalizedState.pane === 'list' ? 'EPHEMERAL_LIST' : 'EPHEMERAL_CHAT',
 				items: chatItems
 			};
 		}
@@ -299,10 +271,14 @@
 		if (!target.closest('.holo-fab')) {
 			return;
 		}
+		if ('touches' in e && e.cancelable) {
+			e.preventDefault();
+		}
 
 		isPressed = true;
 		isDragging = false;
 		isSnapping = false;
+		suppressToggleAfterDrag = false;
 
 		const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
 		const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
@@ -350,6 +326,7 @@
 
 		if (isDragging) {
 			isSnapping = true;
+			suppressToggleAfterDrag = true;
 
 			const padding = 20;
 			const centerX = fabPosition.x + FAB_SIZE_PX / 2;
@@ -360,15 +337,17 @@
 				fabPosition.x = innerWidth - FAB_SIZE_PX - padding;
 			}
 
-			setTimeout(() => {
-				isDragging = false;
-			}, 50);
+			isDragging = false;
 		} else {
 			isDragging = false;
 		}
 	}
 
 	function toggleMobileMenu() {
+		if (suppressToggleAfterDrag) {
+			suppressToggleAfterDrag = false;
+			return;
+		}
 		if (!isDragging && mobileFabVisible) {
 			isMobileMenuOpen = !isMobileMenuOpen;
 		}
@@ -444,7 +423,7 @@
 		if (typeof window !== 'undefined') {
 			fabPosition = {
 				x: window.innerWidth - 76,
-				y: 20
+				y: FAB_DEFAULT_TOP_OFFSET_PX
 			};
 			isSnapping = true;
 			window.addEventListener('pointerdown', handleGlobalPointerDown);
@@ -465,8 +444,9 @@
 	bind:innerHeight={innerHeight}
 	on:mousemove={handleDragMove}
 	on:mouseup={handleDragEnd}
-	on:touchmove={handleDragMove}
+	on:touchmove|nonpassive={handleDragMove}
 	on:touchend={handleDragEnd}
+	on:touchcancel={handleDragEnd}
 />
 
 {#if desktopNavVisible}
@@ -568,7 +548,7 @@
 						{/if}
 					</button>
 				{/if}
-			{/each}
+				{/each}
 			<div class="mobile-auth-section">
 				{#if !$authState.isAuthenticated}
 					<button type="button" class="mobile-auth-button" on:click={handleDesktopLogin}>Login</button>
@@ -605,7 +585,7 @@
 		bind:this={fabElement}
 		style="transform: translate({fabPosition.x}px, {fabPosition.y}px);"
 		on:mousedown={handleDragStart}
-		on:touchstart={handleDragStart}
+		on:touchstart|nonpassive={handleDragStart}
 		on:click={toggleMobileMenu}
 		class:open={isMobileMenuOpen}
 		aria-label="Toggle Menu"
@@ -887,7 +867,8 @@
 
 	.holo-fab {
 		position: fixed;
-		top: 30vh; left: 0px; /* JS handles translate */
+		top: 0;
+		left: 0;
 		width: 56px;
 		height: 56px;
 		z-index: 2000;

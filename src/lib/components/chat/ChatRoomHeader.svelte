@@ -11,6 +11,7 @@
 	export let isDarkMode = false;
 	export let messageActionMode: MessageActionMode = 'none';
 	export let showRoomSearch = false;
+	export let isDashboardView = false;
 	export let remainingLabel = '--';
 	export let isBoardView = false;
 	export let isCanvasOpen = false;
@@ -24,6 +25,7 @@
 		startAudioCall: void;
 		startVideoCall: void;
 		restoreMinimizedCall: void;
+		toggleDashboardView: void;
 		toggleBoardView: void;
 		toggleCanvas: void;
 		toggleRoomSearch: void;
@@ -112,8 +114,12 @@
 		dispatch(type === 'audio' ? 'startAudioCall' : 'startVideoCall');
 	}
 
-	function toggleWorkspace(target: 'board' | 'canvas') {
+	function toggleWorkspace(target: 'dashboard' | 'board' | 'canvas') {
 		showWorkspaceMenu = false;
+		if (target === 'dashboard') {
+			dispatch('toggleDashboardView');
+			return;
+		}
 		dispatch(target === 'board' ? 'toggleBoardView' : 'toggleCanvas');
 	}
 
@@ -239,6 +245,20 @@
 			</button>
 			{#if showWorkspaceMenu}
 				<div class="header-dropdown" role="menu" aria-label="Workspace options">
+					<button
+						type="button"
+						class="dropdown-option"
+						class:active={isDashboardView}
+						role="menuitem"
+						on:click={() => toggleWorkspace('dashboard')}
+					>
+						<span class="dropdown-option-content">
+							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M4.5 4.5h6.75v6.75H4.5zM12.75 4.5h6.75V9h-6.75zM12.75 10.5h6.75v9h-6.75zM4.5 12.75h6.75v6.75H4.5z" />
+							</svg>
+							<span>{isDashboardView ? 'Close dashboard' : 'Open dashboard'}</span>
+						</span>
+					</button>
 					<button
 						type="button"
 						class="dropdown-option"
