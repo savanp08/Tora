@@ -128,6 +128,8 @@ func New(
 		r.Post("/auth/register", authHandler.Register)
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
+		r.Post("/auth/forgot-password/request", authHandler.ForgotPasswordRequest)
+		r.Post("/auth/forgot-password/verify", authHandler.ForgotPasswordVerify)
 		r.Post("/auth/anonymous", authHandler.Anonymous)
 		r.Get("/auth/google", authHandler.GoogleLogin)
 		r.Get("/auth/google/callback", authHandler.GoogleCallback)

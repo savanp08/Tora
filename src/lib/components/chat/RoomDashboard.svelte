@@ -13,10 +13,15 @@
 	export let organizePreview: RoomDashboardOrganizeSections | null = null;
 
 	type DashboardAddItemKind = 'note' | 'beacon' | 'task';
+	type DashboardAddItemRequest =
+		| { kind: 'note'; text: string }
+		| { kind: 'beacon'; text: string; beaconAt: number }
+		| { kind: 'task'; title: string; details: string };
 
 	const dispatch = createEventDispatcher<{
+		close: void;
 		editNote: { itemId: string; note: string };
-		addItemRequest: { kind: DashboardAddItemKind };
+		addItemRequest: DashboardAddItemRequest;
 		aiOrganizePreview: RoomDashboardOrganizeSections;
 		aiOrganizeError: { message: string };
 	}>();
@@ -35,6 +40,13 @@
 	let ticker: ReturnType<typeof setInterval> | null = null;
 	let addMenuOpen = false;
 	let addMenuRef: HTMLElement | null = null;
+	let addComposerKind: DashboardAddItemKind | '' = '';
+	let addComposerError = '';
+	let addNoteDraft = '';
+	let addBeaconDraft = '';
+	let addBeaconAtDraft = '';
+	let addTaskTitleDraft = '';
+	let addTaskDetailDraft = '';
 
 	$: scopedItems = items.filter((item) => item.roomId === roomId);
 	$: scheduledItemsComputed = scopedItems
@@ -56,20 +68,6 @@
 	$: priorityItems = organizePreview?.priority ?? priorityItemsComputed;
 	$: expiredItems = organizePreview?.expired ?? expiredItemsComputed;
 	$: groupedPinnedItems = organizePreview?.pinnedItems ?? groupedPinnedItemsComputed;
-
-	onMount(() => {
-		document.addEventListener('pointerdown', onDocumentPointerDown);
-		ticker = setInterval(() => {
-			nowMs = Date.now();
-		}, 30000);
-		return () => {
-			document.removeEventListener('pointerdown', onDocumentPointerDown);
-			if (ticker) {
-				clearInterval(ticker);
-				ticker = null;
-			}
-		};
-	});
 
 	onDestroy(() => {
 		if (ticker) {
@@ -300,10 +298,106 @@
 		}
 	}
 
+	function toLocalDateTimeInputValue(timestamp: number) {
+		const value = new Date(timestamp);
+		const year = value.getFullYear();
+		const month = `${value.getMonth() + 1}`.padStart(2, '0');
+		const day = `${value.getDate()}`.padStart(2, '0');
+		const hours = `${value.getHours()}`.padStart(2, '0');
+		const minutes = `${value.getMinutes()}`.padStart(2, '0');
+		return `${year}-${month}-${day}T${hours}:${minutes}`;
+	}
+
+	function parseLocalDateTimeInput(value: string) {
+		const parsed = Date.parse(value);
+		if (!Number.isFinite(parsed) || parsed <= 0) {
+			return 0;
+		}
+		return Math.trunc(parsed);
+	}
+
+	function closeAddComposer() {
+		addComposerKind = '';
+		addComposerError = '';
+	}
+
+	function resetAddComposerDrafts() {
+		addNoteDraft = '';
+		addBeaconDraft = '';
+		addBeaconAtDraft = toLocalDateTimeInputValue(Date.now() + 10 * 60 * 1000);
+		addTaskTitleDraft = '';
+		addTaskDetailDraft = '';
+	}
+
+	function openAddComposer(kind: DashboardAddItemKind) {
+		addComposerKind = kind;
+		addComposerError = '';
+		if (kind === 'beacon' && !addBeaconAtDraft) {
+			addBeaconAtDraft = toLocalDateTimeInputValue(Date.now() + 10 * 60 * 1000);
+		}
+	}
+
+	function submitAddComposer() {
+		addComposerError = '';
+		if (addComposerKind === 'note') {
+			const text = addNoteDraft.trim();
+			if (!text) {
+				addComposerError = 'Note text is required.';
+				return;
+			}
+			dispatch('addItemRequest', { kind: 'note', text });
+			closeAddComposer();
+			resetAddComposerDrafts();
+			return;
+		}
+		if (addComposerKind === 'beacon') {
+			const text = addBeaconDraft.trim();
+			const beaconAt = parseLocalDateTimeInput(addBeaconAtDraft);
+			if (!text) {
+				addComposerError = 'Beacon text is required.';
+				return;
+			}
+			if (beaconAt <= Date.now()) {
+				addComposerError = 'Choose a future date and time.';
+				return;
+			}
+			dispatch('addItemRequest', { kind: 'beacon', text, beaconAt });
+			closeAddComposer();
+			resetAddComposerDrafts();
+			return;
+		}
+		if (addComposerKind === 'task') {
+			const title = addTaskTitleDraft.trim();
+			const details = addTaskDetailDraft.trim();
+			if (!title) {
+				addComposerError = 'Task title is required.';
+				return;
+			}
+			dispatch('addItemRequest', { kind: 'task', title, details });
+			closeAddComposer();
+			resetAddComposerDrafts();
+		}
+	}
+
 	function onAddMenuSelect(kind: DashboardAddItemKind) {
 		addMenuOpen = false;
-		dispatch('addItemRequest', { kind });
+		openAddComposer(kind);
 	}
+
+	onMount(() => {
+		resetAddComposerDrafts();
+		document.addEventListener('pointerdown', onDocumentPointerDown);
+		ticker = setInterval(() => {
+			nowMs = Date.now();
+		}, 30000);
+		return () => {
+			document.removeEventListener('pointerdown', onDocumentPointerDown);
+			if (ticker) {
+				clearInterval(ticker);
+				ticker = null;
+			}
+		};
+	});
 </script>
 
 <section class="room-dashboard {isDarkMode ? 'theme-dark' : ''}">
@@ -352,30 +446,115 @@
 					AI Organize
 				{/if}
 			</button>
+			<button
+				type="button"
+				class="dashboard-close-btn"
+				aria-label="Close dashboard"
+				title="Close dashboard"
+				on:click={() => dispatch('close')}
+			>
+				<span aria-hidden="true">×</span>
+			</button>
 		</div>
 	</header>
 
-	<section class="dashboard-section">
+	{#if addComposerKind}
+		<section class="dashboard-add-composer" aria-label="Add dashboard item">
+			<header class="composer-head">
+				<strong>
+					{addComposerKind === 'note'
+						? 'Add Note'
+						: addComposerKind === 'beacon'
+							? 'Schedule Beacon'
+							: 'Create Task'}
+				</strong>
+				<button type="button" class="composer-close-btn" on:click={closeAddComposer}>Cancel</button>
+			</header>
+
+			{#if addComposerKind === 'note'}
+				<label class="composer-field">
+					<span>Note text</span>
+					<textarea
+						bind:value={addNoteDraft}
+						placeholder="Write note text"
+						maxlength="600"
+					></textarea>
+				</label>
+			{:else if addComposerKind === 'beacon'}
+				<label class="composer-field">
+					<span>Beacon message</span>
+					<textarea
+						bind:value={addBeaconDraft}
+						placeholder="Beacon text"
+						maxlength="500"
+					></textarea>
+				</label>
+				<label class="composer-field">
+					<span>Date and time</span>
+					<input type="datetime-local" bind:value={addBeaconAtDraft} />
+				</label>
+				{#if addBeaconDraft.trim()}
+					<div class="beacon-preview">
+						<div class="preview-pill">Beacon Preview</div>
+						<p>{addBeaconDraft.trim()}</p>
+					</div>
+				{/if}
+			{:else}
+				<label class="composer-field">
+					<span>Task title</span>
+					<input
+						type="text"
+						bind:value={addTaskTitleDraft}
+						placeholder="Task title"
+						maxlength="120"
+					/>
+				</label>
+				<label class="composer-field">
+					<span>Task details (optional)</span>
+					<textarea
+						bind:value={addTaskDetailDraft}
+						placeholder="Task details"
+						maxlength="700"
+					></textarea>
+				</label>
+			{/if}
+
+			{#if addComposerError}
+				<div class="composer-error">{addComposerError}</div>
+			{/if}
+			<div class="composer-actions">
+				<button type="button" class="composer-submit-btn" on:click={submitAddComposer}>
+					{addComposerKind === 'note'
+						? 'Add Note'
+						: addComposerKind === 'beacon'
+							? 'Schedule Beacon'
+							: 'Create Task'}
+				</button>
+			</div>
+		</section>
+	{/if}
+
+	<section class="dashboard-section section-priority">
 		<div class="section-head">
 			<h4>Priority</h4>
-			<span>{priorityItems.length}</span>
+			<span class="section-count">{priorityItems.length}</span>
 		</div>
 		{#if priorityItems.length === 0}
 			<div class="empty-state">No upcoming beacons/tasks.</div>
 		{:else}
 			<div class="card-list">
 				{#each priorityItems as item (item.id)}
-					<article class="dashboard-card">
+					<article class="dashboard-card kind-{item.kind}">
 						<div class="card-top">
 							<strong>{formatKindLabel(item.kind)}</strong>
 							<time>{formatDateTime(item.beaconAt)}</time>
 						</div>
 						<p>{item.taskTitle || item.messageText || 'No content'}</p>
 						{#if item.topic}
-							<div class="topic-chip">Topic: {item.topic}</div>
+							<div class="topic-chip chip">Topic: {item.topic}</div>
 						{/if}
 						{#if item.note}
-							<div class="note-chip">Note: {item.note}</div>
+							<div class="note-chip chip">Note: {item.note}</div>
 						{/if}
 					</article>
 				{/each}
@@ -383,10 +562,10 @@
 		{/if}
 	</section>
 
-	<section class="dashboard-section">
+	<section class="dashboard-section section-pinned">
 		<div class="section-head">
 			<h4>Pinned Items</h4>
-			<span>{groupedPinnedItems.length}</span>
+			<span class="section-count">{groupedPinnedItems.length}</span>
 		</div>
 		{#if groupedPinnedItems.length === 0}
 			<div class="empty-state">No pinned items yet.</div>
@@ -398,14 +577,14 @@
 						<div class="empty-state subtle">No pinned messages.</div>
 					{:else}
 						{#each sectionItems('message') as item (item.id)}
-							<article class="dashboard-card">
+							<article class="dashboard-card kind-message">
 								<div class="card-top">
 									<strong>{item.senderName || 'User'}</strong>
 									<time>{formatDateTime(item.originalCreatedAt)}</time>
 								</div>
 								<p>{item.messageText || 'No text content'}</p>
 								{#if item.topic}
-									<div class="topic-chip">Topic: {item.topic}</div>
+									<div class="topic-chip chip">Topic: {item.topic}</div>
 								{/if}
 								{#if item.mediaUrl}
 									{#if isImageItem(item)}
@@ -437,14 +616,14 @@
 						<div class="empty-state subtle">No pinned notes.</div>
 					{:else}
 						{#each sectionItems('note') as item (item.id)}
-							<article class="dashboard-card">
+							<article class="dashboard-card kind-note">
 								<div class="card-top">
 									<strong>{item.senderName || 'User'}</strong>
 									<time>{formatDateTime(item.originalCreatedAt)}</time>
 								</div>
 								<p>{item.messageText || 'No note content'}</p>
 								{#if item.topic}
-									<div class="topic-chip">Topic: {item.topic}</div>
+									<div class="topic-chip chip">Topic: {item.topic}</div>
 								{/if}
 								<label class="note-editor">
 									<span>Attached note</span>
@@ -467,14 +646,14 @@
 						<div class="empty-state subtle">No pinned tasks.</div>
 					{:else}
 						{#each sectionItems('task') as item (item.id)}
-							<article class="dashboard-card">
+							<article class="dashboard-card kind-task">
 								<div class="card-top">
 									<strong>{item.taskTitle || 'Task'}</strong>
 									<time>{formatDateTime(item.beaconAt)}</time>
 								</div>
 								<p>{item.messageText || 'No task details'}</p>
 								{#if item.topic}
-									<div class="topic-chip">Topic: {item.topic}</div>
+									<div class="topic-chip chip">Topic: {item.topic}</div>
 								{/if}
 								<label class="note-editor">
 									<span>Attached note</span>
@@ -495,24 +674,24 @@
 		{/if}
 	</section>
 
-	<section class="dashboard-section expired">
+	<section class="dashboard-section section-expired">
 		<div class="section-head">
 			<h4>Expired</h4>
-			<span>{expiredItems.length}</span>
+			<span class="section-count">{expiredItems.length}</span>
 		</div>
 		{#if expiredItems.length === 0}
 			<div class="empty-state">Nothing expired.</div>
 		{:else}
 			<div class="card-list">
 				{#each expiredItems as item (item.id)}
-					<article class="dashboard-card">
+					<article class="dashboard-card kind-{item.kind}">
 						<div class="card-top">
 							<strong>{formatKindLabel(item.kind)}</strong>
 							<time>{formatDateTime(item.beaconAt)}</time>
 						</div>
 						<p>{item.taskTitle || item.messageText || 'No content'}</p>
 						{#if item.topic}
-							<div class="topic-chip">Topic: {item.topic}</div>
+							<div class="topic-chip chip">Topic: {item.topic}</div>
 						{/if}
 					</article>
 				{/each}
@@ -523,31 +702,96 @@
 
 <style>
 	.room-dashboard {
+		--dash-bg:
+			radial-gradient(160% 110% at 8% -4%, rgba(217, 230, 249, 0.62) 0%, transparent 52%),
+			linear-gradient(180deg, rgba(246, 250, 255, 0.96) 0%, rgba(238, 244, 252, 0.94) 100%);
+		--dash-header-bg: rgba(255, 255, 255, 0.72);
+		--dash-section-bg: rgba(255, 255, 255, 0.68);
+		--dash-group-bg: rgba(250, 253, 255, 0.62);
+		--dash-card-bg: rgba(255, 255, 255, 0.78);
+		--dash-input-bg: rgba(255, 255, 255, 0.9);
+		--dash-menu-bg: rgba(252, 254, 255, 0.92);
+		--dash-border: rgba(127, 147, 176, 0.32);
+		--dash-border-strong: rgba(104, 131, 167, 0.48);
+		--dash-text: #1c2738;
+		--dash-muted: #5a6980;
+		--dash-soft: #7185a2;
+		--dash-accent: #2f5d98;
+		--dash-accent-soft: rgba(47, 93, 152, 0.15);
+		--dash-chip-bg: rgba(232, 241, 254, 0.88);
+		--dash-chip-text: #2d4e79;
+		--dash-focus-ring: 0 0 0 3px rgba(77, 121, 184, 0.22);
+		--dash-primary-btn:
+			linear-gradient(180deg, rgba(74, 120, 186, 0.94) 0%, rgba(50, 87, 143, 0.96) 100%);
+		--dash-primary-btn-hover:
+			linear-gradient(180deg, rgba(81, 130, 198, 0.97) 0%, rgba(58, 97, 155, 0.99) 100%);
+		--dash-primary-btn-text: #f7fbff;
+		--dash-danger: #b93c55;
+		--dash-shadow-soft: 0 10px 24px rgba(28, 47, 76, 0.12);
+		--dash-shadow-strong: 0 18px 36px rgba(20, 38, 66, 0.16);
+
 		flex: 1;
 		min-height: 0;
 		overflow: auto;
 		display: grid;
 		align-content: start;
-		gap: 0.7rem;
-		padding: 0.75rem;
-		background: linear-gradient(180deg, #f8fbff 0%, #eef3fa 100%);
+		gap: 0.86rem;
+		padding: 0.86rem;
+		background: var(--dash-bg);
+		color: var(--dash-text);
+		scrollbar-gutter: stable;
 	}
 
 	.room-dashboard.theme-dark {
-		background: linear-gradient(180deg, #111620 0%, #0b1220 100%);
+		--dash-bg:
+			radial-gradient(145% 110% at 7% -6%, rgba(55, 86, 134, 0.34) 0%, transparent 50%),
+			linear-gradient(180deg, rgba(11, 17, 28, 0.97) 0%, rgba(8, 14, 25, 0.98) 100%);
+		--dash-header-bg: rgba(16, 24, 39, 0.74);
+		--dash-section-bg: rgba(15, 23, 38, 0.74);
+		--dash-group-bg: rgba(12, 21, 35, 0.68);
+		--dash-card-bg: rgba(20, 31, 49, 0.82);
+		--dash-input-bg: rgba(14, 24, 40, 0.92);
+		--dash-menu-bg: rgba(10, 18, 31, 0.94);
+		--dash-border: rgba(92, 118, 153, 0.42);
+		--dash-border-strong: rgba(124, 154, 196, 0.58);
+		--dash-text: #e5edf9;
+		--dash-muted: #a3b5cd;
+		--dash-soft: #89a0bf;
+		--dash-accent: #9cc1f6;
+		--dash-accent-soft: rgba(140, 181, 242, 0.2);
+		--dash-chip-bg: rgba(38, 56, 86, 0.9);
+		--dash-chip-text: #cbe0fe;
+		--dash-focus-ring: 0 0 0 3px rgba(126, 168, 224, 0.24);
+		--dash-primary-btn:
+			linear-gradient(180deg, rgba(70, 102, 153, 0.96) 0%, rgba(49, 76, 119, 0.98) 100%);
+		--dash-primary-btn-hover:
+			linear-gradient(180deg, rgba(83, 117, 172, 0.98) 0%, rgba(58, 88, 136, 1) 100%);
+		--dash-primary-btn-text: #eff6ff;
+		--dash-danger: #f2a9b7;
+		--dash-shadow-soft: 0 14px 30px rgba(0, 0, 0, 0.32);
+		--dash-shadow-strong: 0 22px 44px rgba(0, 0, 0, 0.44);
 	}
 
 	.dashboard-header {
 		display: flex;
 		align-items: flex-start;
 		justify-content: space-between;
-		gap: 0.8rem;
+		gap: 0.9rem;
+		padding: 0.74rem 0.78rem;
+		border: 1px solid var(--dash-border);
+		border-radius: 1rem;
+		background: var(--dash-header-bg);
+		box-shadow: var(--dash-shadow-soft);
+		backdrop-filter: blur(16px) saturate(150%);
+		-webkit-backdrop-filter: blur(16px) saturate(150%);
 	}
 
 	.header-actions {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.4rem;
+		justify-content: flex-end;
+		gap: 0.42rem;
+		flex-wrap: wrap;
 	}
 
 	.add-actions {
@@ -556,303 +800,516 @@
 
 	.dashboard-title-wrap h3 {
 		margin: 0;
-		font-size: 0.96rem;
-		color: #1f2f47;
+		font-size: 0.99rem;
+		letter-spacing: 0.01em;
+		color: var(--dash-text);
 	}
 
 	.dashboard-title-wrap p {
-		margin: 0.2rem 0 0;
+		margin: 0.24rem 0 0;
 		font-size: 0.76rem;
-		color: #5e6f89;
+		line-height: 1.4;
+		color: var(--dash-muted);
+		max-width: 34ch;
 	}
 
-	.room-dashboard.theme-dark .dashboard-title-wrap h3 {
-		color: #e8edf8;
-	}
-
-	.room-dashboard.theme-dark .dashboard-title-wrap p {
-		color: #a4b6d2;
-	}
-
-	.add-action-btn {
-		border: 1px solid #b8c8dd;
-		background: rgba(245, 250, 255, 0.9);
-		color: #20395a;
-		border-radius: 0.55rem;
+	.add-action-btn,
+	.ai-organize-btn,
+	.dashboard-close-btn,
+	.composer-close-btn {
+		border: 1px solid var(--dash-border);
+		background: var(--dash-input-bg);
+		color: var(--dash-text);
+		border-radius: 0.66rem;
 		font-size: 0.73rem;
 		font-weight: 700;
-		padding: 0.36rem 0.66rem;
 		cursor: pointer;
+		padding: 0.42rem 0.72rem;
+		line-height: 1;
+		transition:
+			background 0.2s ease,
+			border-color 0.2s ease,
+			box-shadow 0.2s ease,
+			transform 0.15s ease;
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+		backdrop-filter: blur(10px) saturate(130%);
+		-webkit-backdrop-filter: blur(10px) saturate(130%);
+	}
+
+	.add-action-btn:hover,
+	.ai-organize-btn:hover:not(:disabled),
+	.dashboard-close-btn:hover,
+	.composer-close-btn:hover {
+		border-color: var(--dash-border-strong);
+		background: var(--dash-menu-bg);
+		transform: translateY(-1px);
+	}
+
+	.add-action-btn:focus-visible,
+	.ai-organize-btn:focus-visible,
+	.dashboard-close-btn:focus-visible,
+	.composer-close-btn:focus-visible,
+	.composer-submit-btn:focus-visible,
+	.add-menu button:focus-visible,
+	.composer-field input:focus,
+	.composer-field textarea:focus,
+	.note-editor textarea:focus {
+		outline: none;
+		box-shadow: var(--dash-focus-ring);
+	}
+
+	.dashboard-close-btn {
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		font-size: 1.08rem;
+		justify-content: center;
+		display: inline-flex;
+		align-items: center;
+	}
+
+	.dashboard-close-btn span {
+		transform: translateY(-0.5px);
+	}
+
+	.ai-organize-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.ai-organize-btn:disabled {
+		opacity: 0.56;
+		cursor: not-allowed;
+		transform: none;
+	}
+
+	.btn-spinner {
+		width: 0.74rem;
+		height: 0.74rem;
+		border-radius: 999px;
+		border: 2px solid color-mix(in srgb, var(--dash-accent) 28%, transparent);
+		border-top-color: color-mix(in srgb, var(--dash-accent) 92%, black 8%);
+		animation: dashboard-spin 0.82s linear infinite;
 	}
 
 	.add-menu {
 		position: absolute;
-		top: calc(100% + 0.3rem);
+		top: calc(100% + 0.45rem);
 		right: 0;
-		min-width: 11rem;
+		min-width: 11.4rem;
 		display: grid;
-		gap: 0.18rem;
-		padding: 0.28rem;
-		border: 1px solid rgba(177, 196, 220, 0.9);
-		border-radius: 0.62rem;
-		background: rgba(250, 253, 255, 0.98);
-		box-shadow: 0 12px 30px rgba(16, 36, 66, 0.14);
-		z-index: 20;
+		gap: 0.2rem;
+		padding: 0.36rem;
+		border: 1px solid var(--dash-border-strong);
+		border-radius: 0.78rem;
+		background: var(--dash-menu-bg);
+		box-shadow: var(--dash-shadow-strong);
+		backdrop-filter: blur(14px) saturate(145%);
+		-webkit-backdrop-filter: blur(14px) saturate(145%);
+		z-index: 24;
 	}
 
 	.add-menu button {
 		border: 0;
 		background: transparent;
-		color: #2e4465;
+		color: var(--dash-text);
 		font-size: 0.72rem;
-		font-weight: 600;
+		font-weight: 620;
 		text-align: left;
-		padding: 0.36rem 0.44rem;
-		border-radius: 0.42rem;
+		padding: 0.42rem 0.5rem;
+		border-radius: 0.52rem;
 		cursor: pointer;
+		transition: background 0.2s ease;
 	}
 
-	.add-menu button:hover,
-	.add-menu button:focus-visible {
-		background: rgba(223, 235, 251, 0.92);
-		outline: none;
+	.add-menu button:hover {
+		background: var(--dash-accent-soft);
 	}
 
-	.room-dashboard.theme-dark .add-action-btn {
-		border-color: rgba(89, 115, 151, 0.88);
-		background: rgba(16, 27, 45, 0.9);
-		color: #dce9fb;
+	.dashboard-add-composer {
+		display: grid;
+		gap: 0.68rem;
+		padding: 0.74rem;
+		border-radius: 0.92rem;
+		border: 1px solid var(--dash-border);
+		background: var(--dash-section-bg);
+		box-shadow: var(--dash-shadow-soft);
+		backdrop-filter: blur(13px) saturate(145%);
+		-webkit-backdrop-filter: blur(13px) saturate(145%);
 	}
 
-	.room-dashboard.theme-dark .add-menu {
-		border-color: rgba(67, 92, 126, 0.9);
-		background: rgba(12, 22, 38, 0.97);
-		box-shadow: 0 14px 34px rgba(0, 0, 0, 0.48);
-	}
-
-	.room-dashboard.theme-dark .add-menu button {
-		color: #d3e2f8;
-	}
-
-	.room-dashboard.theme-dark .add-menu button:hover,
-	.room-dashboard.theme-dark .add-menu button:focus-visible {
-		background: rgba(39, 58, 88, 0.9);
-	}
-
-	.ai-organize-btn {
-		border: 1px solid #b8c8dd;
-		background: rgba(245, 250, 255, 0.9);
-		color: #243a5a;
-		border-radius: 0.55rem;
-		font-size: 0.73rem;
-		font-weight: 700;
-		padding: 0.36rem 0.62rem;
-		cursor: pointer;
-		display: inline-flex;
+	.composer-head {
+		display: flex;
 		align-items: center;
-		gap: 0.38rem;
+		justify-content: space-between;
+		gap: 0.5rem;
 	}
 
-	.ai-organize-btn:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
+	.composer-head strong {
+		font-size: 0.79rem;
+		color: var(--dash-text);
+		letter-spacing: 0.01em;
 	}
 
-	.btn-spinner {
-		width: 0.72rem;
-		height: 0.72rem;
+	.composer-close-btn {
+		font-size: 0.69rem;
+		padding: 0.34rem 0.56rem;
+	}
+
+	.composer-field {
+		display: grid;
+		gap: 0.3rem;
+	}
+
+	.composer-field span {
+		font-size: 0.67rem;
+		font-weight: 700;
+		color: var(--dash-soft);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
+	.composer-field input,
+	.composer-field textarea,
+	.note-editor textarea {
+		width: 100%;
+		border: 1px solid var(--dash-border);
+		background: var(--dash-input-bg);
+		color: var(--dash-text);
+		border-radius: 0.62rem;
+		font-size: 0.74rem;
+		padding: 0.48rem 0.56rem;
+		outline: none;
+		transition:
+			border-color 0.2s ease,
+			box-shadow 0.2s ease,
+			background 0.2s ease;
+	}
+
+	.composer-field textarea {
+		min-height: 4.8rem;
+		resize: vertical;
+	}
+
+	.beacon-preview {
+		position: relative;
+		display: grid;
+		gap: 0.3rem;
+		padding: 0.56rem 0.6rem;
+		border: 1px solid var(--dash-border);
+		border-radius: 0.7rem;
+		background: var(--dash-card-bg);
+		overflow: hidden;
+	}
+
+	.beacon-preview::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(
+			130deg,
+			color-mix(in srgb, var(--dash-accent) 18%, transparent) 0%,
+			transparent 62%
+		);
+		pointer-events: none;
+	}
+
+	.preview-pill {
+		display: inline-flex;
+		width: fit-content;
+		padding: 0.16rem 0.48rem;
 		border-radius: 999px;
-		border: 2px solid rgba(58, 90, 129, 0.25);
-		border-top-color: rgba(58, 90, 129, 0.95);
-		animation: dashboard-spin 0.8s linear infinite;
+		font-size: 0.62rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--dash-chip-text);
+		background: var(--dash-chip-bg);
+		border: 1px solid var(--dash-border);
+	}
+
+	.beacon-preview p {
+		margin: 0;
+		font-size: 0.73rem;
+		line-height: 1.38;
+		color: var(--dash-text);
+	}
+
+	.composer-error {
+		font-size: 0.68rem;
+		font-weight: 700;
+		color: var(--dash-danger);
+	}
+
+	.composer-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.composer-submit-btn {
+		border: 1px solid color-mix(in srgb, var(--dash-accent) 60%, transparent);
+		background: var(--dash-primary-btn);
+		color: var(--dash-primary-btn-text);
+		border-radius: 0.64rem;
+		font-size: 0.72rem;
+		font-weight: 700;
+		padding: 0.44rem 0.72rem;
+		cursor: pointer;
+		box-shadow:
+			0 10px 22px color-mix(in srgb, var(--dash-accent) 24%, transparent),
+			inset 0 1px 0 rgba(255, 255, 255, 0.22);
+		transition:
+			transform 0.15s ease,
+			filter 0.2s ease,
+			box-shadow 0.2s ease;
+	}
+
+	.composer-submit-btn:hover {
+		background: var(--dash-primary-btn-hover);
+		transform: translateY(-1px);
+		filter: saturate(1.05);
 	}
 
 	.dashboard-section {
-		border: 1px solid rgba(179, 195, 216, 0.78);
-		border-radius: 0.8rem;
-		background: rgba(250, 253, 255, 0.92);
-		padding: 0.62rem;
+		border: 1px solid var(--dash-border);
+		border-radius: 1rem;
+		background: var(--dash-section-bg);
+		padding: 0.74rem;
 		display: grid;
-		gap: 0.58rem;
+		gap: 0.64rem;
+		box-shadow: var(--dash-shadow-soft);
+		backdrop-filter: blur(13px) saturate(145%);
+		-webkit-backdrop-filter: blur(13px) saturate(145%);
 	}
 
-	.dashboard-section.expired {
-		margin-top: 0.3rem;
+	.section-priority {
+		border-top: 1px solid color-mix(in srgb, var(--dash-accent) 45%, var(--dash-border));
 	}
 
-	.room-dashboard.theme-dark .dashboard-section {
-		border-color: rgba(62, 82, 111, 0.85);
-		background: rgba(12, 20, 35, 0.88);
+	.section-expired {
+		border-top: 1px solid color-mix(in srgb, #cb5d74 45%, var(--dash-border));
 	}
 
 	.section-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: 0.55rem;
 	}
 
 	.section-head h4 {
 		margin: 0;
-		font-size: 0.8rem;
-		color: #2d3f5d;
+		font-size: 0.82rem;
+		letter-spacing: 0.02em;
+		color: var(--dash-text);
 	}
 
-	.section-head span {
-		font-size: 0.68rem;
-		font-weight: 700;
-		color: #4f668a;
-	}
-
-	.room-dashboard.theme-dark .section-head h4 {
-		color: #dce8fa;
-	}
-
-	.room-dashboard.theme-dark .section-head span {
-		color: #9bb6de;
+	.section-count {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 1.72rem;
+		height: 1.42rem;
+		padding: 0 0.42rem;
+		border-radius: 999px;
+		font-size: 0.67rem;
+		font-weight: 760;
+		color: var(--dash-accent);
+		background: var(--dash-chip-bg);
+		border: 1px solid var(--dash-border);
 	}
 
 	.card-list,
 	.pinned-groups {
 		display: grid;
-		gap: 0.5rem;
+		gap: 0.52rem;
 	}
 
 	.group-block {
 		display: grid;
-		gap: 0.45rem;
+		gap: 0.48rem;
+		padding: 0.5rem;
+		border: 1px solid var(--dash-border);
+		border-radius: 0.78rem;
+		background: var(--dash-group-bg);
 	}
 
 	.group-block h5 {
 		margin: 0;
-		font-size: 0.72rem;
+		font-size: 0.66rem;
+		font-weight: 760;
 		text-transform: uppercase;
-		letter-spacing: 0.03em;
-		color: #4d6080;
-	}
-
-	.room-dashboard.theme-dark .group-block h5 {
-		color: #a6bcdd;
+		letter-spacing: 0.08em;
+		color: var(--dash-soft);
 	}
 
 	.dashboard-card {
-		border: 1px solid rgba(187, 201, 220, 0.86);
-		border-radius: 0.65rem;
-		padding: 0.5rem;
+		border: 1px solid var(--dash-border);
+		border-radius: 0.78rem;
+		padding: 0.56rem;
 		display: grid;
-		gap: 0.34rem;
-		background: rgba(255, 255, 255, 0.88);
+		gap: 0.38rem;
+		background: var(--dash-card-bg);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.25),
+			0 8px 16px rgba(27, 44, 70, 0.08);
+		transition:
+			transform 0.16s ease,
+			border-color 0.16s ease,
+			box-shadow 0.16s ease;
 	}
 
-	.room-dashboard.theme-dark .dashboard-card {
-		border-color: rgba(72, 90, 118, 0.88);
-		background: rgba(18, 27, 43, 0.86);
+	.dashboard-card:hover {
+		border-color: var(--dash-border-strong);
+		transform: translateY(-1px);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.32),
+			0 12px 22px rgba(24, 40, 67, 0.12);
+	}
+
+	.dashboard-card.kind-task {
+		border-left: 2px solid color-mix(in srgb, var(--dash-accent) 56%, transparent);
+	}
+
+	.dashboard-card.kind-note {
+		border-left: 2px solid color-mix(in srgb, #7090b8 52%, transparent);
+	}
+
+	.dashboard-card.kind-message {
+		border-left: 2px solid color-mix(in srgb, #7f8796 42%, transparent);
 	}
 
 	.card-top {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.5rem;
+		gap: 0.56rem;
 	}
 
 	.card-top strong {
 		font-size: 0.76rem;
-		color: #314564;
+		color: var(--dash-text);
+		font-weight: 700;
 	}
 
 	.card-top time {
 		font-size: 0.66rem;
-		color: #6a7f9f;
-	}
-
-	.room-dashboard.theme-dark .card-top strong {
-		color: #d9e6fb;
-	}
-
-	.room-dashboard.theme-dark .card-top time {
-		color: #9ab2d8;
+		font-weight: 620;
+		color: var(--dash-soft);
 	}
 
 	.dashboard-card p {
 		margin: 0;
-		font-size: 0.76rem;
-		color: #354b6d;
-		line-height: 1.36;
-	}
-
-	.room-dashboard.theme-dark .dashboard-card p {
-		color: #d7e5fb;
+		font-size: 0.75rem;
+		line-height: 1.4;
+		color: var(--dash-muted);
 	}
 
 	.dashboard-card img {
 		width: 100%;
 		max-height: 170px;
 		object-fit: cover;
-		border-radius: 0.5rem;
-		border: 1px solid rgba(188, 203, 222, 0.85);
+		border-radius: 0.58rem;
+		border: 1px solid var(--dash-border);
+	}
+
+	.dashboard-card a {
+		font-size: 0.72rem;
+		font-weight: 650;
+		color: var(--dash-accent);
+		text-decoration: none;
+	}
+
+	.dashboard-card a:hover {
+		text-decoration: underline;
+	}
+
+	.chip {
+		display: inline-flex;
+		width: fit-content;
+		padding: 0.2rem 0.38rem;
+		border-radius: 999px;
+		font-size: 0.64rem;
+		font-weight: 650;
+		letter-spacing: 0.02em;
+		background: var(--dash-chip-bg);
+		border: 1px solid var(--dash-border);
+		color: var(--dash-chip-text);
 	}
 
 	.note-chip {
-		font-size: 0.68rem;
-		color: #415777;
-		background: rgba(233, 241, 250, 0.95);
-		border-radius: 0.42rem;
-		padding: 0.26rem 0.34rem;
-	}
-
-	.topic-chip {
-		font-size: 0.66rem;
-		color: #3d5f87;
-		background: rgba(228, 238, 252, 0.95);
-		border-radius: 0.42rem;
-		padding: 0.22rem 0.34rem;
-	}
-
-	.room-dashboard.theme-dark .topic-chip {
-		color: #bdd4f4;
-		background: rgba(31, 45, 71, 0.92);
+		background: color-mix(in srgb, var(--dash-chip-bg) 60%, var(--dash-accent-soft));
 	}
 
 	.note-editor {
 		display: grid;
-		gap: 0.2rem;
+		gap: 0.24rem;
 	}
 
 	.note-editor span {
-		font-size: 0.65rem;
-		font-weight: 700;
-		color: #577195;
+		font-size: 0.64rem;
+		font-weight: 720;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--dash-soft);
 	}
 
 	.note-editor textarea {
-		width: 100%;
-		min-height: 44px;
-		border: 1px solid rgba(173, 190, 213, 0.85);
-		border-radius: 0.44rem;
-		padding: 0.34rem;
-		font-size: 0.72rem;
-		background: rgba(252, 254, 255, 0.96);
-		color: #2a405f;
+		min-height: 48px;
 		resize: vertical;
+		font-size: 0.72rem;
+		line-height: 1.35;
 	}
 
 	.empty-state {
-		font-size: 0.73rem;
-		color: #667b99;
-		padding: 0.3rem 0.1rem;
+		font-size: 0.72rem;
+		color: var(--dash-muted);
+		padding: 0.42rem 0.32rem;
+		border: 1px dashed var(--dash-border);
+		border-radius: 0.66rem;
+		background: color-mix(in srgb, var(--dash-group-bg) 80%, transparent);
 	}
 
 	.empty-state.subtle {
-		font-size: 0.69rem;
-	}
-
-	.room-dashboard.theme-dark .empty-state {
-		color: #a3bcdd;
+		font-size: 0.68rem;
+		padding: 0.34rem 0.3rem;
 	}
 
 	@media (max-width: 900px) {
 		.room-dashboard {
-			padding: 0.62rem;
+			padding: 0.7rem;
+			gap: 0.74rem;
+		}
+
+		.dashboard-header {
+			padding: 0.64rem 0.66rem;
+		}
+
+		.dashboard-title-wrap p {
+			max-width: 28ch;
+		}
+	}
+
+	@media (max-width: 620px) {
+		.dashboard-header {
+			flex-direction: column;
+			align-items: stretch;
+			gap: 0.62rem;
+		}
+
+		.header-actions {
+			justify-content: flex-start;
+		}
+
+		.dashboard-section,
+		.dashboard-add-composer {
+			border-radius: 0.9rem;
+			padding: 0.66rem;
+		}
+
+		.group-block {
+			padding: 0.44rem;
 		}
 	}
 

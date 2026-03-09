@@ -14,10 +14,24 @@
 	let isRegisterMode = false;
 	let isSubmitting = false;
 	let authError = '';
+	let authNotice = '';
+	let isForgotFlowActive = false;
+	let forgotStep: 'request' | 'verify' = 'request';
+	let forgotEmail = '';
+	let forgotOtp = '';
+	let forgotNewPassword = '';
+	let forgotInfo = '';
+	let forgotError = '';
+	let isForgotSubmitting = false;
+	let forgotDebugOtp = '';
 
 	$: normalizedEmail = email.trim().toLowerCase();
 	$: normalizedUsername = normalizeAccountUsername(username);
 	$: canSubmit = normalizedEmail.length > 0 && password.trim().length > 0 && (!isRegisterMode || normalizedUsername.length > 0);
+	$: normalizedForgotEmail = forgotEmail.trim().toLowerCase();
+	$: normalizedForgotOtp = forgotOtp.replace(/\D+/g, '').slice(0, 6);
+	$: canForgotRequest = normalizedForgotEmail.length > 0;
+	$: canForgotVerify = normalizedForgotEmail.length > 0 && normalizedForgotOtp.length === 6;
 	$: requestedRedirect = resolveSafeRedirect($page.url.searchParams.get('redirect'));
 
 	function resolveSafeRedirect(rawPath: string | null) {
@@ -54,6 +68,7 @@
 	async function handleAuth(event: SubmitEvent) {
 		event.preventDefault();
 		authError = '';
+		authNotice = '';
 		if (isSubmitting || !canSubmit) {
 			return;
 		}
@@ -124,6 +139,117 @@
 		}
 	}
 
+	function openForgotPasswordFlow() {
+		if (isSubmitting || isRegisterMode) {
+			return;
+		}
+		isForgotFlowActive = true;
+		forgotStep = 'request';
+		forgotEmail = normalizedEmail || email.trim();
+		forgotOtp = '';
+		forgotNewPassword = '';
+		forgotInfo = '';
+		forgotError = '';
+		forgotDebugOtp = '';
+		authError = '';
+		authNotice = '';
+	}
+
+	function closeForgotPasswordFlow() {
+		isForgotFlowActive = false;
+		forgotStep = 'request';
+		forgotOtp = '';
+		forgotNewPassword = '';
+		forgotInfo = '';
+		forgotError = '';
+		forgotDebugOtp = '';
+		isForgotSubmitting = false;
+	}
+
+	async function handleForgotPasswordRequest(event: SubmitEvent) {
+		event.preventDefault();
+		forgotError = '';
+		forgotInfo = '';
+		forgotDebugOtp = '';
+
+		if (isForgotSubmitting || !canForgotRequest) {
+			return;
+		}
+		isForgotSubmitting = true;
+
+		try {
+			const response = await fetch(`${API_BASE}/api/auth/forgot-password/request`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({ email: normalizedForgotEmail })
+			});
+			const data = (await response.json().catch(() => null)) as
+				| {
+						error?: string;
+						message?: string;
+						debugOtp?: string;
+				  }
+				| null;
+
+			if (!response.ok) {
+				forgotError = data?.error?.trim() || 'Unable to request OTP right now.';
+				return;
+			}
+
+			forgotStep = 'verify';
+			forgotInfo = data?.message?.trim() || 'OTP sent. Enter the code to verify.';
+			forgotDebugOtp = data?.debugOtp?.trim() || '';
+		} catch {
+			forgotError = 'Unable to reach the authentication service.';
+		} finally {
+			isForgotSubmitting = false;
+		}
+	}
+
+	async function handleForgotPasswordVerify(event: SubmitEvent) {
+		event.preventDefault();
+		forgotError = '';
+		forgotInfo = '';
+
+		if (isForgotSubmitting || !canForgotVerify) {
+			return;
+		}
+		isForgotSubmitting = true;
+
+		try {
+			const response = await fetch(`${API_BASE}/api/auth/forgot-password/verify`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({
+					email: normalizedForgotEmail,
+					otp: normalizedForgotOtp,
+					newPassword: forgotNewPassword
+				})
+			});
+			const data = (await response.json().catch(() => null)) as
+				| {
+						error?: string;
+						message?: string;
+						passwordUpdated?: boolean;
+				  }
+				| null;
+
+			if (!response.ok) {
+				forgotError = data?.error?.trim() || 'Unable to verify OTP.';
+				return;
+			}
+
+			closeForgotPasswordFlow();
+			authNotice = data?.message?.trim() || 'Password reset verification complete.';
+		} catch {
+			forgotError = 'Unable to reach the authentication service.';
+		} finally {
+			isForgotSubmitting = false;
+		}
+	}
+
 	function handleGoogleLogin() {
 		if (!browser || isSubmitting) {
 			return;
@@ -152,88 +278,211 @@
 		{#if authError}
 			<div class="error-msg">{authError}</div>
 		{/if}
+		{#if authNotice}
+			<div class="notice-msg">{authNotice}</div>
+		{/if}
 
-		<form on:submit={handleAuth}>
-			<div class="field-group login-field">
-				<label for="email">Email</label>
-				<input id="email" type="email" bind:value={email} autocomplete="email" required />
-			</div>
+		{#if isForgotFlowActive}
+			<section class="forgot-shell login-field">
+				<header>
+					<h2>Reset Password</h2>
+					<p>Enter OTP and optionally set a new password.</p>
+				</header>
 
-			{#if isRegisterMode}
+				{#if forgotError}
+					<div class="error-msg">{forgotError}</div>
+				{/if}
+				{#if forgotInfo}
+					<div class="notice-msg">{forgotInfo}</div>
+				{/if}
+				{#if forgotDebugOtp}
+					<div class="debug-msg">Dev OTP: {forgotDebugOtp}</div>
+				{/if}
+
+				{#if forgotStep === 'request'}
+					<form on:submit={handleForgotPasswordRequest}>
+						<div class="field-group">
+							<label for="forgot-email">Email</label>
+							<input
+								id="forgot-email"
+								type="email"
+								bind:value={forgotEmail}
+								autocomplete="email"
+								required
+							/>
+						</div>
+						<button
+							type="submit"
+							class="btn-primary-action"
+							disabled={isForgotSubmitting || !canForgotRequest}
+						>
+							{isForgotSubmitting ? 'Sending OTP...' : 'Send OTP'}
+						</button>
+					</form>
+				{:else}
+					<form on:submit={handleForgotPasswordVerify}>
+						<div class="field-group">
+							<label for="forgot-email-verify">Email</label>
+							<input
+								id="forgot-email-verify"
+								type="email"
+								bind:value={forgotEmail}
+								autocomplete="email"
+								required
+							/>
+						</div>
+						<div class="field-group">
+							<label for="forgot-otp">OTP</label>
+							<input
+								id="forgot-otp"
+								type="text"
+								inputmode="numeric"
+								pattern="[0-9]*"
+								maxlength="6"
+								value={normalizedForgotOtp}
+								on:input={(event) => {
+									forgotOtp = (event.currentTarget as HTMLInputElement).value;
+								}}
+								placeholder="6-digit OTP"
+								required
+							/>
+						</div>
+						<div class="field-group">
+							<label for="forgot-new-password">New password (optional)</label>
+							<input
+								id="forgot-new-password"
+								type="password"
+								bind:value={forgotNewPassword}
+								autocomplete="new-password"
+								placeholder="Leave blank to keep current password"
+							/>
+						</div>
+						<button
+							type="submit"
+							class="btn-primary-action"
+							disabled={isForgotSubmitting || !canForgotVerify}
+						>
+							{isForgotSubmitting ? 'Verifying...' : 'Verify OTP'}
+						</button>
+					</form>
+				{/if}
+
+				<div class="forgot-actions">
+					{#if forgotStep === 'verify'}
+						<button
+							type="button"
+							class="switch-btn"
+							on:click={() => {
+								forgotStep = 'request';
+								forgotError = '';
+								forgotInfo = '';
+								forgotDebugOtp = '';
+							}}
+						>
+							Request new OTP
+						</button>
+					{/if}
+					<button
+						type="button"
+						class="switch-btn"
+						on:click={closeForgotPasswordFlow}
+						disabled={isForgotSubmitting}
+					>
+						Back to sign in
+					</button>
+				</div>
+			</section>
+		{:else}
+			<form on:submit={handleAuth}>
 				<div class="field-group login-field">
-					<label for="username">Username</label>
+					<label for="email">Email</label>
+					<input id="email" type="email" bind:value={email} autocomplete="email" required />
+				</div>
+
+				{#if isRegisterMode}
+					<div class="field-group login-field">
+						<label for="username">Username</label>
+						<input
+							id="username"
+							type="text"
+							bind:value={username}
+							autocomplete="username"
+							maxlength="32"
+							required={isRegisterMode}
+						/>
+						<small>Unique, lowercase handle. Spaces and dashes become underscores.</small>
+						{#if username.trim() !== '' && normalizedUsername !== username.trim().toLowerCase()}
+							<small>Will be saved as {normalizedUsername || '(invalid username)'}</small>
+						{/if}
+					</div>
+				{/if}
+
+				<div class="field-group login-field">
+					<label for="password">Password</label>
 					<input
-						id="username"
-						type="text"
-						bind:value={username}
-						autocomplete="username"
-						maxlength="32"
-						required={isRegisterMode}
+						id="password"
+						type="password"
+						bind:value={password}
+						autocomplete={isRegisterMode ? 'new-password' : 'current-password'}
+						required
 					/>
-					<small>Unique, lowercase handle. Spaces and dashes become underscores.</small>
-					{#if username.trim() !== '' && normalizedUsername !== username.trim().toLowerCase()}
-						<small>Will be saved as {normalizedUsername || '(invalid username)'}</small>
+					{#if !isRegisterMode}
+						<div class="forgot-row">
+							<button type="button" class="switch-btn forgot-btn" on:click={openForgotPasswordFlow}>
+								Forgot password?
+							</button>
+						</div>
 					{/if}
 				</div>
-			{/if}
 
-			<div class="field-group login-field">
-				<label for="password">Password</label>
-				<input
-					id="password"
-					type="password"
-					bind:value={password}
-					autocomplete={isRegisterMode ? 'new-password' : 'current-password'}
-					required
-				/>
-			</div>
+				<button type="submit" class="btn-primary-action login-field" disabled={isSubmitting || !canSubmit}>
+					{#if isSubmitting}
+						{isRegisterMode ? 'Creating account...' : 'Signing in...'}
+					{:else}
+						{isRegisterMode ? 'Create Account' : 'Sign In'}
+					{/if}
+				</button>
+			</form>
 
-			<button type="submit" class="btn-primary-action login-field" disabled={isSubmitting || !canSubmit}>
-				{#if isSubmitting}
-					{isRegisterMode ? 'Creating account...' : 'Signing in...'}
-				{:else}
-					{isRegisterMode ? 'Create Account' : 'Sign In'}
-				{/if}
+			<div class="separator"><span>or</span></div>
+
+			<button type="button" class="google-btn login-field" on:click={handleGoogleLogin} disabled={isSubmitting}>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path
+						fill="#4285F4"
+						d="M23.49 12.27c0-.79-.07-1.54-.21-2.27H12v4.3h6.44a5.5 5.5 0 0 1-2.39 3.61v3h3.87c2.26-2.08 3.57-5.14 3.57-8.64Z"
+					/>
+					<path
+						fill="#34A853"
+						d="M12 24c3.24 0 5.96-1.08 7.95-2.93l-3.87-3c-1.08.72-2.46 1.15-4.08 1.15-3.13 0-5.78-2.11-6.72-4.95H1.28v3.09A12 12 0 0 0 12 24Z"
+					/>
+					<path
+						fill="#FBBC05"
+						d="M5.28 14.27a7.19 7.19 0 0 1 0-4.54V6.64H1.28a12 12 0 0 0 0 10.72l4-3.09Z"
+					/>
+					<path
+						fill="#EA4335"
+						d="M12 4.77c1.76 0 3.34.61 4.58 1.8l3.44-3.44C17.95 1.18 15.24 0 12 0A12 12 0 0 0 1.28 6.64l4 3.09c.94-2.84 3.59-4.96 6.72-4.96Z"
+					/>
+				</svg>
+				Continue with Google
 			</button>
-		</form>
 
-		<div class="separator"><span>or</span></div>
-
-		<button type="button" class="google-btn login-field" on:click={handleGoogleLogin} disabled={isSubmitting}>
-			<svg viewBox="0 0 24 24" aria-hidden="true">
-				<path
-					fill="#4285F4"
-					d="M23.49 12.27c0-.79-.07-1.54-.21-2.27H12v4.3h6.44a5.5 5.5 0 0 1-2.39 3.61v3h3.87c2.26-2.08 3.57-5.14 3.57-8.64Z"
-				/>
-				<path
-					fill="#34A853"
-					d="M12 24c3.24 0 5.96-1.08 7.95-2.93l-3.87-3c-1.08.72-2.46 1.15-4.08 1.15-3.13 0-5.78-2.11-6.72-4.95H1.28v3.09A12 12 0 0 0 12 24Z"
-				/>
-				<path
-					fill="#FBBC05"
-					d="M5.28 14.27a7.19 7.19 0 0 1 0-4.54V6.64H1.28a12 12 0 0 0 0 10.72l4-3.09Z"
-				/>
-				<path
-					fill="#EA4335"
-					d="M12 4.77c1.76 0 3.34.61 4.58 1.8l3.44-3.44C17.95 1.18 15.24 0 12 0A12 12 0 0 0 1.28 6.64l4 3.09c.94-2.84 3.59-4.96 6.72-4.96Z"
-				/>
-			</svg>
-			Continue with Google
-		</button>
-
-		<p class="switch-row">
-			{isRegisterMode ? 'Already have an account?' : 'Need an account?'}
-			<button
-				type="button"
-				class="switch-btn"
-				on:click={() => {
-					isRegisterMode = !isRegisterMode;
-					authError = '';
-				}}
-			>
-				{isRegisterMode ? 'Sign in instead' : 'Create one'}
-			</button>
-		</p>
+			<p class="switch-row">
+				{isRegisterMode ? 'Already have an account?' : 'Need an account?'}
+				<button
+					type="button"
+					class="switch-btn"
+					on:click={() => {
+						isRegisterMode = !isRegisterMode;
+						authError = '';
+						authNotice = '';
+					}}
+				>
+					{isRegisterMode ? 'Sign in instead' : 'Create one'}
+				</button>
+			</p>
+		{/if}
 	</section>
 </main>
 
@@ -291,6 +540,33 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.75rem;
+	}
+
+	.forgot-shell {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		padding: 0.85rem;
+		border-radius: 10px;
+		border: 1px solid var(--border-subtle);
+		background: var(--surface-secondary);
+	}
+
+	.forgot-shell .btn-primary-action {
+		width: 100%;
+		margin-top: 0.2rem;
+	}
+
+	.forgot-shell header h2 {
+		margin: 0;
+		font-size: 1rem;
+		color: var(--text-primary);
+	}
+
+	.forgot-shell header p {
+		margin: 0.3rem 0 0;
+		font-size: 0.84rem;
+		color: var(--text-secondary);
 	}
 
 	.field-group {
@@ -386,6 +662,22 @@
 		cursor: not-allowed;
 	}
 
+	.forgot-row {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.forgot-btn {
+		font-size: 0.75rem;
+	}
+
+	.forgot-actions {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.7rem;
+	}
+
 	.separator {
 		display: grid;
 		place-items: center;
@@ -429,6 +721,31 @@
 		border-radius: 4px;
 		margin-bottom: 15px;
 		font-size: 0.85rem;
+	}
+
+	.notice-msg {
+		color: var(--accent-primary);
+		background: var(--state-info-bg);
+		border: 1px solid var(--state-info-border);
+		padding: 10px;
+		border-radius: 4px;
+		margin-bottom: 15px;
+		font-size: 0.85rem;
+	}
+
+	.debug-msg {
+		color: var(--text-secondary);
+		background: var(--surface-hover);
+		border: 1px dashed var(--border-default);
+		padding: 10px;
+		border-radius: 4px;
+		font-size: 0.8rem;
+		margin-bottom: 8px;
+	}
+
+	.forgot-shell .error-msg,
+	.forgot-shell .notice-msg {
+		margin-bottom: 0;
 	}
 
 	@media (max-width: 640px) {

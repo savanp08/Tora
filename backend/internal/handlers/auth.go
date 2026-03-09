@@ -10,7 +10,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
+	"net/smtp"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,10 +31,26 @@ type AuthHandler struct {
 }
 
 var authLimiter = security.NewLimiter(5, time.Minute, 5, 15*time.Minute)
+var authForgotPasswordRequestLimiter = security.NewLimiter(5, time.Minute, 8, 20*time.Minute)
+var authForgotPasswordVerifyLimiter = security.NewLimiter(8, time.Minute, 12, 20*time.Minute)
 
 const (
-	authCookieName        = "tora_auth"
-	maxAuthUsernameLength = 32
+	authCookieName                    = "tora_auth"
+	maxAuthUsernameLength             = 32
+	passwordResetOTPLength            = 6
+	defaultPasswordResetOTPTTLMinutes = 10
+	minPasswordResetOTPTTLMinutes     = 1
+	maxPasswordResetOTPTTLMinutes     = 60
+	defaultPasswordResetSMTPPort      = 587
+	passwordResetSMTPSubject          = "Converse password reset code"
+	passwordResetDebugOTPEnv          = "AUTH_PASSWORD_RESET_DEBUG_OTP"
+	passwordResetOTPTTLMinutesEnv     = "AUTH_PASSWORD_RESET_OTP_TTL_MINUTES"
+	passwordResetSMTPHostEnv          = "SMTP_HOST"
+	passwordResetSMTPPortEnv          = "SMTP_PORT"
+	passwordResetSMTPUsernameEnv      = "SMTP_USERNAME"
+	passwordResetSMTPPasswordEnv      = "SMTP_PASSWORD"
+	passwordResetSMTPFromAddressEnv   = "SMTP_FROM"
+	passwordResetSMTPFromNameEnv      = "SMTP_FROM_NAME"
 )
 
 type RegisterRequest struct {
@@ -51,14 +70,53 @@ type AnonymousAuthRequest struct {
 	Username string `json:"username"`
 }
 
+type ForgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+type ForgotPasswordVerifyRequest struct {
+	Email       string `json:"email"`
+	OTP         string `json:"otp"`
+	NewPassword string `json:"newPassword"`
+}
+
 type AuthResponse struct {
 	User  models.User `json:"user"`
 	Token string      `json:"token"`
 }
 
+type ForgotPasswordRequestResponse struct {
+	Message   string `json:"message"`
+	DebugOTP  string `json:"debugOtp,omitempty"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
+}
+
+type ForgotPasswordVerifyResponse struct {
+	Message         string `json:"message"`
+	PasswordUpdated bool   `json:"passwordUpdated"`
+}
+
+type PasswordResetTokenRecord struct {
+	Email     string
+	OTPHash   string
+	ExpiresAt time.Time
+	CreatedAt time.Time
+	Consumed  bool
+}
+
+type passwordResetSMTPSettings struct {
+	Host        string
+	Port        int
+	Username    string
+	Password    string
+	FromAddress string
+	FromName    string
+}
+
 func NewAuthHandler(scyllaStore *database.ScyllaStore) *AuthHandler {
 	handler := &AuthHandler{scylla: scyllaStore}
 	handler.ensureUserSchema()
+	handler.ensurePasswordResetSchema()
 	return handler
 }
 
@@ -215,6 +273,156 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	writeAuthJSON(w, http.StatusOK, AuthResponse{User: user, Token: token})
 }
 
+func (h *AuthHandler) ForgotPasswordRequest(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !authForgotPasswordRequestLimiter.Allow(clientIP) {
+		writeAuthError(w, http.StatusTooManyRequests, "Password reset rate limit exceeded")
+		return
+	}
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		writeAuthError(w, http.StatusServiceUnavailable, "Authentication storage unavailable")
+		return
+	}
+
+	var req ForgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if !isLikelyEmail(email) {
+		writeAuthError(w, http.StatusBadRequest, "Valid email is required")
+		return
+	}
+
+	response := ForgotPasswordRequestResponse{
+		Message: "If an account exists for this email, an OTP has been sent.",
+	}
+
+	user, exists, err := h.getUserByEmail(r.Context(), email)
+	if err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "Failed to process password reset request")
+		return
+	}
+	if !exists || strings.TrimSpace(user.Email) == "" {
+		writeAuthJSON(w, http.StatusOK, response)
+		return
+	}
+
+	otp, err := newNumericOTP(passwordResetOTPLength)
+	if err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "Failed to generate OTP")
+		return
+	}
+	otpHash, err := bcrypt.GenerateFromPassword([]byte(otp), bcrypt.DefaultCost)
+	if err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "Failed to secure OTP")
+		return
+	}
+
+	ttl := loadPasswordResetOTPTTL()
+	expiresAt := time.Now().UTC().Add(ttl)
+	if err := h.upsertPasswordResetToken(r.Context(), email, string(otpHash), expiresAt, clientIP, ttl); err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "Failed to prepare OTP")
+		return
+	}
+
+	if err := sendPasswordResetEmail(email, otp, expiresAt); err != nil {
+		log.Printf("[auth] password-reset email delivery failed email=%s err=%v", email, err)
+	}
+
+	if shouldExposePasswordResetDebugOTP() {
+		response.DebugOTP = otp
+		response.ExpiresAt = expiresAt.Unix()
+	}
+	writeAuthJSON(w, http.StatusOK, response)
+}
+
+func (h *AuthHandler) ForgotPasswordVerify(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !authForgotPasswordVerifyLimiter.Allow(clientIP) {
+		writeAuthError(w, http.StatusTooManyRequests, "Password reset verification rate limit exceeded")
+		return
+	}
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		writeAuthError(w, http.StatusServiceUnavailable, "Authentication storage unavailable")
+		return
+	}
+
+	var req ForgotPasswordVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "Invalid JSON format")
+		return
+	}
+
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if !isLikelyEmail(email) {
+		writeAuthError(w, http.StatusBadRequest, "Valid email is required")
+		return
+	}
+	otp := normalizeNumericOTP(req.OTP)
+	if len(otp) != passwordResetOTPLength {
+		writeAuthError(w, http.StatusBadRequest, fmt.Sprintf("OTP must be %d digits", passwordResetOTPLength))
+		return
+	}
+
+	tokenRecord, exists, err := h.getPasswordResetTokenByEmail(r.Context(), email)
+	if err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "Failed to verify OTP")
+		return
+	}
+	if !exists || tokenRecord.Consumed || tokenRecord.ExpiresAt.Before(time.Now().UTC()) {
+		_ = h.deletePasswordResetToken(r.Context(), email)
+		writeAuthError(w, http.StatusUnauthorized, "Invalid or expired OTP")
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(tokenRecord.OTPHash), []byte(otp)); err != nil {
+		writeAuthError(w, http.StatusUnauthorized, "Invalid or expired OTP")
+		return
+	}
+
+	newPassword := strings.TrimSpace(req.NewPassword)
+	passwordUpdated := false
+	if newPassword != "" {
+		user, userExists, userErr := h.getUserByEmail(r.Context(), email)
+		if userErr != nil {
+			writeAuthError(w, http.StatusInternalServerError, "Failed to update password")
+			return
+		}
+		if !userExists {
+			_ = h.deletePasswordResetToken(r.Context(), email)
+			writeAuthError(w, http.StatusUnauthorized, "Invalid or expired OTP")
+			return
+		}
+		passwordHash, hashErr := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+		if hashErr != nil {
+			writeAuthError(w, http.StatusInternalServerError, "Failed to secure password")
+			return
+		}
+		if updateErr := h.updateUserPasswordHash(r.Context(), user.ID, string(passwordHash)); updateErr != nil {
+			writeAuthError(w, http.StatusInternalServerError, "Failed to update password")
+			return
+		}
+		passwordUpdated = true
+	}
+
+	if err := h.deletePasswordResetToken(r.Context(), email); err != nil {
+		writeAuthError(w, http.StatusInternalServerError, "Failed to finalize password reset")
+		return
+	}
+
+	message := "OTP verified. Existing password is unchanged."
+	if passwordUpdated {
+		message = "Password reset successful. You can sign in with your new password."
+	}
+	writeAuthJSON(w, http.StatusOK, ForgotPasswordVerifyResponse{
+		Message:         message,
+		PasswordUpdated: passwordUpdated,
+	})
+}
+
 func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 	if !authLimiter.Allow(clientIP) {
@@ -309,6 +517,121 @@ func (h *AuthHandler) ensureUserSchema() {
 	if err := h.scylla.Session.Query(usernamesQuery).Exec(); err != nil {
 		log.Printf("[auth] ensure users_by_username schema failed: %v", err)
 	}
+}
+
+func (h *AuthHandler) ensurePasswordResetSchema() {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return
+	}
+
+	resetTable := h.scylla.Table("password_reset_tokens")
+	createQuery := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		email text PRIMARY KEY,
+		otp_hash text,
+		expires_at timestamp,
+		created_at timestamp,
+		consumed_at timestamp,
+		request_ip text
+	)`, resetTable)
+	if err := h.scylla.Session.Query(createQuery).Exec(); err != nil {
+		log.Printf("[auth] ensure password_reset_tokens schema failed: %v", err)
+	}
+}
+
+func (h *AuthHandler) upsertPasswordResetToken(
+	ctx context.Context,
+	email string,
+	otpHash string,
+	expiresAt time.Time,
+	requestIP string,
+	ttl time.Duration,
+) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	normalizedEmail := strings.TrimSpace(strings.ToLower(email))
+	if normalizedEmail == "" {
+		return fmt.Errorf("email is required")
+	}
+	trimmedOTPHash := strings.TrimSpace(otpHash)
+	if trimmedOTPHash == "" {
+		return fmt.Errorf("otp hash is required")
+	}
+
+	resetTable := h.scylla.Table("password_reset_tokens")
+	query := fmt.Sprintf(
+		`INSERT INTO %s (email, otp_hash, expires_at, created_at, request_ip) VALUES (?, ?, ?, ?, ?) USING TTL ?`,
+		resetTable,
+	)
+	now := time.Now().UTC()
+	ttlSeconds := int(ttl.Seconds())
+	if ttlSeconds < 1 {
+		ttlSeconds = int((defaultPasswordResetOTPTTLMinutes * time.Minute).Seconds())
+	}
+	return h.scylla.Session.Query(
+		query,
+		normalizedEmail,
+		trimmedOTPHash,
+		expiresAt.UTC(),
+		now,
+		strings.TrimSpace(requestIP),
+		ttlSeconds,
+	).WithContext(ctx).Exec()
+}
+
+func (h *AuthHandler) getPasswordResetTokenByEmail(
+	ctx context.Context,
+	email string,
+) (PasswordResetTokenRecord, bool, error) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return PasswordResetTokenRecord{}, false, fmt.Errorf("scylla session is not configured")
+	}
+	normalizedEmail := strings.TrimSpace(strings.ToLower(email))
+	if normalizedEmail == "" {
+		return PasswordResetTokenRecord{}, false, nil
+	}
+
+	resetTable := h.scylla.Table("password_reset_tokens")
+	query := fmt.Sprintf(
+		`SELECT email, otp_hash, expires_at, created_at, consumed_at FROM %s WHERE email = ? LIMIT 1`,
+		resetTable,
+	)
+
+	var record PasswordResetTokenRecord
+	var consumedAt *time.Time
+	err := h.scylla.Session.Query(query, normalizedEmail).WithContext(ctx).Scan(
+		&record.Email,
+		&record.OTPHash,
+		&record.ExpiresAt,
+		&record.CreatedAt,
+		&consumedAt,
+	)
+	if err != nil {
+		if errors.Is(err, gocql.ErrNotFound) {
+			return PasswordResetTokenRecord{}, false, nil
+		}
+		return PasswordResetTokenRecord{}, false, err
+	}
+	record.Consumed = consumedAt != nil && !consumedAt.IsZero()
+	record.Email = strings.TrimSpace(strings.ToLower(record.Email))
+	record.OTPHash = strings.TrimSpace(record.OTPHash)
+	record.ExpiresAt = record.ExpiresAt.UTC()
+	record.CreatedAt = record.CreatedAt.UTC()
+	return record, true, nil
+}
+
+func (h *AuthHandler) deletePasswordResetToken(ctx context.Context, email string) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	normalizedEmail := strings.TrimSpace(strings.ToLower(email))
+	if normalizedEmail == "" {
+		return nil
+	}
+
+	resetTable := h.scylla.Table("password_reset_tokens")
+	query := fmt.Sprintf(`DELETE FROM %s WHERE email = ?`, resetTable)
+	return h.scylla.Session.Query(query, normalizedEmail).WithContext(ctx).Exec()
 }
 
 func (h *AuthHandler) insertUser(ctx context.Context, user models.User) error {
@@ -610,6 +933,20 @@ func (h *AuthHandler) updateUserUsername(ctx context.Context, userID gocql.UUID,
 	return h.scylla.Session.Query(query, normalizedUsername, userID).WithContext(ctx).Exec()
 }
 
+func (h *AuthHandler) updateUserPasswordHash(ctx context.Context, userID gocql.UUID, passwordHash string) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	trimmedPasswordHash := strings.TrimSpace(passwordHash)
+	if trimmedPasswordHash == "" {
+		return fmt.Errorf("password hash is required")
+	}
+
+	usersTable := h.scylla.Table("users")
+	query := fmt.Sprintf(`UPDATE %s SET password_hash = ? WHERE id = ?`, usersTable)
+	return h.scylla.Session.Query(query, trimmedPasswordHash, userID).WithContext(ctx).Exec()
+}
+
 func (h *AuthHandler) ensureUserHasUsername(ctx context.Context, user models.User) (models.User, error) {
 	normalizedExisting := normalizeAccountUsername(user.Username)
 	if normalizedExisting != "" {
@@ -647,6 +984,165 @@ func (h *AuthHandler) ensureUserHasUsername(ctx context.Context, user models.Use
 		return user, nil
 	}
 	return models.User{}, fmt.Errorf("failed to assign unique username")
+}
+
+func isLikelyEmail(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	_, err := mail.ParseAddress(trimmed)
+	return err == nil
+}
+
+func normalizeNumericOTP(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	var normalized strings.Builder
+	normalized.Grow(len(trimmed))
+	for _, ch := range trimmed {
+		if ch < '0' || ch > '9' {
+			continue
+		}
+		normalized.WriteRune(ch)
+		if normalized.Len() >= passwordResetOTPLength {
+			break
+		}
+	}
+	return normalized.String()
+}
+
+func newNumericOTP(length int) (string, error) {
+	if length <= 0 {
+		return "", fmt.Errorf("otp length must be positive")
+	}
+	raw := make([]byte, length)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	builder.Grow(length)
+	for _, b := range raw {
+		builder.WriteByte('0' + (b % 10))
+	}
+	return builder.String(), nil
+}
+
+func loadPasswordResetOTPTTL() time.Duration {
+	defaultTTL := time.Duration(defaultPasswordResetOTPTTLMinutes) * time.Minute
+	raw := strings.TrimSpace(os.Getenv(passwordResetOTPTTLMinutesEnv))
+	if raw == "" {
+		return defaultTTL
+	}
+	minutes, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultTTL
+	}
+	if minutes < minPasswordResetOTPTTLMinutes {
+		minutes = minPasswordResetOTPTTLMinutes
+	}
+	if minutes > maxPasswordResetOTPTTLMinutes {
+		minutes = maxPasswordResetOTPTTLMinutes
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func shouldExposePasswordResetDebugOTP() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(passwordResetDebugOTPEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func loadPasswordResetSMTPSettings() passwordResetSMTPSettings {
+	settings := passwordResetSMTPSettings{
+		Host:        strings.TrimSpace(os.Getenv(passwordResetSMTPHostEnv)),
+		Port:        parsePasswordResetSMTPPort(strings.TrimSpace(os.Getenv(passwordResetSMTPPortEnv))),
+		Username:    strings.TrimSpace(os.Getenv(passwordResetSMTPUsernameEnv)),
+		Password:    strings.TrimSpace(os.Getenv(passwordResetSMTPPasswordEnv)),
+		FromAddress: strings.TrimSpace(os.Getenv(passwordResetSMTPFromAddressEnv)),
+		FromName:    strings.TrimSpace(os.Getenv(passwordResetSMTPFromNameEnv)),
+	}
+	if settings.Port <= 0 {
+		settings.Port = defaultPasswordResetSMTPPort
+	}
+	return settings
+}
+
+func (s passwordResetSMTPSettings) validate() error {
+	if strings.TrimSpace(s.Host) == "" {
+		return fmt.Errorf("smtp host is not configured")
+	}
+	if s.Port <= 0 {
+		return fmt.Errorf("smtp port is invalid")
+	}
+	if !isLikelyEmail(s.FromAddress) {
+		return fmt.Errorf("smtp from address is not configured")
+	}
+	return nil
+}
+
+func (s passwordResetSMTPSettings) fromHeader() string {
+	trimmedName := strings.TrimSpace(s.FromName)
+	trimmedAddress := strings.TrimSpace(s.FromAddress)
+	if trimmedName == "" {
+		return trimmedAddress
+	}
+	return fmt.Sprintf("%s <%s>", trimmedName, trimmedAddress)
+}
+
+func sendPasswordResetEmail(targetEmail string, otp string, expiresAt time.Time) error {
+	settings := loadPasswordResetSMTPSettings()
+	if err := settings.validate(); err != nil {
+		return err
+	}
+	normalizedTarget := strings.TrimSpace(strings.ToLower(targetEmail))
+	if !isLikelyEmail(normalizedTarget) {
+		return fmt.Errorf("invalid recipient email")
+	}
+	if len(otp) != passwordResetOTPLength {
+		return fmt.Errorf("invalid otp value")
+	}
+
+	expiresAtUTC := expiresAt.UTC()
+	body := fmt.Sprintf(
+		"Use this OTP to reset your Converse password: %s\n\nThis code expires at %s UTC.\nIf you did not request this, you can ignore this email.",
+		otp,
+		expiresAtUTC.Format("2006-01-02 15:04:05"),
+	)
+
+	headers := []string{
+		fmt.Sprintf("From: %s", settings.fromHeader()),
+		fmt.Sprintf("To: %s", normalizedTarget),
+		fmt.Sprintf("Subject: %s", passwordResetSMTPSubject),
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		body,
+	}
+	message := strings.Join(headers, "\r\n")
+
+	smtpAddress := fmt.Sprintf("%s:%d", settings.Host, settings.Port)
+	var smtpAuth smtp.Auth
+	if settings.Username != "" || settings.Password != "" {
+		smtpAuth = smtp.PlainAuth("", settings.Username, settings.Password, settings.Host)
+	}
+	return smtp.SendMail(smtpAddress, smtpAuth, settings.FromAddress, []string{normalizedTarget}, []byte(message))
+}
+
+func parsePasswordResetSMTPPort(raw string) int {
+	if strings.TrimSpace(raw) == "" {
+		return defaultPasswordResetSMTPPort
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return defaultPasswordResetSMTPPort
+	}
+	return value
 }
 
 func shouldUseSecureCookies(r *http.Request) bool {

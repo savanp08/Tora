@@ -51,6 +51,7 @@
 	const FAB_SIZE_PX = 56;
 	const FAB_PADDING_PX = 15;
 	const FAB_DEFAULT_TOP_OFFSET_PX = 80;
+	const FAB_DRAG_THRESHOLD_PX = 10;
 	const BOARD_MENU_ACTIONS: Array<{ label: string; action: BoardQuickAction }> = [
 		{ label: 'Dashboard Board', action: 'open-board-dashboard' },
 		{ label: 'Draw Board', action: 'open-board-draw' },
@@ -271,9 +272,6 @@
 		if (!target.closest('.holo-fab')) {
 			return;
 		}
-		if ('touches' in e && e.cancelable) {
-			e.preventDefault();
-		}
 
 		isPressed = true;
 		isDragging = false;
@@ -303,7 +301,7 @@
 		const moveX = Math.abs(clientX - dragStartPos.x);
 		const moveY = Math.abs(clientY - dragStartPos.y);
 
-		if (!isDragging && (moveX > 5 || moveY > 5)) {
+		if (!isDragging && (moveX > FAB_DRAG_THRESHOLD_PX || moveY > FAB_DRAG_THRESHOLD_PX)) {
 			isDragging = true;
 		}
 

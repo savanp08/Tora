@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS converse.users_by_username (
 	created_at timestamp
 );
 
+CREATE TABLE IF NOT EXISTS converse.password_reset_tokens (
+	email text PRIMARY KEY,
+	otp_hash text,
+	expires_at timestamp,
+	created_at timestamp,
+	consumed_at timestamp,
+	request_ip text
+);
+
 CREATE TABLE IF NOT EXISTS converse.rooms (
 	id uuid PRIMARY KEY,
 	name text,

@@ -222,6 +222,10 @@
 		| 'mark-active-read';
 	type BoardWorkspaceModule = Exclude<WorkspaceModule, 'code'>;
 	type DashboardAddItemKind = 'note' | 'beacon' | 'task';
+	type DashboardAddItemRequestDetail =
+		| { kind: 'note'; text?: string }
+		| { kind: 'beacon'; text?: string; beaconAt?: number }
+		| { kind: 'task'; title?: string; details?: string };
 
 	const CALL_SIGNAL_TYPES = new Set([
 		'call_invite',
@@ -4197,6 +4201,75 @@
 		return true;
 	}
 
+	function addDashboardNoteItemDirect(noteText: string) {
+		const normalizedText = noteText.trim();
+		if (!normalizedText) {
+			showErrorToast('Note cannot be empty.');
+			return;
+		}
+		const dashboardItem = buildManualDashboardItem({
+			kind: 'note',
+			messageText: normalizedText
+		});
+		if (!dashboardItem) {
+			showErrorToast('Unable to add note right now.');
+			return;
+		}
+		upsertRoomDashboardItem(dashboardItem);
+		showErrorToast('Note added to dashboard.');
+	}
+
+	function addDashboardBeaconItemDirect(beaconText: string, beaconAt: number) {
+		const normalizedText = beaconText.trim();
+		if (!normalizedText) {
+			showErrorToast('Beacon text cannot be empty.');
+			return;
+		}
+		const normalizedBeaconAt = parseOptionalTimestamp(beaconAt);
+		if (normalizedBeaconAt <= Date.now()) {
+			showErrorToast('Choose a future date/time for the beacon.');
+			return;
+		}
+		const beaconLabel = formatBeaconTimestamp(normalizedBeaconAt);
+		const dashboardItem = buildManualDashboardItem({
+			kind: 'message',
+			messageText: normalizedText,
+			note: normalizedText,
+			beaconAt: normalizedBeaconAt,
+			beaconLabel,
+			beaconData: {
+				kind: 'beacon',
+				text: normalizedText
+			}
+		});
+		if (!dashboardItem) {
+			showErrorToast('Unable to schedule beacon right now.');
+			return;
+		}
+		upsertRoomDashboardItem(dashboardItem);
+		showErrorToast(`Beacon scheduled for ${beaconLabel || formatDateTime(normalizedBeaconAt)}.`);
+	}
+
+	function addDashboardTaskItemDirect(taskTitle: string, taskDetail = '') {
+		const normalizedTitle = taskTitle.trim();
+		const normalizedDetail = taskDetail.trim();
+		if (!normalizedTitle) {
+			showErrorToast('Task title cannot be empty.');
+			return;
+		}
+		const dashboardItem = buildManualDashboardItem({
+			kind: 'task',
+			messageText: normalizedDetail,
+			taskTitle: normalizedTitle
+		});
+		if (!dashboardItem) {
+			showErrorToast('Unable to create task right now.');
+			return;
+		}
+		upsertRoomDashboardItem(dashboardItem);
+		showErrorToast('Task added to dashboard.');
+	}
+
 	async function addDashboardNoteItem() {
 		const noteRaw = await openPromptDialog({
 			title: 'Add Note',
@@ -4216,16 +4289,7 @@
 			showErrorToast('Note cannot be empty.');
 			return;
 		}
-		const dashboardItem = buildManualDashboardItem({
-			kind: 'note',
-			messageText: noteText
-		});
-		if (!dashboardItem) {
-			showErrorToast('Unable to add note right now.');
-			return;
-		}
-		upsertRoomDashboardItem(dashboardItem);
-		showErrorToast('Note added to dashboard.');
+		addDashboardNoteItemDirect(noteText);
 	}
 
 	async function addDashboardBeaconItem() {
@@ -4263,28 +4327,7 @@
 			return;
 		}
 		const beaconAt = parseDashboardDateTimePromptValue(scheduleRaw);
-		if (beaconAt <= Date.now()) {
-			showErrorToast('Choose a future date/time for the beacon.');
-			return;
-		}
-		const beaconLabel = formatBeaconTimestamp(beaconAt);
-		const dashboardItem = buildManualDashboardItem({
-			kind: 'message',
-			messageText: beaconText,
-			note: beaconText,
-			beaconAt,
-			beaconLabel,
-			beaconData: {
-				kind: 'beacon',
-				text: beaconText
-			}
-		});
-		if (!dashboardItem) {
-			showErrorToast('Unable to schedule beacon right now.');
-			return;
-		}
-		upsertRoomDashboardItem(dashboardItem);
-		showErrorToast(`Beacon scheduled for ${beaconLabel || formatDateTime(beaconAt)}.`);
+		addDashboardBeaconItemDirect(beaconText, beaconAt);
 	}
 
 	async function addDashboardTaskItem() {
@@ -4323,17 +4366,7 @@
 			return;
 		}
 		const taskDetail = taskDetailRaw.trim();
-		const dashboardItem = buildManualDashboardItem({
-			kind: 'task',
-			messageText: taskDetail,
-			taskTitle
-		});
-		if (!dashboardItem) {
-			showErrorToast('Unable to create task right now.');
-			return;
-		}
-		upsertRoomDashboardItem(dashboardItem);
-		showErrorToast('Task added to dashboard.');
+		addDashboardTaskItemDirect(taskTitle, taskDetail);
 	}
 
 	function addBeaconMessageToDashboard(message: ChatMessage) {
@@ -6131,21 +6164,39 @@
 	}
 
 	async function onDashboardAddItemRequest(
-		event: CustomEvent<{ kind: DashboardAddItemKind }>
+		event: CustomEvent<DashboardAddItemRequestDetail>
 	) {
 		if (!canAddDashboardItem()) {
 			return;
 		}
-		const kind = event.detail.kind;
+		const detail = event.detail;
+		const kind = detail.kind;
 		if (kind === 'note') {
+			const inlineText = toStringValue(detail.text).trim();
+			if (inlineText) {
+				addDashboardNoteItemDirect(inlineText);
+				return;
+			}
 			await addDashboardNoteItem();
 			return;
 		}
 		if (kind === 'beacon') {
+			const inlineText = toStringValue(detail.text).trim();
+			const inlineBeaconAt = parseOptionalTimestamp(detail.beaconAt);
+			if (inlineText && inlineBeaconAt > 0) {
+				addDashboardBeaconItemDirect(inlineText, inlineBeaconAt);
+				return;
+			}
 			await addDashboardBeaconItem();
 			return;
 		}
 		if (kind === 'task') {
+			const inlineTitle = toStringValue(detail.title).trim();
+			const inlineDetails = toStringValue(detail.details).trim();
+			if (inlineTitle) {
+				addDashboardTaskItemDirect(inlineTitle, inlineDetails);
+				return;
+			}
 			await addDashboardTaskItem();
 		}
 	}
@@ -6386,7 +6437,7 @@
 	class:mobile-list-only={isMobileView && mobilePane === 'list'}
 	class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
 >
-	<MonochromeRoomBackground seed={roomId || activeThread.id || 'chat-room'} />
+	<MonochromeRoomBackground seed={roomId || 'chat-room'} />
 
 	<div class="sidebar-pane">
 		<ChatSidebar
@@ -6760,6 +6811,7 @@
 											isDarkMode={$isDarkMode}
 											currentUserId={currentUserId}
 											organizePreview={roomDashboardOrganizePreview}
+											on:close={() => deactivateWorkspaceModule('dashboard')}
 											on:editNote={onDashboardItemNoteEdit}
 											on:addItemRequest={(event) => void onDashboardAddItemRequest(event)}
 											on:aiOrganizePreview={onDashboardOrganizePreview}
