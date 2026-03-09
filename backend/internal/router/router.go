@@ -177,6 +177,7 @@ func New(
 		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
 		r.Post("/rooms/{roomId}/ai-organize", roomHandler.AIOrganizeDashboard)
 		r.Post("/rooms/{roomId}/ai-timeline", roomHandler.HandleAIGenerateTimeline)
+		r.Post("/rooms/{roomId}/ai-edit", roomHandler.HandleAIEditTimeline)
 		r.Post("/rooms/{roomId}/pins", roomHandler.UpsertRoomPin)
 		r.Get("/rooms/{roomId}/pins/navigate", roomHandler.NavigateRoomPins)
 		r.Get("/rooms/{roomId}/pins/{pinMessageId}/discussion/comments", roomHandler.GetPinnedDiscussionComments)

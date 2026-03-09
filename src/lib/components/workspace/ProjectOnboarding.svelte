@@ -3,6 +3,7 @@
 		activeProjectTab,
 		generateAITimeline,
 		isProjectNew,
+		projectTimeline,
 		setProjectTimeline,
 		timelineError,
 		timelineLoading
@@ -26,9 +27,14 @@
 
 	const MANUAL_TEMPLATE_CARDS: ManualTemplateCard[] = [
 		{
-			key: 'software_agile',
-			label: 'Software Agile',
-			description: 'Backlog, Frontend, Backend, and QA sprint structure.'
+			key: 'agile_sprint_planner',
+			label: 'Agile Sprint Planner',
+			description: 'Backlog, frontend, backend, and QA sprint structure.'
+		},
+		{
+			key: 'waterfall_linear',
+			label: 'Waterfall / Linear',
+			description: 'Sequential phases with clearly staged delivery.'
 		},
 		{
 			key: 'marketing_blitz',
@@ -41,11 +47,6 @@
 			description: 'Day-based execution plan for urgent delivery.'
 		},
 		{
-			key: 'high_volume',
-			label: 'High Volume',
-			description: 'Bucket workflow for triage, processing, and review.'
-		},
-		{
 			key: 'blank_board',
 			label: 'Blank Board',
 			description: 'Start empty and shape your own workflow.'
@@ -56,6 +57,16 @@
 	let aiPrompt = '';
 	let localError = '';
 	let applyingTemplate = false;
+	let aiPartialWarning = '';
+	let aiMissingSprints: string[] = [];
+
+	const TEMPLATE_KEY_MAP: Record<string, string> = {
+		agile_sprint_planner: 'software_agile',
+		waterfall_linear: 'waterfall_linear',
+		marketing_blitz: 'marketing_blitz',
+		time_critical: 'time_critical',
+		blank_board: 'blank_board'
+	};
 
 	function createBlankTimeline(): ProjectTimeline {
 		const today = new Date();
@@ -78,12 +89,24 @@
 	function goBackToSelection() {
 		mode = 'selection';
 		localError = '';
+		aiPartialWarning = '';
+		aiMissingSprints = [];
+	}
+
+	function openPartialWorkspace() {
+		if (!$projectTimeline) {
+			return;
+		}
+		isProjectNew.set(false);
+		activeProjectTab.set('overview');
 	}
 
 	async function generateWorkspace() {
 		const normalizedRoomID = roomId.trim();
 		const normalizedPrompt = aiPrompt.trim();
 		localError = '';
+		aiPartialWarning = '';
+		aiMissingSprints = [];
 		if (!normalizedRoomID) {
 			localError = 'Room id is required before generating a workspace.';
 			return;
@@ -94,10 +117,19 @@
 		}
 
 		try {
-			await generateAITimeline(normalizedRoomID, normalizedPrompt);
+			const generatedTimeline = await generateAITimeline(normalizedRoomID, normalizedPrompt);
 			await initializeTaskStoreForRoom(normalizeRoomIDValue(normalizedRoomID), {
 				apiBase: API_BASE
 			});
+			if (generatedTimeline.is_partial) {
+				aiMissingSprints = generatedTimeline.missing_sprints ?? [];
+				aiPartialWarning =
+					aiMissingSprints.length > 0
+						? 'AI hit request limits and generated only part of the project plan.'
+						: 'AI hit request limits and generated a partial project plan.';
+				isProjectNew.set(true);
+				return;
+			}
 			isProjectNew.set(false);
 			activeProjectTab.set('overview');
 		} catch (error) {
@@ -116,8 +148,9 @@
 			localError = 'Choose a valid template.';
 			return;
 		}
+		const resolvedTemplateKey = TEMPLATE_KEY_MAP[templateKey] || templateKey;
 
-		if (templateKey === 'blank_board') {
+		if (resolvedTemplateKey === 'blank_board') {
 			setProjectTimeline(createBlankTimeline());
 			await initializeTaskStoreForRoom(normalizeRoomIDValue(normalizedRoomID), {
 				apiBase: API_BASE
@@ -129,7 +162,7 @@
 
 		applyingTemplate = true;
 		try {
-			await loadTemplate(normalizedRoomID, templateKey);
+			await loadTemplate(normalizedRoomID, resolvedTemplateKey);
 			await initializeTaskStoreForRoom(normalizeRoomIDValue(normalizedRoomID), {
 				apiBase: API_BASE
 			});
@@ -209,6 +242,18 @@
 					{$timelineLoading ? 'Generating...' : 'Generate Workspace'}
 				</button>
 			</div>
+
+			{#if aiPartialWarning}
+				<div class="partial-warning-banner">
+					<strong>{aiPartialWarning}</strong>
+					{#if aiMissingSprints.length > 0}
+						<p>Missing sprints: {aiMissingSprints.join(', ')}</p>
+					{/if}
+					<button type="button" class="warning-cta-btn" on:click={openPartialWorkspace}>
+						Open Partial Workspace
+					</button>
+				</div>
+			{/if}
 		</div>
 	{:else}
 		<div class="wizard-shell">
@@ -472,6 +517,42 @@
 		color: #ffd7de;
 		padding: 0.58rem 0.72rem;
 		font-size: 0.8rem;
+	}
+
+	.partial-warning-banner {
+		border-radius: 12px;
+		border: 1px solid rgba(245, 158, 11, 0.55);
+		background: rgba(245, 158, 11, 0.15);
+		color: #fde7c0;
+		padding: 0.7rem 0.78rem;
+		display: grid;
+		gap: 0.5rem;
+	}
+
+	.partial-warning-banner strong {
+		font-size: 0.82rem;
+	}
+
+	.partial-warning-banner p {
+		margin: 0;
+		font-size: 0.76rem;
+		color: rgba(254, 233, 187, 0.92);
+	}
+
+	.warning-cta-btn {
+		width: fit-content;
+		border-radius: 10px;
+		border: 1px solid rgba(245, 158, 11, 0.66);
+		background: rgba(251, 191, 36, 0.18);
+		color: #fff3d8;
+		padding: 0.45rem 0.72rem;
+		font-size: 0.76rem;
+		cursor: pointer;
+	}
+
+	.warning-cta-btn:hover {
+		border-color: rgba(251, 191, 36, 0.82);
+		background: rgba(251, 191, 36, 0.26);
 	}
 
 	@media (max-width: 900px) {

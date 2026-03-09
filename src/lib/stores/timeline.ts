@@ -1,5 +1,11 @@
 import { get, writable } from 'svelte/store';
-import type { ProjectTimeline, Sprint, TimelineTask, TimelineTaskStatus } from '$lib/types/timeline';
+import type {
+	ProjectTimeline,
+	Sprint,
+	TimelineTask,
+	TimelineTaskDurationUnit,
+	TimelineTaskStatus
+} from '$lib/types/timeline';
 import { currentUser } from '$lib/store';
 import { normalizeRoomIDValue } from '$lib/utils/chat/core';
 
@@ -29,6 +35,8 @@ type ParsedTaskMetadata = {
 	effortScore: number;
 	sprintStartDate: string;
 	sprintEndDate: string;
+	durationUnit: TimelineTaskDurationUnit;
+	durationValue: number;
 };
 
 type TimelineSprintAccumulator = {
@@ -74,6 +82,44 @@ function toNumberValue(value: unknown, fallback: number) {
 	return fallback;
 }
 
+function normalizeDurationUnit(value: unknown): TimelineTaskDurationUnit {
+	const normalized = toStringValue(value).toLowerCase();
+	if (normalized === 'hour' || normalized === 'hours') {
+		return 'hours';
+	}
+	return 'days';
+}
+
+function normalizeDurationValue(value: unknown, unit: TimelineTaskDurationUnit) {
+	const parsed = toNumberValue(value, unit === 'hours' ? 4 : 1);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return unit === 'hours' ? 4 : 1;
+	}
+	return parsed;
+}
+
+function parseTimelineDate(value: string, fallback: Date) {
+	const parsed = Date.parse(value);
+	if (Number.isFinite(parsed)) {
+		return new Date(parsed);
+	}
+	return new Date(fallback.getTime());
+}
+
+function toTimelineDateString(value: Date) {
+	return value.toISOString().slice(0, 10);
+}
+
+function getTaskEndDate(startDate: Date, durationUnit: TimelineTaskDurationUnit, durationValue: number) {
+	const endDate = new Date(startDate.getTime());
+	if (durationUnit === 'hours') {
+		endDate.setTime(endDate.getTime() + durationValue * 60 * 60 * 1000);
+		return endDate;
+	}
+	endDate.setDate(endDate.getDate() + durationValue);
+	return endDate;
+}
+
 function normalizeTaskStatus(value: unknown): TimelineTaskStatus {
 	const normalized = toStringValue(value).toLowerCase().replace(/\s+/g, '_');
 	if (normalized === 'in_progress') {
@@ -97,6 +143,11 @@ function normalizeTask(raw: unknown, fallbackID: string): TimelineTask | null {
 
 	const taskID = toStringValue(source.id) || toStringValue(source.task_id) || fallbackID;
 	const effort = Math.max(1, Math.min(10, Math.floor(toNumberValue(source.effort_score, 3))));
+	const durationUnit = normalizeDurationUnit(source.duration_unit ?? source.durationUnit);
+	const durationValue = normalizeDurationValue(
+		source.duration_value ?? source.durationValue,
+		durationUnit
+	);
 
 	return {
 		id: taskID,
@@ -104,7 +155,11 @@ function normalizeTask(raw: unknown, fallbackID: string): TimelineTask | null {
 		status: normalizeTaskStatus(source.status),
 		effort_score: effort,
 		type: toStringValue(source.type) || 'general',
-		description: toStringValue(source.description) || undefined
+		description: toStringValue(source.description) || undefined,
+		start_date: toStringValue(source.start_date ?? source.startDate),
+		end_date: toStringValue(source.end_date ?? source.endDate),
+		duration_unit: durationUnit,
+		duration_value: durationValue
 	};
 }
 
@@ -151,8 +206,25 @@ function normalizeTimeline(payload: unknown): ProjectTimeline {
 	}
 
 	const projectName = toStringValue(source.project_name) || 'Project Timeline';
+	const techStack = Array.isArray(source.tech_stack)
+		? source.tech_stack.map((entry) => toStringValue(entry)).filter(Boolean)
+		: [];
+	const targetAudience = toStringValue(source.target_audience);
+	const estimatedCost = toStringValue(source.estimated_cost);
+	const rolesNeeded = Array.isArray(source.roles_needed)
+		? source.roles_needed.map((entry) => toStringValue(entry)).filter(Boolean)
+		: [];
+	const missingSprints = Array.isArray(source.missing_sprints)
+		? source.missing_sprints.map((entry) => toStringValue(entry)).filter(Boolean)
+		: [];
 	const normalized: ProjectTimeline = {
 		project_name: projectName,
+		tech_stack: techStack,
+		target_audience: targetAudience,
+		estimated_cost: estimatedCost,
+		roles_needed: rolesNeeded,
+		is_partial: Boolean(source.is_partial),
+		missing_sprints: missingSprints,
 		total_progress: 0,
 		sprints
 	};
@@ -163,6 +235,16 @@ function normalizeTimeline(payload: unknown): ProjectTimeline {
 async function parseErrorMessage(response: Response) {
 	const payload = (await response.json().catch(() => null)) as TimelineErrorResponse | null;
 	return payload?.error?.trim() || payload?.message?.trim() || `HTTP ${response.status}`;
+}
+
+function withTimelineUserHeaders(userID: string, headers: Record<string, string> = {}) {
+	if (!userID) {
+		return headers;
+	}
+	return {
+		...headers,
+		'X-User-Id': userID
+	};
 }
 
 function parseTaskTimestamp(value: unknown) {
@@ -211,7 +293,9 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 			type: 'general',
 			effortScore: 3,
 			sprintStartDate: '',
-			sprintEndDate: ''
+			sprintEndDate: '',
+			durationUnit: 'days',
+			durationValue: 1
 		};
 	}
 
@@ -222,7 +306,9 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 			type: 'general',
 			effortScore: 3,
 			sprintStartDate: '',
-			sprintEndDate: ''
+			sprintEndDate: '',
+			durationUnit: 'days',
+			durationValue: 1
 		};
 	}
 
@@ -230,6 +316,8 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 	let parsedEffortScore = 3;
 	let sprintStartDate = '';
 	let sprintEndDate = '';
+	let parsedDurationUnit: TimelineTaskDurationUnit = 'days';
+	let parsedDurationValue = 1;
 	const metadataBody = metadataMatch[1] ?? '';
 	for (const section of metadataBody.split('|')) {
 		const [rawKey, ...rawValueParts] = section.split(':');
@@ -255,6 +343,16 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 				sprintStartDate = dateWindowMatch[1];
 				sprintEndDate = dateWindowMatch[2];
 			}
+			continue;
+		}
+		if (key === 'duration') {
+			const durationMatch = rawValue.match(
+				/(-?\d+(?:\.\d+)?)\s*(hour|hours|day|days)?/i
+			);
+			if (durationMatch) {
+				parsedDurationUnit = normalizeDurationUnit(durationMatch[2] ?? 'days');
+				parsedDurationValue = normalizeDurationValue(durationMatch[1], parsedDurationUnit);
+			}
 		}
 	}
 
@@ -263,7 +361,9 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 		type: parsedType,
 		effortScore: parsedEffortScore,
 		sprintStartDate,
-		sprintEndDate
+		sprintEndDate,
+		durationUnit: parsedDurationUnit,
+		durationValue: parsedDurationValue
 	};
 }
 
@@ -307,7 +407,11 @@ function buildTimelineFromRoomTasks(
 			status: normalizeTaskStatus(taskRecord.status),
 			effort_score: metadata.effortScore,
 			type: metadata.type,
-			description: metadata.cleanDescription || undefined
+			description: metadata.cleanDescription || undefined,
+			start_date: '',
+			end_date: '',
+			duration_unit: metadata.durationUnit,
+			duration_value: metadata.durationValue
 		});
 		sprintMap.set(sprintName, existing);
 	}
@@ -337,9 +441,95 @@ function buildTimelineFromRoomTasks(
 
 	return {
 		project_name: fallbackProjectName,
+		tech_stack: [],
+		target_audience: '',
+		estimated_cost: '',
+		roles_needed: [],
+		is_partial: false,
+		missing_sprints: [],
 		total_progress: 0,
 		sprints
 	};
+}
+
+function applyTaskDurationDefaults(task: TimelineTask): TimelineTask {
+	const durationUnit = normalizeDurationUnit(task.duration_unit);
+	const durationValue = normalizeDurationValue(task.duration_value, durationUnit);
+	return {
+		...task,
+		duration_unit: durationUnit,
+		duration_value: durationValue
+	};
+}
+
+export function recalculateGanttDates(tasks: TimelineTask[], projectStart: Date): TimelineTask[] {
+	const startSeed = Number.isFinite(projectStart.getTime()) ? projectStart : new Date();
+	let currentStart = new Date(startSeed.getTime());
+
+	return tasks.map((task) => {
+		const taskWithDuration = applyTaskDurationDefaults(task);
+		const taskStart = new Date(currentStart.getTime());
+		const taskEnd = getTaskEndDate(
+			taskStart,
+			taskWithDuration.duration_unit || 'days',
+			taskWithDuration.duration_value || 1
+		);
+		currentStart = new Date(taskEnd.getTime());
+		return {
+			...taskWithDuration,
+			start_date: toTimelineDateString(taskStart),
+			end_date: toTimelineDateString(taskEnd)
+		};
+	});
+}
+
+function applyTimelineGanttDates(timeline: ProjectTimeline): ProjectTimeline {
+	const nextSprints: Sprint[] = [];
+	let nextSprintSeed = parseTimelineDate(timeline.sprints[0]?.start_date || '', new Date());
+
+	for (const sprint of timeline.sprints) {
+		const taskDefaults = sprint.tasks.map((task) => applyTaskDurationDefaults(task));
+		const hasCompleteDates = taskDefaults.every(
+			(task) => Boolean(task.start_date && task.end_date)
+		);
+		const sprintStartSeed = parseTimelineDate(sprint.start_date || '', nextSprintSeed);
+		const nextTasks = hasCompleteDates ? taskDefaults : recalculateGanttDates(taskDefaults, sprintStartSeed);
+		const sprintStart = nextTasks[0]?.start_date || toTimelineDateString(sprintStartSeed);
+		const sprintEnd = nextTasks[nextTasks.length - 1]?.end_date || sprint.end_date || sprintStart;
+		nextSprints.push({
+			...sprint,
+			start_date: sprintStart,
+			end_date: sprintEnd,
+			tasks: nextTasks
+		});
+		nextSprintSeed = parseTimelineDate(sprintEnd, nextSprintSeed);
+	}
+
+	return {
+		...timeline,
+		sprints: nextSprints
+	};
+}
+
+function recalculateSprintDatesFromIndex(tasks: TimelineTask[], taskIndex: number, startDate: Date) {
+	const nextTasks = [...tasks];
+	let currentStart = new Date(startDate.getTime());
+	for (let index = taskIndex; index < nextTasks.length; index += 1) {
+		const taskWithDuration = applyTaskDurationDefaults(nextTasks[index]);
+		const taskStart = new Date(currentStart.getTime());
+		const taskEnd = getTaskEndDate(
+			taskStart,
+			taskWithDuration.duration_unit || 'days',
+			taskWithDuration.duration_value || 1
+		);
+		nextTasks[index] = {
+			...taskWithDuration,
+			start_date: toTimelineDateString(taskStart),
+			end_date: toTimelineDateString(taskEnd)
+		};
+		currentStart = new Date(taskEnd.getTime());
+	}
+	return nextTasks;
 }
 
 export function calculateTotalProgress(timeline: ProjectTimeline) {
@@ -358,17 +548,89 @@ export function setProjectTimeline(value: ProjectTimeline | null) {
 		isProjectNew.set(true);
 		return;
 	}
-	const nextValue: ProjectTimeline = {
+	const timelineWithDefaults: ProjectTimeline = {
 		...value,
-		total_progress: calculateTotalProgress(value)
+		tech_stack: value.tech_stack ?? [],
+		target_audience: value.target_audience ?? '',
+		estimated_cost: value.estimated_cost ?? '',
+		roles_needed: value.roles_needed ?? [],
+		is_partial: Boolean(value.is_partial),
+		missing_sprints: value.missing_sprints ?? []
+	};
+	const timelineWithDates = applyTimelineGanttDates(timelineWithDefaults);
+	const nextValue: ProjectTimeline = {
+		...timelineWithDates,
+		total_progress: calculateTotalProgress(timelineWithDates)
 	};
 	projectTimeline.set(nextValue);
 	isProjectNew.set(false);
 }
 
+export function applyTimelinePayload(payload: unknown) {
+	const normalized = normalizeTimeline(payload);
+	setProjectTimeline(normalized);
+	timelineError.set('');
+	return normalized;
+}
+
+export function updateTaskDates(taskId: string, newStart: Date | string) {
+	const normalizedTaskID = taskId.trim();
+	if (!normalizedTaskID) {
+		return false;
+	}
+
+	const timeline = get(projectTimeline);
+	if (!timeline) {
+		return false;
+	}
+
+	const manualStart =
+		typeof newStart === 'string'
+			? parseTimelineDate(newStart, new Date())
+			: Number.isFinite(newStart.getTime())
+				? new Date(newStart.getTime())
+				: new Date();
+
+	let didUpdate = false;
+	const nextSprints = timeline.sprints.map((sprint) => {
+		const taskIndex = sprint.tasks.findIndex((task) => task.id === normalizedTaskID);
+		if (taskIndex < 0) {
+			return sprint;
+		}
+		didUpdate = true;
+		const nextTasks = recalculateSprintDatesFromIndex(
+			sprint.tasks.map((task) => applyTaskDurationDefaults(task)),
+			taskIndex,
+			manualStart
+		);
+		return {
+			...sprint,
+			start_date: nextTasks[0]?.start_date || sprint.start_date,
+			end_date: nextTasks[nextTasks.length - 1]?.end_date || sprint.end_date,
+			tasks: nextTasks
+		};
+	});
+
+	if (!didUpdate) {
+		return false;
+	}
+
+	const nextTimeline: ProjectTimeline = {
+		...timeline,
+		sprints: nextSprints,
+		total_progress: calculateTotalProgress({
+			...timeline,
+			sprints: nextSprints
+		})
+	};
+	projectTimeline.set(nextTimeline);
+	return true;
+}
+
 export async function generateAITimeline(roomId: string, prompt: string) {
 	const normalizedRoomID = roomId.trim();
 	const normalizedPrompt = prompt.trim();
+	const sessionUserID = (get(currentUser)?.id ?? '').trim();
 	if (!normalizedRoomID) {
 		throw new Error('roomId is required');
 	}
@@ -381,13 +643,13 @@ export async function generateAITimeline(roomId: string, prompt: string) {
 	try {
 		const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/ai-timeline`, {
 			method: 'POST',
-			headers: {
+			headers: withTimelineUserHeaders(sessionUserID, {
 				'Content-Type': 'application/json'
-			},
+			}),
 			credentials: 'include',
 			body: JSON.stringify({
 				prompt: normalizedPrompt,
-				userId: get(currentUser)?.id ?? ''
+				userId: sessionUserID
 			})
 		});
 		if (!response.ok) {
@@ -395,11 +657,56 @@ export async function generateAITimeline(roomId: string, prompt: string) {
 		}
 
 		const payload = (await response.json().catch(() => null)) as unknown;
-		const normalized = normalizeTimeline(payload);
-		setProjectTimeline(normalized);
+		const normalized = applyTimelinePayload(payload);
 		return normalized;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'Failed to generate project timeline';
+		timelineError.set(message);
+		throw error instanceof Error ? error : new Error(message);
+	} finally {
+		timelineLoading.set(false);
+	}
+}
+
+export async function editAITimeline(
+	roomId: string,
+	prompt: string,
+	currentState: ProjectTimeline | null
+) {
+	const normalizedRoomID = roomId.trim();
+	const normalizedPrompt = prompt.trim();
+	const sessionUserID = (get(currentUser)?.id ?? '').trim();
+	if (!normalizedRoomID) {
+		throw new Error('roomId is required');
+	}
+	if (!normalizedPrompt) {
+		throw new Error('prompt is required');
+	}
+
+	timelineLoading.set(true);
+	timelineError.set('');
+	try {
+		const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/ai-edit`, {
+			method: 'POST',
+			headers: withTimelineUserHeaders(sessionUserID, {
+				'Content-Type': 'application/json'
+			}),
+			credentials: 'include',
+			body: JSON.stringify({
+				prompt: normalizedPrompt,
+				current_state: currentState,
+				userId: sessionUserID
+			})
+		});
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+
+		const payload = (await response.json().catch(() => null)) as unknown;
+		const normalized = applyTimelinePayload(payload);
+		return normalized;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : 'Failed to edit project timeline';
 		timelineError.set(message);
 		throw error instanceof Error ? error : new Error(message);
 	} finally {

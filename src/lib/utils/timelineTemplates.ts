@@ -154,6 +154,84 @@ export const TIMELINE_TEMPLATES: Record<string, ProjectTimeline> = {
 			}
 		]
 	},
+	waterfall_linear: {
+		project_name: 'Waterfall Linear Delivery',
+		total_progress: 0,
+		sprints: [
+			{
+				id: 'phase-discovery',
+				name: 'Discovery',
+				start_date: toISODate(0),
+				end_date: toISODate(6),
+				tasks: [
+					{
+						id: 'task-requirements',
+						title: 'Gather product requirements',
+						status: 'todo',
+						effort_score: 5,
+						type: 'planning',
+						description: 'Finalize scope, dependencies, and acceptance criteria with stakeholders.'
+					},
+					{
+						id: 'task-spec-signoff',
+						title: 'Approve specification pack',
+						status: 'todo',
+						effort_score: 4,
+						type: 'planning',
+						description: 'Review and lock specification baseline before implementation starts.'
+					}
+				]
+			},
+			{
+				id: 'phase-implementation',
+				name: 'Implementation',
+				start_date: toISODate(7),
+				end_date: toISODate(20),
+				tasks: [
+					{
+						id: 'task-core-build',
+						title: 'Build core system modules',
+						status: 'todo',
+						effort_score: 7,
+						type: 'backend',
+						description: 'Implement all approved modules according to baseline design.'
+					},
+					{
+						id: 'task-integration',
+						title: 'Complete system integration',
+						status: 'todo',
+						effort_score: 6,
+						type: 'engineering',
+						description: 'Integrate modules and validate hand-offs across components.'
+					}
+				]
+			},
+			{
+				id: 'phase-verification',
+				name: 'Verification',
+				start_date: toISODate(21),
+				end_date: toISODate(28),
+				tasks: [
+					{
+						id: 'task-test-pass',
+						title: 'Run full validation pass',
+						status: 'todo',
+						effort_score: 5,
+						type: 'qa',
+						description: 'Execute regression, fix critical defects, and certify release readiness.'
+					},
+					{
+						id: 'task-handover',
+						title: 'Prepare release handover',
+						status: 'todo',
+						effort_score: 3,
+						type: 'operations',
+						description: 'Finalize launch checklist, docs, and post-launch support plan.'
+					}
+				]
+			}
+		]
+	},
 	marketing_blitz: {
 		project_name: 'Marketing Blitz Campaign',
 		total_progress: 0,

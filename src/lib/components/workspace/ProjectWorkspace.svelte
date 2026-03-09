@@ -1,11 +1,12 @@
 <script lang="ts">
 	import ProjectOnboarding from '$lib/components/workspace/ProjectOnboarding.svelte';
+	import ProgressGanttTab from '$lib/components/workspace/ProgressGanttTab.svelte';
 	import TaskBoard from '$lib/components/workspace/TaskBoard.svelte';
+	import ToraAIPanel from '$lib/components/workspace/ToraAIPanel.svelte';
 	import TimelineBoard from '$lib/components/workspace/TimelineBoard.svelte';
 	import { currentUser } from '$lib/store';
 	import {
 		activeProjectTab,
-		generateAITimeline,
 		initializeProjectTimelineForRoom,
 		isProjectNew,
 		projectTimeline,
@@ -29,12 +30,6 @@
 		icon: string;
 	};
 
-	type ToraMessage = {
-		role: 'user' | 'assistant';
-		text: string;
-		timestamp: number;
-	};
-
 	const WORKSPACE_TABS: WorkspaceTabMeta[] = [
 		{ key: 'overview', label: 'Overview', icon: 'M4.5 4.5h6.8v6.8H4.5zM12.7 4.5h6.8V9h-6.8zM12.7 10.7h6.8v8.8h-6.8zM4.5 12.7h6.8v6.8H4.5z' },
 		{ key: 'tasks', label: 'Tasks', icon: 'M8 7h11M8 12h11M8 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01' },
@@ -46,8 +41,6 @@
 	const TASK_LABELS = ['backend', 'frontend', 'qa', 'design', 'strategy', 'planning'];
 
 	let selectedSprintFilter = '';
-	let toraPrompt = '';
-	let toraMessages: ToraMessage[] = [];
 	let lastWorkspaceRoomID = '';
 	let workspaceLoadToken = 0;
 	let clearingTaskboard = false;
@@ -58,8 +51,6 @@
 		lastWorkspaceRoomID = normalizedWorkspaceRoomID;
 		activeProjectTab.set('overview');
 		selectedSprintFilter = '';
-		toraPrompt = '';
-		toraMessages = [];
 		void hydrateWorkspaceForRoom(normalizedWorkspaceRoomID);
 	}
 
@@ -167,8 +158,6 @@
 
 			activeProjectTab.set('overview');
 			selectedSprintFilter = '';
-			toraPrompt = '';
-			toraMessages = [];
 		} catch (error) {
 			timelineError.set(error instanceof Error ? error.message : 'Failed to clear room taskboard');
 		} finally {
@@ -184,60 +173,6 @@
 			return `${startDate} -> ${endDate}`;
 		}
 		return startDate || endDate;
-	}
-
-	async function askToraToModifyBoard() {
-		const normalizedPrompt = toraPrompt.trim();
-		if (!normalizedPrompt) {
-			return;
-		}
-
-		toraMessages = [
-			...toraMessages,
-			{ role: 'user', text: normalizedPrompt, timestamp: Date.now() }
-		];
-
-		const normalizedRoomID = roomId.trim();
-		if (!normalizedRoomID) {
-			toraMessages = [
-				...toraMessages,
-				{
-					role: 'assistant',
-					text: 'Room id is missing, so I cannot regenerate this board yet.',
-					timestamp: Date.now()
-				}
-			];
-			toraPrompt = '';
-			return;
-		}
-
-		try {
-			await generateAITimeline(normalizedRoomID, normalizedPrompt);
-			await initializeTaskStoreForRoom(normalizeRoomIDValue(normalizedRoomID), {
-				apiBase: API_BASE
-			});
-			isProjectNew.set(false);
-			toraMessages = [
-				...toraMessages,
-				{
-					role: 'assistant',
-					text: 'Workspace updated from your prompt. Review the refreshed plan in Overview.',
-					timestamp: Date.now()
-				}
-			];
-			activeProjectTab.set('overview');
-		} catch (error) {
-			toraMessages = [
-				...toraMessages,
-				{
-					role: 'assistant',
-					text: error instanceof Error ? error.message : 'Failed to modify workspace.',
-					timestamp: Date.now()
-				}
-			];
-		} finally {
-			toraPrompt = '';
-		}
 	}
 </script>
 
@@ -299,6 +234,26 @@
 							<strong>{completionRate}%</strong>
 						</div>
 					</div>
+					<h4>Tech Stack</h4>
+					{#if (timeline.tech_stack ?? []).length > 0}
+						<div class="sidebar-chip-list">
+							{#each timeline.tech_stack ?? [] as stack (stack)}
+								<span class="label-chip">{stack}</span>
+							{/each}
+						</div>
+					{:else}
+						<p class="sidebar-empty">No tech stack provided yet.</p>
+					{/if}
+					<h4>Roles Needed</h4>
+					{#if (timeline.roles_needed ?? []).length > 0}
+						<div class="sidebar-chip-list">
+							{#each timeline.roles_needed ?? [] as role (role)}
+								<span class="label-chip">{role}</span>
+							{/each}
+						</div>
+					{:else}
+						<p class="sidebar-empty">No role recommendations available yet.</p>
+					{/if}
 				{:else}
 					<p class="sidebar-empty">Generate or select a template to initialize this workspace.</p>
 				{/if}
@@ -337,16 +292,17 @@
 			<section class="sidebar-section">
 				<h3>Tora AI</h3>
 				<p class="sidebar-empty">
-					Ask Tora to reshape timeline structure, sprint order, or task grouping.
+					Send edit instructions with full project state so Tora mutates the plan in place.
 				</p>
-				<div class="tora-chat-preview">
-					{#if toraMessages.length === 0}
-						<div class="sidebar-empty">No AI requests yet.</div>
-					{:else}
-						{#each toraMessages.slice(-6) as message (`${message.timestamp}-${message.role}`)}
-							<div class="tora-chip {message.role}">{message.text}</div>
-						{/each}
-					{/if}
+				<div class="sidebar-meta-list">
+					<div class="meta-row">
+						<span>Project</span>
+						<strong>{timeline?.project_name || 'No project loaded'}</strong>
+					</div>
+					<div class="meta-row">
+						<span>Sprints</span>
+						<strong>{sprints.length}</strong>
+					</div>
 				</div>
 			</section>
 		{:else if $activeProjectTab === 'progress'}
@@ -387,43 +343,7 @@
 		{:else if $activeProjectTab === 'tasks'}
 			<TaskBoard {roomId} {canEdit} />
 		{:else if $activeProjectTab === 'progress'}
-			<section class="canvas-panel">
-				<header class="canvas-head">
-					<h2>Progress</h2>
-					<span>{completionRate}% complete</span>
-				</header>
-				<div class="progress-stats">
-					<div class="stat-card done">
-						<span>Done</span>
-						<strong>{completedTasks}</strong>
-					</div>
-					<div class="stat-card active">
-						<span>In Progress</span>
-						<strong>{inProgressTasks}</strong>
-					</div>
-					<div class="stat-card todo">
-						<span>To Do</span>
-						<strong>{todoTasks}</strong>
-					</div>
-				</div>
-				<div class="sprint-progress-list">
-					{#each sprints as sprint (sprint.id)}
-						{@const sprintTotal = sprint.tasks.length}
-						{@const sprintDone = sprint.tasks.filter((task) => task.status === 'done').length}
-						{@const sprintPercent = sprintTotal > 0 ? Math.round((sprintDone / sprintTotal) * 100) : 0}
-						<article class="sprint-progress-card">
-							<div class="sprint-progress-head">
-								<strong>{sprint.name}</strong>
-								<span>{sprintPercent}%</span>
-							</div>
-							<div class="sprint-progress-track">
-								<div class="sprint-progress-fill" style={`width:${sprintPercent}%;`}></div>
-							</div>
-							<small>{formatRange(sprint.start_date, sprint.end_date)}</small>
-						</article>
-					{/each}
-				</div>
-			</section>
+			<ProgressGanttTab />
 		{:else if $activeProjectTab === 'visualizations'}
 			<section class="canvas-panel">
 				<header class="canvas-head">
@@ -474,43 +394,10 @@
 				</div>
 			</section>
 		{:else}
-			<section class="canvas-panel tora-panel">
-				<header class="canvas-head">
-					<h2>Tora AI Console</h2>
-					<span>{$timelineLoading ? 'Working...' : 'Ready'}</span>
-				</header>
-				<div class="tora-thread">
-					{#if toraMessages.length === 0}
-						<div class="empty-viz">Ask Tora to modify your board and it will regenerate the plan.</div>
-					{:else}
-						{#each toraMessages as message (`${message.timestamp}-${message.role}`)}
-							<article class="tora-message {message.role}">
-								<span>{message.role === 'user' ? 'You' : 'Tora'}</span>
-								<p>{message.text}</p>
-							</article>
-						{/each}
-					{/if}
-				</div>
-				<div class="tora-compose">
-					<textarea
-						bind:value={toraPrompt}
-						placeholder="Example: Split this into 4 sprints with QA in each sprint."
-						rows="3"
-					></textarea>
-					<button
-						type="button"
-						on:click={() => {
-							void askToraToModifyBoard();
-						}}
-						disabled={$timelineLoading || !toraPrompt.trim()}
-					>
-						{$timelineLoading ? 'Applying...' : 'Apply With Tora'}
-					</button>
-				</div>
-			</section>
+			<ToraAIPanel {roomId} />
 		{/if}
 	</main>
-</section>
+	</section>
 
 <style>
 	.project-workspace-shell {
@@ -706,28 +593,6 @@
 		color: rgba(212, 224, 250, 0.9);
 	}
 
-	.tora-chat-preview {
-		display: grid;
-		gap: 0.34rem;
-		max-height: 260px;
-		overflow: auto;
-	}
-
-	.tora-chip {
-		font-size: 0.73rem;
-		line-height: 1.35;
-		padding: 0.44rem 0.52rem;
-		border-radius: 9px;
-		border: 1px solid rgba(255, 255, 255, 0.12);
-		background: rgba(255, 255, 255, 0.05);
-		color: rgba(228, 236, 255, 0.9);
-	}
-
-	.tora-chip.user {
-		border-color: rgba(157, 197, 255, 0.56);
-		background: rgba(95, 155, 252, 0.2);
-	}
-
 	.workspace-canvas {
 		flex: 1;
 		min-width: 0;
@@ -769,81 +634,6 @@
 	.canvas-head span {
 		font-size: 0.76rem;
 		color: rgba(186, 199, 227, 0.84);
-	}
-
-	.progress-stats {
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 0.6rem;
-	}
-
-	.stat-card {
-		border-radius: 12px;
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		background: rgba(255, 255, 255, 0.04);
-		padding: 0.64rem 0.7rem;
-		display: grid;
-		gap: 0.2rem;
-	}
-
-	.stat-card span {
-		font-size: 0.72rem;
-		color: rgba(183, 197, 228, 0.78);
-	}
-
-	.stat-card strong {
-		font-size: 1.15rem;
-	}
-
-	.stat-card.done {
-		border-color: rgba(125, 215, 165, 0.4);
-	}
-
-	.stat-card.active {
-		border-color: rgba(123, 182, 255, 0.45);
-	}
-
-	.stat-card.todo {
-		border-color: rgba(255, 255, 255, 0.2);
-	}
-
-	.sprint-progress-list {
-		min-height: 0;
-		overflow: auto;
-		display: grid;
-		gap: 0.54rem;
-	}
-
-	.sprint-progress-card {
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		border-radius: 12px;
-		background: rgba(255, 255, 255, 0.03);
-		padding: 0.62rem 0.7rem;
-		display: grid;
-		gap: 0.38rem;
-	}
-
-	.sprint-progress-head {
-		display: flex;
-		justify-content: space-between;
-		gap: 0.5rem;
-		font-size: 0.78rem;
-	}
-
-	.sprint-progress-track {
-		height: 8px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.08);
-		overflow: hidden;
-	}
-
-	.sprint-progress-fill {
-		height: 100%;
-		background: linear-gradient(90deg, rgba(129, 185, 255, 0.95), rgba(102, 154, 232, 0.95));
-	}
-
-	.sprint-progress-card small {
-		color: rgba(175, 190, 220, 0.78);
 	}
 
 	.viz-grid {
@@ -927,97 +717,12 @@
 		color: rgba(197, 208, 232, 0.84);
 	}
 
-	.tora-panel {
-		grid-template-rows: auto 1fr auto;
-	}
-
-	.tora-thread {
-		min-height: 0;
-		overflow: auto;
-		display: grid;
-		gap: 0.45rem;
-		align-content: start;
-	}
-
-	.tora-message {
-		border: 1px solid rgba(255, 255, 255, 0.12);
-		border-radius: 11px;
-		background: rgba(255, 255, 255, 0.04);
-		padding: 0.5rem 0.56rem;
-		display: grid;
-		gap: 0.2rem;
-	}
-
-	.tora-message span {
-		font-size: 0.68rem;
-		font-weight: 700;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		color: rgba(184, 197, 225, 0.82);
-	}
-
-	.tora-message p {
-		margin: 0;
-		font-size: 0.78rem;
-		line-height: 1.4;
-		color: rgba(228, 235, 252, 0.94);
-	}
-
-	.tora-message.user {
-		border-color: rgba(150, 194, 255, 0.56);
-		background: rgba(104, 164, 252, 0.2);
-	}
-
-	.tora-compose {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 0.55rem;
-		align-items: end;
-	}
-
-	.tora-compose textarea {
-		border: 1px solid rgba(255, 255, 255, 0.14);
-		border-radius: 11px;
-		background: rgba(255, 255, 255, 0.03);
-		color: #eff5ff;
-		padding: 0.6rem 0.68rem;
-		resize: none;
-	}
-
-	.tora-compose textarea::placeholder {
-		color: rgba(191, 203, 229, 0.64);
-	}
-
-	.tora-compose button {
-		border: 1px solid rgba(255, 255, 255, 0.16);
-		border-radius: 10px;
-		background: rgba(255, 255, 255, 0.08);
-		color: #edf5ff;
-		padding: 0.54rem 0.72rem;
-		font-size: 0.78rem;
-		cursor: pointer;
-	}
-
-	.tora-compose button:hover:not(:disabled) {
-		border-color: rgba(175, 208, 255, 0.62);
-		background: rgba(255, 255, 255, 0.14);
-	}
-
-	.tora-compose button:disabled {
-		opacity: 0.56;
-		cursor: not-allowed;
-	}
-
 	@media (max-width: 980px) {
 		.secondary-sidebar {
 			display: none;
 		}
 
 		.viz-grid {
-			grid-template-columns: minmax(0, 1fr);
-		}
-
-		.progress-stats {
 			grid-template-columns: minmax(0, 1fr);
 		}
 	}
