@@ -153,8 +153,9 @@ func New(
 		r.With(authJWTContextMiddleware()).Get("/network/pending", networkHandler.ListPendingRequests)
 		r.With(authJWTContextMiddleware()).Get("/network/connections", networkHandler.ListConnections)
 		r.With(authJWTContextMiddleware()).Post("/rooms/direct", roomHandler.CreateDirectRoom)
-		r.With(authJWTContextMiddleware()).Post("/rooms/{roomId}/tasks", roomHandler.CreateRoomTask)
-		r.With(authJWTContextMiddleware()).Put("/rooms/{roomId}/tasks/{taskId}/status", roomHandler.UpdateRoomTaskStatus)
+		r.Post("/rooms/{roomId}/tasks", roomHandler.CreateRoomTask)
+		r.Delete("/rooms/{roomId}/tasks", roomHandler.DeleteRoomTasks)
+		r.Put("/rooms/{roomId}/tasks/{taskId}/status", roomHandler.UpdateRoomTaskStatus)
 
 		r.Post("/rooms", roomHandler.CreateRoom)
 		r.Post("/rooms/revive", roomHandler.ReviveRoom)

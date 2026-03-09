@@ -1,27 +1,69 @@
 <script lang="ts">
+	import { createEventDispatcher } from 'svelte';
 	import type { OnlineMember } from '$lib/types/chat';
 
 	export let members: OnlineMember[] = [];
 	export let isDarkMode = false;
+	export let canCollapse = false;
+	export let isCollapsed = false;
+
+	const dispatch = createEventDispatcher<{
+		toggleCollapse: void;
+	}>();
 </script>
 
-<aside class="online-panel {isDarkMode ? 'theme-dark' : ''}">
-	<div class="online-header">
-		<h3>Online</h3>
-		<span>{members.length}</span>
-	</div>
-	<div class="online-list">
-		{#if members.length === 0}
-			<div class="empty-label">No online members.</div>
-		{:else}
-			{#each members as member (member.id)}
-				<div class="online-member">
-					<span class="member-dot"></span>
-					<span class="member-name">{member.name}</span>
-				</div>
-			{/each}
-		{/if}
-	</div>
+<aside class="online-panel {isDarkMode ? 'theme-dark' : ''} {isCollapsed ? 'is-collapsed' : ''}">
+	{#if isCollapsed}
+		<div class="online-activity-bar">
+			{#if canCollapse}
+				<button
+					type="button"
+					class="online-activity-toggle"
+					on:click={() => dispatch('toggleCollapse')}
+					title="Expand online list"
+					aria-label="Expand online list"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M9 6l6 6-6 6"></path>
+					</svg>
+				</button>
+			{/if}
+			<span class="online-activity-label">Online</span>
+			<span class="online-activity-count">{members.length}</span>
+		</div>
+	{:else}
+		<div class="online-header">
+			<div class="online-header-title">
+				<h3>Online</h3>
+				<span>{members.length}</span>
+			</div>
+			{#if canCollapse}
+				<button
+					type="button"
+					class="online-collapse-button"
+					on:click={() => dispatch('toggleCollapse')}
+					title="Collapse online list"
+					aria-label="Collapse online list"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M15 6l-6 6 6 6"></path>
+					</svg>
+				</button>
+			{/if}
+		</div>
+		<div class="online-list">
+			{#if members.length === 0}
+				<div class="empty-label">No online members.</div>
+			{:else}
+				{#each members as member (member.id)}
+					<div class="online-member">
+						<span class="member-dot"></span>
+						<span class="member-name">{member.name}</span>
+					</div>
+				{/each}
+			{/if}
+		</div>
+	{/if}
 </aside>
 
 <style>
@@ -35,6 +77,94 @@
 
 	.online-panel.theme-dark {
 		background: linear-gradient(180deg, #0b0b0d 0%, #121214 100%);
+	}
+
+	.online-panel.is-collapsed {
+		align-items: stretch;
+	}
+
+	.online-activity-bar {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.8rem;
+		padding: 0.8rem 0.25rem;
+	}
+
+	.online-activity-toggle {
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		border: 1px solid #c7d0de;
+		border-radius: 6px;
+		background: #edf2f8;
+		color: #324057;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition:
+			background 140ms ease,
+			border-color 140ms ease,
+			color 140ms ease,
+			transform 140ms ease;
+	}
+
+	.online-panel.theme-dark .online-activity-toggle {
+		border-color: #2b3853;
+		background: #111b2f;
+		color: #d6e1f6;
+	}
+
+	.online-activity-toggle:hover {
+		background: #dfe8f4;
+		border-color: #aebfd4;
+		transform: translateY(-1px);
+	}
+
+	.online-panel.theme-dark .online-activity-toggle:hover {
+		background: #22324f;
+		border-color: #41587d;
+	}
+
+	.online-activity-toggle svg {
+		width: 13px;
+		height: 13px;
+		stroke: currentColor;
+		stroke-width: 2;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.online-activity-label {
+		writing-mode: vertical-rl;
+		transform: rotate(180deg);
+		font-size: 0.72rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: #627186;
+		user-select: none;
+	}
+
+	.online-panel.theme-dark .online-activity-label {
+		color: #93a4c4;
+	}
+
+	.online-activity-count {
+		font-size: 0.72rem;
+		color: #f8fbff;
+		font-weight: 700;
+		background: #2f3138;
+		padding: 0.18rem 0.46rem;
+		border-radius: 999px;
+	}
+
+	.online-panel.theme-dark .online-activity-count {
+		background: #222226;
+		color: #ececf2;
 	}
 
 	.online-header {
@@ -59,7 +189,14 @@
 		color: #f0f0f5;
 	}
 
-	.online-header span {
+	.online-header-title {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.58rem;
+		min-width: 0;
+	}
+
+	.online-header-title span {
 		font-size: 0.78rem;
 		color: #f8fbff;
 		font-weight: 700;
@@ -68,9 +205,55 @@
 		border-radius: 999px;
 	}
 
-	.online-panel.theme-dark .online-header span {
+	.online-panel.theme-dark .online-header-title span {
 		background: #222226;
 		color: #ececf2;
+	}
+
+	.online-collapse-button {
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		border: 1px solid #c7d0de;
+		border-radius: 6px;
+		background: #edf2f8;
+		color: #324057;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition:
+			background 140ms ease,
+			border-color 140ms ease,
+			color 140ms ease,
+			transform 140ms ease;
+	}
+
+	.online-panel.theme-dark .online-collapse-button {
+		border-color: #2b3853;
+		background: #111b2f;
+		color: #d6e1f6;
+	}
+
+	.online-collapse-button:hover {
+		background: #dfe8f4;
+		border-color: #aebfd4;
+		transform: translateY(-1px);
+	}
+
+	.online-panel.theme-dark .online-collapse-button:hover {
+		background: #22324f;
+		border-color: #41587d;
+	}
+
+	.online-collapse-button svg {
+		width: 13px;
+		height: 13px;
+		stroke: currentColor;
+		stroke-width: 2;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.online-list {

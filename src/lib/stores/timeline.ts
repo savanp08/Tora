@@ -1,6 +1,7 @@
 import { get, writable } from 'svelte/store';
 import type { ProjectTimeline, Sprint, TimelineTask, TimelineTaskStatus } from '$lib/types/timeline';
 import { currentUser } from '$lib/store';
+import { normalizeRoomIDValue } from '$lib/utils/chat/core';
 
 const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
@@ -10,9 +11,44 @@ type TimelineErrorResponse = {
 	message?: string;
 };
 
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+type RoomTaskRecord = {
+	id: string;
+	title: string;
+	description: string;
+	status: string;
+	sprintName: string;
+	createdAt: number;
+	updatedAt: number;
+};
+
+type ParsedTaskMetadata = {
+	cleanDescription: string;
+	type: string;
+	effortScore: number;
+	sprintStartDate: string;
+	sprintEndDate: string;
+};
+
+type TimelineSprintAccumulator = {
+	name: string;
+	startDate: string;
+	endDate: string;
+	earliestCreatedAt: number;
+	tasks: TimelineTask[];
+};
+
+export type ProjectTab = 'overview' | 'tasks' | 'progress' | 'visualizations' | 'tora_ai';
+
 export const projectTimeline = writable<ProjectTimeline | null>(null);
 export const timelineLoading = writable(false);
 export const timelineError = writable('');
+export const activeProjectTab = writable<ProjectTab>('overview');
+export const isProjectNew = writable<boolean>(true);
+
+let activeTimelineRoomId = '';
+let activeTimelineLoadToken = 0;
 
 function toRecord(value: unknown): Record<string, unknown> | null {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -129,6 +165,183 @@ async function parseErrorMessage(response: Response) {
 	return payload?.error?.trim() || payload?.message?.trim() || `HTTP ${response.status}`;
 }
 
+function parseTaskTimestamp(value: unknown) {
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		return value;
+	}
+	if (typeof value === 'string') {
+		const numeric = Number(value);
+		if (Number.isFinite(numeric)) {
+			return numeric;
+		}
+		const parsed = Date.parse(value);
+		if (Number.isFinite(parsed)) {
+			return parsed;
+		}
+	}
+	return Date.now();
+}
+
+function normalizeRoomTaskRecord(raw: unknown): RoomTaskRecord | null {
+	const source = toRecord(raw);
+	if (!source) {
+		return null;
+	}
+	const id = toStringValue(source.id);
+	const title = toStringValue(source.title);
+	if (!id || !title) {
+		return null;
+	}
+	return {
+		id,
+		title,
+		description: toStringValue(source.description),
+		status: toStringValue(source.status),
+		sprintName: toStringValue(source.sprint_name ?? source.sprintName),
+		createdAt: parseTaskTimestamp(source.created_at ?? source.createdAt),
+		updatedAt: parseTaskTimestamp(source.updated_at ?? source.updatedAt)
+	};
+}
+
+function parseTaskMetadata(description: string): ParsedTaskMetadata {
+	const trimmed = description.trim();
+	if (!trimmed) {
+		return {
+			cleanDescription: '',
+			type: 'general',
+			effortScore: 3,
+			sprintStartDate: '',
+			sprintEndDate: ''
+		};
+	}
+
+	const metadataMatch = trimmed.match(/\[([^\]]+)\]\s*$/);
+	if (!metadataMatch) {
+		return {
+			cleanDescription: trimmed,
+			type: 'general',
+			effortScore: 3,
+			sprintStartDate: '',
+			sprintEndDate: ''
+		};
+	}
+
+	let parsedType = 'general';
+	let parsedEffortScore = 3;
+	let sprintStartDate = '';
+	let sprintEndDate = '';
+	const metadataBody = metadataMatch[1] ?? '';
+	for (const section of metadataBody.split('|')) {
+		const [rawKey, ...rawValueParts] = section.split(':');
+		const key = toStringValue(rawKey).toLowerCase();
+		const rawValue = rawValueParts.join(':').trim();
+		if (!key || !rawValue) {
+			continue;
+		}
+		if (key === 'type') {
+			parsedType = rawValue.toLowerCase() || 'general';
+			continue;
+		}
+		if (key === 'effort') {
+			const numeric = Number(rawValue);
+			if (Number.isFinite(numeric)) {
+				parsedEffortScore = Math.max(1, Math.min(10, Math.floor(numeric)));
+			}
+			continue;
+		}
+		if (key === 'sprint' || key === 'sprint window') {
+			const dateWindowMatch = rawValue.match(/(\d{4}-\d{2}-\d{2})\s*->\s*(\d{4}-\d{2}-\d{2})/);
+			if (dateWindowMatch) {
+				sprintStartDate = dateWindowMatch[1];
+				sprintEndDate = dateWindowMatch[2];
+			}
+		}
+	}
+
+	return {
+		cleanDescription: trimmed.slice(0, metadataMatch.index).trim(),
+		type: parsedType,
+		effortScore: parsedEffortScore,
+		sprintStartDate,
+		sprintEndDate
+	};
+}
+
+function createSprintId(seed: string, index: number) {
+	const normalized = seed.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+	if (normalized) {
+		return `sprint-${normalized}-${index + 1}`;
+	}
+	return `sprint-${index + 1}`;
+}
+
+function buildTimelineFromRoomTasks(
+	taskRecords: RoomTaskRecord[],
+	fallbackProjectName = 'Project Timeline'
+): ProjectTimeline | null {
+	if (taskRecords.length === 0) {
+		return null;
+	}
+
+	const sprintMap = new Map<string, TimelineSprintAccumulator>();
+	for (const taskRecord of taskRecords) {
+		const sprintName = taskRecord.sprintName || 'Backlog';
+		const existing = sprintMap.get(sprintName) ?? {
+			name: sprintName,
+			startDate: '',
+			endDate: '',
+			earliestCreatedAt: taskRecord.createdAt,
+			tasks: []
+		};
+		const metadata = parseTaskMetadata(taskRecord.description);
+		if (!existing.startDate && metadata.sprintStartDate) {
+			existing.startDate = metadata.sprintStartDate;
+		}
+		if (!existing.endDate && metadata.sprintEndDate) {
+			existing.endDate = metadata.sprintEndDate;
+		}
+		existing.earliestCreatedAt = Math.min(existing.earliestCreatedAt, taskRecord.createdAt);
+		existing.tasks.push({
+			id: taskRecord.id,
+			title: taskRecord.title,
+			status: normalizeTaskStatus(taskRecord.status),
+			effort_score: metadata.effortScore,
+			type: metadata.type,
+			description: metadata.cleanDescription || undefined
+		});
+		sprintMap.set(sprintName, existing);
+	}
+
+	const sprintEntries = [...sprintMap.values()].sort((left, right) => {
+		if (left.startDate && right.startDate) {
+			if (left.startDate !== right.startDate) {
+				return left.startDate.localeCompare(right.startDate);
+			}
+		}
+		if (left.earliestCreatedAt !== right.earliestCreatedAt) {
+			return left.earliestCreatedAt - right.earliestCreatedAt;
+		}
+		return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+	});
+
+	const sprints: Sprint[] = sprintEntries.map((entry, index) => ({
+		id: createSprintId(entry.name, index),
+		name: entry.name,
+		start_date: entry.startDate,
+		end_date: entry.endDate,
+		tasks: entry.tasks
+	}));
+	if (sprints.length === 0) {
+		return null;
+	}
+
+	return {
+		project_name: fallbackProjectName,
+		total_progress: 0,
+		sprints
+	};
+}
+
 export function calculateTotalProgress(timeline: ProjectTimeline) {
 	const allTasks = timeline.sprints.flatMap((sprint) => sprint.tasks);
 	const total = allTasks.length;
@@ -142,6 +355,7 @@ export function calculateTotalProgress(timeline: ProjectTimeline) {
 export function setProjectTimeline(value: ProjectTimeline | null) {
 	if (!value) {
 		projectTimeline.set(null);
+		isProjectNew.set(true);
 		return;
 	}
 	const nextValue: ProjectTimeline = {
@@ -149,6 +363,7 @@ export function setProjectTimeline(value: ProjectTimeline | null) {
 		total_progress: calculateTotalProgress(value)
 	};
 	projectTimeline.set(nextValue);
+	isProjectNew.set(false);
 }
 
 export async function generateAITimeline(roomId: string, prompt: string) {
@@ -189,5 +404,73 @@ export async function generateAITimeline(roomId: string, prompt: string) {
 		throw error instanceof Error ? error : new Error(message);
 	} finally {
 		timelineLoading.set(false);
+	}
+}
+
+export async function initializeProjectTimelineForRoom(
+	roomId: string,
+	options?: {
+		fetchImpl?: FetchLike;
+		apiBase?: string;
+		fallbackProjectName?: string;
+	}
+) {
+	const normalizedRoomID = normalizeRoomIDValue(roomId);
+	activeTimelineRoomId = normalizedRoomID;
+	activeTimelineLoadToken += 1;
+	const loadToken = activeTimelineLoadToken;
+
+	if (!normalizedRoomID) {
+		setProjectTimeline(null);
+		timelineError.set('');
+		timelineLoading.set(false);
+		return null;
+	}
+
+	timelineLoading.set(true);
+	timelineError.set('');
+	setProjectTimeline(null);
+
+	const fetchImpl = options?.fetchImpl ?? fetch;
+	const apiBase = options?.apiBase?.trim() || API_BASE;
+
+	try {
+		const response = await fetchImpl(
+			`${apiBase}/api/rooms/${encodeURIComponent(normalizedRoomID)}/tasks`,
+			{
+				method: 'GET',
+				credentials: 'include'
+			}
+		);
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+
+		const payload = (await response.json().catch(() => [])) as unknown;
+		if (loadToken !== activeTimelineLoadToken || normalizedRoomID !== activeTimelineRoomId) {
+			return null;
+		}
+
+		const records = Array.isArray(payload) ? payload : [];
+		const normalizedTasks = records
+			.map((record) => normalizeRoomTaskRecord(record))
+			.filter((record): record is RoomTaskRecord => Boolean(record));
+		const timeline = buildTimelineFromRoomTasks(
+			normalizedTasks,
+			options?.fallbackProjectName || 'Project Timeline'
+		);
+		setProjectTimeline(timeline);
+		timelineError.set('');
+		return timeline;
+	} catch (error) {
+		if (loadToken === activeTimelineLoadToken) {
+			setProjectTimeline(null);
+			timelineError.set(error instanceof Error ? error.message : 'Failed to load project timeline');
+		}
+		return null;
+	} finally {
+		if (loadToken === activeTimelineLoadToken) {
+			timelineLoading.set(false);
+		}
 	}
 }

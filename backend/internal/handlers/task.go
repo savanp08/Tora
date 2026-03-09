@@ -39,6 +39,60 @@ type TaskStatusUpdateRequest struct {
 	Status string `json:"status"`
 }
 
+func resolveTaskRequesterID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return strings.TrimSpace(
+		firstNonEmpty(
+			AuthUserIDFromContext(r.Context()),
+			r.URL.Query().Get("userId"),
+			r.URL.Query().Get("user_id"),
+			r.Header.Get("X-User-Id"),
+		),
+	)
+}
+
+func resolveTaskRequesterMemberID(r *http.Request) string {
+	return normalizeIdentifier(resolveTaskRequesterID(r))
+}
+
+func resolveTaskRequesterAssigneeUUID(r *http.Request) *gocql.UUID {
+	rawUserID := resolveTaskRequesterID(r)
+	if rawUserID == "" {
+		return nil
+	}
+	candidates := []string{rawUserID}
+	if strings.Contains(rawUserID, "_") {
+		candidates = append(candidates, strings.ReplaceAll(rawUserID, "_", "-"))
+	}
+	for _, candidate := range candidates {
+		parsed, err := parseFlexibleTaskUUID(candidate)
+		if err != nil {
+			continue
+		}
+		assigneeID := parsed
+		return &assigneeID
+	}
+	return nil
+}
+
+func (h *RoomHandler) ensureTaskRequesterMembership(
+	ctx context.Context,
+	roomID string,
+	requesterID string,
+) (bool, error) {
+	normalizedRequesterID := normalizeIdentifier(requesterID)
+	if normalizedRequesterID == "" {
+		return false, nil
+	}
+	isMember, err := h.isRoomMember(ctx, roomID, normalizedRequesterID)
+	if err != nil {
+		return false, err
+	}
+	return isMember, nil
+}
+
 func (h *RoomHandler) ensureTaskSchema() {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return
@@ -150,6 +204,20 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
 		return
 	}
+	requesterMemberID := resolveTaskRequesterMemberID(r)
+	if requesterMemberID != "" {
+		isMember, memberErr := h.ensureTaskRequesterMembership(r.Context(), normalizedRoomID, requesterMemberID)
+		if memberErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+			return
+		}
+		if !isMember {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Join the room to create tasks"})
+			return
+		}
+	}
 
 	var req TaskCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -196,12 +264,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 
-	var assigneeID *gocql.UUID
-	if userIDRaw := strings.TrimSpace(AuthUserIDFromContext(r.Context())); userIDRaw != "" {
-		if parsedUserID, parseErr := gocql.ParseUUID(userIDRaw); parseErr == nil {
-			assigneeID = &parsedUserID
-		}
-	}
+	assigneeID := resolveTaskRequesterAssigneeUUID(r)
 
 	query := fmt.Sprintf(
 		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -251,11 +314,25 @@ func (h *RoomHandler) UpdateRoomTaskStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
-	roomUUID, _, err := resolveTaskRoomUUID(rawRoomID)
+	roomUUID, normalizedRoomID, err := resolveTaskRoomUUID(rawRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
 		return
+	}
+	requesterMemberID := resolveTaskRequesterMemberID(r)
+	if requesterMemberID != "" {
+		isMember, memberErr := h.ensureTaskRequesterMembership(r.Context(), normalizedRoomID, requesterMemberID)
+		if memberErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+			return
+		}
+		if !isMember {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Join the room to update tasks"})
+			return
+		}
 	}
 	taskID, err := parseFlexibleTaskUUID(strings.TrimSpace(chi.URLParam(r, "taskId")))
 	if err != nil {
@@ -288,6 +365,46 @@ func (h *RoomHandler) UpdateRoomTaskStatus(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+}
+
+func (h *RoomHandler) DeleteRoomTasks(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task storage unavailable"})
+		return
+	}
+
+	roomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
+		return
+	}
+	requesterMemberID := resolveTaskRequesterMemberID(r)
+	if requesterMemberID != "" {
+		isMember, memberErr := h.ensureTaskRequesterMembership(r.Context(), normalizedRoomID, requesterMemberID)
+		if memberErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+			return
+		}
+		if !isMember {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Join the room to clear tasks"})
+			return
+		}
+	}
+
+	if err := h.deleteRoomTasks(r.Context(), normalizedRoomID); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete room tasks"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 }
 
 func parseFlexibleTaskUUID(raw string) (gocql.UUID, error) {

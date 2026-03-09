@@ -40,6 +40,8 @@
 	export let isMobileView = false;
 	export let isDarkMode = false;
 	export let themePreference: ThemePreference = 'system';
+	export let canCollapse = false;
+	export let isCollapsed = false;
 
 	const dispatch = createEventDispatcher<{
 		select: { id: string; isMember: boolean; status: ThreadStatus };
@@ -51,6 +53,7 @@
 		};
 		toggleMenu: void;
 		toggleTheme: void;
+		toggleCollapse: void;
 		createRoom: void;
 		renameRoom: { roomId: string };
 	}>();
@@ -62,7 +65,6 @@
 	let streamlinedManualRootList = false;
 	let previousActiveRoomId = '';
 	let relationsPanelEl: HTMLElement | null = null;
-	let relationsTriggerEl: HTMLButtonElement | null = null;
 	const treeNodeWidth = 170;
 	const treeNodeHeight = 48;
 	const treeColumnGap = 230;
@@ -151,6 +153,9 @@
 	$: treeLayout = buildTreeLayout(currentTreeRows);
 	$: treeNodes = treeLayout.nodes;
 	$: treeEdges = treeLayout.edges;
+	$: if (isCollapsed && showRelationsMap) {
+		showRelationsMap = false;
+	}
 
 	onMount(() => {
 		const onDocumentPointerDown = (event: PointerEvent) => {
@@ -162,9 +167,6 @@
 				return;
 			}
 			if (relationsPanelEl?.contains(target)) {
-				return;
-			}
-			if (relationsTriggerEl?.contains(target)) {
 				return;
 			}
 			showRelationsMap = false;
@@ -595,13 +597,43 @@
 	}
 </script>
 
-<aside class="room-list {isDarkMode ? 'theme-dark' : ''}">
-	<div class="room-list-header">
+<aside class="room-list {isDarkMode ? 'theme-dark' : ''} {isCollapsed ? 'is-collapsed' : ''}">
+	{#if isCollapsed}
+		<div class="room-list-activity-bar">
+			<button
+				type="button"
+				class="activity-toggle-button"
+				on:click={() => dispatch('toggleCollapse')}
+				title="Expand room list"
+				aria-label="Expand room list"
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M9 6l6 6-6 6"></path>
+				</svg>
+			</button>
+			<span class="activity-label">Chats</span>
+			<span class="thread-count activity-count">{totalRooms}</span>
+		</div>
+	{:else}
+		<div class="room-list-header">
 		<div class="list-title">
 			<h2>Chats</h2>
 			<span class="thread-count">{totalRooms}</span>
 		</div>
 		<div class="list-actions">
+			{#if canCollapse}
+				<button
+					type="button"
+					class="icon-button collapse-icon-button"
+					on:click={() => dispatch('toggleCollapse')}
+					title="Collapse room list"
+					aria-label="Collapse room list"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M15 6l-6 6 6 6"></path>
+					</svg>
+				</button>
+			{/if}
 			<button
 				type="button"
 				class="icon-button theme-icon-button {isDarkMode ? 'active' : ''}"
@@ -961,6 +993,7 @@
 			{/if}
 		{/if}
 	</div>
+	{/if}
 </aside>
 
 {#if showRelationsMap}
@@ -1039,6 +1072,86 @@
 	.room-list.theme-dark {
 		background: linear-gradient(180deg, #0f1729 0%, #0b1323 100%);
 		color: #dbe5f8;
+	}
+
+	.room-list.is-collapsed {
+		align-items: stretch;
+	}
+
+	.room-list-activity-bar {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.8rem;
+		padding: 0.8rem 0.25rem;
+	}
+
+	.activity-toggle-button {
+		width: 2rem;
+		height: 2rem;
+		padding: 0;
+		border: 1px solid #c7d0de;
+		border-radius: 6px;
+		background: #edf2f8;
+		color: #324057;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition:
+			background 140ms ease,
+			border-color 140ms ease,
+			color 140ms ease,
+			transform 140ms ease;
+	}
+
+	.room-list.theme-dark .activity-toggle-button {
+		border-color: #2b3853;
+		background: #111b2f;
+		color: #d6e1f6;
+	}
+
+	.activity-toggle-button:hover {
+		background: #dfe8f4;
+		border-color: #aebfd4;
+		transform: translateY(-1px);
+	}
+
+	.room-list.theme-dark .activity-toggle-button:hover {
+		background: #22324f;
+		border-color: #41587d;
+	}
+
+	.activity-toggle-button svg {
+		width: 13px;
+		height: 13px;
+		stroke: currentColor;
+		stroke-width: 2;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.activity-label {
+		writing-mode: vertical-rl;
+		transform: rotate(180deg);
+		font-size: 0.72rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: #627186;
+		user-select: none;
+	}
+
+	.room-list.theme-dark .activity-label {
+		color: #93a4c4;
+	}
+
+	.activity-count {
+		min-width: auto;
+		padding: 0.16rem 0.44rem;
+		font-size: 0.72rem;
 	}
 
 	.room-list-header {
@@ -1491,6 +1604,20 @@
 		background: #dfe8f4;
 		border-color: #aebfd4;
 		transform: translateY(-1px);
+	}
+
+	.collapse-icon-button {
+		font-size: 0;
+	}
+
+	.collapse-icon-button svg {
+		width: 13px;
+		height: 13px;
+		stroke: currentColor;
+		stroke-width: 2;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.room-list.theme-dark .icon-button:hover:not(:disabled) {

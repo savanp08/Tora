@@ -2,6 +2,8 @@ package websocket
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -206,6 +208,46 @@ func parseFlexibleUUID(raw string) (gocql.UUID, error) {
 	return gocql.ParseUUID(formatted)
 }
 
+func deterministicTaskRoomUUID(normalizedRoomID string) gocql.UUID {
+	digest := sha1.Sum([]byte("converse-task-room:" + normalizedRoomID))
+	uuidBytes := make([]byte, 16)
+	copy(uuidBytes, digest[:16])
+	uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x50
+	uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80
+	compact := hex.EncodeToString(uuidBytes)
+	formatted := fmt.Sprintf(
+		"%s-%s-%s-%s-%s",
+		compact[0:8],
+		compact[8:12],
+		compact[12:16],
+		compact[16:20],
+		compact[20:32],
+	)
+	parsed, err := gocql.ParseUUID(formatted)
+	if err != nil {
+		return gocql.UUID{}
+	}
+	return parsed
+}
+
+func resolveTaskRoomUUID(raw string) (gocql.UUID, error) {
+	normalizedRoomID := normalizeRoomID(raw)
+	if normalizedRoomID == "" {
+		return gocql.UUID{}, fmt.Errorf("room id is required")
+	}
+	if parsed, err := parseFlexibleUUID(strings.TrimSpace(raw)); err == nil {
+		return parsed, nil
+	}
+	if parsed, err := parseFlexibleUUID(normalizedRoomID); err == nil {
+		return parsed, nil
+	}
+	parsed := deterministicTaskRoomUUID(normalizedRoomID)
+	if parsed == (gocql.UUID{}) {
+		return gocql.UUID{}, fmt.Errorf("invalid room id")
+	}
+	return parsed, nil
+}
+
 func (s *MessageService) UpsertTaskPayload(ctx context.Context, payload TaskPayload) error {
 	if s == nil || s.Scylla == nil || s.Scylla.Session == nil {
 		return fmt.Errorf("scylla session is not configured")
@@ -214,7 +256,7 @@ func (s *MessageService) UpsertTaskPayload(ctx context.Context, payload TaskPayl
 		ctx = context.Background()
 	}
 
-	roomUUID, err := parseFlexibleUUID(payload.RoomID)
+	roomUUID, err := resolveTaskRoomUUID(payload.RoomID)
 	if err != nil {
 		return fmt.Errorf("invalid room id: %w", err)
 	}
@@ -267,7 +309,7 @@ func (s *MessageService) DeleteTaskPayload(ctx context.Context, payload TaskPayl
 		ctx = context.Background()
 	}
 
-	roomUUID, err := parseFlexibleUUID(payload.RoomID)
+	roomUUID, err := resolveTaskRoomUUID(payload.RoomID)
 	if err != nil {
 		return fmt.Errorf("invalid room id: %w", err)
 	}

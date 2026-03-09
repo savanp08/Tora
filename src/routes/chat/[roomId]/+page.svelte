@@ -14,7 +14,7 @@
 	import RoomDashboard from '$lib/components/chat/RoomDashboard.svelte';
 	import ChatStatusBars from '$lib/components/chat/ChatStatusBars.svelte';
 	import ChatSidebar from '$lib/components/chat/ChatSidebar.svelte';
-	import TaskBoard from '$lib/components/workspace/TaskBoard.svelte';
+	import ProjectWorkspace from '$lib/components/workspace/ProjectWorkspace.svelte';
 	import ChatUiDialog from '$lib/components/chat/ChatUiDialog.svelte';
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
@@ -156,7 +156,9 @@
 	import { generateUsername } from '$lib/utils/usernameGenerator';
 	import { clearSessionToken, getSessionToken, setSessionToken } from '$lib/utils/sessionToken';
 	import {
+		readSessionChatLayoutPreferences,
 		readSessionRoomPreferences,
+		writeSessionChatLayoutPreferences,
 		writeSessionRoomPreferences
 	} from '$lib/utils/sessionPreferences';
 	import {
@@ -246,6 +248,7 @@
 	const WORKSPACE_MODULES: WorkspaceModule[] = ['dashboard', 'draw', 'code', 'tasks'];
 	const BOARD_WORKSPACE_MODULES: BoardWorkspaceModule[] = ['dashboard', 'draw', 'tasks'];
 	const COMPACT_NAV_BREAKPOINT = 600;
+	const PANEL_COLLAPSE_BREAKPOINT = 600;
 
 	function getCanvasPresenceColor(user: { color?: unknown } | null | undefined) {
 		if (typeof user?.color === 'string') {
@@ -417,6 +420,13 @@
 		return normalized;
 	}
 
+	function syncSessionChatLayoutPreferencesFromStorage() {
+		const preferences = readSessionChatLayoutPreferences();
+		const normalized = writeSessionChatLayoutPreferences(preferences);
+		isOnlinePanelCollapsed = normalized.onlinePanelCollapsed;
+		return normalized;
+	}
+
 	let sidebarRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let roomExpiryTicker: ReturnType<typeof setInterval> | null = null;
 	$: if (browser) {
@@ -467,6 +477,12 @@
 	let roomMembershipSyncing: Record<string, boolean> = {};
 	let isMobileView = false;
 	let isCompactNavViewport = false;
+	let canCollapseRoomList = false;
+	let canCollapseOnlinePanel = false;
+	let isRoomListCollapsed = false;
+	let isOnlinePanelCollapsed = false;
+	let isOnlinePanelAutoCollapsed = false;
+	let onlinePanelCollapsedBeforeAuto = false;
 	let mobilePane: 'list' | 'chat' = 'chat';
 	let focusMessageId = '';
 	let focusConsumedForRoom = false;
@@ -628,6 +644,19 @@
 	$: isDrawBoardActive = visibleBoardModules.includes('draw');
 	$: isTaskBoardActive = visibleBoardModules.includes('tasks');
 	$: isDashboardActive = visibleBoardModules.includes('dashboard');
+	$: hasNonDashboardBoardOpen = isDrawBoardActive || isTaskBoardActive || isCanvasOpen;
+	$: isOnlinePanelEffectivelyCollapsed =
+		canCollapseOnlinePanel && (isOnlinePanelCollapsed || isOnlinePanelAutoCollapsed);
+	$: {
+		const shouldAutoCollapseOnlinePanel = canCollapseOnlinePanel && hasNonDashboardBoardOpen;
+		if (shouldAutoCollapseOnlinePanel && !isOnlinePanelAutoCollapsed) {
+			onlinePanelCollapsedBeforeAuto = isOnlinePanelCollapsed;
+			isOnlinePanelAutoCollapsed = true;
+		} else if (!shouldAutoCollapseOnlinePanel && isOnlinePanelAutoCollapsed) {
+			isOnlinePanelAutoCollapsed = false;
+			isOnlinePanelCollapsed = onlinePanelCollapsedBeforeAuto;
+		}
+	}
 	$: addableWorkspaceModules = WORKSPACE_MODULES.filter(
 		(module) => module !== 'dashboard' && !activeWorkspaceModules.includes(module)
 	);
@@ -803,6 +832,9 @@
 		roomId
 	);
 	$: filteredLeftRooms = filterThreadList(leftRooms, chatListSearch, messagesByRoom, roomId);
+	$: if (canCollapseRoomList && isRoomListCollapsed && showLeftMenu) {
+		showLeftMenu = false;
+	}
 
 	$: if (roomId) {
 		const existingRoom = roomThreads.find((thread) => thread.id === roomId);
@@ -952,6 +984,7 @@
 		}
 		syncActiveRoomPasswordFromHash();
 		syncSessionRoomPreferencesFromStorage();
+		syncSessionChatLayoutPreferencesFromStorage();
 		initializeTrustedDevicePreference();
 		if (trustedCachingEnabled && roomId) {
 			void hydrateOfflineCache(roomId);
@@ -985,8 +1018,17 @@
 		if (!browser) {
 			return;
 		}
-		isMobileView = window.innerWidth <= 900;
-		isCompactNavViewport = window.innerWidth < COMPACT_NAV_BREAKPOINT;
+		const viewportWidth = window.innerWidth;
+		isMobileView = viewportWidth <= 900;
+		isCompactNavViewport = viewportWidth < COMPACT_NAV_BREAKPOINT;
+		canCollapseRoomList = viewportWidth > PANEL_COLLAPSE_BREAKPOINT && !isMobileView;
+		canCollapseOnlinePanel = viewportWidth > 1199 && viewportWidth > PANEL_COLLAPSE_BREAKPOINT;
+		if (!canCollapseRoomList) {
+			isRoomListCollapsed = false;
+		}
+		if (!canCollapseOnlinePanel) {
+			isOnlinePanelAutoCollapsed = false;
+		}
 		if (!isMobileView) {
 			mobilePane = 'chat';
 		}
@@ -5055,6 +5097,24 @@
 		showPrivateAiChat = false;
 	}
 
+	function toggleRoomListCollapse() {
+		if (!canCollapseRoomList) {
+			return;
+		}
+		isRoomListCollapsed = !isRoomListCollapsed;
+		showLeftMenu = false;
+	}
+
+	function toggleOnlinePanelCollapse() {
+		if (!canCollapseOnlinePanel || isOnlinePanelAutoCollapsed) {
+			return;
+		}
+		isOnlinePanelCollapsed = !isOnlinePanelCollapsed;
+		writeSessionChatLayoutPreferences({
+			onlinePanelCollapsed: isOnlinePanelCollapsed
+		});
+	}
+
 	function toggleLeftMenu() {
 		showLeftMenu = !showLeftMenu;
 	}
@@ -6444,6 +6504,8 @@
 	class:theme-dark={$isDarkMode}
 	class:mobile-list-only={isMobileView && mobilePane === 'list'}
 	class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
+	class:sidebar-collapsed={canCollapseRoomList && isRoomListCollapsed}
+	class:online-collapsed={isOnlinePanelEffectivelyCollapsed}
 >
 	<MonochromeRoomBackground seed={roomId || 'chat-room'} />
 
@@ -6458,11 +6520,14 @@
 			{showLeftMenu}
 			isDarkMode={$isDarkMode}
 			{themePreference}
+			canCollapse={canCollapseRoomList}
+			isCollapsed={canCollapseRoomList && isRoomListCollapsed}
 			bind:chatListSearch
 			on:select={onSidebarSelect}
 			on:jumpOrigin={onJumpToBreakOrigin}
 			on:toggleMenu={toggleLeftMenu}
 			on:toggleTheme={toggleThemePreference}
+			on:toggleCollapse={toggleRoomListCollapse}
 			on:createRoom={createRoomFromMenu}
 			on:renameRoom={(event) => void renameRoom(event.detail.roomId)}
 		/>
@@ -6828,7 +6893,7 @@
 											on:aiOrganizeError={onDashboardOrganizeError}
 										/>
 									{:else}
-										<TaskBoard {roomId} canEdit={isMember && !isRoomExpired} />
+										<ProjectWorkspace {roomId} canEdit={isMember && !isRoomExpired} />
 									{/if}
 								</section>
 							{/each}
@@ -6979,7 +7044,13 @@
 	</div>
 
 	<div class="online-pane">
-		<OnlinePanel members={currentOnlineMembers} isDarkMode={$isDarkMode} />
+		<OnlinePanel
+			members={currentOnlineMembers}
+			isDarkMode={$isDarkMode}
+			canCollapse={canCollapseOnlinePanel && !isOnlinePanelAutoCollapsed}
+			isCollapsed={isOnlinePanelEffectivelyCollapsed}
+			on:toggleCollapse={toggleOnlinePanelCollapse}
+		/>
 	</div>
 </section>
 

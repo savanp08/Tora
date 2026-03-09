@@ -1,4 +1,6 @@
+import { get } from 'svelte/store';
 import type { ProjectTimeline, Sprint, TimelineTask } from '$lib/types/timeline';
+import { currentUser } from '$lib/store';
 import { setProjectTimeline, timelineError, timelineLoading } from '$lib/stores/timeline';
 
 const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
@@ -50,173 +52,313 @@ async function parseErrorMessage(response: Response) {
 }
 
 export const TIMELINE_TEMPLATES: Record<string, ProjectTimeline> = {
-	software_mvp: {
-		project_name: 'Software MVP Roadmap',
+	software_agile: {
+		project_name: 'Software Agile Delivery',
 		total_progress: 0,
 		sprints: [
 			{
-				id: 'sprint-db-auth',
-				name: 'Phase 1: DB & Auth',
+				id: 'sprint-backlog',
+				name: 'Backlog',
 				start_date: toISODate(0),
 				end_date: toISODate(6),
 				tasks: [
 					{
-						id: 'task-db-schema',
-						title: 'Finalize database schema',
-						status: 'todo',
-						effort_score: 6,
-						type: 'backend',
-						description: 'Design core entities and migration plan.'
-					},
-					{
-						id: 'task-auth-flow',
-						title: 'Implement JWT auth flow',
-						status: 'todo',
-						effort_score: 7,
-						type: 'backend',
-						description: 'Add login, refresh, and role-based guards.'
-					},
-					{
-						id: 'task-login-ui',
-						title: 'Ship login and signup UI',
+						id: 'task-refinement',
+						title: 'Refine backlog stories',
 						status: 'todo',
 						effort_score: 4,
-						type: 'frontend',
-						description: 'Create polished auth forms and validation.'
-					}
-				]
-			},
-			{
-				id: 'sprint-core-api',
-				name: 'Phase 2: Core API',
-				start_date: toISODate(7),
-				end_date: toISODate(13),
-				tasks: [
-					{
-						id: 'task-resource-crud',
-						title: 'Build core CRUD endpoints',
-						status: 'todo',
-						effort_score: 7,
-						type: 'backend',
-						description: 'Implement create/read/update/delete for key resources.'
+						type: 'planning',
+						description: 'Split epics into sprint-ready tasks with clear acceptance criteria.'
 					},
 					{
-						id: 'task-api-contract-tests',
-						title: 'Add API contract tests',
-						status: 'todo',
-						effort_score: 5,
-						type: 'qa',
-						description: 'Cover success and failure flows for all core endpoints.'
-					},
-					{
-						id: 'task-observability',
-						title: 'Add logs and tracing baseline',
+						id: 'task-prioritization',
+						title: 'Prioritize sprint scope',
 						status: 'todo',
 						effort_score: 3,
-						type: 'devops',
-						description: 'Structured logs and request tracing for all API calls.'
+						type: 'planning',
+						description: 'Balance impact and effort across frontend, backend, and QA.'
 					}
 				]
 			},
 			{
 				id: 'sprint-frontend',
-				name: 'Phase 3: Frontend',
+				name: 'Frontend',
+				start_date: toISODate(7),
+				end_date: toISODate(13),
+				tasks: [
+					{
+						id: 'task-ui-shell',
+						title: 'Build workspace shell screens',
+						status: 'todo',
+						effort_score: 6,
+						type: 'frontend',
+						description: 'Implement primary layout, routing, and responsive behavior.'
+					},
+					{
+						id: 'task-forms',
+						title: 'Implement task create/edit flows',
+						status: 'todo',
+						effort_score: 5,
+						type: 'frontend',
+						description: 'Create polished task forms, validation, and optimistic updates.'
+					}
+				]
+			},
+			{
+				id: 'sprint-backend',
+				name: 'Backend',
 				start_date: toISODate(14),
 				end_date: toISODate(20),
 				tasks: [
 					{
-						id: 'task-dashboard-view',
-						title: 'Build dashboard screens',
+						id: 'task-apis',
+						title: 'Ship core task APIs',
 						status: 'todo',
-						effort_score: 6,
-						type: 'frontend',
-						description: 'Create board, list, and detail views for core entities.'
+						effort_score: 7,
+						type: 'backend',
+						description: 'Expose CRUD endpoints, status transitions, and filters.'
 					},
 					{
-						id: 'task-state-management',
-						title: 'Wire state stores to API',
+						id: 'task-events',
+						title: 'Integrate websocket task events',
 						status: 'todo',
 						effort_score: 5,
-						type: 'frontend',
-						description: 'Connect API endpoints to stores with loading/error handling.'
-					},
+						type: 'backend',
+						description: 'Broadcast create/move/update events for collaborative updates.'
+					}
+				]
+			},
+			{
+				id: 'sprint-qa',
+				name: 'QA',
+				start_date: toISODate(21),
+				end_date: toISODate(27),
+				tasks: [
 					{
-						id: 'task-uat-polish',
-						title: 'Run UAT and polish UX',
+						id: 'task-regression',
+						title: 'Run regression checklist',
 						status: 'todo',
 						effort_score: 4,
 						type: 'qa',
-						description: 'Fix edge cases and improve clarity before release.'
+						description: 'Validate all critical paths across desktop and mobile.'
+					},
+					{
+						id: 'task-bug-bash',
+						title: 'Bug bash and release polish',
+						status: 'todo',
+						effort_score: 4,
+						type: 'qa',
+						description: 'Fix high-impact issues and stabilize release build.'
 					}
 				]
 			}
 		]
 	},
-	marketing_campaign: {
-		project_name: 'Marketing Campaign Plan',
+	marketing_blitz: {
+		project_name: 'Marketing Blitz Campaign',
 		total_progress: 0,
 		sprints: [
 			{
-				id: 'sprint-asset-creation',
-				name: 'Asset Creation',
+				id: 'sprint-strategy',
+				name: 'Strategy',
 				start_date: toISODate(0),
 				end_date: toISODate(6),
 				tasks: [
 					{
-						id: 'task-brand-brief',
-						title: 'Finalize campaign brief',
+						id: 'task-audience',
+						title: 'Define ICP and audience segments',
 						status: 'todo',
 						effort_score: 4,
 						type: 'strategy',
-						description: 'Align goals, audience, channels, and core messaging.'
+						description: 'Map priorities, channels, and conversion goals.'
 					},
 					{
-						id: 'task-creative-assets',
-						title: 'Produce creative assets',
+						id: 'task-offer',
+						title: 'Finalize offer and message pillars',
 						status: 'todo',
-						effort_score: 6,
-						type: 'design',
-						description: 'Design ad variants for social, web, and email.'
-					},
-					{
-						id: 'task-copy-pack',
-						title: 'Write copy pack',
-						status: 'todo',
-						effort_score: 5,
-						type: 'content',
-						description: 'Draft headlines, CTA variants, and email sequence.'
+						effort_score: 4,
+						type: 'strategy',
+						description: 'Lock the offer narrative and value proposition.'
 					}
 				]
 			},
 			{
-				id: 'sprint-launch-distribution',
-				name: 'Launch & Distribution',
+				id: 'sprint-assets',
+				name: 'Asset Creation',
 				start_date: toISODate(7),
 				end_date: toISODate(13),
 				tasks: [
 					{
-						id: 'task-channel-launch',
-						title: 'Launch ads across channels',
+						id: 'task-ad-creative',
+						title: 'Produce ad creative set',
 						status: 'todo',
 						effort_score: 6,
-						type: 'marketing',
-						description: 'Publish campaign across paid social and search.'
+						type: 'design',
+						description: 'Create static/video variations for top channels.'
 					},
 					{
-						id: 'task-performance-review',
-						title: 'Review performance metrics',
+						id: 'task-creative-assets',
+						title: 'Build landing page + email assets',
 						status: 'todo',
-						effort_score: 4,
-						type: 'analytics',
-						description: 'Analyze CTR, conversion, and spend efficiency.'
-					},
+						effort_score: 6,
+						type: 'content',
+						description: 'Prepare launch copy and tracking-ready page sections.'
+					}
+				]
+			},
+			{
+				id: 'sprint-launch',
+				name: 'Ad Launch',
+				start_date: toISODate(14),
+				end_date: toISODate(20),
+				tasks: [
 					{
-						id: 'task-iteration',
-						title: 'Iterate creatives and targeting',
+						id: 'task-launch-ops',
+						title: 'Launch paid campaigns',
 						status: 'todo',
 						effort_score: 5,
-						type: 'optimization',
-						description: 'Improve campaign performance based on first-week data.'
+						type: 'marketing',
+						description: 'Activate channel plans and monitor budget pacing.'
+					},
+					{
+						id: 'task-week1-opt',
+						title: 'Optimize first-week performance',
+						status: 'todo',
+						effort_score: 5,
+						type: 'analytics',
+						description: 'Adjust copy, audience, and bids from performance signals.'
+					}
+				]
+			}
+		]
+	},
+	time_critical: {
+		project_name: 'Time-Critical Ops Plan',
+		total_progress: 0,
+		sprints: [
+			{
+				id: 'day-1',
+				name: 'Day 1',
+				start_date: toISODate(0),
+				end_date: toISODate(0),
+				tasks: [
+					{
+						id: 'day1-triage',
+						title: 'Initial incident triage',
+						status: 'todo',
+						effort_score: 5,
+						type: 'operations',
+						description: 'Assess impact and lock immediate mitigation steps.'
+					},
+					{
+						id: 'day1-owners',
+						title: 'Assign owners and escalation paths',
+						status: 'todo',
+						effort_score: 3,
+						type: 'coordination',
+						description: 'Map each blocker to an accountable owner.'
+					}
+				]
+			},
+			{
+				id: 'day-2',
+				name: 'Day 2',
+				start_date: toISODate(1),
+				end_date: toISODate(1),
+				tasks: [
+					{
+						id: 'day2-fixes',
+						title: 'Ship critical fixes',
+						status: 'todo',
+						effort_score: 7,
+						type: 'execution',
+						description: 'Deliver high-priority fixes and verify rollback safety.'
+					},
+					{
+						id: 'day2-comms',
+						title: 'Publish stakeholder update',
+						status: 'todo',
+						effort_score: 3,
+						type: 'communication',
+						description: 'Share progress, risk status, and next timeline.'
+					}
+				]
+			}
+		]
+	},
+	high_volume: {
+		project_name: 'High-Volume Workflow Board',
+		total_progress: 0,
+		sprints: [
+			{
+				id: 'bucket-triage',
+				name: 'Triage',
+				start_date: toISODate(0),
+				end_date: toISODate(2),
+				tasks: [
+					{
+						id: 'triage-intake',
+						title: 'Intake queue review',
+						status: 'todo',
+						effort_score: 3,
+						type: 'bucket',
+						description: 'Dummy bucket task: classify incoming items by urgency.'
+					},
+					{
+						id: 'triage-routing',
+						title: 'Route items to workstreams',
+						status: 'todo',
+						effort_score: 4,
+						type: 'bucket',
+						description: 'Dummy bucket task: assign each item to correct pipeline.'
+					}
+				]
+			},
+			{
+				id: 'bucket-processing',
+				name: 'Processing',
+				start_date: toISODate(3),
+				end_date: toISODate(6),
+				tasks: [
+					{
+						id: 'processing-core',
+						title: 'Bulk processing pass',
+						status: 'todo',
+						effort_score: 6,
+						type: 'bucket',
+						description: 'Dummy bucket task: execute primary handling workflow.'
+					},
+					{
+						id: 'processing-escalations',
+						title: 'Exception handling',
+						status: 'todo',
+						effort_score: 5,
+						type: 'bucket',
+						description: 'Dummy bucket task: resolve escalated edge cases.'
+					}
+				]
+			},
+			{
+				id: 'bucket-review',
+				name: 'Review',
+				start_date: toISODate(7),
+				end_date: toISODate(9),
+				tasks: [
+					{
+						id: 'review-qa',
+						title: 'Quality review sample',
+						status: 'todo',
+						effort_score: 4,
+						type: 'bucket',
+						description: 'Dummy bucket task: audit quality against expected output.'
+					},
+					{
+						id: 'review-signoff',
+						title: 'Final sign-off batch',
+						status: 'todo',
+						effort_score: 3,
+						type: 'bucket',
+						description: 'Dummy bucket task: close processed work and publish summary.'
 					}
 				]
 			}
@@ -238,6 +380,7 @@ export async function loadTemplate(roomId: string, templateKey: string) {
 	const timeline = cloneTimeline(baseTemplate);
 	timelineLoading.set(true);
 	timelineError.set('');
+	const sessionUserID = (get(currentUser)?.id || '').trim();
 
 	try {
 		for (const sprint of timeline.sprints) {
@@ -245,7 +388,8 @@ export async function loadTemplate(roomId: string, templateKey: string) {
 				const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/tasks`, {
 					method: 'POST',
 					headers: {
-						'Content-Type': 'application/json'
+						'Content-Type': 'application/json',
+						...(sessionUserID ? { 'X-User-Id': sessionUserID } : {})
 					},
 					credentials: 'include',
 					body: JSON.stringify({

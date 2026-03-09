@@ -1,24 +1,6 @@
 <script lang="ts">
 	import type { Sprint, TimelineTask, TimelineTaskStatus } from '$lib/types/timeline';
-	import {
-		generateAITimeline,
-		projectTimeline,
-		timelineError,
-		timelineLoading
-	} from '$lib/stores/timeline';
-	import { loadTemplate } from '$lib/utils/timelineTemplates';
-
-	export let roomId = '';
-
-	type TimelineTemplateOption = {
-		key: string;
-		label: string;
-	};
-
-	const TEMPLATE_OPTIONS: TimelineTemplateOption[] = [
-		{ key: 'software_mvp', label: 'Software MVP' },
-		{ key: 'marketing_campaign', label: 'Marketing Campaign' }
-	];
+	import { projectTimeline } from '$lib/stores/timeline';
 
 	const KANBAN_COLUMNS: Array<{ key: TimelineTaskStatus; label: string }> = [
 		{ key: 'todo', label: 'To Do' },
@@ -26,9 +8,7 @@
 		{ key: 'done', label: 'Done' }
 	];
 
-	let aiPrompt = '';
 	let selectedSprintID = '';
-	let isTemplateMenuOpen = false;
 
 	$: sprints = $projectTimeline?.sprints ?? [];
 	$: if (sprints.length > 0 && !sprints.some((sprint) => sprint.id === selectedSprintID)) {
@@ -56,97 +36,9 @@
 		const completed = sprint.tasks.filter((task) => task.status === 'done').length;
 		return Math.round((completed / total) * 100);
 	}
-
-	async function handleGenerate() {
-		const normalizedRoomID = roomId.trim();
-		const normalizedPrompt = aiPrompt.trim();
-		if (!normalizedRoomID) {
-			timelineError.set('Room id is required before generating a timeline.');
-			return;
-		}
-		if (!normalizedPrompt) {
-			timelineError.set('Describe your project before generating.');
-			return;
-		}
-
-		isTemplateMenuOpen = false;
-		try {
-			await generateAITimeline(normalizedRoomID, normalizedPrompt);
-		} catch {
-			// Error state is already surfaced through the store.
-		}
-	}
-
-	async function handleTemplateSelection(templateKey: string) {
-		const normalizedRoomID = roomId.trim();
-		if (!normalizedRoomID) {
-			timelineError.set('Room id is required before loading a template.');
-			return;
-		}
-		isTemplateMenuOpen = false;
-		try {
-			await loadTemplate(normalizedRoomID, templateKey);
-		} catch {
-			// Error state is already surfaced through the store.
-		}
-	}
 </script>
 
 <section class="timeline-board" aria-label="Project timeline board">
-	<div class="control-panel glass-card">
-		<div class="template-group">
-			<button
-				type="button"
-				class="template-trigger"
-				on:click={() => {
-					isTemplateMenuOpen = !isTemplateMenuOpen;
-				}}
-				aria-expanded={isTemplateMenuOpen}
-			>
-				1-Click Templates
-			</button>
-			{#if isTemplateMenuOpen}
-				<div class="template-menu" role="menu">
-					{#each TEMPLATE_OPTIONS as option}
-						<button
-							type="button"
-							class="template-option"
-							on:click={() => {
-								void handleTemplateSelection(option.key);
-							}}
-						>
-							{option.label}
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
-
-		<div class="ai-group">
-			<input
-				type="text"
-				class="ai-input"
-				bind:value={aiPrompt}
-				placeholder="Describe your project..."
-				disabled={$timelineLoading}
-			/>
-			<button
-				type="button"
-				class="generate-btn"
-				on:click={() => {
-					void handleGenerate();
-				}}
-				disabled={$timelineLoading}
-			>
-				{$timelineLoading ? 'Generating...' : 'Generate'}
-			</button>
-		</div>
-	</div>
-
-	{#if $timelineError}
-		<div class="error-banner">{$timelineError}</div>
-	{/if}
-
 	{#if $projectTimeline}
 		<section class="timeline-header glass-card">
 			<div>
@@ -229,7 +121,7 @@
 		</section>
 	{:else}
 		<section class="glass-card empty-state">
-			Use a template or AI prompt to generate your first timeline board.
+			Use the onboarding flow to create your first timeline board.
 		</section>
 	{/if}
 </section>
@@ -243,20 +135,20 @@
 		--timeline-muted: rgba(205, 213, 235, 0.75);
 		--timeline-accent: #8ab4ff;
 		--timeline-accent-soft: rgba(138, 180, 255, 0.2);
-		--timeline-error-bg: rgba(220, 38, 38, 0.18);
-		--timeline-error-border: rgba(248, 113, 113, 0.35);
-		--timeline-error-text: #ffd4df;
 	}
 
 	.timeline-board {
 		height: 100%;
 		min-height: 0;
 		display: grid;
-		grid-template-rows: auto auto auto 1fr;
+		grid-template-rows: auto 1fr;
 		gap: 0.85rem;
 		padding: 0.9rem;
 		background: radial-gradient(circle at 12% -8%, rgba(255, 255, 255, 0.07), transparent 34%), var(--timeline-bg);
 		color: var(--timeline-text);
+		position: relative;
+		overflow: visible;
+		isolation: isolate;
 	}
 
 	.glass-card {
@@ -267,89 +159,12 @@
 		-webkit-backdrop-filter: blur(16px);
 	}
 
-	.control-panel {
-		padding: 0.75rem;
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 0.72rem;
-		justify-content: space-between;
-		position: relative;
-	}
-
-	.template-group {
-		position: relative;
-	}
-
-	.template-trigger,
-	.generate-btn,
-	.template-option {
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		background: rgba(255, 255, 255, 0.06);
-		color: var(--timeline-text);
-		border-radius: 10px;
-		padding: 0.52rem 0.7rem;
-		font-size: 0.8rem;
-		cursor: pointer;
-		transition: border-color 0.2s ease, background 0.2s ease;
-	}
-
-	.template-trigger:hover,
-	.generate-btn:hover,
-	.template-option:hover {
-		border-color: rgba(173, 203, 255, 0.62);
-		background: rgba(255, 255, 255, 0.11);
-	}
-
-	.template-menu {
-		position: absolute;
-		top: calc(100% + 8px);
-		left: 0;
-		display: grid;
-		gap: 0.3rem;
-		min-width: 180px;
-		padding: 0.45rem;
-		border-radius: 12px;
-		border: 1px solid rgba(255, 255, 255, 0.16);
-		background: rgba(14, 18, 26, 0.96);
-		backdrop-filter: blur(18px);
-		-webkit-backdrop-filter: blur(18px);
-		z-index: 30;
-	}
-
-	.ai-group {
-		flex: 1;
-		min-width: min(100%, 340px);
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 0.45rem;
-	}
-
-	.ai-input {
-		border-radius: 10px;
-		border: 1px solid rgba(255, 255, 255, 0.14);
-		background: rgba(255, 255, 255, 0.04);
-		color: var(--timeline-text);
-		padding: 0.54rem 0.65rem;
-	}
-
-	.ai-input::placeholder {
-		color: var(--timeline-muted);
-	}
-
-	.error-banner {
-		border-radius: 12px;
-		padding: 0.55rem 0.68rem;
-		border: 1px solid var(--timeline-error-border);
-		background: var(--timeline-error-bg);
-		color: var(--timeline-error-text);
-		font-size: 0.8rem;
-	}
-
 	.timeline-header {
 		padding: 0.8rem;
 		display: grid;
 		gap: 0.7rem;
+		position: relative;
+		z-index: 1;
 	}
 
 	.timeline-header h2 {
@@ -391,6 +206,8 @@
 		display: grid;
 		grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
 		gap: 0.85rem;
+		position: relative;
+		z-index: 1;
 	}
 
 	.sprint-column,

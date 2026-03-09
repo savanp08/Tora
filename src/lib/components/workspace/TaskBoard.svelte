@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { currentUser } from '$lib/store';
 	import { activeContext } from '$lib/stores/jiraContext';
 	import {
 		moveTaskOptimistic,
@@ -70,6 +71,7 @@
 	let contextLoadToken = 0;
 	let roomBoardError = '';
 
+	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: todoTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'todo');
 	$: inProgressTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'in_progress');
@@ -86,6 +88,16 @@
 	$: if (contextAware && contextKey !== lastContextKey) {
 		lastContextKey = contextKey;
 		void loadContextTasks();
+	}
+
+	function withSessionUserHeaders(headers: Record<string, string> = {}) {
+		if (!sessionUserID) {
+			return headers;
+		}
+		return {
+			...headers,
+			'X-User-Id': sessionUserID
+		};
 	}
 
 	function resolveColumn(statusValue: string): ColumnKey {
@@ -215,7 +227,8 @@
 
 			const response = await fetch(endpoint, {
 				method: 'GET',
-				credentials: 'include'
+				credentials: 'include',
+				headers: withSessionUserHeaders()
 			});
 			if (!response.ok) {
 				throw new Error(await parseErrorMessage(response));
@@ -277,7 +290,7 @@
 			`${API_BASE}/api/rooms/${encodeURIComponent(normalizedWorkspaceRoomID)}/tasks/${encodeURIComponent(taskID)}/status`,
 			{
 				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
+				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
 				credentials: 'include',
 				body: JSON.stringify({ status: columnKey })
 			}
@@ -367,7 +380,7 @@
 					`${API_BASE}/api/rooms/${encodeURIComponent(normalizedWorkspaceRoomID)}/tasks`,
 					{
 						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
+						headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
 						credentials: 'include',
 						body: JSON.stringify({
 							content
@@ -478,16 +491,32 @@
 			return;
 		}
 
-		moveTaskToColumn(incomingTaskId, columnKey);
+		void moveTaskToColumn(incomingTaskId, columnKey);
 		stopDragging();
 	}
 
-	function moveTaskToColumn(taskId: string, targetColumn: ColumnKey) {
+	async function persistRoomTaskStatus(taskId: string, roomIdValue: string, status: ColumnKey) {
+		const response = await fetch(
+			`${API_BASE}/api/rooms/${encodeURIComponent(roomIdValue)}/tasks/${encodeURIComponent(taskId)}/status`,
+			{
+				method: 'PUT',
+				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+				credentials: 'include',
+				body: JSON.stringify({ status })
+			}
+		);
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+	}
+
+	async function moveTaskToColumn(taskId: string, targetColumn: ColumnKey) {
 		const existingTask = $taskStore.find((task) => task.id === taskId);
 		if (!existingTask) {
 			return;
 		}
-		if (resolveColumn(existingTask.status) === targetColumn) {
+		const previousColumn = resolveColumn(existingTask.status);
+		if (previousColumn === targetColumn) {
 			return;
 		}
 
@@ -498,10 +527,19 @@
 
 		const targetRoomId = normalizedRoomId || updatedTask.roomId;
 		if (!targetRoomId) {
+			moveTaskOptimistic(taskId, previousColumn);
+			roomBoardError = 'Invalid room id';
 			return;
 		}
 
-		sendSocketPayload(buildTaskSocketPayload('task_move', targetRoomId, updatedTask));
+		roomBoardError = '';
+		try {
+			await persistRoomTaskStatus(taskId, targetRoomId, targetColumn);
+			sendSocketPayload(buildTaskSocketPayload('task_move', targetRoomId, updatedTask));
+		} catch (error) {
+			moveTaskOptimistic(taskId, previousColumn);
+			roomBoardError = error instanceof Error ? error.message : 'Failed to move task';
+		}
 	}
 
 	function formatUpdatedAt(value: number) {
@@ -536,7 +574,7 @@
 		try {
 			const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomID)}/tasks`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
 				credentials: 'include',
 				body: JSON.stringify({ content })
 			});

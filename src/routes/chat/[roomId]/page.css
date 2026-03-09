@@ -16,6 +16,18 @@
 	overflow: hidden;
 }
 
+.chat-shell.sidebar-collapsed {
+	grid-template-columns: 58px minmax(0, 1fr) 280px;
+}
+
+.chat-shell.online-collapsed {
+	grid-template-columns: 330px minmax(0, 1fr) 58px;
+}
+
+.chat-shell.sidebar-collapsed.online-collapsed {
+	grid-template-columns: 58px minmax(0, 1fr) 58px;
+}
+
 .chat-shell > :not(:first-child) {
 	position: relative;
 	z-index: 1;
@@ -887,6 +899,10 @@
 @media (max-width: 1199px) {
 	.chat-shell {
 		grid-template-columns: 290px minmax(0, 1fr);
+	}
+
+	.chat-shell.sidebar-collapsed {
+		grid-template-columns: 58px minmax(0, 1fr);
 	}
 
 	.sidebar-pane {
