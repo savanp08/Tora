@@ -133,6 +133,7 @@ func New(
 		r.Post("/auth/register", authHandler.Register)
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
+		r.Post("/auth/logout", authHandler.Logout)
 		r.Post("/auth/forgot-password/request", authHandler.ForgotPasswordRequest)
 		r.Post("/auth/forgot-password/verify", authHandler.ForgotPasswordVerify)
 		r.Post("/auth/anonymous", authHandler.Anonymous)
@@ -143,6 +144,7 @@ func New(
 		r.With(authJWTContextMiddleware()).Route("/personal/items", func(r chi.Router) {
 			r.Get("/", personalHandler.GetItems)
 			r.Post("/", personalHandler.CreateItem)
+			r.Post("/bulk", personalHandler.CreateItemsBulk)
 			r.Put("/{itemId}/status", personalHandler.UpdateItemStatus)
 			r.Delete("/{itemId}", personalHandler.DeleteItem)
 		})
@@ -173,6 +175,7 @@ func New(
 		r.Get("/rooms/{roomId}/tasks", roomHandler.GetRoomTasks)
 		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
 		r.Post("/rooms/{roomId}/ai-organize", roomHandler.AIOrganizeDashboard)
+		r.Post("/rooms/{roomId}/ai-timeline", roomHandler.HandleAIGenerateTimeline)
 		r.Post("/rooms/{roomId}/pins", roomHandler.UpsertRoomPin)
 		r.Get("/rooms/{roomId}/pins/navigate", roomHandler.NavigateRoomPins)
 		r.Get("/rooms/{roomId}/pins/{pinMessageId}/discussion/comments", roomHandler.GetPinnedDiscussionComments)

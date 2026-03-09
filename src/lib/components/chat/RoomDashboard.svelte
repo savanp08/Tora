@@ -33,6 +33,17 @@
 		note: 1,
 		task: 2
 	};
+	const BEACON_MAX_SCHEDULE_DAYS = 15;
+	const BEACON_DEFAULT_OFFSET_MINUTES = 10;
+	const BEACON_TIME_STEP_MINUTES = 5;
+	const BEACON_DAY_MS = 24 * 60 * 60 * 1000;
+	const BEACON_QUICK_OFFSETS = [10, 30, 60] as const;
+
+	type BeaconDayOption = {
+		value: string;
+		label: string;
+		dateLabel: string;
+	};
 
 	let noteDraftByItemId: Record<string, string> = {};
 	let isOrganizing = false;
@@ -44,9 +55,14 @@
 	let addComposerError = '';
 	let addNoteDraft = '';
 	let addBeaconDraft = '';
-	let addBeaconAtDraft = '';
+	let addBeaconDateDraft = '';
+	let addBeaconTimeDraft = '';
 	let addTaskTitleDraft = '';
 	let addTaskDetailDraft = '';
+	let beaconMinDateValue = '';
+	let beaconMaxDateValue = '';
+	let beaconDayOptions: BeaconDayOption[] = [];
+	let beaconPreviewTimestamp = 0;
 
 	$: scopedItems = items.filter((item) => item.roomId === roomId);
 	$: scheduledItemsComputed = scopedItems
@@ -68,6 +84,10 @@
 	$: priorityItems = organizePreview?.priority ?? priorityItemsComputed;
 	$: expiredItems = organizePreview?.expired ?? expiredItemsComputed;
 	$: groupedPinnedItems = organizePreview?.pinnedItems ?? groupedPinnedItemsComputed;
+	$: beaconMinDateValue = toLocalDateInputValue(nowMs);
+	$: beaconMaxDateValue = toLocalDateInputValue(nowMs + BEACON_MAX_SCHEDULE_DAYS * BEACON_DAY_MS);
+	$: beaconDayOptions = buildBeaconDayOptions(beaconMinDateValue, beaconMaxDateValue);
+	$: beaconPreviewTimestamp = composeBeaconTimestamp(addBeaconDateDraft, addBeaconTimeDraft);
 
 	onDestroy(() => {
 		if (ticker) {
@@ -298,22 +318,125 @@
 		}
 	}
 
-	function toLocalDateTimeInputValue(timestamp: number) {
-		const value = new Date(timestamp);
-		const year = value.getFullYear();
-		const month = `${value.getMonth() + 1}`.padStart(2, '0');
-		const day = `${value.getDate()}`.padStart(2, '0');
-		const hours = `${value.getHours()}`.padStart(2, '0');
-		const minutes = `${value.getMinutes()}`.padStart(2, '0');
-		return `${year}-${month}-${day}T${hours}:${minutes}`;
+	function padTwo(value: number) {
+		return `${value}`.padStart(2, '0');
 	}
 
-	function parseLocalDateTimeInput(value: string) {
-		const parsed = Date.parse(value);
+	function toLocalDateInputValue(timestamp: number) {
+		const value = new Date(timestamp);
+		const year = value.getFullYear();
+		const month = padTwo(value.getMonth() + 1);
+		const day = padTwo(value.getDate());
+		return `${year}-${month}-${day}`;
+	}
+
+	function toLocalTimeInputValue(timestamp: number) {
+		const value = new Date(timestamp);
+		return `${padTwo(value.getHours())}:${padTwo(value.getMinutes())}`;
+	}
+
+	function roundTimestampToStep(timestamp: number, stepMinutes: number) {
+		const stepMs = Math.max(1, stepMinutes) * 60 * 1000;
+		return Math.ceil(timestamp / stepMs) * stepMs;
+	}
+
+	function parseDateOnlyInput(value: string) {
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+			return 0;
+		}
+		const parsed = Date.parse(`${value}T00:00`);
 		if (!Number.isFinite(parsed) || parsed <= 0) {
 			return 0;
 		}
 		return Math.trunc(parsed);
+	}
+
+	function normalizeBeaconDateInput(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return '';
+		}
+		const parsed = parseDateOnlyInput(trimmed);
+		if (!parsed) {
+			return '';
+		}
+		if (beaconMinDateValue && trimmed < beaconMinDateValue) {
+			return beaconMinDateValue;
+		}
+		if (beaconMaxDateValue && trimmed > beaconMaxDateValue) {
+			return beaconMaxDateValue;
+		}
+		return trimmed;
+	}
+
+	function composeBeaconTimestamp(dateValue: string, timeValue: string) {
+		const normalizedDate = normalizeBeaconDateInput(dateValue);
+		const normalizedTime = timeValue.trim();
+		if (!normalizedDate || !/^\d{2}:\d{2}$/.test(normalizedTime)) {
+			return 0;
+		}
+		const parsed = Date.parse(`${normalizedDate}T${normalizedTime}`);
+		if (!Number.isFinite(parsed) || parsed <= 0) {
+			return 0;
+		}
+		return Math.trunc(parsed);
+	}
+
+	function setBeaconDraftFromTimestamp(timestamp: number) {
+		const rounded = roundTimestampToStep(timestamp, BEACON_TIME_STEP_MINUTES);
+		addBeaconDateDraft = normalizeBeaconDateInput(toLocalDateInputValue(rounded));
+		addBeaconTimeDraft = toLocalTimeInputValue(rounded);
+	}
+
+	function formatBeaconDayLabel(offset: number) {
+		if (offset === 0) {
+			return 'Today';
+		}
+		if (offset === 1) {
+			return 'Tomorrow';
+		}
+		return `Day ${offset + 1}`;
+	}
+
+	function formatBeaconDayDate(value: Date) {
+		return value.toLocaleDateString([], {
+			weekday: 'short',
+			month: 'short',
+			day: 'numeric'
+		});
+	}
+
+	function buildBeaconDayOptions(minDateValue: string, maxDateValue: string) {
+		const minDateTimestamp = parseDateOnlyInput(minDateValue);
+		const maxDateTimestamp = parseDateOnlyInput(maxDateValue);
+		if (!minDateTimestamp || !maxDateTimestamp || maxDateTimestamp < minDateTimestamp) {
+			return [] as BeaconDayOption[];
+		}
+		const dayCount = Math.max(0, Math.round((maxDateTimestamp - minDateTimestamp) / BEACON_DAY_MS));
+		const options: BeaconDayOption[] = [];
+		for (let offset = 0; offset <= dayCount; offset += 1) {
+			const timestamp = minDateTimestamp + offset * BEACON_DAY_MS;
+			const value = toLocalDateInputValue(timestamp);
+			options.push({
+				value,
+				label: formatBeaconDayLabel(offset),
+				dateLabel: formatBeaconDayDate(new Date(timestamp))
+			});
+		}
+		return options;
+	}
+
+	function selectBeaconDate(value: string) {
+		const normalized = normalizeBeaconDateInput(value);
+		if (!normalized) {
+			return;
+		}
+		addBeaconDateDraft = normalized;
+	}
+
+	function applyBeaconQuickOffset(minutes: number) {
+		const safeMinutes = Math.max(1, Math.trunc(minutes));
+		setBeaconDraftFromTimestamp(Date.now() + safeMinutes * 60 * 1000);
 	}
 
 	function closeAddComposer() {
@@ -324,7 +447,7 @@
 	function resetAddComposerDrafts() {
 		addNoteDraft = '';
 		addBeaconDraft = '';
-		addBeaconAtDraft = toLocalDateTimeInputValue(Date.now() + 10 * 60 * 1000);
+		setBeaconDraftFromTimestamp(Date.now() + BEACON_DEFAULT_OFFSET_MINUTES * 60 * 1000);
 		addTaskTitleDraft = '';
 		addTaskDetailDraft = '';
 	}
@@ -332,8 +455,8 @@
 	function openAddComposer(kind: DashboardAddItemKind) {
 		addComposerKind = kind;
 		addComposerError = '';
-		if (kind === 'beacon' && !addBeaconAtDraft) {
-			addBeaconAtDraft = toLocalDateTimeInputValue(Date.now() + 10 * 60 * 1000);
+		if (kind === 'beacon' && (!addBeaconDateDraft || !addBeaconTimeDraft)) {
+			setBeaconDraftFromTimestamp(Date.now() + BEACON_DEFAULT_OFFSET_MINUTES * 60 * 1000);
 		}
 	}
 
@@ -352,9 +475,17 @@
 		}
 		if (addComposerKind === 'beacon') {
 			const text = addBeaconDraft.trim();
-			const beaconAt = parseLocalDateTimeInput(addBeaconAtDraft);
+			const beaconAt = composeBeaconTimestamp(addBeaconDateDraft, addBeaconTimeDraft);
 			if (!text) {
 				addComposerError = 'Beacon text is required.';
+				return;
+			}
+			if (!addBeaconDateDraft || !addBeaconTimeDraft || !beaconAt) {
+				addComposerError = 'Choose a valid day and time.';
+				return;
+			}
+			if (addBeaconDateDraft < beaconMinDateValue || addBeaconDateDraft > beaconMaxDateValue) {
+				addComposerError = `Beacon can only be scheduled within the next ${BEACON_MAX_SCHEDULE_DAYS} days.`;
 				return;
 			}
 			if (beaconAt <= Date.now()) {
@@ -489,13 +620,80 @@
 						maxlength="500"
 					></textarea>
 				</label>
-				<label class="composer-field">
-					<span>Date and time</span>
-					<input type="datetime-local" bind:value={addBeaconAtDraft} />
-				</label>
+				<div class="beacon-scheduler">
+					<div class="composer-field">
+						<span>Quick day picker</span>
+						<div class="beacon-day-scroll" role="listbox" aria-label="Beacon day picker">
+							{#each beaconDayOptions as option (option.value)}
+								<button
+									type="button"
+									class="beacon-day-chip"
+									class:is-active={addBeaconDateDraft === option.value}
+									on:click={() => selectBeaconDate(option.value)}
+								>
+									<strong>{option.label}</strong>
+									<small>{option.dateLabel}</small>
+								</button>
+							{/each}
+						</div>
+					</div>
+
+					<div class="beacon-datetime-grid">
+						<label class="composer-field">
+							<span>Date</span>
+							<div class="beacon-input-wrap">
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<rect x="4.5" y="5.5" width="15" height="14" rx="2"></rect>
+									<path d="M8 3.8v3.2M16 3.8v3.2M4.5 9.2h15"></path>
+								</svg>
+								<input
+									class="beacon-datetime-input"
+									type="date"
+									bind:value={addBeaconDateDraft}
+									min={beaconMinDateValue}
+									max={beaconMaxDateValue}
+								/>
+							</div>
+						</label>
+
+						<label class="composer-field">
+							<span>Time</span>
+							<div class="beacon-input-wrap">
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									<circle cx="12" cy="12" r="8.5"></circle>
+									<path d="M12 7.6V12l3 1.8"></path>
+								</svg>
+								<input
+									class="beacon-datetime-input"
+									type="time"
+									bind:value={addBeaconTimeDraft}
+									step={BEACON_TIME_STEP_MINUTES * 60}
+								/>
+							</div>
+						</label>
+					</div>
+
+					<div class="beacon-quick-time">
+						<span>Quick set</span>
+						<div class="beacon-quick-time-actions">
+							{#each BEACON_QUICK_OFFSETS as offsetMinutes (offsetMinutes)}
+								<button type="button" on:click={() => applyBeaconQuickOffset(offsetMinutes)}>
+									+{offsetMinutes}m
+								</button>
+							{/each}
+						</div>
+					</div>
+				</div>
 				{#if addBeaconDraft.trim()}
 					<div class="beacon-preview">
 						<div class="preview-pill">Beacon Preview</div>
+						<div class="beacon-preview-time">
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<circle cx="12" cy="12" r="8.5"></circle>
+								<path d="M12 7.6V12l3 1.8"></path>
+							</svg>
+							<span>{formatDateTime(beaconPreviewTimestamp || null)}</span>
+						</div>
 						<p>{addBeaconDraft.trim()}</p>
 					</div>
 				{/if}
@@ -992,6 +1190,169 @@
 		resize: vertical;
 	}
 
+	.beacon-scheduler {
+		display: grid;
+		gap: 0.56rem;
+		padding: 0.56rem;
+		border: 1px solid var(--dash-border);
+		border-radius: 0.74rem;
+		background: color-mix(in srgb, var(--dash-card-bg) 85%, transparent);
+	}
+
+	.beacon-day-scroll {
+		display: flex;
+		gap: 0.42rem;
+		overflow-x: auto;
+		padding: 0.12rem 0.04rem 0.16rem;
+		scrollbar-width: thin;
+		scrollbar-color: color-mix(in srgb, var(--dash-accent) 46%, transparent) transparent;
+	}
+
+	.beacon-day-chip {
+		flex: 0 0 auto;
+		display: grid;
+		gap: 0.12rem;
+		min-width: 6.1rem;
+		padding: 0.42rem 0.48rem;
+		border-radius: 0.58rem;
+		border: 1px solid var(--dash-border);
+		background: var(--dash-input-bg);
+		color: var(--dash-text);
+		text-align: left;
+		cursor: pointer;
+		transition:
+			border-color 0.16s ease,
+			background 0.16s ease,
+			transform 0.16s ease;
+	}
+
+	.beacon-day-chip strong {
+		font-size: 0.7rem;
+		font-weight: 700;
+	}
+
+	.beacon-day-chip small {
+		font-size: 0.62rem;
+		color: var(--dash-soft);
+	}
+
+	.beacon-day-chip:hover {
+		border-color: var(--dash-border-strong);
+		transform: translateY(-1px);
+	}
+
+	.beacon-day-chip.is-active {
+		border-color: color-mix(in srgb, var(--dash-accent) 56%, var(--dash-border-strong));
+		background: color-mix(in srgb, var(--dash-accent-soft) 45%, var(--dash-input-bg));
+	}
+
+	.beacon-datetime-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.48rem;
+	}
+
+	.beacon-input-wrap {
+		display: flex;
+		align-items: center;
+		gap: 0.42rem;
+		border: 1px solid var(--dash-border);
+		border-radius: 0.62rem;
+		background: var(--dash-input-bg);
+		padding: 0.24rem 0.42rem;
+	}
+
+	.beacon-input-wrap svg {
+		width: 0.88rem;
+		height: 0.88rem;
+		stroke: var(--dash-soft);
+		stroke-width: 1.85;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		flex-shrink: 0;
+	}
+
+	.beacon-input-wrap:focus-within {
+		border-color: var(--dash-border-strong);
+		box-shadow: var(--dash-focus-ring);
+	}
+
+	.beacon-datetime-input {
+		border: 0 !important;
+		background: transparent !important;
+		padding: 0.2rem 0 !important;
+		border-radius: 0 !important;
+		min-height: 1.9rem;
+		color: var(--dash-text);
+	}
+
+	.beacon-datetime-input:focus {
+		box-shadow: none !important;
+	}
+
+	.beacon-quick-time {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.4rem;
+		flex-wrap: wrap;
+	}
+
+	.beacon-quick-time span {
+		font-size: 0.64rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--dash-soft);
+	}
+
+	.beacon-quick-time-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.34rem;
+		flex-wrap: wrap;
+	}
+
+	.beacon-quick-time-actions button {
+		border: 1px solid var(--dash-border);
+		border-radius: 999px;
+		padding: 0.22rem 0.52rem;
+		font-size: 0.66rem;
+		font-weight: 700;
+		background: var(--dash-input-bg);
+		color: var(--dash-text);
+		cursor: pointer;
+		transition:
+			background 0.16s ease,
+			border-color 0.16s ease;
+	}
+
+	.beacon-quick-time-actions button:hover {
+		border-color: var(--dash-border-strong);
+		background: color-mix(in srgb, var(--dash-accent-soft) 38%, var(--dash-input-bg));
+	}
+
+	.beacon-day-chip:focus-visible,
+	.beacon-quick-time-actions button:focus-visible {
+		outline: none;
+		box-shadow: var(--dash-focus-ring);
+	}
+
+	.beacon-datetime-input::-webkit-calendar-picker-indicator {
+		opacity: 0.82;
+		cursor: pointer;
+	}
+
+	.room-dashboard.theme-dark .beacon-datetime-input {
+		color-scheme: dark;
+	}
+
+	.room-dashboard.theme-dark .beacon-datetime-input::-webkit-calendar-picker-indicator {
+		filter: invert(1) brightness(1.8);
+		opacity: 0.96;
+	}
+
 	.beacon-preview {
 		position: relative;
 		display: grid;
@@ -1027,6 +1388,25 @@
 		color: var(--dash-chip-text);
 		background: var(--dash-chip-bg);
 		border: 1px solid var(--dash-border);
+	}
+
+	.beacon-preview-time {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.32rem;
+		font-size: 0.67rem;
+		font-weight: 700;
+		color: var(--dash-soft);
+	}
+
+	.beacon-preview-time svg {
+		width: 0.76rem;
+		height: 0.76rem;
+		stroke: currentColor;
+		stroke-width: 1.85;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.beacon-preview p {
@@ -1310,6 +1690,10 @@
 
 		.group-block {
 			padding: 0.44rem;
+		}
+
+		.beacon-datetime-grid {
+			grid-template-columns: minmax(0, 1fr);
 		}
 	}
 

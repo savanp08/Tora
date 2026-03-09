@@ -283,6 +283,7 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 	}
 
 	userRoomsTable := normalizedKeyspace + ".user_rooms"
+	userRoomsTextTable := normalizedKeyspace + ".user_rooms_text"
 	userConnectionsTable := normalizedKeyspace + ".user_connections"
 	personalItemsTable := normalizedKeyspace + ".personal_items"
 	tasksTable := normalizedKeyspace + ".tasks"
@@ -304,6 +305,20 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS %s (
 				user_id uuid,
+				room_id text,
+				room_name text,
+				role text,
+				room_type text,
+				joined_at timestamp,
+				last_accessed timestamp,
+				expires_at timestamp,
+				PRIMARY KEY ((user_id), room_id)
+			) WITH CLUSTERING ORDER BY (room_id ASC)`,
+			userRoomsTextTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				user_id uuid,
 				target_id uuid,
 				status text,
 				created_at timestamp,
@@ -316,9 +331,15 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 				user_id uuid,
 				item_id uuid,
 				type text,
+				title text,
 				content text,
+				description text,
 				status text,
 				due_at timestamp,
+				start_at timestamp,
+				end_at timestamp,
+				remind_at timestamp,
+				repeat_rule text,
 				created_at timestamp,
 				PRIMARY KEY ((user_id), item_id)
 			) WITH CLUSTERING ORDER BY (item_id DESC)`,
@@ -331,6 +352,7 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 				title text,
 				description text,
 				status text,
+				sprint_name text,
 				assignee_id uuid,
 				created_at timestamp,
 				updated_at timestamp,
@@ -355,6 +377,39 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD expires_at timestamp`, roomsTable),
 	}
 	for _, alterQuery := range alterRoomsQueries {
+		err := session.Query(alterQuery).Exec()
+		if err != nil {
+			lowered := strings.ToLower(strings.TrimSpace(err.Error()))
+			if strings.Contains(lowered, "duplicate") || strings.Contains(lowered, "already exists") {
+				continue
+			}
+			return err
+		}
+	}
+
+	alterPersonalItemsQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD title text`, personalItemsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD description text`, personalItemsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD start_at timestamp`, personalItemsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD end_at timestamp`, personalItemsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD remind_at timestamp`, personalItemsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD repeat_rule text`, personalItemsTable),
+	}
+	for _, alterQuery := range alterPersonalItemsQueries {
+		err := session.Query(alterQuery).Exec()
+		if err != nil {
+			lowered := strings.ToLower(strings.TrimSpace(err.Error()))
+			if strings.Contains(lowered, "duplicate") || strings.Contains(lowered, "already exists") {
+				continue
+			}
+			return err
+		}
+	}
+
+	alterTasksQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD sprint_name text`, tasksTable),
+	}
+	for _, alterQuery := range alterTasksQueries {
 		err := session.Query(alterQuery).Exec()
 		if err != nil {
 			lowered := strings.ToLower(strings.TrimSpace(err.Error()))

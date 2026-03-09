@@ -463,6 +463,11 @@ func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
 	writeAuthJSON(w, http.StatusOK, AuthResponse{User: user, Token: token})
 }
 
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	clearAuthCookie(w, r)
+	writeAuthJSON(w, http.StatusOK, map[string]string{"message": "Logged out"})
+}
+
 func (h *AuthHandler) ensureUserSchema() {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return
@@ -702,6 +707,22 @@ func setAuthCookie(w http.ResponseWriter, r *http.Request, token string) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().UTC().Add(7 * 24 * time.Hour),
 	})
+}
+
+func clearAuthCookie(w http.ResponseWriter, r *http.Request) {
+	expiredAt := time.Unix(0, 0).UTC()
+	for _, secureCookie := range []bool{false, true} {
+		http.SetCookie(w, &http.Cookie{
+			Name:     authCookieName,
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   secureCookie,
+			SameSite: http.SameSiteLaxMode,
+			Expires:  expiredAt,
+			MaxAge:   -1,
+		})
+	}
 }
 
 func writeAuthJSON(w http.ResponseWriter, code int, payload any) {

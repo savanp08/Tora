@@ -332,6 +332,10 @@
 	}
 
 	function handleDragEnd() {
+		if (!isPressed) {
+			return;
+		}
+
 		isPressed = false;
 
 		if (isDragging) {
@@ -408,6 +412,11 @@
 		void goto('/dashboard');
 	}
 
+	function handleHomeNavigation() {
+		closeAllMenus();
+		void goto('/');
+	}
+
 	function toggleThemePreference() {
 		const nextDarkMode = !$isDarkMode;
 		isDarkMode.set(nextDarkMode);
@@ -416,14 +425,22 @@
 		}
 	}
 
-	function handleLogout() {
-		logout();
+	async function handleLogout() {
+		await logout();
 		closeAllMenus();
 		void goto('/login');
 	}
 
 	function handleMobileLinkClick() {
 		isMobileMenuOpen = false;
+	}
+
+	function handleFabKeydown(event: KeyboardEvent) {
+		if (event.key !== 'Enter' && event.key !== ' ') {
+			return;
+		}
+		event.preventDefault();
+		toggleMobileMenu();
 	}
 
 	onMount(() => {
@@ -501,29 +518,45 @@
 		>
 			<div class="menu-header">
 				<span>{mobileMenuTitle}</span>
-				<button
-					type="button"
-					class="menu-theme-toggle {$isDarkMode ? 'active' : ''}"
-					on:click={toggleThemePreference}
-					title={$isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-					aria-label={$isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-				>
-					{#if $isDarkMode}
+				<div class="menu-header-actions">
+					<button
+						type="button"
+						class="menu-home-toggle"
+						on:click={handleHomeNavigation}
+						title="Go to landing page"
+						aria-label="Go to landing page"
+					>
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<path
-								d="M12 4.5a1 1 0 0 1 1 1v1.4a1 1 0 1 1-2 0V5.5a1 1 0 0 1 1-1Zm0 12.1a1 1 0 0 1 1 1V19a1 1 0 1 1-2 0v-1.4a1 1 0 0 1 1-1Zm7.5-5.2a1 1 0 0 1 0 2h-1.4a1 1 0 1 1 0-2h1.4Zm-12.1 0a1 1 0 0 1 0 2H6a1 1 0 1 1 0-2h1.4Zm8.3-4.3a1 1 0 0 1 1.4 0l1 1a1 1 0 1 1-1.4 1.4l-1-1a1 1 0 0 1 0-1.4Zm-9.8 9.8a1 1 0 0 1 1.4 0l1 1a1 1 0 0 1-1.4 1.4l-1-1a1 1 0 0 1 0-1.4Zm11.2 1.4a1 1 0 0 1 0-1.4l1-1a1 1 0 1 1 1.4 1.4l-1 1a1 1 0 0 1-1.4 0Zm-9.8-9.8a1 1 0 0 1 0-1.4l1-1a1 1 0 0 1 1.4 1.4l-1 1a1 1 0 0 1-1.4 0ZM12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"
+								d="M12 3.4 3.8 10a1 1 0 0 0 1.2 1.6l.8-.6V19a1 1 0 0 0 1 1h4.8a1 1 0 0 0 1-1v-4.3h.8V19a1 1 0 0 0 1 1h4.8a1 1 0 0 0 1-1v-7.9l.8.6a1 1 0 0 0 1.2-1.6L12.6 3.4a1 1 0 0 0-1.2 0Z"
 								fill="currentColor"
 							/>
 						</svg>
-					{:else}
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path
-								d="M15.4 2.7a1 1 0 0 1 .8 1.6 8 8 0 1 0 3.5 13.9 1 1 0 0 1 1.6.8 9.9 9.9 0 1 1-6.7-16.2 1 1 0 0 1 .8-.1Z"
-								fill="currentColor"
-							/>
-						</svg>
-					{/if}
-				</button>
+					</button>
+					<button
+						type="button"
+						class="menu-theme-toggle {$isDarkMode ? 'active' : ''}"
+						on:click={toggleThemePreference}
+						title={$isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+						aria-label={$isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+					>
+						{#if $isDarkMode}
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path
+									d="M12 4.5a1 1 0 0 1 1 1v1.4a1 1 0 1 1-2 0V5.5a1 1 0 0 1 1-1Zm0 12.1a1 1 0 0 1 1 1V19a1 1 0 1 1-2 0v-1.4a1 1 0 0 1 1-1Zm7.5-5.2a1 1 0 0 1 0 2h-1.4a1 1 0 1 1 0-2h1.4Zm-12.1 0a1 1 0 0 1 0 2H6a1 1 0 1 1 0-2h1.4Zm8.3-4.3a1 1 0 0 1 1.4 0l1 1a1 1 0 1 1-1.4 1.4l-1-1a1 1 0 0 1 0-1.4Zm-9.8 9.8a1 1 0 0 1 1.4 0l1 1a1 1 0 0 1-1.4 1.4l-1-1a1 1 0 0 1 0-1.4Zm11.2 1.4a1 1 0 0 1 0-1.4l1-1a1 1 0 1 1 1.4 1.4l-1 1a1 1 0 0 1-1.4 0Zm-9.8-9.8a1 1 0 0 1 0-1.4l1-1a1 1 0 0 1 1.4 1.4l-1 1a1 1 0 0 1-1.4 0ZM12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"
+									fill="currentColor"
+								/>
+							</svg>
+						{:else}
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path
+									d="M15.4 2.7a1 1 0 0 1 .8 1.6 8 8 0 1 0 3.5 13.9 1 1 0 0 1 1.6.8 9.9 9.9 0 1 1-6.7-16.2 1 1 0 0 1 .8-.1Z"
+									fill="currentColor"
+								/>
+							</svg>
+						{/if}
+					</button>
+				</div>
 			</div>
 			{#each mobileMenuItems as item}
 				{#if item.href}
@@ -590,6 +623,7 @@
 		on:mousedown={handleDragStart}
 		on:touchstart|nonpassive={handleDragStart}
 		on:click={toggleMobileMenu}
+		on:keydown={handleFabKeydown}
 		class:open={isMobileMenuOpen}
 		aria-label="Toggle Menu"
 	>
@@ -781,7 +815,7 @@
 		left: 0;
 		width: 56px;
 		height: 56px;
-		z-index: 2000;
+		z-index: 13020;
 		background: var(--navbar-fab-bg);
 		backdrop-filter: blur(22px) saturate(180%);
 		-webkit-backdrop-filter: blur(22px) saturate(180%);
@@ -845,7 +879,7 @@
 		background: var(--navbar-overlay);
 		backdrop-filter: blur(7px) saturate(130%);
 		-webkit-backdrop-filter: blur(7px) saturate(130%);
-		z-index: 1998;
+		z-index: 13018;
 	}
 
 	.mobile-menu-card {
@@ -861,7 +895,7 @@
 		backdrop-filter: blur(20px) saturate(165%);
 		-webkit-backdrop-filter: blur(20px) saturate(165%);
 		box-shadow: var(--navbar-mobile-shadow);
-		z-index: 2200;
+		z-index: 13021;
 	}
 
 	.menu-header {
@@ -878,6 +912,13 @@
 		letter-spacing: 1px;
 	}
 
+	.menu-header-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+
+	.menu-home-toggle,
 	.menu-theme-toggle {
 		width: 1.75rem;
 		height: 1.75rem;
@@ -896,11 +937,13 @@
 			transform 0.16s ease;
 	}
 
+	.menu-home-toggle svg,
 	.menu-theme-toggle svg {
 		width: 13px;
 		height: 13px;
 	}
 
+	.menu-home-toggle:hover,
 	.menu-theme-toggle:hover {
 		transform: translateY(-1px);
 	}

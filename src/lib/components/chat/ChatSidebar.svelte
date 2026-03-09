@@ -615,16 +615,7 @@
 			>
 				<IconSet name="theme" size={14} />
 			</button>
-			<button
-				type="button"
-				class="icon-button map-icon-button"
-				on:click={openRelationsMap}
-				title="View room relations map"
-				aria-label="View room relations map"
-				bind:this={relationsTriggerEl}
-			>
-				<IconSet name="tree-map" size={14} />
-			</button>
+			
 
 			<button
 				type="button"

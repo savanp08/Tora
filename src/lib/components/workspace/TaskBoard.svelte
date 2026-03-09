@@ -5,6 +5,7 @@
 		taskStore,
 		taskStoreError,
 		taskStoreLoading,
+		upsertTaskStoreEntry,
 		type Task
 	} from '$lib/stores/tasks';
 	import { normalizeRoomIDValue, toStringValue } from '$lib/utils/chat/core';
@@ -38,9 +39,12 @@
 
 	type PersonalItemResponse = {
 		item_id?: unknown;
+		title?: unknown;
 		content?: unknown;
+		description?: unknown;
 		status?: unknown;
 		created_at?: unknown;
+		updated_at?: unknown;
 	};
 
 	type RoomTaskResponse = {
@@ -64,6 +68,7 @@
 	let newTaskContent = '';
 	let lastContextKey = '';
 	let contextLoadToken = 0;
+	let roomBoardError = '';
 
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: todoTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'todo');
@@ -133,19 +138,22 @@
 		}
 		const source = raw as PersonalItemResponse;
 		const itemID = toStringValue(source.item_id);
+		const title = toStringValue(source.title);
 		const content = toStringValue(source.content);
-		if (!itemID || !content) {
+		const description = toStringValue(source.description);
+		const displayTitle = title || content || description;
+		if (!itemID || !displayTitle) {
 			return null;
 		}
 		const createdAt = parseTimestamp(source.created_at);
 		return {
 			id: itemID,
-			title: content,
-			description: '',
+			title: displayTitle,
+			description: description || (content !== displayTitle ? content : ''),
 			status: toStringValue(source.status) || 'pending',
 			assigneeId: '',
 			createdAt,
-			updatedAt: createdAt,
+			updatedAt: parseTimestamp(source.updated_at) || createdAt,
 			source: 'personal'
 		};
 	}
@@ -337,7 +345,9 @@
 					credentials: 'include',
 					body: JSON.stringify({
 						type: 'task',
-						content
+						title: content,
+						content,
+						description: ''
 					})
 				});
 				if (!response.ok) {
@@ -505,6 +515,48 @@
 			minute: '2-digit'
 		})}`;
 	}
+
+	async function handleCreateRoomTask(contentValue: string) {
+		if (contextAware || creatingTask) {
+			return;
+		}
+		const content = contentValue.trim();
+		if (!content) {
+			return;
+		}
+
+		const normalizedTargetRoomID = normalizeRoomIDValue(normalizedRoomId);
+		if (!normalizedTargetRoomID) {
+			roomBoardError = 'Invalid room id';
+			return;
+		}
+
+		creatingTask = true;
+		roomBoardError = '';
+		try {
+			const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomID)}/tasks`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({ content })
+			});
+			if (!response.ok) {
+				throw new Error(await parseErrorMessage(response));
+			}
+
+			const createdPayload = await response.json().catch(() => null);
+			const createdTask = upsertTaskStoreEntry(createdPayload, normalizedTargetRoomID);
+			if (!createdTask) {
+				throw new Error('Invalid room task response');
+			}
+			sendSocketPayload(buildTaskSocketPayload('task_create', normalizedTargetRoomID, createdTask));
+			newTaskContent = '';
+		} catch (error) {
+			roomBoardError = error instanceof Error ? error.message : 'Failed to create task';
+		} finally {
+			creatingTask = false;
+		}
+	}
 </script>
 
 {#if contextAware}
@@ -586,9 +638,34 @@
 		{/if}
 	</section>
 {:else}
-	<section class="task-board" aria-label="Task board">
+	<section class="task-board room-board" aria-label="Task board">
+		<header class="board-header">
+			<h2>{boardTitle}</h2>
+			<span>{$taskStore.length}</span>
+		</header>
+
+		<form
+			class="new-task-form"
+			on:submit|preventDefault={() => {
+				void handleCreateRoomTask(newTaskContent);
+			}}
+		>
+			<input
+				type="text"
+				bind:value={newTaskContent}
+				placeholder="New Task"
+				autocomplete="off"
+				disabled={creatingTask}
+			/>
+			<button type="submit" disabled={creatingTask || !newTaskContent.trim() || !canEdit}>
+				{creatingTask ? 'Adding...' : 'Add'}
+			</button>
+		</form>
+
 		{#if $taskStoreLoading}
 			<div class="board-state">Loading tasks...</div>
+		{:else if roomBoardError}
+			<div class="board-state error">Unable to load tasks: {roomBoardError}</div>
 		{:else if $taskStoreError}
 			<div class="board-state error">Unable to load tasks: {$taskStoreError}</div>
 		{:else if !hasAnyTasks}
@@ -726,12 +803,14 @@
 
 	.task-board {
 		height: 100%;
+		width: 100%;
 		min-height: 0;
 		padding: 1rem;
 		background: var(--workspace-taskboard-bg);
 	}
 
-	.context-aware-board {
+	.context-aware-board,
+	.room-board {
 		display: grid;
 		grid-template-rows: auto auto 1fr;
 		gap: 0.8rem;

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -55,28 +56,8 @@ func (h *DashboardHandler) GetRooms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := fmt.Sprintf(
-		`SELECT room_id, room_name, role, last_accessed FROM %s WHERE user_id = ?`,
-		h.scylla.Table("user_rooms"),
-	)
-	iter := h.scylla.Session.Query(query, userID).WithContext(r.Context()).Iter()
-
-	rooms := make([]DashboardRoomResponse, 0, 8)
-	var (
-		roomID       gocql.UUID
-		roomName     string
-		role         string
-		lastAccessed time.Time
-	)
-	for iter.Scan(&roomID, &roomName, &role, &lastAccessed) {
-		rooms = append(rooms, DashboardRoomResponse{
-			RoomID:       strings.TrimSpace(roomID.String()),
-			RoomName:     strings.TrimSpace(roomName),
-			Role:         strings.TrimSpace(role),
-			LastAccessed: lastAccessed.UTC(),
-		})
-	}
-	if err := iter.Close(); err != nil {
+	rooms, err := h.loadRecentRoomsForUser(r.Context(), userID, 0)
+	if err != nil {
 		writeDashboardError(w, http.StatusInternalServerError, "Failed to load dashboard rooms")
 		return
 	}
@@ -132,38 +113,10 @@ func (h *DashboardHandler) GetOverview(w http.ResponseWriter, r *http.Request) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-
-		query := fmt.Sprintf(
-			`SELECT room_id, room_name, role, last_accessed FROM %s WHERE user_id = ?`,
-			h.scylla.Table("user_rooms"),
-		)
-		iter := h.scylla.Session.Query(query, userID).WithContext(r.Context()).Iter()
-
-		rooms := make([]DashboardRoomResponse, 0, 8)
-		var (
-			roomID       gocql.UUID
-			roomName     string
-			role         string
-			lastAccessed time.Time
-		)
-		for iter.Scan(&roomID, &roomName, &role, &lastAccessed) {
-			rooms = append(rooms, DashboardRoomResponse{
-				RoomID:       strings.TrimSpace(roomID.String()),
-				RoomName:     strings.TrimSpace(roomName),
-				Role:         strings.TrimSpace(role),
-				LastAccessed: lastAccessed.UTC(),
-			})
-		}
-		if err := iter.Close(); err != nil {
+		rooms, err := h.loadRecentRoomsForUser(r.Context(), userID, 5)
+		if err != nil {
 			recordError("load recent rooms", err)
 			return
-		}
-
-		sort.Slice(rooms, func(i, j int) bool {
-			return rooms[i].LastAccessed.After(rooms[j].LastAccessed)
-		})
-		if len(rooms) > 5 {
-			rooms = rooms[:5]
 		}
 
 		mu.Lock()
@@ -206,7 +159,7 @@ func (h *DashboardHandler) GetOverview(w http.ResponseWriter, r *http.Request) {
 		defer wg.Done()
 
 		query := fmt.Sprintf(
-			`SELECT user_id, item_id, type, content, status, due_at, created_at FROM %s WHERE user_id = ? AND status = ? ALLOW FILTERING`,
+			`SELECT user_id, item_id, type, title, content, description, status, due_at, start_at, end_at, remind_at, repeat_rule, created_at FROM %s WHERE user_id = ? AND status = ? ALLOW FILTERING`,
 			h.scylla.Table("personal_items"),
 		)
 		iter := h.scylla.Session.Query(query, userID, "pending").WithContext(r.Context()).Iter()
@@ -214,20 +167,52 @@ func (h *DashboardHandler) GetOverview(w http.ResponseWriter, r *http.Request) {
 		items := make([]models.PersonalItem, 0)
 		for {
 			var (
-				item      models.PersonalItem
-				dueAtRaw  *time.Time
-				createdAt time.Time
+				item        models.PersonalItem
+				dueAtRaw    *time.Time
+				startAtRaw  *time.Time
+				endAtRaw    *time.Time
+				remindAtRaw *time.Time
+				createdAt   time.Time
 			)
-			if !iter.Scan(&item.UserID, &item.ItemID, &item.Type, &item.Content, &item.Status, &dueAtRaw, &createdAt) {
+			if !iter.Scan(
+				&item.UserID,
+				&item.ItemID,
+				&item.Type,
+				&item.Title,
+				&item.Content,
+				&item.Description,
+				&item.Status,
+				&dueAtRaw,
+				&startAtRaw,
+				&endAtRaw,
+				&remindAtRaw,
+				&item.RepeatRule,
+				&createdAt,
+			) {
 				break
 			}
 			item.Type = strings.TrimSpace(item.Type)
+			item.Title = strings.TrimSpace(item.Title)
 			item.Content = strings.TrimSpace(item.Content)
+			item.Description = strings.TrimSpace(item.Description)
 			item.Status = strings.TrimSpace(item.Status)
+			item.RepeatRule = strings.TrimSpace(item.RepeatRule)
 			item.CreatedAt = createdAt.UTC()
 			if dueAtRaw != nil {
 				dueAt := dueAtRaw.UTC()
 				item.DueAt = &dueAt
+			}
+			if startAtRaw != nil {
+				startAt := startAtRaw.UTC()
+				item.StartAt = &startAt
+			}
+			if endAtRaw != nil {
+				endAt := endAtRaw.UTC()
+				item.EndAt = &endAt
+			}
+			if remindAtRaw != nil {
+				remindAt := remindAtRaw.UTC()
+				item.RemindAt = &remindAt
 			}
 			items = append(items, item)
 		}
@@ -295,6 +280,130 @@ func (h *DashboardHandler) GetOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeDashboardJSON(w, http.StatusOK, response)
+}
+
+func (h *DashboardHandler) loadRecentRoomsForUser(
+	ctx context.Context,
+	userID gocql.UUID,
+	limit int,
+) ([]DashboardRoomResponse, error) {
+	roomsByID := map[string]DashboardRoomResponse{}
+	loadErrs := make([]error, 0, 2)
+	hadSuccessfulSource := false
+
+	if err := h.loadUUIDRooms(ctx, userID, roomsByID); err != nil {
+		loadErrs = append(loadErrs, err)
+	} else {
+		hadSuccessfulSource = true
+	}
+	if err := h.loadTextRooms(ctx, userID, roomsByID); err != nil {
+		loadErrs = append(loadErrs, err)
+	} else {
+		hadSuccessfulSource = true
+	}
+
+	rooms := make([]DashboardRoomResponse, 0, len(roomsByID))
+	for _, room := range roomsByID {
+		rooms = append(rooms, room)
+	}
+	sort.Slice(rooms, func(i, j int) bool {
+		return rooms[i].LastAccessed.After(rooms[j].LastAccessed)
+	})
+	if limit > 0 && len(rooms) > limit {
+		rooms = rooms[:limit]
+	}
+
+	if !hadSuccessfulSource && len(loadErrs) > 0 {
+		return nil, loadErrs[0]
+	}
+	return rooms, nil
+}
+
+func (h *DashboardHandler) loadUUIDRooms(
+	ctx context.Context,
+	userID gocql.UUID,
+	roomsByID map[string]DashboardRoomResponse,
+) error {
+	query := fmt.Sprintf(
+		`SELECT room_id, room_name, role, last_accessed FROM %s WHERE user_id = ?`,
+		h.scylla.Table("user_rooms"),
+	)
+	iter := h.scylla.Session.Query(query, userID).WithContext(ctx).Iter()
+	for {
+		var (
+			roomID       gocql.UUID
+			roomName     string
+			role         string
+			lastAccessed time.Time
+		)
+		if !iter.Scan(&roomID, &roomName, &role, &lastAccessed) {
+			break
+		}
+		mergeDashboardRoom(roomsByID, DashboardRoomResponse{
+			RoomID:       strings.TrimSpace(roomID.String()),
+			RoomName:     strings.TrimSpace(roomName),
+			Role:         strings.TrimSpace(role),
+			LastAccessed: lastAccessed.UTC(),
+		})
+	}
+	return iter.Close()
+}
+
+func (h *DashboardHandler) loadTextRooms(
+	ctx context.Context,
+	userID gocql.UUID,
+	roomsByID map[string]DashboardRoomResponse,
+) error {
+	query := fmt.Sprintf(
+		`SELECT room_id, room_name, role, room_type, last_accessed, expires_at FROM %s WHERE user_id = ?`,
+		h.scylla.Table("user_rooms_text"),
+	)
+	iter := h.scylla.Session.Query(query, userID).WithContext(ctx).Iter()
+	now := time.Now().UTC()
+	for {
+		var (
+			roomID       string
+			roomName     string
+			role         string
+			roomType     string
+			lastAccessed time.Time
+			expiresAt    *time.Time
+		)
+		if !iter.Scan(&roomID, &roomName, &role, &roomType, &lastAccessed, &expiresAt) {
+			break
+		}
+		normalizedRoomType := strings.ToLower(strings.TrimSpace(roomType))
+		if normalizedRoomType == "ephemeral" && expiresAt != nil && expiresAt.UTC().Before(now) {
+			continue
+		}
+		mergeDashboardRoom(roomsByID, DashboardRoomResponse{
+			RoomID:       strings.TrimSpace(roomID),
+			RoomName:     strings.TrimSpace(roomName),
+			Role:         strings.TrimSpace(role),
+			LastAccessed: lastAccessed.UTC(),
+		})
+	}
+	return iter.Close()
+}
+
+func mergeDashboardRoom(roomsByID map[string]DashboardRoomResponse, candidate DashboardRoomResponse) {
+	normalizedRoomID := strings.TrimSpace(candidate.RoomID)
+	if normalizedRoomID == "" {
+		return
+	}
+	candidate.RoomID = normalizedRoomID
+	existing, exists := roomsByID[normalizedRoomID]
+	if !exists || candidate.LastAccessed.After(existing.LastAccessed) {
+		roomsByID[normalizedRoomID] = candidate
+		return
+	}
+	if strings.TrimSpace(existing.RoomName) == "" && strings.TrimSpace(candidate.RoomName) != "" {
+		existing.RoomName = candidate.RoomName
+	}
+	if strings.TrimSpace(existing.Role) == "" && strings.TrimSpace(candidate.Role) != "" {
+		existing.Role = candidate.Role
+	}
+	roomsByID[normalizedRoomID] = existing
 }
 
 func writeDashboardError(w http.ResponseWriter, code int, message string) {

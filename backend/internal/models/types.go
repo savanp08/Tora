@@ -52,13 +52,19 @@ type UserConnection struct {
 }
 
 type PersonalItem struct {
-	UserID    gocql.UUID `json:"user_id"`
-	ItemID    gocql.UUID `json:"item_id"`
-	Type      string     `json:"type"`
-	Content   string     `json:"content"`
-	Status    string     `json:"status"`
-	DueAt     *time.Time `json:"due_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	UserID      gocql.UUID `json:"user_id"`
+	ItemID      gocql.UUID `json:"item_id"`
+	Type        string     `json:"type"`
+	Title       string     `json:"title,omitempty"`
+	Content     string     `json:"content"`
+	Description string     `json:"description,omitempty"`
+	Status      string     `json:"status"`
+	DueAt       *time.Time `json:"due_at,omitempty"`
+	StartAt     *time.Time `json:"start_at,omitempty"`
+	EndAt       *time.Time `json:"end_at,omitempty"`
+	RemindAt    *time.Time `json:"remind_at,omitempty"`
+	RepeatRule  string     `json:"repeat_rule,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type Task struct {
@@ -67,6 +73,7 @@ type Task struct {
 	Title       string      `json:"title"`
 	Description string      `json:"description"`
 	Status      string      `json:"status"`
+	SprintName  string      `json:"sprint_name,omitempty"`
 	AssigneeID  *gocql.UUID `json:"assignee_id,omitempty"`
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`

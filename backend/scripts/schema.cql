@@ -47,12 +47,25 @@ CREATE TABLE IF NOT EXISTS converse.user_rooms (
 	PRIMARY KEY ((user_id), room_id)
 ) WITH CLUSTERING ORDER BY (room_id ASC);
 
+CREATE TABLE IF NOT EXISTS converse.user_rooms_text (
+	user_id uuid,
+	room_id text,
+	room_name text,
+	role text,
+	room_type text,
+	joined_at timestamp,
+	last_accessed timestamp,
+	expires_at timestamp,
+	PRIMARY KEY ((user_id), room_id)
+) WITH CLUSTERING ORDER BY (room_id ASC);
+
 CREATE TABLE IF NOT EXISTS converse.tasks (
 	room_id uuid,
 	id uuid,
 	title text,
 	description text,
 	status text,
+	sprint_name text,
 	assignee_id uuid,
 	created_at timestamp,
 	updated_at timestamp,
@@ -60,6 +73,7 @@ CREATE TABLE IF NOT EXISTS converse.tasks (
 ) WITH CLUSTERING ORDER BY (id ASC);
 
 CREATE INDEX IF NOT EXISTS tasks_assignee_id_idx ON converse.tasks (assignee_id);
+ALTER TABLE converse.tasks ADD sprint_name text;
 
 ALTER TABLE converse.rooms ADD is_direct boolean;
 
@@ -75,9 +89,15 @@ CREATE TABLE IF NOT EXISTS converse.personal_items (
 	user_id uuid,
 	item_id uuid,
 	type text,
+	title text,
 	content text,
+	description text,
 	status text,
 	due_at timestamp,
+	start_at timestamp,
+	end_at timestamp,
+	remind_at timestamp,
+	repeat_rule text,
 	created_at timestamp,
 	PRIMARY KEY ((user_id), item_id)
 ) WITH CLUSTERING ORDER BY (item_id DESC);

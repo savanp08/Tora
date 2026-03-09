@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +21,7 @@ type TaskRecordResponse struct {
 	Title       string    `json:"title"`
 	Description string    `json:"description"`
 	Status      string    `json:"status"`
+	SprintName  string    `json:"sprint_name,omitempty"`
 	AssigneeID  string    `json:"assignee_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -29,6 +32,7 @@ type TaskCreateRequest struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
+	SprintName  string `json:"sprint_name"`
 }
 
 type TaskStatusUpdateRequest struct {
@@ -47,6 +51,7 @@ func (h *RoomHandler) ensureTaskSchema() {
 		title text,
 		description text,
 		status text,
+		sprint_name text,
 		assignee_id uuid,
 		created_at timestamp,
 		updated_at timestamp,
@@ -61,6 +66,15 @@ func (h *RoomHandler) ensureTaskSchema() {
 	if err := h.scylla.Session.Query(indexQuery).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
 		log.Printf("[task] ensure tasks assignee index failed: %v", err)
 	}
+
+	alterQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD sprint_name text`, tasksTable),
+	}
+	for _, alterQuery := range alterQueries {
+		if err := h.scylla.Session.Query(alterQuery).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
+			log.Printf("[task] ensure tasks schema alter failed: %v", err)
+		}
+	}
 }
 
 func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +85,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
-	roomUUID, err := parseFlexibleTaskUUID(rawRoomID)
+	roomUUID, normalizedRoomID, err := resolveTaskRoomUUID(rawRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
@@ -79,7 +93,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, title, description, status, assignee_id, created_at, updated_at FROM %s WHERE room_id = ?`,
+		`SELECT id, title, description, status, sprint_name, assignee_id, created_at, updated_at FROM %s WHERE room_id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	iter := h.scylla.Session.Query(query, roomUUID).WithContext(r.Context()).Iter()
@@ -90,17 +104,19 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 		title       string
 		description string
 		status      string
+		sprintName  string
 		assigneeID  *gocql.UUID
 		createdAt   time.Time
 		updatedAt   time.Time
 	)
-	for iter.Scan(&taskID, &title, &description, &status, &assigneeID, &createdAt, &updatedAt) {
+	for iter.Scan(&taskID, &title, &description, &status, &sprintName, &assigneeID, &createdAt, &updatedAt) {
 		task := TaskRecordResponse{
 			ID:          strings.TrimSpace(taskID.String()),
-			RoomID:      strings.TrimSpace(roomUUID.String()),
+			RoomID:      normalizedRoomID,
 			Title:       strings.TrimSpace(title),
 			Description: strings.TrimSpace(description),
 			Status:      normalizeTaskStatusValue(status),
+			SprintName:  strings.TrimSpace(sprintName),
 			CreatedAt:   createdAt.UTC(),
 			UpdatedAt:   updatedAt.UTC(),
 		}
@@ -128,7 +144,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
-	roomUUID, err := parseFlexibleTaskUUID(rawRoomID)
+	roomUUID, normalizedRoomID, err := resolveTaskRoomUUID(rawRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
@@ -167,6 +183,10 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	if status == "" {
 		status = "todo"
 	}
+	sprintName := strings.TrimSpace(req.SprintName)
+	if len(sprintName) > 160 {
+		sprintName = sprintName[:160]
+	}
 
 	taskUUID, err := gocql.RandomUUID()
 	if err != nil {
@@ -184,7 +204,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, id, title, description, status, assignee_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		h.scylla.Table("tasks"),
 	)
 	if err := h.scylla.Session.Query(
@@ -194,6 +214,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		title,
 		description,
 		status,
+		sprintName,
 		assigneeID,
 		now,
 		now,
@@ -205,10 +226,11 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 
 	response := TaskRecordResponse{
 		ID:          strings.TrimSpace(taskUUID.String()),
-		RoomID:      strings.TrimSpace(roomUUID.String()),
+		RoomID:      normalizedRoomID,
 		Title:       title,
 		Description: description,
 		Status:      status,
+		SprintName:  sprintName,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -229,7 +251,7 @@ func (h *RoomHandler) UpdateRoomTaskStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
-	roomUUID, err := parseFlexibleTaskUUID(rawRoomID)
+	roomUUID, _, err := resolveTaskRoomUUID(rawRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
@@ -291,6 +313,46 @@ func parseFlexibleTaskUUID(raw string) (gocql.UUID, error) {
 	return gocql.ParseUUID(formatted)
 }
 
+func resolveTaskRoomUUID(raw string) (gocql.UUID, string, error) {
+	normalizedRoomID := normalizeRoomID(raw)
+	if normalizedRoomID == "" {
+		return gocql.UUID{}, "", fmt.Errorf("room id is required")
+	}
+
+	if parsed, err := parseFlexibleTaskUUID(strings.TrimSpace(raw)); err == nil {
+		return parsed, normalizedRoomID, nil
+	}
+	if parsed, err := parseFlexibleTaskUUID(normalizedRoomID); err == nil {
+		return parsed, normalizedRoomID, nil
+	}
+
+	return deterministicTaskRoomUUID(normalizedRoomID), normalizedRoomID, nil
+}
+
+func deterministicTaskRoomUUID(normalizedRoomID string) gocql.UUID {
+	// Some room IDs (ephemeral) are not UUIDs. Map them deterministically into UUID space
+	// so every request for the same room hits the same Scylla partition key.
+	digest := sha1.Sum([]byte("converse-task-room:" + normalizedRoomID))
+	uuidBytes := make([]byte, 16)
+	copy(uuidBytes, digest[:16])
+	uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x50 // RFC 4122 version 5
+	uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80 // RFC 4122 variant
+	compact := hex.EncodeToString(uuidBytes)
+	formatted := fmt.Sprintf(
+		"%s-%s-%s-%s-%s",
+		compact[0:8],
+		compact[8:12],
+		compact[12:16],
+		compact[16:20],
+		compact[20:32],
+	)
+	parsed, err := gocql.ParseUUID(formatted)
+	if err != nil {
+		return gocql.UUID{}
+	}
+	return parsed
+}
+
 func normalizeTaskStatusValue(raw string) string {
 	normalized := strings.ToLower(strings.TrimSpace(raw))
 	normalized = strings.ReplaceAll(normalized, " ", "_")
@@ -308,7 +370,7 @@ func (h *RoomHandler) deleteRoomTasks(ctx context.Context, roomID string) error 
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return fmt.Errorf("scylla session is not configured")
 	}
-	roomUUID, err := parseFlexibleTaskUUID(roomID)
+	roomUUID, _, err := resolveTaskRoomUUID(roomID)
 	if err != nil {
 		return err
 	}

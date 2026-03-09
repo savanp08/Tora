@@ -42,7 +42,7 @@ func (r *PersonalRepo) CreateItem(ctx context.Context, item models.PersonalItem)
 	}
 
 	query := fmt.Sprintf(
-		`INSERT INTO %s (user_id, item_id, type, content, status, due_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO %s (user_id, item_id, type, title, content, description, status, due_at, start_at, end_at, remind_at, repeat_rule, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.store.Table("personal_items"),
 	)
 	return r.store.Session.Query(
@@ -50,11 +50,29 @@ func (r *PersonalRepo) CreateItem(ctx context.Context, item models.PersonalItem)
 		item.UserID,
 		item.ItemID,
 		strings.TrimSpace(item.Type),
+		strings.TrimSpace(item.Title),
 		strings.TrimSpace(item.Content),
+		strings.TrimSpace(item.Description),
 		strings.TrimSpace(item.Status),
 		item.DueAt,
+		item.StartAt,
+		item.EndAt,
+		item.RemindAt,
+		strings.TrimSpace(item.RepeatRule),
 		createdAt,
 	).WithContext(ctx).Exec()
+}
+
+func (r *PersonalRepo) CreateItems(ctx context.Context, items []models.PersonalItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	for _, item := range items {
+		if err := r.CreateItem(ctx, item); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *PersonalRepo) GetItemsByUserID(ctx context.Context, userID gocql.UUID) ([]models.PersonalItem, error) {
@@ -72,7 +90,7 @@ func (r *PersonalRepo) GetItemsByUserID(ctx context.Context, userID gocql.UUID) 
 	}
 
 	query := fmt.Sprintf(
-		`SELECT item_id, type, content, status, due_at, created_at FROM %s WHERE user_id = ?`,
+		`SELECT item_id, type, title, content, description, status, due_at, start_at, end_at, remind_at, repeat_rule, created_at FROM %s WHERE user_id = ?`,
 		r.store.Table("personal_items"),
 	)
 	iter := r.store.Session.Query(query, userID).WithContext(ctx).Iter()
@@ -80,24 +98,49 @@ func (r *PersonalRepo) GetItemsByUserID(ctx context.Context, userID gocql.UUID) 
 	items := make([]models.PersonalItem, 0)
 	for {
 		var (
-			itemID    gocql.UUID
-			itemType  string
-			content   string
-			status    string
-			dueAt     *time.Time
-			createdAt time.Time
+			itemID      gocql.UUID
+			itemType    string
+			title       string
+			content     string
+			description string
+			status      string
+			dueAt       *time.Time
+			startAt     *time.Time
+			endAt       *time.Time
+			remindAt    *time.Time
+			repeatRule  string
+			createdAt   time.Time
 		)
-		if !iter.Scan(&itemID, &itemType, &content, &status, &dueAt, &createdAt) {
+		if !iter.Scan(
+			&itemID,
+			&itemType,
+			&title,
+			&content,
+			&description,
+			&status,
+			&dueAt,
+			&startAt,
+			&endAt,
+			&remindAt,
+			&repeatRule,
+			&createdAt,
+		) {
 			break
 		}
 		items = append(items, models.PersonalItem{
-			UserID:    userID,
-			ItemID:    itemID,
-			Type:      itemType,
-			Content:   content,
-			Status:    status,
-			DueAt:     dueAt,
-			CreatedAt: createdAt,
+			UserID:      userID,
+			ItemID:      itemID,
+			Type:        itemType,
+			Title:       title,
+			Content:     content,
+			Description: description,
+			Status:      status,
+			DueAt:       dueAt,
+			StartAt:     startAt,
+			EndAt:       endAt,
+			RemindAt:    remindAt,
+			RepeatRule:  repeatRule,
+			CreatedAt:   createdAt,
 		})
 	}
 	if err := iter.Close(); err != nil {

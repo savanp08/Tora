@@ -2951,6 +2951,14 @@
 		openWorkspaceModule('draw');
 	}
 
+	function toggleTaskBoardView() {
+		if (isTaskBoardActive) {
+			deactivateWorkspaceModule('tasks');
+			return;
+		}
+		openWorkspaceModule('tasks');
+	}
+
 	function toggleDashboardView() {
 		if (isDashboardActive) {
 			deactivateWorkspaceModule('dashboard');
@@ -6479,6 +6487,7 @@
 						{showRoomSearch}
 						isDashboardView={isDashboardActive}
 						isBoardView={isDrawBoardActive}
+						isTaskBoardView={isTaskBoardActive}
 						{isCanvasOpen}
 					hasMinimizedCall={activeCall && isCallMinimized}
 					minimizedCallLabel={callDurationLabel}
@@ -6491,6 +6500,7 @@
 						on:restoreMinimizedCall={restoreMinimizedCall}
 						on:toggleDashboardView={toggleDashboardView}
 						on:toggleBoardView={toggleBoardView}
+						on:toggleTaskBoardView={toggleTaskBoardView}
 						on:toggleCanvas={toggleCanvas}
 					on:toggleRoomSearch={toggleRoomSearch}
 					on:renameRoom={() => void renameRoom(roomId)}

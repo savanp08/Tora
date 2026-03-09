@@ -26,6 +26,7 @@ import (
 	"github.com/gocql/gocql"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	jwtutil "github.com/savanp08/converse/internal/auth"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
@@ -512,6 +513,10 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		userID = fmt.Sprintf("user_%d", time.Now().UnixNano())
 	}
+	authenticatedUserUUID, hasAuthenticatedUserUUID := resolveAuthenticatedUserUUIDFromRequest(r)
+	if hasAuthenticatedUserUUID {
+		userID = authenticatedUserUUID.String()
+	}
 	token := "temp_token_for_" + normalizedUsername
 
 	finalRoomID := ""
@@ -756,6 +761,51 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		AIEnabled:        roomFeatures.AIEnabled,
 		E2EEnabled:       roomFeatures.E2EEnabled,
 		ServerNow:        time.Now().Unix(),
+	}
+
+	if hasAuthenticatedUserUUID {
+		resolvedRoomType := strings.TrimSpace(roomType)
+		if resolvedRoomType == "" {
+			if loadedRoomType, typeErr := h.getRoomType(ctx, finalRoomID); typeErr == nil {
+				resolvedRoomType = strings.TrimSpace(loadedRoomType)
+			}
+		}
+		if resolvedRoomType == "" {
+			resolvedRoomType = "ephemeral"
+		}
+
+		joinedRole := "member"
+		if mode == "create" || isAdmin {
+			joinedRole = "owner"
+		}
+
+		joinedAt := time.Now().UTC()
+		if finalCreatedAt > 0 {
+			joinedAt = time.Unix(finalCreatedAt, 0).UTC()
+		}
+		var expiresAtTime *time.Time
+		if expiresAt > 0 {
+			nextExpiresAt := time.Unix(expiresAt, 0).UTC()
+			expiresAtTime = &nextExpiresAt
+		}
+
+		if err := h.upsertAuthenticatedUserRoomLink(
+			ctx,
+			authenticatedUserUUID,
+			finalRoomID,
+			finalRoomName,
+			joinedRole,
+			resolvedRoomType,
+			joinedAt,
+			expiresAtTime,
+		); err != nil {
+			log.Printf(
+				"[room] failed to upsert authenticated user room link user=%s room=%s err=%v",
+				authenticatedUserUUID.String(),
+				finalRoomID,
+				err,
+			)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -3993,6 +4043,97 @@ func truncate(input string, max int) string {
 
 func roomKey(roomID string) string {
 	return "room:" + roomID
+}
+
+func resolveAuthenticatedUserUUIDFromRequest(r *http.Request) (gocql.UUID, bool) {
+	token := strings.TrimSpace(readAuthTokenFromRequest(r))
+	if token == "" {
+		return gocql.UUID{}, false
+	}
+	claims, err := jwtutil.ValidateToken(token)
+	if err != nil || claims == nil {
+		return gocql.UUID{}, false
+	}
+
+	userID := strings.TrimSpace(claims.UserID)
+	if userID == "" {
+		return gocql.UUID{}, false
+	}
+	parsedUserID, err := gocql.ParseUUID(userID)
+	if err != nil {
+		return gocql.UUID{}, false
+	}
+	return parsedUserID, true
+}
+
+func readAuthTokenFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if cookie, err := r.Cookie("tora_auth"); err == nil {
+		if token := strings.TrimSpace(cookie.Value); token != "" {
+			return token
+		}
+	}
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authorization == "" {
+		return ""
+	}
+	const bearerPrefix = "Bearer "
+	if !strings.HasPrefix(authorization, bearerPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))
+}
+
+func (h *RoomHandler) upsertAuthenticatedUserRoomLink(
+	ctx context.Context,
+	userID gocql.UUID,
+	roomID string,
+	roomName string,
+	role string,
+	roomType string,
+	joinedAt time.Time,
+	expiresAt *time.Time,
+) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("room id is required")
+	}
+	normalizedRoomName := normalizeRoomName(roomName)
+	if normalizedRoomName == "" {
+		normalizedRoomName = "Room"
+	}
+	normalizedRole := strings.TrimSpace(strings.ToLower(role))
+	if normalizedRole == "" {
+		normalizedRole = "member"
+	}
+	normalizedRoomType := strings.TrimSpace(strings.ToLower(roomType))
+	if normalizedRoomType == "" {
+		normalizedRoomType = "ephemeral"
+	}
+	if joinedAt.IsZero() {
+		joinedAt = time.Now().UTC()
+	}
+
+	query := fmt.Sprintf(
+		`INSERT INTO %s (user_id, room_id, room_name, role, room_type, joined_at, last_accessed, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		h.scylla.Table("user_rooms_text"),
+	)
+	return h.scylla.Session.Query(
+		query,
+		userID,
+		normalizedRoomID,
+		normalizedRoomName,
+		normalizedRole,
+		normalizedRoomType,
+		joinedAt.UTC(),
+		time.Now().UTC(),
+		expiresAt,
+	).WithContext(ctx).Exec()
 }
 
 func roomMembersKey(roomID string) string {

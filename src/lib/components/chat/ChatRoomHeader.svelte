@@ -14,6 +14,7 @@
 	export let isDashboardView = false;
 	export let remainingLabel = '--';
 	export let isBoardView = false;
+	export let isTaskBoardView = false;
 	export let isCanvasOpen = false;
 	export let hasMinimizedCall = false;
 	export let minimizedCallLabel = '00:00';
@@ -27,6 +28,7 @@
 		restoreMinimizedCall: void;
 		toggleDashboardView: void;
 		toggleBoardView: void;
+		toggleTaskBoardView: void;
 		toggleCanvas: void;
 		toggleRoomSearch: void;
 		renameRoom: void;
@@ -114,13 +116,21 @@
 		dispatch(type === 'audio' ? 'startAudioCall' : 'startVideoCall');
 	}
 
-	function toggleWorkspace(target: 'dashboard' | 'board' | 'canvas') {
+	function toggleWorkspace(target: 'dashboard' | 'board' | 'tasks' | 'canvas') {
 		showWorkspaceMenu = false;
 		if (target === 'dashboard') {
 			dispatch('toggleDashboardView');
 			return;
 		}
-		dispatch(target === 'board' ? 'toggleBoardView' : 'toggleCanvas');
+		if (target === 'board') {
+			dispatch('toggleBoardView');
+			return;
+		}
+		if (target === 'tasks') {
+			dispatch('toggleTaskBoardView');
+			return;
+		}
+		dispatch('toggleCanvas');
 	}
 
 	function restoreMinimizedCall() {
@@ -271,7 +281,21 @@
 								<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
 								<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
 							</svg>
-							<span>{isBoardView ? 'Close board' : 'Open board'}</span>
+							<span>{isBoardView ? 'Close draw board' : 'Open draw board'}</span>
+						</span>
+					</button>
+					<button
+						type="button"
+						class="dropdown-option"
+						class:active={isTaskBoardView}
+						role="menuitem"
+						on:click={() => toggleWorkspace('tasks')}
+					>
+						<span class="dropdown-option-content">
+							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M8 7h11M8 12h11M8 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01" />
+							</svg>
+							<span>{isTaskBoardView ? 'Close tasks board' : 'Open tasks board'}</span>
 						</span>
 					</button>
 					<button

@@ -21,9 +21,15 @@ export interface DashboardPersonalItem {
 	user_id: string;
 	item_id: string;
 	type: string;
+	title: string;
 	content: string;
+	description: string;
 	status: string;
 	due_at: string | null;
+	start_at: string | null;
+	end_at: string | null;
+	remind_at: string | null;
+	repeat_rule: string;
 	created_at: string;
 }
 
@@ -121,9 +127,15 @@ function normalizePersonalItem(raw: unknown): DashboardPersonalItem | null {
 		user_id: toStringValue(source.user_id),
 		item_id: itemID,
 		type: toStringValue(source.type),
+		title: toStringValue(source.title),
 		content: toStringValue(source.content),
+		description: toStringValue(source.description),
 		status: toStringValue(source.status),
 		due_at: dueAtRaw || null,
+		start_at: toStringValue(source.start_at) || null,
+		end_at: toStringValue(source.end_at) || null,
+		remind_at: toStringValue(source.remind_at) || null,
+		repeat_rule: toStringValue(source.repeat_rule),
 		created_at: toStringValue(source.created_at)
 	};
 }
