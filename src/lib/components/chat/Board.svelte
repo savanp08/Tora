@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import type { ChatMessage } from '$lib/types/chat';
+	import { APP_LIMITS } from '$lib/config/limits';
 	import { activeRoomPassword } from '$lib/store';
 	import {
 		createMessageId,
@@ -23,14 +24,14 @@
 	const BOARD_WIDTH = 3840;
 	const BOARD_HEIGHT = 2560;
 	const MIN_ZOOM = 0.04;
-	const MAX_ZOOM = 4;
+	const MAX_ZOOM = APP_LIMITS.board.maxZoom;
 	const DOUBLE_TAP_MS = 340;
 	const TAP_MOVE_TOLERANCE = 8;
-	const CURSOR_MOVE_THROTTLE_MS = 1000;
+	const CURSOR_MOVE_THROTTLE_MS = APP_LIMITS.board.cursorMoveThrottleMs;
 	const BOARD_UPDATE_STACK_FLUSH_MS = 1000;
 	const BOARD_EVENT_BATCH_TYPE = 'board_event_batch';
-	const REMOTE_CURSOR_STALE_MS = 8000;
-	const HISTORY_LIMIT = 80;
+	const REMOTE_CURSOR_STALE_MS = APP_LIMITS.board.remoteCursorStaleMs;
+	const HISTORY_LIMIT = APP_LIMITS.board.historyLimit;
 	const BRUSH_WIDTH_PRESETS = [1.5, 3, 5, 8] as const;
 	const BOARD_COLOR_PRESETS = [
 		'#111827',
@@ -57,14 +58,20 @@
 	const MIN_SHAPE_POINTER_DELTA = 4;
 	const DEFAULT_MESSAGE_CARD_WIDTH = 340;
 	const DEFAULT_MEDIA_CARD_WIDTH = 360;
-	const MAX_IMAGE_PREVIEW_HEIGHT = 460;
-	const MAX_VIDEO_PREVIEW_HEIGHT = 360;
-	const LOCAL_ACTION_LIMIT = 180;
+	const MAX_IMAGE_PREVIEW_HEIGHT = APP_LIMITS.board.maxImagePreviewHeight;
+	const MAX_VIDEO_PREVIEW_HEIGHT = APP_LIMITS.board.maxVideoPreviewHeight;
+	const LOCAL_ACTION_LIMIT = APP_LIMITS.board.localActionLimit;
 	const LOCAL_ACTION_STORAGE_PREFIX = 'converse_board_local_actions_v1';
 	const DUSTER_STRIPE_WIDTH = BOARD_WIDTH * 0.01;
 	const MINIMAP_WIDTH = 200;
 	const MINIMAP_HEIGHT = 150;
-	const BOARD_STORAGE_LIMIT_BYTES = 10 * 1024 * 1024;
+	const BOARD_STORAGE_LIMIT_BYTES = APP_LIMITS.board.maxStorageBytes;
+	const EPHEMERAL_DRAW_BOARD_LIMIT_BYTES = APP_LIMITS.board.ephemeralMaxStorageBytes;
+	const DRAW_BOARD_MEMORY_LIMIT_MESSAGE = `Draw Board memory limit (${Math.max(
+		1,
+		Math.round(EPHEMERAL_DRAW_BOARD_LIMIT_BYTES / (1024 * 1024))
+	)}MB) reached.`;
+	const DRAW_BOARD_LIMIT_TOAST_COOLDOWN_MS = APP_LIMITS.board.drawLimitToastCooldownMs;
 	const RICH_MESSAGE_SCHEMA = 'rich_message_v1';
 	const BOARD_STROKE_SCHEMA = 'board_stroke_v1';
 	const BOARD_TEXT_BOX_SCHEMA = 'board_text_box_v1';
@@ -162,8 +169,12 @@
 	export let canModerateBoard = false;
 	export let currentUserId = '';
 	export let currentUsername = '';
+	export let isEphemeralRoom = true;
 
-	const dispatch = createEventDispatcher<{ close: void }>();
+	const dispatch = createEventDispatcher<{
+		close: void;
+		toastError: { message: string };
+	}>();
 
 	let boardContainerEl: HTMLDivElement | null = null;
 	let boardToolbarEl: HTMLDivElement | null = null;
@@ -218,6 +229,9 @@
 	let boardApproxBytes = 0;
 	let boardStorageUsagePercent = 0;
 	let boardRemainingBytes = BOARD_STORAGE_LIMIT_BYTES;
+	let latestSerializedBoardSnapshot = '';
+	let latestSerializedBoardSnapshotBytes = 0;
+	let lastDrawBoardLimitToastAt = 0;
 	let boardZoomLevel = 1;
 	let dusterCenterX = BOARD_WIDTH / 2;
 	let dusterIsDragging = false;
@@ -429,6 +443,8 @@
 		boardApproxBytes = 0;
 		boardStorageUsagePercent = 0;
 		boardRemainingBytes = BOARD_STORAGE_LIMIT_BYTES;
+		latestSerializedBoardSnapshot = '';
+		latestSerializedBoardSnapshotBytes = 0;
 		boardZoomLevel = 1;
 		remoteCursorByUserId = new Map<string, BoardCursorWire>();
 		remoteCursors = [];
@@ -2283,8 +2299,38 @@
 		];
 	}
 
+	function notifyDrawBoardMemoryLimitReached() {
+		const now = Date.now();
+		if (now - lastDrawBoardLimitToastAt < DRAW_BOARD_LIMIT_TOAST_COOLDOWN_MS) {
+			return;
+		}
+		lastDrawBoardLimitToastAt = now;
+		dispatch('toastError', { message: DRAW_BOARD_MEMORY_LIMIT_MESSAGE });
+	}
+
+	function canBroadcastBoardUpdates() {
+		if (!isEphemeralRoom) {
+			return true;
+		}
+		if (!fabricCanvas) {
+			return true;
+		}
+		if (!latestSerializedBoardSnapshot) {
+			refreshBoardStats();
+		}
+		if (latestSerializedBoardSnapshotBytes <= EPHEMERAL_DRAW_BOARD_LIMIT_BYTES) {
+			return true;
+		}
+		pendingBoardUpdates = [];
+		notifyDrawBoardMemoryLimitReached();
+		return false;
+	}
+
 	function flushPendingBoardUpdates() {
 		if (pendingBoardUpdates.length === 0) {
+			return;
+		}
+		if (!canBroadcastBoardUpdates()) {
 			return;
 		}
 
@@ -2336,6 +2382,9 @@
 
 	function sendBoardEnvelope(type: BoardEventType, payload: Record<string, unknown>) {
 		if (!normalizedRoomId || !canEdit) {
+			return;
+		}
+		if (!canBroadcastBoardUpdates()) {
 			return;
 		}
 		if (isStackedBoardEventType(type)) {
@@ -4092,6 +4141,8 @@
 		if (!fabricCanvas) {
 			boardElementCount = 0;
 			boardApproxBytes = 0;
+			latestSerializedBoardSnapshot = '';
+			latestSerializedBoardSnapshotBytes = 0;
 			return;
 		}
 		const objects = fabricCanvas.getObjects?.() ?? [];
@@ -4100,6 +4151,8 @@
 		).length;
 		const serialized = serializedSnapshot || serializeBoardSnapshot();
 		boardApproxBytes = serialized ? UTF8_ENCODER.encode(serialized).length : 0;
+		latestSerializedBoardSnapshot = serialized;
+		latestSerializedBoardSnapshotBytes = serialized ? new Blob([serialized]).size : 0;
 	}
 
 	function captureHistorySnapshot(force = false) {
@@ -4500,6 +4553,13 @@
 		const input = event.currentTarget as HTMLInputElement | null;
 		const file = input?.files?.[0] ?? null;
 		if (!file) {
+			return;
+		}
+		if (isEphemeralRoom && file.type.startsWith('image/')) {
+			dispatch('toastError', { message: 'Image uploads are disabled in ephemeral rooms.' });
+			if (input) {
+				input.value = '';
+			}
 			return;
 		}
 		isUploadingMedia = true;
@@ -5442,7 +5502,7 @@
 	<input
 		bind:this={mediaInputEl}
 		type="file"
-		accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt"
+		accept={isEphemeralRoom ? 'video/*,audio/*,.pdf,.doc,.docx,.txt' : 'image/*,video/*,audio/*,.pdf,.doc,.docx,.txt'}
 		class="hidden-input"
 		on:change={onMediaFileSelected}
 		disabled={isUploadingMedia}

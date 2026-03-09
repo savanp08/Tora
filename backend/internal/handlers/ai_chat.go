@@ -13,14 +13,14 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/ai"
+	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
 )
 
 const (
-	privateAIChatLogsTableName   = "private_ai_logs"
-	privateAIRoomHistoryPrefix   = "room:history:"
-	privateAIContextMessageLimit = 50
+	privateAIChatLogsTableName = "private_ai_logs"
+	privateAIRoomHistoryPrefix = "room:history:"
 )
 
 const privateAISystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
@@ -63,6 +63,10 @@ type privateAIChatAuditRecord struct {
 	Prompt    string
 	Response  string
 	Timestamp time.Time
+}
+
+func privateAIContextMessageLimit() int {
+	return config.LoadAppLimits().AI.ContextMessageLimit
 }
 
 func ConfigureAIChatPersistence(redisStore *database.RedisStore, scyllaStore *database.ScyllaStore) {
@@ -317,7 +321,7 @@ func buildPrivateAIPromptWithRoomContext(ctx context.Context, roomID, prompt str
 	contextMessages := []models.Message{}
 	if normalizedRoomID != "" {
 		rollingSummary = loadPrivateAIRoomSummary(ctx, normalizedRoomID)
-		contextMessages = loadPrivateAIRecentMessages(ctx, normalizedRoomID, privateAIContextMessageLimit)
+		contextMessages = loadPrivateAIRecentMessages(ctx, normalizedRoomID, privateAIContextMessageLimit())
 	}
 
 	encodedMessages := "[]"
@@ -385,7 +389,7 @@ func loadPrivateAIRecentMessages(ctx context.Context, roomID string, limit int) 
 		return []models.Message{}
 	}
 	if limit <= 0 {
-		limit = privateAIContextMessageLimit
+		limit = privateAIContextMessageLimit()
 	}
 	if ctx == nil {
 		ctx = context.Background()

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import IconSet from '$lib/components/icons/IconSet.svelte';
 	import AiDisclaimerModal from '$lib/components/chat/AiDisclaimerModal.svelte';
+	import { APP_LIMITS } from '$lib/config/limits';
 	import { getUTF8ByteLength, MESSAGE_TEXT_MAX_BYTES } from '$lib/utils/chat/core';
 	import {
 		compressMedia,
@@ -8,8 +9,9 @@
 		uploadToR2,
 		type MediaMessageType
 	} from '$lib/utils/media';
-	import type { ReplyTarget, TaskChecklistItem } from '$lib/types/chat';
+	import type { ComposerMediaPayload, ReplyTarget, TaskChecklistItem } from '$lib/types/chat';
 	import { stringifyTaskMessagePayload } from '$lib/utils/chat/task';
+	import { buildBeaconMessagePayload, formatBeaconTimestamp } from '$lib/utils/chat/beacon';
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
@@ -22,15 +24,15 @@
 	const KLIPY_API_KEY = KLIPY_API_KEY_RAW?.trim() ?? '';
 	const KLIPY_API_BASE = 'https://api.klipy.com';
 	const KLIPY_CLIENT_KEY = 'converse-web';
-	const KLIPY_SEARCH_LIMIT = 24;
+	const KLIPY_SEARCH_LIMIT = APP_LIMITS.composer.klipySearchLimit;
 	const KLIPY_DEFAULT_LOCALE = 'us';
 	const KLIPY_CONTENT_FILTER = 'medium';
-	const KLIPY_AD_MIN_WIDTH = '50';
-	const KLIPY_AD_MAX_WIDTH = '150';
-	const KLIPY_AD_MIN_HEIGHT = '50';
-	const KLIPY_AD_MAX_HEIGHT = '150';
+	const KLIPY_AD_MIN_WIDTH = String(APP_LIMITS.composer.klipyAdMinWidth);
+	const KLIPY_AD_MAX_WIDTH = String(APP_LIMITS.composer.klipyAdMaxWidth);
+	const KLIPY_AD_MIN_HEIGHT = String(APP_LIMITS.composer.klipyAdMinHeight);
+	const KLIPY_AD_MAX_HEIGHT = String(APP_LIMITS.composer.klipyAdMaxHeight);
 	const KLIPY_AD_INSERT_POSITIONS = [1, 4] as const;
-	const COMPOSER_MAX_VISIBLE_LINES = 3;
+	const COMPOSER_MAX_VISIBLE_LINES = APP_LIMITS.composer.maxVisibleLines;
 	const COMMON_EMOJIS = [
 		'😊',
 		'😀',
@@ -104,6 +106,7 @@
 	export let roomId = '';
 	export let aiEnabled = true;
 	export let disabled = false;
+	export let isEphemeralRoom = false;
 	export let mentionCandidates: string[] = [];
 
 	let mediaInput: HTMLInputElement | null = null;
@@ -129,6 +132,11 @@
 	let taskNewItemText = '';
 	let taskAddInputOpen = false;
 	let taskDraftError = '';
+	let beaconDraftOpen = false;
+	let beaconDraftDate = '';
+	let beaconDraftTime = '';
+	let beaconDraftText = '';
+	let beaconDraftError = '';
 	let isRecording = false;
 	let mediaRecorder: MediaRecorder | null = null;
 	let audioChunks: Blob[] = [];
@@ -164,6 +172,18 @@
 	$: isOverMessageLimit = draftMessageBytes > messageLimit;
 	$: overLimitBy = Math.max(0, draftMessageBytes - messageLimit);
 	$: taskDraftReady = taskDraftOpen && taskDraftTitle.trim() !== '' && taskDraftItems.length > 0;
+	$: beaconDraftReady =
+		beaconDraftOpen &&
+		beaconDraftText.trim() !== '' &&
+		beaconDraftDate.trim() !== '' &&
+		beaconDraftTime.trim() !== '';
+	$: beaconDraftDateTimeValue =
+		beaconDraftDate && beaconDraftTime ? new Date(`${beaconDraftDate}T${beaconDraftTime}`) : null;
+	$: beaconDraftTimestamp =
+		beaconDraftDateTimeValue instanceof Date && !Number.isNaN(beaconDraftDateTimeValue.getTime())
+			? beaconDraftDateTimeValue.getTime()
+			: 0;
+	$: beaconDraftLabel = beaconDraftTimestamp > 0 ? formatBeaconTimestamp(beaconDraftTimestamp) : '';
 	$: hasPendingAttachment = Boolean(attachedFile || attachedMediaAsset);
 	$: activeMediaResults =
 		activeMediaTab === 'gif'
@@ -197,7 +217,8 @@
 				: 'Search memes';
 	$: showSendButton =
 		!isRecording && !taskDraftOpen && (hasPendingAttachment || normalizedDraftMessage.length > 0);
-	$: composerDisabled = disabled || isProcessingAttachment || isRecording || taskDraftOpen;
+	$: composerDisabled =
+		disabled || isProcessingAttachment || isRecording || taskDraftOpen || beaconDraftOpen;
 	$: composerPlaceholder = disabled
 		? 'This room has expired. Extend time to continue chatting.'
 		: isRecording
@@ -209,9 +230,7 @@
 					: 'Type a message';
 
 	const dispatch = createEventDispatcher<{
-		send:
-			| { type: MediaMessageType | 'task'; content: string; fileName?: string; text?: string }
-			| undefined;
+		send: ComposerMediaPayload | undefined;
 		attach: { file: File | null; type: 'media' | 'file'; error?: string };
 		removeAttachment: void;
 		cancelReply: void;
@@ -513,6 +532,7 @@
 		clearAttachmentPreview();
 		closeMediaPicker();
 		closeMentionPicker();
+		clearBeaconDraft();
 		if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
 			mediaRecorder.stop();
 		}
@@ -652,8 +672,11 @@
 		emitTypingValue();
 	}
 
-	function chooseAttachmentType(type: 'media' | 'file' | 'task') {
+	function chooseAttachmentType(type: 'media' | 'file' | 'task' | 'beacon') {
 		if (disabled) {
+			return;
+		}
+		if (type === 'beacon' && !isEphemeralRoom) {
 			return;
 		}
 		closeMentionPicker();
@@ -670,11 +693,22 @@
 			attachedMediaAsset = null;
 			attachedMessageType = null;
 			dispatch('attach', { file: null, type: 'file' });
+			clearBeaconDraft();
 			taskDraftOpen = true;
 			taskAddInputOpen = false;
 			if (taskDraftTitle.trim() === '') {
 				taskDraftTitle = 'Task';
 			}
+			return;
+		}
+		if (type === 'beacon') {
+			clearAttachmentPreview();
+			attachedFile = null;
+			attachedMediaAsset = null;
+			attachedMessageType = null;
+			dispatch('attach', { file: null, type: 'file' });
+			clearTaskDraft();
+			openBeaconDraft();
 			return;
 		}
 		taskDraftOpen = false;
@@ -1283,6 +1317,10 @@
 		if (disabled || isProcessingAttachment || isOverMessageLimit || isRecording) {
 			return;
 		}
+		if (beaconDraftOpen) {
+			submitBeaconDraft();
+			return;
+		}
 		if (taskDraftOpen) {
 			submitTaskDraft();
 			return;
@@ -1440,7 +1478,14 @@
 	}
 
 	async function toggleRecording() {
-		if (disabled || isProcessingAttachment || attachedFile || attachedMediaAsset || taskDraftOpen) {
+		if (
+			disabled ||
+			isProcessingAttachment ||
+			attachedFile ||
+			attachedMediaAsset ||
+			taskDraftOpen ||
+			beaconDraftOpen
+		) {
 			return;
 		}
 		closeMediaPicker();
@@ -1519,6 +1564,71 @@
 		taskNewItemText = '';
 		taskAddInputOpen = false;
 		taskDraftError = '';
+	}
+
+	function clearBeaconDraft() {
+		beaconDraftOpen = false;
+		beaconDraftDate = '';
+		beaconDraftTime = '';
+		beaconDraftText = '';
+		beaconDraftError = '';
+	}
+
+	function toLocalDateInputValue(date: Date) {
+		const year = date.getFullYear();
+		const month = `${date.getMonth() + 1}`.padStart(2, '0');
+		const day = `${date.getDate()}`.padStart(2, '0');
+		return `${year}-${month}-${day}`;
+	}
+
+	function toLocalTimeInputValue(date: Date) {
+		const hours = `${date.getHours()}`.padStart(2, '0');
+		const minutes = `${date.getMinutes()}`.padStart(2, '0');
+		return `${hours}:${minutes}`;
+	}
+
+	function openBeaconDraft() {
+		const defaultDate = new Date(Date.now() + 10 * 60 * 1000);
+		beaconDraftOpen = true;
+		beaconDraftDate = toLocalDateInputValue(defaultDate);
+		beaconDraftTime = toLocalTimeInputValue(defaultDate);
+		beaconDraftText = draftMessage.trim();
+		beaconDraftError = '';
+	}
+
+	function submitBeaconDraft() {
+		const normalizedText = beaconDraftText.trim();
+		if (!normalizedText) {
+			beaconDraftError = 'Enter beacon text before sending.';
+			return;
+		}
+		if (!beaconDraftDate || !beaconDraftTime) {
+			beaconDraftError = 'Select both date and time.';
+			return;
+		}
+		const composedDateTime = new Date(`${beaconDraftDate}T${beaconDraftTime}`);
+		const beaconAt = composedDateTime.getTime();
+		if (!Number.isFinite(beaconAt) || beaconAt <= 0) {
+			beaconDraftError = 'Invalid beacon date/time.';
+			return;
+		}
+		const beaconLabel = formatBeaconTimestamp(beaconAt);
+		dispatch('send', {
+			type: 'beacon',
+			content: buildBeaconMessagePayload({
+				text: normalizedText,
+				beaconAt,
+				beaconLabel
+			})
+		});
+		draftMessage = '';
+		clearBeaconDraft();
+	}
+
+	function onBeaconDraftBackdropClick(event: MouseEvent) {
+		if (event.target === event.currentTarget) {
+			clearBeaconDraft();
+		}
 	}
 
 	function openTaskDraftAddInput() {
@@ -1702,6 +1812,61 @@
 	</div>
 {/if}
 
+{#if beaconDraftOpen}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<div
+		class="beacon-draft-shell"
+		data-mode={isDarkMode ? 'dark' : 'light'}
+		role="presentation"
+		on:click={onBeaconDraftBackdropClick}
+	>
+		<section class="beacon-draft-card" role="group" aria-label="Beacon composer">
+			<div class="beacon-draft-header">
+				<div class="beacon-draft-kicker">Beacon</div>
+				<button type="button" class="beacon-draft-close" on:click={clearBeaconDraft}>Cancel</button>
+			</div>
+			<div class="beacon-draft-schedule-row">
+				<label>
+					<span>Date</span>
+					<input type="date" bind:value={beaconDraftDate} />
+				</label>
+				<label>
+					<span>Time</span>
+					<input type="time" bind:value={beaconDraftTime} />
+				</label>
+			</div>
+			<label class="beacon-draft-text-wrap">
+				<span>Message</span>
+				<textarea
+					rows="3"
+					bind:value={beaconDraftText}
+					placeholder="What should this beacon remind the room about?"
+				></textarea>
+			</label>
+			<div class="beacon-preview-card">
+				<div class="beacon-preview-meta">
+					<IconSet name="beacon" size={14} />
+					<span>{beaconDraftLabel || 'Set date and time'}</span>
+				</div>
+				<div class="beacon-preview-text">
+					{beaconDraftText.trim() || 'Your beacon preview appears here.'}
+				</div>
+			</div>
+			{#if beaconDraftError}
+				<div class="beacon-draft-error">{beaconDraftError}</div>
+			{/if}
+			<div class="beacon-draft-footer">
+				<button type="button" class="beacon-draft-footer-btn ghost" on:click={clearBeaconDraft}>
+					Cancel
+				</button>
+				<button type="button" class="beacon-draft-footer-btn submit" on:click={submitBeaconDraft}>
+					Send Beacon
+				</button>
+			</div>
+		</section>
+	</div>
+{/if}
+
 <footer class="composer" data-mode={isDarkMode ? 'dark' : 'light'}>
 	{#if activeReply}
 		<div class="reply-preview-panel">
@@ -1871,7 +2036,7 @@
 				type="button"
 				class="attach-button"
 				on:click={toggleAttachMenu}
-				disabled={disabled || isProcessingAttachment || isRecording}
+				disabled={disabled || isProcessingAttachment || isRecording || beaconDraftOpen}
 				aria-label="Attach"
 				title="Attach"
 			>
@@ -1891,6 +2056,12 @@
 						<IconSet name="list-vertical" size={14} />
 						<span>Task</span>
 					</button>
+					{#if isEphemeralRoom}
+						<button type="button" on:click={() => chooseAttachmentType('beacon')}>
+							<IconSet name="beacon" size={14} />
+							<span>Beacon</span>
+						</button>
+					{/if}
 				</div>
 			{/if}
 		</div>
@@ -2016,7 +2187,11 @@
 				type="button"
 				class="mic-button {isRecording ? 'recording' : ''}"
 				on:click={toggleRecording}
-				disabled={disabled || isProcessingAttachment || hasPendingAttachment || taskDraftOpen}
+				disabled={disabled ||
+					isProcessingAttachment ||
+					hasPendingAttachment ||
+					taskDraftOpen ||
+					beaconDraftOpen}
 				aria-label={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 				title={isRecording ? 'Stop recording and send voice message' : 'Record voice message'}
 			>
@@ -2159,8 +2334,8 @@
 	.attachment-preview-image,
 	.attachment-preview-video {
 		display: block;
-		width: min(100%, 320px);
-		max-height: 230px;
+		width: min(100%, 260px);
+		max-height: 180px;
 		border: 1px solid var(--border-default);
 		border-radius: 8px;
 		background: var(--bg-tertiary);
@@ -2619,11 +2794,175 @@
 		padding: 0.32rem 0.48rem;
 	}
 
+	.beacon-draft-shell {
+		position: fixed;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1.1rem;
+		background: var(--overlay-soft);
+		backdrop-filter: blur(8px);
+		-webkit-backdrop-filter: blur(8px);
+		z-index: 525;
+	}
+
+	.beacon-draft-card {
+		width: min(100%, 32rem);
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		border-radius: 14px;
+		padding: 0.85rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.62rem;
+		box-shadow: var(--shadow-lg);
+	}
+
+	.beacon-draft-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.4rem;
+	}
+
+	.beacon-draft-kicker {
+		font-size: 0.69rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-secondary);
+	}
+
+	.beacon-draft-close {
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-secondary);
+		border-radius: 9px;
+		padding: 0.22rem 0.56rem;
+		font-size: 0.72rem;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	.beacon-draft-schedule-row {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.52rem;
+	}
+
+	.beacon-draft-schedule-row label,
+	.beacon-draft-text-wrap {
+		display: flex;
+		flex-direction: column;
+		gap: 0.24rem;
+	}
+
+	.beacon-draft-schedule-row span,
+	.beacon-draft-text-wrap span {
+		font-size: 0.73rem;
+		font-weight: 700;
+		color: var(--text-secondary);
+	}
+
+	.beacon-draft-schedule-row input,
+	.beacon-draft-text-wrap textarea {
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-primary);
+		border-radius: 10px;
+		padding: 0.45rem 0.55rem;
+		font-size: 0.82rem;
+	}
+
+	.beacon-draft-text-wrap textarea {
+		resize: vertical;
+		min-height: 4.7rem;
+		max-height: 10.5rem;
+	}
+
+	.beacon-draft-schedule-row input:focus,
+	.beacon-draft-text-wrap textarea:focus {
+		outline: none;
+		border-color: var(--border-focus);
+		box-shadow: 0 0 0 2px var(--interactive-focus);
+	}
+
+	.beacon-preview-card {
+		border: 1px solid var(--border-default);
+		background: var(--surface-secondary);
+		border-radius: 11px;
+		padding: 0.52rem 0.6rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.34rem;
+	}
+
+	.beacon-preview-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.34rem;
+		font-size: 0.74rem;
+		font-weight: 700;
+		color: var(--text-secondary);
+	}
+
+	.beacon-preview-text {
+		font-size: 0.82rem;
+		color: var(--text-primary);
+		word-break: break-word;
+	}
+
+	.beacon-draft-error {
+		font-size: 0.74rem;
+		color: var(--accent-danger);
+		background: var(--state-danger-bg);
+		border: 1px solid var(--state-danger-border);
+		border-radius: 8px;
+		padding: 0.32rem 0.48rem;
+	}
+
+	.beacon-draft-footer {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.44rem;
+	}
+
+	.beacon-draft-footer-btn {
+		border: 1px solid var(--border-default);
+		background: var(--surface-primary);
+		color: var(--text-secondary);
+		border-radius: 10px;
+		padding: 0.42rem 0.78rem;
+		font-size: 0.78rem;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	.beacon-draft-footer-btn.submit {
+		border-color: var(--state-info-border);
+		background: var(--state-info-bg);
+		color: var(--accent-info);
+	}
+
+	.beacon-draft-footer-btn.ghost {
+		background: var(--surface-secondary);
+	}
+
 	@media (max-width: 640px) {
 		.task-draft-card {
 			width: min(100%, 100vw - 1rem);
 			max-height: min(88vh, 760px);
 			padding: 0.62rem;
+		}
+
+		.beacon-draft-card {
+			width: min(100%, 100vw - 1rem);
+			padding: 0.65rem;
+		}
+
+		.beacon-draft-schedule-row {
+			grid-template-columns: 1fr;
 		}
 
 		.task-draft-footer {

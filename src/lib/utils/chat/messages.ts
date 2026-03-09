@@ -13,6 +13,7 @@ import {
 	toStringValue,
 	toTimestamp
 } from '$lib/utils/chat/core';
+import { parseBeaconMessagePayload } from '$lib/utils/chat/beacon';
 import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 
 export const DELETED_MESSAGE_PLACEHOLDER = 'This message was deleted';
@@ -109,6 +110,10 @@ export function getMessagePreviewText(message: ChatMessage) {
 	const fallbackFileName = (message.fileName || '').trim();
 	const fallbackSnippet = (message.replyToSnippet || '').trim();
 	const hasReplyTarget = normalizeMessageID(message.replyToMessageId || '') !== '';
+	const beaconPayload = parseBeaconMessagePayload(content);
+	if (beaconPayload) {
+		return `Beacon: ${beaconPayload.text}`;
+	}
 	const contentSnippetPayload = parseSnippetPreviewPayload(
 		content,
 		fallbackFileName,

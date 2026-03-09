@@ -1,4 +1,6 @@
 import { browser } from '$app/environment';
+import { APP_LIMITS } from '$lib/config/limits';
+import { syncTaskStoreFromSocketPayload } from '$lib/ws/client';
 import { writable } from 'svelte/store';
 
 export type GlobalSocketState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
@@ -8,7 +10,7 @@ export type GlobalSocketEvent = {
 	receivedAt: number;
 };
 
-const MAX_QUEUED_MESSAGES = 500;
+const MAX_QUEUED_MESSAGES = APP_LIMITS.ws.maxQueuedMessages;
 const DEFAULT_API_BASE = 'http://localhost:8080';
 
 export const socketState = writable<GlobalSocketState>('idle');
@@ -118,6 +120,7 @@ function connectSocket() {
 			return;
 		}
 		const payload = parseMessagePayload(event.data);
+		syncTaskStoreFromSocketPayload(payload);
 		globalMessages.set({
 			payload,
 			receivedAt: Date.now()

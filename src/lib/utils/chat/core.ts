@@ -1,7 +1,8 @@
 import type { ChatThread } from '$lib/types/chat';
+import { APP_LIMITS } from '$lib/config/limits';
 
 const MS_EPOCH_THRESHOLD = 1_000_000_000_000;
-export const MESSAGE_TEXT_MAX_BYTES = 4000;
+export const MESSAGE_TEXT_MAX_BYTES = APP_LIMITS.chat.messageTextMaxBytes;
 
 export function getUTF8ByteLength(value: string) {
 	if (!value) {
@@ -33,7 +34,7 @@ export function normalizeRoomNameValue(value: string) {
 	if (!trimmed) {
 		return '';
 	}
-	return trimmed.replace(/\s+/g, ' ').slice(0, 20);
+	return trimmed.replace(/\s+/g, ' ').slice(0, APP_LIMITS.room.nameMaxLength);
 }
 
 export function normalizeUsernameValue(value: string) {

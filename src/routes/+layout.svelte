@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { onMount, onDestroy } from 'svelte';
+	import GlobalNavbar from '$lib/components/layout/GlobalNavbar.svelte';
+	import { initializeAuth } from '$lib/stores/auth';
 	import { isDarkMode } from '$lib/store';
 	import './layout.css';
 
@@ -19,6 +21,10 @@
 	let tooltipY = 0;
 	let tooltipPlacement: TooltipPlacement = 'top';
 	let activeTooltipElement: HTMLElement | null = null;
+
+	if (browser) {
+		initializeAuth();
+	}
 
 	onMount(() => {
 		if (!browser) {
@@ -287,6 +293,7 @@
 	}
 </script>
 
+<GlobalNavbar />
 <slot />
 <div
 	class="instant-tooltip"

@@ -29,7 +29,7 @@
 		toggleRoomSearch: void;
 		renameRoom: void;
 		toggleBreakSelectionMode: void;
-		togglePinSelectionMode: void;
+		toggleDiscussionSelectionMode: void;
 		toggleReplySelectionMode: void;
 		toggleEditSelectionMode: void;
 		toggleDeleteSelectionMode: void;
@@ -75,7 +75,7 @@
 			| 'toggleRoomSearch'
 			| 'renameRoom'
 			| 'toggleBreakSelectionMode'
-			| 'togglePinSelectionMode'
+			| 'toggleDiscussionSelectionMode'
 			| 'toggleReplySelectionMode'
 			| 'toggleEditSelectionMode'
 			| 'toggleDeleteSelectionMode'
@@ -307,9 +307,11 @@
 				</button>
 				<button
 					type="button"
-					on:click|stopPropagation={() => closeMenuThen('togglePinSelectionMode')}
+					on:click|stopPropagation={() => closeMenuThen('toggleDiscussionSelectionMode')}
 				>
-					{messageActionMode === 'pin' ? 'Cancel Pin Mode' : '📌 Pin Message'}
+					{messageActionMode === 'discussion'
+						? 'Cancel Discussion Mode'
+						: '💬 Discussion Mode'}
 				</button>
 				<button
 					type="button"

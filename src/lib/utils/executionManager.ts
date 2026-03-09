@@ -38,7 +38,8 @@ type RemoteExecutionStrategy = {
 	runRemote: (
 		code: string,
 		language: string,
-		signal: AbortSignal
+		signal: AbortSignal,
+		stdin: string
 	) => Promise<RemoteExecutionPayload>;
 };
 
@@ -284,31 +285,31 @@ export class ExecutionManager {
 				mode: 'remote',
 				language: 'cpp',
 				aliases: ['c++'],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
 			},
 			{
 				mode: 'remote',
 				language: 'c',
 				aliases: [],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
 			},
 			{
 				mode: 'remote',
 				language: 'java',
 				aliases: [],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
 			},
 			{
 				mode: 'remote',
 				language: 'go',
 				aliases: ['golang'],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
 			},
 			{
 				mode: 'remote',
 				language: 'rust',
 				aliases: ['rs'],
-				runRemote: (code, language, signal) => this.runRemote(code, language, signal)
+				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
 			}
 		];
 
@@ -323,7 +324,12 @@ export class ExecutionManager {
 		return new Map(this.strategies);
 	}
 
-	async run(language: string, code: string, timeoutMs = 5000): Promise<ExecutionRunHandle> {
+	async run(
+		language: string,
+		code: string,
+		timeoutMs = 5000,
+		stdin = ''
+	): Promise<ExecutionRunHandle> {
 		const normalizedLanguage = this.normalizeLanguage(language);
 		const strategy = this.strategyByLanguage.get(normalizedLanguage);
 		if (!strategy) {
@@ -388,7 +394,8 @@ export class ExecutionManager {
 				strategy,
 				code,
 				normalizedLanguage,
-				abortController.signal
+				abortController.signal,
+				stdin
 			);
 		}
 
@@ -512,10 +519,11 @@ export class ExecutionManager {
 		strategy: RemoteExecutionStrategy,
 		code: string,
 		language: string,
-		signal: AbortSignal
+		signal: AbortSignal,
+		stdin: string
 	) {
 		try {
-			const remotePayload = await strategy.runRemote(code, language, signal);
+			const remotePayload = await strategy.runRemote(code, language, signal, stdin);
 			if (context.settled) {
 				return;
 			}
@@ -560,7 +568,7 @@ export class ExecutionManager {
 		}
 	}
 
-	private async runRemote(code: string, language: string, signal: AbortSignal) {
+	private async runRemote(code: string, language: string, signal: AbortSignal, stdin: string) {
 		const base64Code = encodeCodeAsBase64(code);
 		let response: Response;
 		try {
@@ -571,7 +579,8 @@ export class ExecutionManager {
 				},
 				body: JSON.stringify({
 					language,
-					code: base64Code
+					code: base64Code,
+					stdin
 				}),
 				signal
 			});

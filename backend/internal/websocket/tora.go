@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/savanp08/converse/internal/ai"
+	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/models"
 )
 
@@ -21,7 +22,6 @@ const (
 	toraBotSenderID         = "Tora-Bot"
 	toraBotSenderName       = "Tora-Bot"
 	toraAuditLogsTable      = "private_ai_logs"
-	toraContextMsgLimit     = 50
 	toraRequestTimeout      = 25 * time.Second
 	toraSummaryTimeout      = 20 * time.Second
 )
@@ -48,6 +48,10 @@ type toraAuditRecord struct {
 	Timestamp time.Time
 }
 
+func toraContextMsgLimit() int {
+	return config.LoadAppLimits().AI.ContextMessageLimit
+}
+
 func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, deviceID string) {
 	if h == nil {
 		return
@@ -69,7 +73,7 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 	defer cancel()
 
 	rollingSummary := h.loadRoomRollingSummary(ctx, roomID)
-	contextMessages := h.loadRecentMessagesFromRedis(ctx, roomID, toraContextMsgLimit)
+	contextMessages := h.loadRecentMessagesFromRedis(ctx, roomID, toraContextMsgLimit())
 	aiPrompt := buildToraPrompt(rollingSummary, contextMessages, prompt)
 	aiResponse, err := ai.DefaultRouter.GenerateChatResponse(ctx, aiPrompt)
 	if err != nil {
@@ -254,7 +258,7 @@ func (h *Hub) loadRecentMessagesFromRedis(ctx context.Context, roomID string, li
 		return []models.Message{}
 	}
 	if limit <= 0 {
-		limit = toraContextMsgLimit
+		limit = toraContextMsgLimit()
 	}
 	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {

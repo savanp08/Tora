@@ -1,3 +1,5 @@
+import { APP_LIMITS } from '$lib/config/limits';
+
 export type CallType = 'audio' | 'video';
 
 export type SignalingMessageType =
@@ -33,7 +35,7 @@ const WEBRTC_STUN_CONFIG: RTCConfiguration = {
 	iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
 };
 
-const MAX_PARTICIPANTS_DEFAULT = 5;
+const MAX_PARTICIPANTS_DEFAULT = APP_LIMITS.calls.maxParticipants;
 
 function toStringValue(input: unknown) {
 	if (typeof input === 'string') {
@@ -207,7 +209,7 @@ export class WebRTCManager extends EventTarget {
 			return existing;
 		}
 		if (this.peerConnections.size >= this.maxParticipants - 1) {
-			throw new Error('call is limited to 5 participants');
+			throw new Error(`call is limited to ${this.maxParticipants} participants`);
 		}
 
 		const connection = new RTCPeerConnection(WEBRTC_STUN_CONFIG);

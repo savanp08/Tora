@@ -4,13 +4,6 @@ import "time"
 
 const MaxRoomMembers = 1200
 
-type User struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Email     string    `json:"email,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
 type Message struct {
 	ID               string              `json:"id"`
 	RoomID           string              `json:"roomId"`

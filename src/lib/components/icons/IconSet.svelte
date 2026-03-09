@@ -3,6 +3,8 @@
 		| 'copy'
 		| 'break'
 		| 'pin'
+		| 'beacon'
+		| 'discussion'
 		| 'reply'
 		| 'paperclip'
 		| 'image'
@@ -45,11 +47,17 @@
 		<circle cx="6" cy="18" r="3"></circle>
 		<path d="M18 9a9 9 0 0 1-9 9"></path>
 	{:else if name === 'pin'}
+		<path d="M8 3.5h8"></path>
+		<path d="M12 3.5v6"></path>
+		<path d="M7.8 9.5h8.4l-2.8 4.2v4.8l-2.8 2v-6.8Z"></path>
+	{:else if name === 'beacon'}
+		<path d="M12 4.5c3.7 0 6.7 3 6.7 6.7 0 4.9-6.7 10.8-6.7 10.8S5.3 16.1 5.3 11.2c0-3.7 3-6.7 6.7-6.7Z"></path>
+		<circle cx="12" cy="11.2" r="2.2"></circle>
+	{:else if name === 'discussion'}
 		<path
-			fill="currentColor"
-			stroke="none"
-			d="M12 2.5c-3.87 0-7 3.13-7 7 0 5.09 6 11.51 6.25 11.78a1 1 0 0 0 1.5 0C13 21.01 19 14.59 19 9.5c0-3.87-3.13-7-7-7Zm0 9.2a2.2 2.2 0 1 1 0-4.4 2.2 2.2 0 0 1 0 4.4Z"
+			d="M4 6.5a2.5 2.5 0 0 1 2.5-2.5h11a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5h-6l-4 3v-3H6.5A2.5 2.5 0 0 1 4 13.5Z"
 		></path>
+		<path d="M8 9.5h8M8 12.5h5"></path>
 	{:else if name === 'reply'}
 		<path d="M9 7 4 12l5 5"></path>
 		<path d="M4 12h10a6 6 0 0 1 6 6"></path>

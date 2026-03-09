@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/monitor"
 	"github.com/savanp08/converse/internal/security"
@@ -21,16 +23,9 @@ import (
 )
 
 const (
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 65536
-	maxTextChars   = 4000
-	maxMediaURLLen = 4096
-	maxFileNameLen = 180
-
-	maxGlobalWSConnections = int32(60000)
-	maxWSConnectionsPerIP  = int32(2000)
+	writeWait  = 10 * time.Second
+	pongWait   = 60 * time.Second
+	pingPeriod = (pongWait * 9) / 10
 
 	messageTypeCallInvite   = "call_invite"
 	messageTypeCallCancel   = "call_cancel"
@@ -40,6 +35,10 @@ const (
 	messageTypeCallLog      = "call_log"
 	callTypeAudio           = "audio"
 	callTypeVideo           = "video"
+
+	wsRateScopeUser   = "user"
+	wsRateScopeIP     = "ip"
+	wsRateScopeDevice = "device"
 )
 
 var (
@@ -51,6 +50,59 @@ var (
 	trustedProxiesMu     sync.RWMutex
 	trustedProxyMatchers []trustedProxyMatcher
 )
+
+type wsRateLimitRule struct {
+	WindowName string
+	Window     time.Duration
+	MaxAllowed int64
+}
+
+type wsRateLimitCheck struct {
+	Scope string
+	Value string
+}
+
+type wsRateLimitExceededError struct {
+	Scope  string
+	Window string
+	Limit  int64
+}
+
+func (e *wsRateLimitExceededError) Error() string {
+	if e == nil {
+		return "websocket rate limit exceeded"
+	}
+	return fmt.Sprintf(
+		"websocket rate limit exceeded scope=%s window=%s limit=%d",
+		strings.TrimSpace(e.Scope),
+		strings.TrimSpace(e.Window),
+		e.Limit,
+	)
+}
+
+func (e *wsRateLimitExceededError) PublicMessage() string {
+	if e == nil {
+		return "Too many websocket connection attempts"
+	}
+	scopeLabel := "this context"
+	switch strings.TrimSpace(e.Scope) {
+	case wsRateScopeUser:
+		scopeLabel = "this user"
+	case wsRateScopeIP:
+		scopeLabel = "this IP"
+	case wsRateScopeDevice:
+		scopeLabel = "this device"
+	}
+	windowLabel := strings.TrimSpace(e.Window)
+	if windowLabel == "" {
+		windowLabel = "current"
+	}
+	return fmt.Sprintf("Too many websocket connection attempts for %s in the %s window.", scopeLabel, windowLabel)
+}
+
+func wsLimits() config.WebSocketLimits {
+	return config.LoadAppLimits().WS
+}
 
 type trustedProxyMatcher struct {
 	ipNet *net.IPNet
@@ -189,14 +241,24 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too many socket connection attempts", http.StatusTooManyRequests)
 		return
 	}
+	requestedUserID := normalizeUsername(r.URL.Query().Get("userId"))
+	rateLimitDeviceID := extractSocketDeviceID(r)
+	if limitErr := enforceWSConnectionRateLimits(r.Context(), requestedUserID, clientIP, rateLimitDeviceID); limitErr != nil {
+		var exceeded *wsRateLimitExceededError
+		if errors.As(limitErr, &exceeded) {
+			http.Error(w, exceeded.PublicMessage(), http.StatusTooManyRequests)
+			return
+		}
+		http.Error(w, "WebSocket limiter unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	releaseReservation, status, rejectReason := reserveWSConnection(clientIP)
 	if releaseReservation == nil {
 		http.Error(w, rejectReason, status)
 		return
 	}
 
-	userID := r.URL.Query().Get("userId")
-	userID = normalizeUsername(userID)
+	userID := requestedUserID
 	if userID == "" {
 		userID = "guest_" + time.Now().UTC().Format("20060102150405.000000000")
 	}
@@ -243,7 +305,7 @@ func (c *Client) readPump() {
 		c.Conn.Close()
 	}()
 
-	c.Conn.SetReadLimit(maxMessageSize)
+	c.Conn.SetReadLimit(wsLimits().MaxMessageSize)
 	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(string) error { c.Conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 
@@ -355,6 +417,12 @@ func (c *Client) readPump() {
 			}
 			continue
 		}
+		if taskPayload, isTaskPayload := parseTaskPayload(raw); isTaskPayload {
+			if c.Hub != nil {
+				c.dispatchTaskPayload(taskPayload)
+			}
+			continue
+		}
 		if signalingEvent, isSignalingEvent := parseSignalingPayload(raw); isSignalingEvent {
 			c.forwardSignalingEvent(signalingEvent)
 			continue
@@ -441,6 +509,19 @@ func (c *Client) dispatchBoardEvent(boardEvent clientBoardEventPayload) {
 		Payload:   boardEvent.Payload,
 		Element:   boardEvent.Element,
 		ElementID: boardEvent.ElementID,
+	}
+}
+
+func (c *Client) dispatchTaskPayload(taskPayload TaskPayload) {
+	if c == nil || c.Hub == nil {
+		return
+	}
+	if taskPayload.Type == "" || taskPayload.RoomID == "" {
+		return
+	}
+	c.Hub.taskEvent <- &ClientTaskEvent{
+		Client:  c,
+		Payload: taskPayload,
 	}
 }
 
@@ -598,6 +679,127 @@ func normalizeUsername(raw string) string {
 	}
 
 	return strings.Trim(builder.String(), "_")
+}
+
+func enforceWSConnectionRateLimits(ctx context.Context, userID string, ipAddress string, deviceID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	rateLimits := wsLimits().Rate
+	checks := []wsRateLimitCheck{
+		{Scope: wsRateScopeUser, Value: normalizeUsername(userID)},
+		{Scope: wsRateScopeIP, Value: strings.TrimSpace(ipAddress)},
+		{Scope: wsRateScopeDevice, Value: normalizeSocketDeviceID(deviceID)},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.Value) == "" {
+			continue
+		}
+
+		var rules []wsRateLimitRule
+		switch check.Scope {
+		case wsRateScopeUser:
+			rules = buildWSRateLimitRules(rateLimits.ConnectUser)
+		case wsRateScopeIP:
+			rules = buildWSRateLimitRules(rateLimits.ConnectIP)
+		case wsRateScopeDevice:
+			rules = buildWSRateLimitRules(rateLimits.ConnectDevice)
+		}
+
+		for _, rule := range rules {
+			result, err := security.AllowFixedWindow(
+				ctx,
+				"ws_connect",
+				check.Scope,
+				rule.WindowName,
+				check.Value,
+				rule.MaxAllowed,
+				rule.Window,
+			)
+			if err != nil {
+				return err
+			}
+			if result.Allowed {
+				continue
+			}
+			return &wsRateLimitExceededError{
+				Scope:  check.Scope,
+				Window: rule.WindowName,
+				Limit:  rule.MaxAllowed,
+			}
+		}
+	}
+	return nil
+}
+
+func buildWSRateLimitRules(limit config.TimeWindowLimit) []wsRateLimitRule {
+	rules := make([]wsRateLimitRule, 0, 4)
+	if limit.PerHour > 0 {
+		rules = append(rules, wsRateLimitRule{
+			WindowName: "hour",
+			Window:     time.Hour,
+			MaxAllowed: limit.PerHour,
+		})
+	}
+	if limit.PerDay > 0 {
+		rules = append(rules, wsRateLimitRule{
+			WindowName: "day",
+			Window:     24 * time.Hour,
+			MaxAllowed: limit.PerDay,
+		})
+	}
+	if limit.PerWeek > 0 {
+		rules = append(rules, wsRateLimitRule{
+			WindowName: "week",
+			Window:     7 * 24 * time.Hour,
+			MaxAllowed: limit.PerWeek,
+		})
+	}
+	if limit.PerMonth > 0 {
+		rules = append(rules, wsRateLimitRule{
+			WindowName: "month",
+			Window:     30 * 24 * time.Hour,
+			MaxAllowed: limit.PerMonth,
+		})
+	}
+	return rules
+}
+
+func extractSocketDeviceID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	for _, candidate := range []string{
+		r.URL.Query().Get("deviceId"),
+		r.URL.Query().Get("device_id"),
+		r.Header.Get("X-Device-Id"),
+		r.Header.Get("X-Device-ID"),
+	} {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" {
+			continue
+		}
+		return normalizeSocketDeviceID(trimmed)
+	}
+	return ""
+}
+
+func normalizeSocketDeviceID(raw string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, ch := range trimmed {
+		if (ch >= 'a' && ch <= 'z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '_' ||
+			ch == '-' {
+			builder.WriteRune(ch)
+		}
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func (c *Client) writePump() {
@@ -922,6 +1124,7 @@ func parseMessageEditPayload(raw []byte) (clientMessageEditPayload, bool) {
 	if roomID == "" || messageID == "" || content == "" {
 		return clientMessageEditPayload{}, false
 	}
+	maxTextChars := wsLimits().MaxTextChars
 	if len(content) > maxTextChars {
 		content = content[:maxTextChars]
 	}
@@ -1105,6 +1308,7 @@ func parseDiscussionCommentPayload(raw []byte) (clientDiscussionCommentPayload, 
 	if roomID == "" || pinMessageID == "" || content == "" {
 		return clientDiscussionCommentPayload{}, false
 	}
+	maxTextChars := wsLimits().MaxTextChars
 	if len(content) > maxTextChars {
 		content = content[:maxTextChars]
 	}
@@ -1778,15 +1982,16 @@ func normalizeInboundMessage(msg *models.Message) bool {
 	if msg.ReplyToMessageID == "" {
 		msg.ReplyToSnippet = ""
 	}
+	limits := wsLimits()
 
 	switch msg.Type {
 	case "", "text":
 		msg.Type = "text"
-		return msg.Content != "" && len(msg.Content) <= maxTextChars
+		return msg.Content != "" && len(msg.Content) <= limits.MaxTextChars
 	case "task":
-		return msg.Content != "" && len(msg.Content) <= maxTextChars
+		return msg.Content != "" && len(msg.Content) <= limits.MaxTextChars
 	case messageTypeCallLog:
-		if msg.Content == "" || len(msg.Content) > maxTextChars {
+		if msg.Content == "" || len(msg.Content) > limits.MaxTextChars {
 			return false
 		}
 		msg.MediaURL = ""
@@ -1801,14 +2006,14 @@ func normalizeInboundMessage(msg *models.Message) bool {
 		if msg.Content == "" {
 			msg.Content = msg.MediaURL
 		}
-		if len(msg.Content) == 0 || len(msg.Content) > maxMediaURLLen {
+		if len(msg.Content) == 0 || len(msg.Content) > limits.MaxMediaURLLength {
 			return false
 		}
 		if msg.MediaURL == "" {
 			msg.MediaURL = msg.Content
 		}
-		if len(msg.FileName) > maxFileNameLen {
-			msg.FileName = msg.FileName[:maxFileNameLen]
+		if len(msg.FileName) > limits.MaxFileNameLength {
+			msg.FileName = msg.FileName[:limits.MaxFileNameLength]
 		}
 		return true
 	default:
@@ -2005,9 +2210,10 @@ func (c *Client) canWriteToRoom(roomID string) bool {
 }
 
 func reserveWSConnection(clientIP string) (func(), int, string) {
+	limits := wsLimits()
 	for {
 		currentGlobal := globalWSConnections.Load()
-		if currentGlobal >= maxGlobalWSConnections {
+		if currentGlobal >= limits.MaxGlobalConnections {
 			return nil, http.StatusServiceUnavailable, "WebSocket capacity reached"
 		}
 		if globalWSConnections.CompareAndSwap(currentGlobal, currentGlobal+1) {
@@ -2018,7 +2224,7 @@ func reserveWSConnection(clientIP string) (func(), int, string) {
 	ipCounter := getOrCreateIPConnectionCounter(clientIP)
 	for {
 		currentIP := ipCounter.Load()
-		if currentIP >= maxWSConnectionsPerIP {
+		if currentIP >= limits.MaxConnectionsPerIP {
 			decrementGlobalWSConnections()
 			return nil, http.StatusTooManyRequests, "Too many active WebSocket connections for this IP"
 		}

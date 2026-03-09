@@ -1,7 +1,8 @@
+import { APP_LIMITS } from '$lib/config/limits';
+
 const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
-const MB = 1024 * 1024;
-const VIDEO_LIMIT_BYTES = 50 * MB;
+const VIDEO_LIMIT_BYTES = APP_LIMITS.media.maxVideoBytes;
 
 export type MediaMessageType = 'image' | 'video' | 'file' | 'audio';
 
@@ -16,8 +17,8 @@ export async function compressMedia(file: File): Promise<File> {
 		const mod = await import('browser-image-compression');
 		const imageCompression = mod.default;
 		const compressed = await imageCompression(file, {
-			maxSizeMB: 1,
-			maxWidthOrHeight: 1920,
+			maxSizeMB: APP_LIMITS.media.imageCompressionMaxSizeMB,
+			maxWidthOrHeight: APP_LIMITS.media.imageCompressionMaxWidthOrHeight,
 			useWebWorker: true
 		});
 		return compressed as File;

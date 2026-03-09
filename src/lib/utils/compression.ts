@@ -1,15 +1,15 @@
+import { APP_LIMITS } from '$lib/config/limits';
 export type AttachmentType = 'media' | 'file';
 
-const MB = 1024 * 1024;
-const VIDEO_LIMIT_BYTES = 50 * MB;
+const VIDEO_LIMIT_BYTES = APP_LIMITS.media.maxVideoBytes;
 
 export async function compressImage(file: File): Promise<File> {
 	try {
 		const mod = await import('browser-image-compression');
 		const imageCompression = mod.default;
 		const compressed = await imageCompression(file, {
-			maxSizeMB: 1,
-			maxWidthOrHeight: 1920,
+			maxSizeMB: APP_LIMITS.media.imageCompressionMaxSizeMB,
+			maxWidthOrHeight: APP_LIMITS.media.imageCompressionMaxWidthOrHeight,
 			useWebWorker: true
 		});
 		return compressed as File;
@@ -20,7 +20,12 @@ export async function compressImage(file: File): Promise<File> {
 
 export async function compressVideo(file: File): Promise<File> {
 	if (file.size > VIDEO_LIMIT_BYTES) {
-		throw new Error('Video is too large. Max supported size is 50MB.');
+		throw new Error(
+			`Video is too large. Max supported size is ${Math.max(
+				1,
+				Math.round(VIDEO_LIMIT_BYTES / (1024 * 1024))
+			)}MB.`
+		);
 	}
 	return file;
 }

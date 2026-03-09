@@ -20,17 +20,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
+	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/monitor"
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
-)
-
-const (
-	maxUploadFileSize  = 5 * 1024 * 1024
-	maxImageFileSize   = maxUploadFileSize
-	maxMultipartBytes  = maxUploadFileSize + (1 * 1024 * 1024)
-	maxFormFieldLength = 1024
 )
 
 var (
@@ -38,6 +32,102 @@ var (
 	uploadReadLimiter    = security.NewLimiter(240, time.Minute, 64, 15*time.Minute)
 	uploadProxyLimiter   = security.NewLimiter(12, time.Minute, 4, 15*time.Minute)
 )
+
+const (
+	uploadScopeUser   = "user"
+	uploadScopeIP     = "ip"
+	uploadScopeDevice = "device"
+)
+
+type uploadRateLimitRule struct {
+	WindowName string
+	Window     time.Duration
+	MaxAllowed int64
+}
+
+type uploadRateLimitCheck struct {
+	Scope string
+	Value string
+}
+
+type uploadRateLimitExceededError struct {
+	Action string
+	Scope  string
+	Window string
+	Limit  int64
+}
+
+func (e *uploadRateLimitExceededError) Error() string {
+	if e == nil {
+		return "upload rate limit exceeded"
+	}
+	return fmt.Sprintf(
+		"upload rate limit exceeded action=%s scope=%s window=%s limit=%d",
+		strings.TrimSpace(e.Action),
+		strings.TrimSpace(e.Scope),
+		strings.TrimSpace(e.Window),
+		e.Limit,
+	)
+}
+
+func (e *uploadRateLimitExceededError) PublicMessage() string {
+	if e == nil {
+		return "Upload rate limit exceeded. Please try again later."
+	}
+	scopeLabel := "this context"
+	switch strings.TrimSpace(e.Scope) {
+	case uploadScopeUser:
+		scopeLabel = "this user"
+	case uploadScopeIP:
+		scopeLabel = "this IP"
+	case uploadScopeDevice:
+		scopeLabel = "this device"
+	}
+	windowLabel := strings.TrimSpace(e.Window)
+	if windowLabel == "" {
+		windowLabel = "current"
+	}
+	return fmt.Sprintf("Upload rate limit exceeded for %s in the %s window.", scopeLabel, windowLabel)
+}
+
+func uploadLimits() config.UploadLimits {
+	return config.LoadAppLimits().Upload
+}
+
+func maxUploadFileSize() int64 {
+	return uploadLimits().MaxFileBytes
+}
+
+func maxImageFileSize() int64 {
+	return uploadLimits().MaxImageBytes
+}
+
+func maxMultipartBytes() int64 {
+	return uploadLimits().MaxMultipartBytes
+}
+
+func maxFormFieldLength() int64 {
+	return uploadLimits().MaxFormFieldLength
+}
+
+func formatBinaryLimitMB(bytes int64) string {
+	if bytes <= 0 {
+		return "0MB"
+	}
+	mb := float64(bytes) / (1024 * 1024)
+	if mb == float64(int64(mb)) {
+		return fmt.Sprintf("%dMB", int64(mb))
+	}
+	return fmt.Sprintf("%.1fMB", mb)
+}
+
+func uploadLimitExceededMessage(kind string, maxBytes int64) string {
+	label := strings.TrimSpace(kind)
+	if label == "" {
+		label = "File"
+	}
+	return fmt.Sprintf("%s is larger than allowed limit (%s)", label, formatBinaryLimitMB(maxBytes))
+}
 
 type UploadHandler struct {
 	r2      *storage.R2Client
@@ -50,6 +140,7 @@ type GenerateUploadURLRequest struct {
 	FileType string `json:"filetype"`
 	FileSize int64  `json:"filesize"`
 	RoomID   string `json:"roomId,omitempty"`
+	DeviceID string `json:"deviceId,omitempty"`
 }
 
 type GenerateUploadURLResponse struct {
@@ -100,6 +191,24 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	rateLimitUserID := extractUploadRateLimitUserID(r)
+	rateLimitDeviceID := extractUploadRateLimitDeviceID(r, req.DeviceID)
+	if err := enforceUploadActionRateLimits(r.Context(), "generate_url", rateLimitUserID, clientIP, rateLimitDeviceID); err != nil {
+		var exceeded *uploadRateLimitExceededError
+		if errors.As(err, &exceeded) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": exceeded.PublicMessage(),
+			})
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Upload limiter unavailable",
+		})
+		return
+	}
+
 	filename := strings.TrimSpace(req.Filename)
 	if filename == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -124,17 +233,17 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
-	if req.FileSize > maxUploadFileSize {
+	if req.FileSize > maxUploadFileSize() {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "File is larger than allowed limit (5MB)",
+			"error": uploadLimitExceededMessage("File", maxUploadFileSize()),
 		})
 		return
 	}
-	if strings.HasPrefix(fileType, "image/") && req.FileSize > maxImageFileSize {
+	if strings.HasPrefix(fileType, "image/") && req.FileSize > maxImageFileSize() {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "Image is larger than allowed limit (5MB)",
+			"error": uploadLimitExceededMessage("Image", maxImageFileSize()),
 		})
 		return
 	}
@@ -191,8 +300,29 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if err := enforceUploadActionRateLimits(
+		r.Context(),
+		"proxy",
+		extractUploadRateLimitUserID(r),
+		clientIP,
+		extractUploadRateLimitDeviceID(r, ""),
+	); err != nil {
+		var exceeded *uploadRateLimitExceededError
+		if errors.As(err, &exceeded) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": exceeded.PublicMessage(),
+			})
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Upload limiter unavailable",
+		})
+		return
+	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxMultipartBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxMultipartBytes())
 	multipartReader, err := r.MultipartReader()
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -218,7 +348,7 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 			status := http.StatusBadRequest
 			if strings.Contains(strings.ToLower(partErr.Error()), "too large") {
 				status = http.StatusRequestEntityTooLarge
-				message = "File is larger than allowed limit (5MB)"
+				message = uploadLimitExceededMessage("File", maxUploadFileSize())
 			}
 			w.WriteHeader(status)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
@@ -229,7 +359,7 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 		switch fieldName {
 		case "roomId":
 			if roomIDFromForm == "" {
-				value, readErr := readSmallMultipartField(part, maxFormFieldLength)
+				value, readErr := readSmallMultipartField(part, maxFormFieldLength())
 				if readErr != nil {
 					_ = part.Close()
 					w.WriteHeader(http.StatusBadRequest)
@@ -284,7 +414,7 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 				filename,
 				fileReader,
 				fileType,
-				maxUploadFileSize,
+				maxUploadFileSize(),
 			)
 			_ = part.Close()
 			if uploadErr != nil {
@@ -293,7 +423,9 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case errors.Is(uploadErr, storage.ErrUploadTooLarge):
 					w.WriteHeader(http.StatusRequestEntityTooLarge)
-					_ = json.NewEncoder(w).Encode(map[string]string{"error": "File is larger than allowed limit (5MB)"})
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error": uploadLimitExceededMessage("File", maxUploadFileSize()),
+					})
 				case errors.Is(uploadErr, storage.ErrEmptyUpload):
 					w.WriteHeader(http.StatusBadRequest)
 					_ = json.NewEncoder(w).Encode(map[string]string{"error": "file must not be empty"})
@@ -304,12 +436,12 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if strings.HasPrefix(fileType, "image/") && fileSize > maxImageFileSize {
+			if strings.HasPrefix(fileType, "image/") && fileSize > maxImageFileSize() {
 				_ = h.r2.DeleteObjects(r.Context(), []string{h.resolveObjectKeyFromFileURL(fileURL)})
 				monitor.TotalUploads.WithLabelValues("error").Inc()
 				w.WriteHeader(http.StatusRequestEntityTooLarge)
 				_ = json.NewEncoder(w).Encode(map[string]string{
-					"error": "Image is larger than allowed limit (5MB)",
+					"error": uploadLimitExceededMessage("Image", maxImageFileSize()),
 				})
 				return
 			}
@@ -505,7 +637,7 @@ func detectUploadContentType(reader io.Reader, fallbackType string) (io.Reader, 
 
 func readSmallMultipartField(reader io.Reader, maxBytes int64) (string, error) {
 	if maxBytes <= 0 {
-		maxBytes = maxFormFieldLength
+		maxBytes = maxFormFieldLength()
 	}
 
 	var builder strings.Builder
@@ -637,6 +769,131 @@ func (h *UploadHandler) trackUploadedFile(ctx context.Context, roomID, objectKey
 	if err := h.redis.Client.Expire(ctx, filesKey, nextTTL).Err(); err != nil {
 		log.Printf("[upload] failed to set room file index ttl room=%s key=%s err=%v", normalizedRoomID, filesKey, err)
 	}
+}
+
+func enforceUploadActionRateLimits(
+	ctx context.Context,
+	action string,
+	userID string,
+	ipAddress string,
+	deviceID string,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	limits := uploadLimits().Rate
+
+	var scopeLimits config.UploadRateScopeLimits
+	switch strings.TrimSpace(strings.ToLower(action)) {
+	case "generate_url":
+		scopeLimits = limits.GenerateURL
+	case "proxy":
+		scopeLimits = limits.Proxy
+	default:
+		return nil
+	}
+
+	checks := []uploadRateLimitCheck{
+		{Scope: uploadScopeUser, Value: normalizeIdentifier(userID)},
+		{Scope: uploadScopeIP, Value: strings.TrimSpace(ipAddress)},
+		{Scope: uploadScopeDevice, Value: normalizeDeviceIdentifier(deviceID)},
+	}
+	for _, check := range checks {
+		if strings.TrimSpace(check.Value) == "" {
+			continue
+		}
+		var rules []uploadRateLimitRule
+		switch check.Scope {
+		case uploadScopeUser:
+			rules = buildUploadRateLimitRules(scopeLimits.User)
+		case uploadScopeIP:
+			rules = buildUploadRateLimitRules(scopeLimits.IP)
+		case uploadScopeDevice:
+			rules = buildUploadRateLimitRules(scopeLimits.Device)
+		}
+
+		for _, rule := range rules {
+			result, err := security.AllowFixedWindow(
+				ctx,
+				"upload:"+action,
+				check.Scope,
+				rule.WindowName,
+				check.Value,
+				rule.MaxAllowed,
+				rule.Window,
+			)
+			if err != nil {
+				return err
+			}
+			if result.Allowed {
+				continue
+			}
+			return &uploadRateLimitExceededError{
+				Action: action,
+				Scope:  check.Scope,
+				Window: rule.WindowName,
+				Limit:  rule.MaxAllowed,
+			}
+		}
+	}
+	return nil
+}
+
+func buildUploadRateLimitRules(limit config.TimeWindowLimit) []uploadRateLimitRule {
+	rules := make([]uploadRateLimitRule, 0, 4)
+	if limit.PerHour > 0 {
+		rules = append(rules, uploadRateLimitRule{
+			WindowName: "hour",
+			Window:     time.Hour,
+			MaxAllowed: limit.PerHour,
+		})
+	}
+	if limit.PerDay > 0 {
+		rules = append(rules, uploadRateLimitRule{
+			WindowName: "day",
+			Window:     24 * time.Hour,
+			MaxAllowed: limit.PerDay,
+		})
+	}
+	if limit.PerWeek > 0 {
+		rules = append(rules, uploadRateLimitRule{
+			WindowName: "week",
+			Window:     7 * 24 * time.Hour,
+			MaxAllowed: limit.PerWeek,
+		})
+	}
+	if limit.PerMonth > 0 {
+		rules = append(rules, uploadRateLimitRule{
+			WindowName: "month",
+			Window:     30 * 24 * time.Hour,
+			MaxAllowed: limit.PerMonth,
+		})
+	}
+	return rules
+}
+
+func extractUploadRateLimitUserID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return normalizeIdentifier(firstNonEmpty(
+		r.URL.Query().Get("userId"),
+		r.URL.Query().Get("user_id"),
+		r.Header.Get("X-User-Id"),
+	))
+}
+
+func extractUploadRateLimitDeviceID(r *http.Request, explicit string) string {
+	if r == nil {
+		return normalizeDeviceIdentifier(explicit)
+	}
+	return normalizeDeviceIdentifier(firstNonEmpty(
+		explicit,
+		r.URL.Query().Get("deviceId"),
+		r.URL.Query().Get("device_id"),
+		r.Header.Get("X-Device-Id"),
+		r.Header.Get("X-Device-ID"),
+	))
 }
 
 func extractClientIP(r *http.Request) string {

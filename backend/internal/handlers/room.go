@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,7 +24,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/security"
@@ -35,14 +38,10 @@ const (
 	roomDefaultTTL       = 6 * time.Hour
 	roomExtendedTTL      = 24 * time.Hour
 	roomMaxExtendAge     = 15 * 24 * time.Hour
-	roomMaxDescendants   = 6
 	roomMinDurationHours = 0.1
-	roomMaxDurationHours = 15.0 * 24.0
 	roomHistoryTTL       = roomDefaultTTL
 	roomHistorySize      = 50
-	roomCodeDigits       = 6
 	roomAdminCodeLength  = 4
-	roomNameMaxLength    = 20
 	roomIDLength         = 14
 	roomIDAlphabet       = "abcdefghijklmnopqrstuvwxyz0123456789"
 	roomAdminCodeCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -51,9 +50,10 @@ const (
 	messageBreakPrefix   = "message:break:"
 	roomNameRetryLimit   = 3
 	roomSoftExpiryTable  = "room_message_soft_expiry"
-	roomPasswordMaxLen   = 64
 	roomDefaultAIEnabled = true
 	roomDefaultE2EE      = false
+	reviveRoomTTL        = 24 * time.Hour
+	revivePayloadMaxSize = 12 * 1024 * 1024
 )
 
 var (
@@ -62,6 +62,41 @@ var (
 	JoinRoomLimiter   = security.NewLimiter(20, time.Minute, 20, 15*time.Minute)
 	ExtendRoomLimiter = security.NewLimiter(5, 10*time.Minute, 5, 30*time.Minute)
 )
+
+func roomLimits() config.RoomLimits {
+	return config.LoadAppLimits().Room
+}
+
+func roomCodeDigits() int {
+	return roomLimits().CodeDigits
+}
+
+func roomNameMaxLength() int {
+	return roomLimits().NameMaxLength
+}
+
+func roomPasswordMaxLen() int {
+	return roomLimits().PasswordMaxLength
+}
+
+func roomMaxDescendants() int {
+	return roomLimits().MaxDescendants
+}
+
+func roomMaxDurationHours() float64 {
+	return roomLimits().MaxDurationHours
+}
+
+func roomCodeUpperBound() int {
+	digits := roomCodeDigits()
+	if digits <= 0 {
+		return 1_000_000
+	}
+	if digits >= 9 {
+		return 1_000_000_000
+	}
+	return int(math.Pow10(digits))
+}
 
 type RoomHandler struct {
 	hub    *websocket.Hub
@@ -78,6 +113,7 @@ func NewRoomHandler(hub *websocket.Hub, redisStore *database.RedisStore, scyllaS
 	handler := &RoomHandler{hub: hub, redis: redisStore, scylla: scyllaStore}
 	handler.ensureRoomSchema()
 	handler.ensureRoomMessageSoftExpirySchema()
+	handler.ensureTaskSchema()
 	handler.ensurePinnedDiscussionSchema()
 	return handler
 }
@@ -248,6 +284,13 @@ type RoomAdminActionResponse struct {
 	RemovedUserID string `json:"removedUserId,omitempty"`
 	Message       string `json:"message"`
 	ServerNow     int64  `json:"serverNow,omitempty"`
+}
+
+type ReviveRoomResponse struct {
+	NewRoomID string `json:"newRoomId"`
+	RoomID    string `json:"roomId"`
+	ExpiresAt int64  `json:"expiresAt"`
+	ServerNow int64  `json:"serverNow"`
 }
 
 type PromoteToAdminRequest struct {
@@ -672,9 +715,11 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to evaluate child room limit"})
 		return
 	}
-	if descendantCount >= roomMaxDescendants {
+	if descendantCount >= roomMaxDescendants() {
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Root room has reached the child limit (6)"})
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("Root room has reached the child limit (%d)", roomMaxDescendants()),
+		})
 		return
 	}
 
@@ -1706,7 +1751,7 @@ func normalizeRoomName(raw string) string {
 		lastWasUnderscore = false
 	}
 
-	return truncateRunes(strings.TrimSpace(builder.String()), roomNameMaxLength)
+	return truncateRunes(strings.TrimSpace(builder.String()), roomNameMaxLength())
 }
 
 func normalizeRoomNameLookup(raw string) string {
@@ -1724,13 +1769,13 @@ func deriveBranchRoomName(sourceText string) string {
 	}
 
 	if fromJSON := deriveBranchRoomNameFromJSON(trimmed); fromJSON != "" {
-		return truncateRunes(fromJSON, roomNameMaxLength)
+		return truncateRunes(fromJSON, roomNameMaxLength())
 	}
 	if fromURL := deriveBranchRoomNameFromURL(trimmed); fromURL != "" {
-		return truncateRunes(fromURL, roomNameMaxLength)
+		return truncateRunes(fromURL, roomNameMaxLength())
 	}
 
-	return truncateRunes(normalizeRoomName(trimmed), roomNameMaxLength)
+	return truncateRunes(normalizeRoomName(trimmed), roomNameMaxLength())
 }
 
 func deriveBranchRoomNameFromJSON(sourceText string) string {
@@ -1941,7 +1986,7 @@ func normalizeRoomCode(raw string) string {
 	}
 
 	code := builder.String()
-	if len(code) != roomCodeDigits {
+	if len(code) != roomCodeDigits() {
 		return ""
 	}
 	return code
@@ -1952,7 +1997,7 @@ func normalizeRoomPassword(raw string) string {
 	if trimmed == "" {
 		return ""
 	}
-	return truncateRunes(trimmed, roomPasswordMaxLen)
+	return truncateRunes(trimmed, roomPasswordMaxLen())
 }
 
 func normalizeRoomPasswordHash(raw string) string {
@@ -2082,11 +2127,11 @@ func resolveInitialRoomTTL(requestedHours float64) (time.Duration, error) {
 	if !isFinite(safeHours) {
 		return 0, fmt.Errorf("roomDurationHours is invalid")
 	}
-	if safeHours < roomMinDurationHours || safeHours > roomMaxDurationHours {
+	if safeHours < roomMinDurationHours || safeHours > roomMaxDurationHours() {
 		return 0, fmt.Errorf(
 			"roomDurationHours must be between %.1f and %.1f",
 			roomMinDurationHours,
-			roomMaxDurationHours,
+			roomMaxDurationHours(),
 		)
 	}
 	minutes := math.Round(safeHours * 60)
@@ -2137,7 +2182,7 @@ func (h *RoomHandler) resolveCreateRoomName(ctx context.Context, requestedRoomNa
 		lastGenerated = "room"
 	}
 
-	base := truncateRunes(lastGenerated, roomNameMaxLength-3)
+	base := truncateRunes(lastGenerated, roomNameMaxLength()-3)
 	if base == "" {
 		base = "room"
 	}
@@ -2497,6 +2542,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 		e2ee_enabled boolean,
 		canvas_has_data boolean,
 		rolling_summary text,
+		expires_at timestamp,
 		created_at timestamp,
 		updated_at timestamp
 	)`, roomsTable)
@@ -2513,6 +2559,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 		fmt.Sprintf(`ALTER TABLE %s ADD e2ee_enabled boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD canvas_has_data boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD rolling_summary text`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD expires_at timestamp`, roomsTable),
 	}
 	for _, query := range alterQueries {
 		if err := h.scylla.Session.Query(query).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
@@ -2562,7 +2609,7 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 			roomName = normalizeRoomName(cachedName)
 		}
 		if roomName == "" {
-			roomName = truncateRunes(roomID, roomNameMaxLength)
+			roomName = truncateRunes(roomID, roomNameMaxLength())
 		}
 	}
 	roomType = strings.TrimSpace(roomType)
@@ -2603,11 +2650,15 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 	if storedCreatedAt, err := h.getRoomCreatedAt(ctx, roomID); err == nil && storedCreatedAt > 0 {
 		createdAt = time.Unix(storedCreatedAt, 0).UTC()
 	}
+	expiresAt := time.Now().UTC().Add(roomDefaultTTL)
+	if roomExpiryUnix := h.getRoomExpiryUnix(ctx, roomID); roomExpiryUnix > 0 {
+		expiresAt = time.Unix(roomExpiryUnix, 0).UTC()
+	}
 	updatedAt := time.Now().UTC()
 
 	roomsTable := h.scylla.Table("rooms")
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, admin_code, ai_enabled, e2ee_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, admin_code, ai_enabled, e2ee_enabled, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		roomsTable,
 		hardScyllaTTLSeconds,
 	)
@@ -2621,6 +2672,7 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 		adminCode,
 		roomFeatures.AIEnabled,
 		roomFeatures.E2EEnabled,
+		expiresAt,
 		createdAt,
 		updatedAt,
 	).WithContext(ctx).Exec(); err != nil {
@@ -3043,7 +3095,7 @@ func (h *RoomHandler) ensureRoomCode(ctx context.Context, roomID string) (string
 
 	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	for attempts := 0; attempts < 40; attempts++ {
-		code := fmt.Sprintf("%0*d", roomCodeDigits, rng.Intn(1000000))
+		code := fmt.Sprintf("%0*d", roomCodeDigits(), rng.Intn(roomCodeUpperBound()))
 		created, err := h.redis.Client.SetNX(ctx, roomCodeKey(code), roomID, codeTTL).Result()
 		if err != nil {
 			return "", err
@@ -3900,4 +3952,800 @@ func (h *RoomHandler) CreateRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNotImplemented)
+}
+
+func (h *RoomHandler) ReviveRoom(w http.ResponseWriter, r *http.Request) {
+	clientIP := extractClientIP(r)
+	if !roomCreateLimiter.Allow(clientIP) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Room revive rate limit exceeded"})
+		return
+	}
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Room storage unavailable"})
+		return
+	}
+	if h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Scylla storage unavailable"})
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, revivePayloadMaxSize)
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
+
+	var rawPayload map[string]interface{}
+	if err := decoder.Decode(&rawPayload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON payload"})
+		return
+	}
+	reviveStripIdentityFields(rawPayload)
+	state := reviveExtractStateRoot(rawPayload)
+	if len(state) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Room state payload is required"})
+		return
+	}
+
+	ctx := r.Context()
+	now := time.Now().UTC()
+	expiresAt := now.Add(reviveRoomTTL)
+	newRoomID := normalizeRoomID(uuid.NewString())
+	if newRoomID == "" {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate room id"})
+		return
+	}
+
+	roomName := reviveResolveRoomName(state)
+	roomFeatures := reviveResolveRoomFeatures(state)
+	if err := h.createRoom(
+		ctx,
+		newRoomID,
+		roomName,
+		"ephemeral",
+		now.Unix(),
+		"",
+		"",
+		reviveRoomTTL,
+		"",
+		roomFeatures.AIEnabled,
+		roomFeatures.E2EEnabled,
+	); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create revived room"})
+		return
+	}
+	if err := h.syncRoomExpiryInScylla(ctx, newRoomID, expiresAt); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to set room expiry"})
+		return
+	}
+	_ = h.redis.Client.HSet(ctx, roomKey(newRoomID), "expires_at", expiresAt.Unix()).Err()
+
+	messageEntries := reviveExtractObjectArray(state, "messages")
+	taskEntries := reviveExtractObjectArray(state, "tasks")
+	if len(taskEntries) > 0 {
+		messageEntries = append(messageEntries, reviveConvertTasksToMessageEntries(taskEntries, now)...)
+	}
+	if err := h.reviveInsertMessages(ctx, newRoomID, messageEntries, now); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to restore messages"})
+		return
+	}
+
+	boardEntries := reviveExtractObjectArray(
+		state,
+		"boardElements",
+		"board_elements",
+		"canvasElements",
+		"canvas_elements",
+		"drawBoard",
+		"draw_board",
+	)
+	if len(boardEntries) == 0 {
+		if entries := reviveExtractObjectArray(state, "canvas"); len(entries) > 0 {
+			boardEntries = entries
+		}
+	}
+	if err := h.reviveInsertBoardElements(ctx, newRoomID, boardEntries, now); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to restore canvas board state"})
+		return
+	}
+
+	canvasSnapshotBytes, hasSnapshot, snapshotErr := reviveResolveCanvasSnapshotBytes(state)
+	if snapshotErr != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid canvas snapshot payload"})
+		return
+	}
+	if hasSnapshot {
+		if err := h.reviveInsertCanvasSnapshot(ctx, newRoomID, canvasSnapshotBytes); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to restore canvas snapshot"})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(ReviveRoomResponse{
+		NewRoomID: newRoomID,
+		RoomID:    newRoomID,
+		ExpiresAt: expiresAt.Unix(),
+		ServerNow: time.Now().Unix(),
+	})
+}
+
+func (h *RoomHandler) syncRoomExpiryInScylla(ctx context.Context, roomID string, expiresAt time.Time) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("room id is required")
+	}
+	if expiresAt.IsZero() {
+		expiresAt = time.Now().UTC().Add(reviveRoomTTL)
+	}
+
+	query := fmt.Sprintf(
+		`UPDATE %s USING TTL %d SET expires_at = ?, updated_at = ? WHERE room_id = ?`,
+		h.scylla.Table("rooms"),
+		hardScyllaTTLSeconds,
+	)
+	return h.scylla.Session.Query(
+		query,
+		expiresAt.UTC(),
+		time.Now().UTC(),
+		normalizedRoomID,
+	).WithContext(ctx).Exec()
+}
+
+func (h *RoomHandler) reviveInsertMessages(
+	ctx context.Context,
+	roomID string,
+	entries []map[string]interface{},
+	fallbackCreatedAt time.Time,
+) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, message_id, sender_id, sender_name, content, type, media_url, media_type, file_name, is_edited, edited_at, has_break_room, break_room_id, break_join_count, reply_to_message_id, reply_to_snippet, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		h.scylla.Table("messages"),
+		hardScyllaTTLSeconds,
+	)
+
+	seenMessageIDs := make(map[string]struct{}, len(entries))
+	for index, entry := range entries {
+		messageID := normalizeMessageID(
+			firstNonEmptyStringValue(
+				entry["message_id"],
+				entry["messageId"],
+				entry["id"],
+			),
+		)
+		if messageID == "" {
+			messageID = normalizeMessageID(uuid.NewString())
+		}
+		if _, exists := seenMessageIDs[messageID]; exists {
+			messageID = normalizeMessageID(fmt.Sprintf("%s_%d", messageID, index))
+		}
+		seenMessageIDs[messageID] = struct{}{}
+
+		senderID := normalizeIdentifier(firstNonEmptyStringValue(entry["sender_id"], entry["senderId"]))
+		if senderID == "" {
+			senderID = "revived_user"
+		}
+		senderName := normalizeUsername(firstNonEmptyStringValue(entry["sender_name"], entry["senderName"]))
+		if senderName == "" {
+			senderName = "Revived_User"
+		}
+		content := reviveContentString(
+			reviveLookupValue(entry, "content", "messageText", "message_text", "text"),
+		)
+		messageType := strings.TrimSpace(
+			firstNonEmptyStringValue(entry["type"], entry["kind"]),
+		)
+		if messageType == "" {
+			messageType = "text"
+		}
+		mediaURL := strings.TrimSpace(firstNonEmptyStringValue(entry["media_url"], entry["mediaUrl"]))
+		mediaType := strings.TrimSpace(firstNonEmptyStringValue(entry["media_type"], entry["mediaType"]))
+		fileName := strings.TrimSpace(firstNonEmptyStringValue(entry["file_name"], entry["fileName"]))
+		isEdited := reviveBoolValue(reviveLookupValue(entry, "is_edited", "isEdited"), false)
+		editedAt := reviveTimeValue(reviveLookupValue(entry, "edited_at", "editedAt"))
+		var editedAtValue interface{}
+		if !editedAt.IsZero() {
+			editedAtValue = editedAt.UTC()
+		}
+		hasBreakRoom := reviveBoolValue(reviveLookupValue(entry, "has_break_room", "hasBreakRoom"), false)
+		breakRoomID := normalizeRoomID(firstNonEmptyStringValue(entry["break_room_id"], entry["breakRoomId"]))
+		breakJoinCount := int(reviveInt64Value(reviveLookupValue(entry, "break_join_count", "breakJoinCount")))
+		replyToMessageID := normalizeMessageID(
+			firstNonEmptyStringValue(entry["reply_to_message_id"], entry["replyToMessageId"]),
+		)
+		replyToSnippet := strings.TrimSpace(firstNonEmptyStringValue(entry["reply_to_snippet"], entry["replyToSnippet"]))
+		createdAt := reviveTimeValue(
+			reviveLookupValue(entry, "created_at", "createdAt", "originalCreatedAt", "timestamp"),
+		)
+		if createdAt.IsZero() {
+			createdAt = fallbackCreatedAt.Add(time.Duration(index) * time.Millisecond).UTC()
+		}
+
+		if err := h.scylla.Session.Query(
+			insertQuery,
+			roomID,
+			messageID,
+			senderID,
+			senderName,
+			content,
+			messageType,
+			mediaURL,
+			mediaType,
+			fileName,
+			isEdited,
+			editedAtValue,
+			hasBreakRoom,
+			breakRoomID,
+			breakJoinCount,
+			replyToMessageID,
+			replyToSnippet,
+			createdAt.UTC(),
+		).WithContext(ctx).Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *RoomHandler) reviveInsertBoardElements(
+	ctx context.Context,
+	roomID string,
+	entries []map[string]interface{},
+	fallbackCreatedAt time.Time,
+) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, element_id, type, x, y, width, height, content, z_index, created_by_user_id, created_by_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		h.scylla.Table("board_elements"),
+		hardScyllaTTLSeconds,
+	)
+	seenElementIDs := make(map[string]struct{}, len(entries))
+	for index, entry := range entries {
+		elementID := normalizeMessageID(firstNonEmptyStringValue(entry["element_id"], entry["elementId"], entry["id"]))
+		if elementID == "" {
+			elementID = normalizeMessageID(uuid.NewString())
+		}
+		if _, exists := seenElementIDs[elementID]; exists {
+			elementID = normalizeMessageID(fmt.Sprintf("%s_%d", elementID, index))
+		}
+		seenElementIDs[elementID] = struct{}{}
+
+		elementType := strings.TrimSpace(firstNonEmptyStringValue(entry["type"], entry["elementType"], entry["kind"]))
+		if elementType == "" {
+			elementType = "shape"
+		}
+		x := reviveFloat32Value(reviveLookupValue(entry, "x"))
+		y := reviveFloat32Value(reviveLookupValue(entry, "y"))
+		width := reviveFloat32Value(reviveLookupValue(entry, "width", "w"))
+		height := reviveFloat32Value(reviveLookupValue(entry, "height", "h"))
+		content := reviveContentString(reviveLookupValue(entry, "content", "data", "text", "messageText"))
+		zIndex := int(reviveInt64Value(reviveLookupValue(entry, "z_index", "zIndex")))
+		createdByUserID := normalizeIdentifier(
+			firstNonEmptyStringValue(entry["created_by_user_id"], entry["createdByUserId"], entry["sender_id"], entry["senderId"]),
+		)
+		createdByName := normalizeUsername(
+			firstNonEmptyStringValue(entry["created_by_name"], entry["createdByName"], entry["sender_name"], entry["senderName"]),
+		)
+		createdAt := reviveTimeValue(reviveLookupValue(entry, "created_at", "createdAt", "timestamp"))
+		if createdAt.IsZero() {
+			createdAt = fallbackCreatedAt.Add(time.Duration(index) * time.Millisecond).UTC()
+		}
+
+		if err := h.scylla.Session.Query(
+			insertQuery,
+			roomID,
+			elementID,
+			elementType,
+			x,
+			y,
+			width,
+			height,
+			content,
+			zIndex,
+			createdByUserID,
+			createdByName,
+			createdAt.UTC(),
+		).WithContext(ctx).Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *RoomHandler) reviveInsertCanvasSnapshot(ctx context.Context, roomID string, snapshot []byte) error {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	if len(snapshot) == 0 {
+		return nil
+	}
+
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, snapshot) VALUES (?, ?) USING TTL %d`,
+		h.scylla.Table("canvas_snapshots"),
+		hardScyllaTTLSeconds,
+	)
+	return h.scylla.Session.Query(insertQuery, roomID, snapshot).WithContext(ctx).Exec()
+}
+
+func reviveResolveRoomName(state map[string]interface{}) string {
+	roomMeta := reviveExtractObject(state, "room")
+	name := normalizeRoomName(
+		firstNonEmptyStringValue(
+			reviveLookupValue(roomMeta, "name"),
+			reviveLookupValue(state, "roomName", "room_name", "name"),
+		),
+	)
+	if name == "" {
+		name = "Revived_Room"
+	}
+	return name
+}
+
+func reviveResolveRoomFeatures(state map[string]interface{}) roomFeatureFlags {
+	roomMeta := reviveExtractObject(state, "room")
+	aiRaw := reviveLookupValue(roomMeta, "ai_enabled", "aiEnabled")
+	if aiRaw == nil {
+		aiRaw = reviveLookupValue(state, "ai_enabled", "aiEnabled")
+	}
+	e2eRaw := reviveLookupValue(roomMeta, "e2ee_enabled", "e2e_enabled", "e2eEnabled")
+	if e2eRaw == nil {
+		e2eRaw = reviveLookupValue(state, "e2ee_enabled", "e2e_enabled", "e2eEnabled")
+	}
+	return normalizeRoomFeatureFlags(
+		reviveBoolValue(aiRaw, roomDefaultAIEnabled),
+		reviveBoolValue(e2eRaw, roomDefaultE2EE),
+	)
+}
+
+func reviveExtractStateRoot(payload map[string]interface{}) map[string]interface{} {
+	if len(payload) == 0 {
+		return map[string]interface{}{}
+	}
+	for _, key := range []string{"roomState", "room_state", "state", "archive", "payload", "data"} {
+		if nested, ok := payload[key].(map[string]interface{}); ok && len(nested) > 0 {
+			return nested
+		}
+	}
+	return payload
+}
+
+func reviveStripIdentityFields(value interface{}) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, nested := range typed {
+			switch reviveNormalizeIdentityFieldKey(key) {
+			case "ownerid", "userid":
+				delete(typed, key)
+				continue
+			}
+			reviveStripIdentityFields(nested)
+		}
+	case []interface{}:
+		for _, item := range typed {
+			reviveStripIdentityFields(item)
+		}
+	}
+}
+
+func reviveNormalizeIdentityFieldKey(raw string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(raw))
+	if trimmed == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.Grow(len(trimmed))
+	for _, char := range trimmed {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteRune(char)
+		}
+	}
+	return builder.String()
+}
+
+func reviveExtractObject(source map[string]interface{}, key string) map[string]interface{} {
+	if source == nil {
+		return map[string]interface{}{}
+	}
+	if key == "" {
+		return map[string]interface{}{}
+	}
+	raw, ok := source[key]
+	if !ok || raw == nil {
+		return map[string]interface{}{}
+	}
+	typed, ok := raw.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{}
+	}
+	return typed
+}
+
+func reviveExtractObjectArray(source map[string]interface{}, keys ...string) []map[string]interface{} {
+	if source == nil || len(keys) == 0 {
+		return []map[string]interface{}{}
+	}
+	for _, key := range keys {
+		raw, ok := source[key]
+		if !ok || raw == nil {
+			continue
+		}
+		switch typed := raw.(type) {
+		case []interface{}:
+			return reviveConvertArrayToObjectArray(typed)
+		case map[string]interface{}:
+			return []map[string]interface{}{typed}
+		}
+	}
+	return []map[string]interface{}{}
+}
+
+func reviveConvertArrayToObjectArray(values []interface{}) []map[string]interface{} {
+	if len(values) == 0 {
+		return []map[string]interface{}{}
+	}
+	results := make([]map[string]interface{}, 0, len(values))
+	for _, value := range values {
+		record, ok := value.(map[string]interface{})
+		if !ok || len(record) == 0 {
+			continue
+		}
+		results = append(results, record)
+	}
+	return results
+}
+
+func reviveConvertTasksToMessageEntries(
+	tasks []map[string]interface{},
+	fallbackCreatedAt time.Time,
+) []map[string]interface{} {
+	if len(tasks) == 0 {
+		return []map[string]interface{}{}
+	}
+	results := make([]map[string]interface{}, 0, len(tasks))
+	for index, task := range tasks {
+		entry := make(map[string]interface{}, len(task)+4)
+		for key, value := range task {
+			entry[key] = value
+		}
+		entry["type"] = "task"
+		if reviveLookupValue(entry, "content", "messageText", "message_text", "text") == nil {
+			encodedTask, err := json.Marshal(task)
+			if err == nil {
+				entry["content"] = string(encodedTask)
+			}
+		}
+		if reviveLookupValue(entry, "created_at", "createdAt", "timestamp") == nil {
+			entry["createdAt"] = fallbackCreatedAt.Add(time.Duration(index) * time.Millisecond).UnixMilli()
+		}
+		if reviveLookupValue(entry, "id", "message_id", "messageId") == nil {
+			entry["id"] = uuid.NewString()
+		}
+		results = append(results, entry)
+	}
+	return results
+}
+
+func reviveResolveCanvasSnapshotBytes(
+	state map[string]interface{},
+) ([]byte, bool, error) {
+	snapshots := reviveExtractObjectArray(state, "canvasSnapshots", "canvas_snapshots")
+	for _, snapshot := range snapshots {
+		rawSnapshot := reviveLookupValue(snapshot, "snapshot", "state", "data", "content")
+		decoded, ok, err := reviveBinaryValue(rawSnapshot)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
+			return decoded, true, nil
+		}
+	}
+
+	candidate := reviveLookupValue(
+		state,
+		"canvasSnapshot",
+		"canvas_snapshot",
+		"canvasState",
+		"canvas_state",
+		"yjsSnapshot",
+		"yjs_snapshot",
+	)
+	if candidate != nil {
+		decoded, ok, err := reviveBinaryValue(candidate)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
+			return decoded, true, nil
+		}
+	}
+
+	canvasRaw, canvasExists := state["canvas"]
+	if !canvasExists || canvasRaw == nil {
+		return nil, false, nil
+	}
+	if _, isArray := canvasRaw.([]interface{}); isArray {
+		return nil, false, nil
+	}
+	decoded, ok, err := reviveBinaryValue(canvasRaw)
+	if err != nil {
+		return nil, false, err
+	}
+	if ok {
+		return decoded, true, nil
+	}
+	return nil, false, nil
+}
+
+func reviveLookupValue(source map[string]interface{}, keys ...string) interface{} {
+	if source == nil {
+		return nil
+	}
+	for _, key := range keys {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		if value, exists := source[key]; exists && value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func reviveBoolValue(value interface{}, fallback bool) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return parseFlagString(typed, fallback)
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return fallback
+		}
+		return parsed != 0
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	case int64:
+		return typed != 0
+	default:
+		return fallback
+	}
+}
+
+func reviveInt64Value(value interface{}) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int32:
+		return int64(typed)
+	case int64:
+		return typed
+	case float32:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return parsed
+		}
+		if parsed, err := typed.Float64(); err == nil {
+			return int64(parsed)
+		}
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return 0
+		}
+		if parsed, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return parsed
+		}
+		if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return int64(parsed)
+		}
+	}
+	return 0
+}
+
+func reviveFloat32Value(value interface{}) float32 {
+	switch typed := value.(type) {
+	case float32:
+		return typed
+	case float64:
+		return float32(typed)
+	case int:
+		return float32(typed)
+	case int32:
+		return float32(typed)
+	case int64:
+		return float32(typed)
+	case json.Number:
+		if parsed, err := typed.Float64(); err == nil {
+			return float32(parsed)
+		}
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return 0
+		}
+		if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return float32(parsed)
+		}
+	}
+	return 0
+}
+
+func reviveTimeValue(value interface{}) time.Time {
+	switch typed := value.(type) {
+	case nil:
+		return time.Time{}
+	case time.Time:
+		return typed.UTC()
+	case *time.Time:
+		if typed == nil {
+			return time.Time{}
+		}
+		return typed.UTC()
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return reviveUnixValueToTime(parsed)
+		}
+		if parsed, err := typed.Float64(); err == nil {
+			return reviveUnixValueToTime(int64(parsed))
+		}
+	case int:
+		return reviveUnixValueToTime(int64(typed))
+	case int32:
+		return reviveUnixValueToTime(int64(typed))
+	case int64:
+		return reviveUnixValueToTime(typed)
+	case float32:
+		return reviveUnixValueToTime(int64(typed))
+	case float64:
+		return reviveUnixValueToTime(int64(typed))
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return time.Time{}
+		}
+		if parsedInt, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return reviveUnixValueToTime(parsedInt)
+		}
+		if parsedFloat, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return reviveUnixValueToTime(int64(parsedFloat))
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+			return parsed.UTC()
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func reviveUnixValueToTime(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	// Treat 13+ digit values as milliseconds.
+	if value >= 1_000_000_000_000 {
+		return time.UnixMilli(value).UTC()
+	}
+	return time.Unix(value, 0).UTC()
+}
+
+func reviveContentString(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case map[string]interface{}:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	case []interface{}:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	default:
+		return strings.TrimSpace(reviveStringValue(typed))
+	}
+}
+
+func reviveStringValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	case int:
+		return strconv.Itoa(typed)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func reviveBinaryValue(value interface{}) ([]byte, bool, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, false, nil
+	case []byte:
+		if len(typed) == 0 {
+			return nil, false, nil
+		}
+		copyBytes := make([]byte, len(typed))
+		copy(copyBytes, typed)
+		return copyBytes, true, nil
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return nil, false, nil
+		}
+		if decoded, err := base64.StdEncoding.DecodeString(trimmed); err == nil && len(decoded) > 0 {
+			return decoded, true, nil
+		}
+		if decoded, err := base64.RawStdEncoding.DecodeString(trimmed); err == nil && len(decoded) > 0 {
+			return decoded, true, nil
+		}
+		return []byte(trimmed), true, nil
+	case map[string]interface{}, []interface{}:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(encoded) == 0 {
+			return nil, false, nil
+		}
+		return encoded, true, nil
+	default:
+		text := reviveStringValue(typed)
+		if text == "" {
+			return nil, false, nil
+		}
+		return []byte(text), true, nil
+	}
 }

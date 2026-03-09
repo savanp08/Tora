@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/monitor"
 )
@@ -21,7 +22,6 @@ const chatTypingChannel = "chat:typing"
 const chatMutationChannel = "chat:message_mutation"
 const chatDiscussionChannel = "chat:discussion_comment"
 const chatRoomEventChannel = "chat:room_event"
-const maxConnectionsPerRoom = 6
 
 type Hub struct {
 	rooms                map[string]map[*Client]bool
@@ -30,6 +30,7 @@ type Hub struct {
 	typing               chan *ClientTypingEvent
 	typingInbox          chan TypingRedisEvent
 	boardEvent           chan *ClientBoardEvent
+	taskEvent            chan *ClientTaskEvent
 	discussionComment    chan *ClientDiscussionCommentEvent
 	discussionCommentPin chan *ClientDiscussionCommentPinEvent
 	messageReaction      chan *ClientMessageReactionEvent
@@ -72,6 +73,11 @@ type ClientBoardEvent struct {
 	Payload   map[string]interface{}
 	Element   *models.BoardElement
 	ElementID string
+}
+
+type ClientTaskEvent struct {
+	Client  *Client
+	Payload TaskPayload
 }
 
 type ClientDiscussionCommentEvent struct {
@@ -139,6 +145,22 @@ type ClientSubscription struct {
 	RoomIDs []string
 }
 
+func boardMaxStorageBytes() int64 {
+	return config.LoadAppLimits().Board.MaxStorageBytes
+}
+
+func boardStorageLimitLabel() string {
+	limitBytes := boardMaxStorageBytes()
+	if limitBytes <= 0 {
+		return "0MB"
+	}
+	mb := float64(limitBytes) / (1024 * 1024)
+	if mb == float64(int64(mb)) {
+		return strconv.FormatInt(int64(mb), 10) + "MB"
+	}
+	return strconv.FormatFloat(mb, 'f', 1, 64) + "MB"
+}
+
 func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	hub := &Hub{
 		broadcast:            make(chan models.Message, 4096),
@@ -146,6 +168,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		typing:               make(chan *ClientTypingEvent, 256),
 		typingInbox:          make(chan TypingRedisEvent, 4096),
 		boardEvent:           make(chan *ClientBoardEvent, 4096),
+		taskEvent:            make(chan *ClientTaskEvent, 1024),
 		discussionComment:    make(chan *ClientDiscussionCommentEvent, 256),
 		discussionCommentPin: make(chan *ClientDiscussionCommentPinEvent, 256),
 		messageReaction:      make(chan *ClientMessageReactionEvent, 256),
@@ -473,6 +496,9 @@ func (h *Hub) Run() {
 		case boardEvent := <-h.boardEvent:
 			h.handleClientBoardEvent(boardEvent)
 
+		case taskEvent := <-h.taskEvent:
+			h.handleClientTaskEvent(taskEvent)
+
 		case discussionEvent := <-h.discussionComment:
 			h.handleClientDiscussionCommentEvent(discussionEvent)
 
@@ -624,6 +650,7 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 	}
 
 	client := subscription.Client
+	roomConnectionLimit := config.LoadAppLimits().WS.MaxConnectionsPerRoom
 	if client.JoinedAt.IsZero() {
 		client.JoinedAt = time.Now().UTC()
 	}
@@ -665,15 +692,15 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 		}
 
 		alreadySubscribed := roomClients[client]
-		if !alreadySubscribed && len(roomClients) >= maxConnectionsPerRoom {
+		if !alreadySubscribed && len(roomClients) >= roomConnectionLimit {
 			select {
 			case client.Send <- map[string]interface{}{
 				"type":   "room_limit_exceeded",
 				"roomId": roomID,
 				"payload": map[string]interface{}{
 					"code":    "room_full",
-					"limit":   maxConnectionsPerRoom,
-					"message": "Room is full. Maximum 6 users are allowed in this room.",
+					"limit":   roomConnectionLimit,
+					"message": "Room is full. Maximum " + strconv.Itoa(roomConnectionLimit) + " users are allowed in this room.",
 				},
 			}:
 			default:
@@ -845,7 +872,13 @@ func (h *Hub) handleClientBoardEvent(event *ClientBoardEvent) {
 				err,
 			)
 			if errors.Is(err, ErrBoardSizeLimitExceeded) {
-				h.sendBoardError(client, roomID, "board_size_limit", "Board is full (10MB max). Remove some elements and try again.", element.ElementID)
+				h.sendBoardError(
+					client,
+					roomID,
+					"board_size_limit",
+					"Board is full ("+boardStorageLimitLabel()+" max). Remove some elements and try again.",
+					element.ElementID,
+				)
 			} else {
 				h.sendBoardError(client, roomID, "board_add_failed", "Unable to save board element. Please retry.", element.ElementID)
 			}
@@ -966,7 +999,7 @@ func (h *Hub) sendBoardError(client *Client, roomID, code, message, elementID st
 			"code":      strings.TrimSpace(code),
 			"message":   strings.TrimSpace(message),
 			"elementId": normalizedElementID,
-			"maxBytes":  boardMaxStorageBytes,
+			"maxBytes":  boardMaxStorageBytes(),
 		},
 	}
 	select {
@@ -1026,6 +1059,92 @@ func (h *Hub) handleClientDiscussionCommentEvent(event *ClientDiscussionCommentE
 		Payload:      comment,
 	}
 	h.publishDiscussionCommentEvent(discussionEvent)
+}
+
+func (h *Hub) handleClientTaskEvent(event *ClientTaskEvent) {
+	if event == nil || event.Client == nil || h.msgService == nil {
+		return
+	}
+
+	client := event.Client
+	taskPayload := event.Payload
+	taskPayload.Type = strings.ToLower(strings.TrimSpace(taskPayload.Type))
+	taskPayload.RoomID = normalizeRoomID(taskPayload.RoomID)
+	taskPayload.Task.ID = normalizeTaskIdentifier(taskPayload.Task.ID)
+
+	if !isTaskEventType(taskPayload.Type) || taskPayload.RoomID == "" || taskPayload.Task.ID == "" {
+		return
+	}
+	if !client.isSubscribedToRoom(taskPayload.RoomID) || !client.canWriteToRoom(taskPayload.RoomID) {
+		return
+	}
+	if !h.isClientRoomMember(client.UserID, taskPayload.RoomID) {
+		client.subscribeToRoom(taskPayload.RoomID, false)
+		return
+	}
+
+	if taskPayload.Raw == nil {
+		taskPayload.Raw = map[string]interface{}{}
+	}
+	taskPayload.Raw["type"] = taskPayload.Type
+	if _, hasRoomID := taskPayload.Raw["roomId"]; !hasRoomID {
+		taskPayload.Raw["roomId"] = taskPayload.RoomID
+	}
+	if _, hasRoomID2 := taskPayload.Raw["room_id"]; !hasRoomID2 {
+		taskPayload.Raw["room_id"] = taskPayload.RoomID
+	}
+
+	if taskPayload.Payload == nil {
+		taskPayload.Payload = map[string]interface{}{}
+	}
+	taskPayload.Payload["id"] = taskPayload.Task.ID
+	taskPayload.Payload["taskId"] = taskPayload.Task.ID
+	taskPayload.Payload["task_id"] = taskPayload.Task.ID
+	if _, hasTitle := taskPayload.Payload["title"]; !hasTitle && strings.TrimSpace(taskPayload.Task.Title) != "" {
+		taskPayload.Payload["title"] = taskPayload.Task.Title
+	}
+	if _, hasDescription := taskPayload.Payload["description"]; !hasDescription && strings.TrimSpace(taskPayload.Task.Description) != "" {
+		taskPayload.Payload["description"] = taskPayload.Task.Description
+	}
+	if _, hasStatus := taskPayload.Payload["status"]; !hasStatus && strings.TrimSpace(taskPayload.Task.Status) != "" {
+		taskPayload.Payload["status"] = normalizeTaskStatus(taskPayload.Task.Status)
+	}
+	if _, hasAssignee := taskPayload.Payload["assignee_id"]; !hasAssignee && strings.TrimSpace(taskPayload.Task.AssigneeID) != "" {
+		taskPayload.Payload["assignee_id"] = taskPayload.Task.AssigneeID
+		taskPayload.Payload["assigneeId"] = taskPayload.Task.AssigneeID
+	}
+	if _, hasPayload := taskPayload.Raw["payload"]; !hasPayload {
+		taskPayload.Raw["payload"] = taskPayload.Payload
+	}
+
+	go func(payload TaskPayload, originUserID string) {
+		ctx := context.Background()
+		var err error
+		switch payload.Type {
+		case "task_create", "task_update", "task_move":
+			err = h.msgService.UpsertTaskPayload(ctx, payload)
+		case "task_delete":
+			err = h.msgService.DeleteTaskPayload(ctx, payload)
+		}
+		if err != nil {
+			log.Printf(
+				"[ws] task persistence failed type=%s room=%s task=%s user=%s err=%v",
+				payload.Type,
+				payload.RoomID,
+				payload.Task.ID,
+				originUserID,
+				err,
+			)
+			return
+		}
+
+		h.publishRoomEvent(RoomEvent{
+			Type:         payload.Type,
+			RoomID:       payload.RoomID,
+			Payload:      payload.Raw,
+			OriginUserID: strings.TrimSpace(originUserID),
+		})
+	}(taskPayload, client.UserID)
 }
 
 func (h *Hub) handleClientDiscussionCommentPinEvent(event *ClientDiscussionCommentPinEvent) {
@@ -1473,6 +1592,15 @@ func (h *Hub) broadcastRoomEventToLocal(event RoomEvent) {
 		h.broadcastSignalingEventToLocal(eventType, roomID, event.Payload)
 		return
 	}
+	if isTaskEventType(eventType) {
+		h.broadcastTaskEventToLocal(RoomEvent{
+			Type:         eventType,
+			RoomID:       roomID,
+			Payload:      event.Payload,
+			OriginUserID: strings.TrimSpace(event.OriginUserID),
+		})
+		return
+	}
 	if isBoardEventType(eventType) {
 		h.broadcastBoardEventToLocal(RoomEvent{
 			Type:         eventType,
@@ -1499,6 +1627,46 @@ func (h *Hub) broadcastRoomEventToLocal(event RoomEvent) {
 	}
 
 	for roomClient := range clients {
+		select {
+		case roomClient.Send <- payload:
+		default:
+			h.removeClientFromAllRooms(roomClient, true)
+			roomClient.closeSendChannel()
+		}
+	}
+}
+
+func (h *Hub) broadcastTaskEventToLocal(event RoomEvent) {
+	roomID := normalizeRoomID(event.RoomID)
+	eventType := strings.ToLower(strings.TrimSpace(event.Type))
+	if roomID == "" || !isTaskEventType(eventType) {
+		return
+	}
+	clients, ok := h.rooms[roomID]
+	if !ok {
+		return
+	}
+
+	payload := map[string]interface{}{}
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	payload["type"] = eventType
+	payload["roomId"] = roomID
+	payload["room_id"] = roomID
+
+	originUserID := strings.TrimSpace(event.OriginUserID)
+	for roomClient := range clients {
+		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
+			roomClient.subscribeToRoom(roomID, false)
+			continue
+		}
+		if !roomClient.canWriteToRoom(roomID) {
+			continue
+		}
+		if originUserID != "" && roomClient.UserID == originUserID {
+			continue
+		}
 		select {
 		case roomClient.Send <- payload:
 		default:

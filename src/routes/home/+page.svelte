@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	let roomPassword = '';
 
 	function navigateToApp() {
@@ -10,6 +11,8 @@
 </script>
 
 <div class="home-container">
+	<MonochromeRoomBackground seed="tora-home-launch" />
+
 	<header class="hero-section">
 		<h1 class="headline">Welcome to Tora</h1>
 		<p class="sub-headline">
@@ -81,10 +84,7 @@
 		margin: 0;
 		min-height: 100vh;
 		font-family: 'Space Grotesk', 'Sora', 'Avenir Next', sans-serif;
-		background:
-			radial-gradient(circle at 18% 18%, rgba(0, 240, 255, 0.18), transparent 42%),
-			radial-gradient(circle at 78% 0%, rgba(112, 0, 255, 0.22), transparent 38%),
-			linear-gradient(150deg, #060910 0%, #0b1324 52%, #10192f 100%);
+		background: #0d0d12;
 		color: #f8fafc;
 	}
 
@@ -93,6 +93,14 @@
 		margin: 0 auto;
 		padding: 4rem 1.25rem;
 		color: #f8fafc;
+		position: relative;
+		isolation: isolate;
+		overflow: hidden;
+	}
+
+	.home-container > :not(:first-child) {
+		position: relative;
+		z-index: 1;
 	}
 
 	.hero-section {

@@ -3,7 +3,9 @@
 	import ExpiryClockPicker from '$lib/components/home/ExpiryClockPicker.svelte';
 	import LoginFooter from '$lib/components/home/LoginFooter.svelte';
 	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
+	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import toraLogo from '$lib/assets/tora-logo.svg';
+	import { APP_LIMITS } from '$lib/config/limits';
 	import {
 		activeRoomPassword,
 		authToken,
@@ -16,6 +18,7 @@
 		normalizeRoomCodeInput,
 		normalizeRoomIdValue,
 		normalizeRoomNameInput,
+		sanitizeRoomCodePartial,
 		normalizeUsernameInput,
 		type JoinMode
 	} from '$lib/utils/homeJoin';
@@ -25,10 +28,16 @@
 		writeSessionRoomPreferences
 	} from '$lib/utils/sessionPreferences';
 	import { setSessionToken } from '$lib/utils/sessionToken';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const CLIENT_LOG_PREFIX = '[home-client]';
+	const ROOM_CODE_DIGITS = APP_LIMITS.room.codeDigits;
+	const ROOM_NAME_MAX_LENGTH = APP_LIMITS.room.nameMaxLength;
+	const ROOM_PASSWORD_MAX_LENGTH = APP_LIMITS.room.passwordMaxLength;
+	const INCOMPLETE_CODE_MESSAGE = `Enter all ${ROOM_CODE_DIGITS} digits or set a room name.`;
+
+	type RoomInputSource = 'name' | 'code';
 
 	let roomName = '';
 	let roomCode = '';
@@ -40,8 +49,20 @@
 	let showAdvancedOptions = false;
 	let showAiTierDetails = false;
 	let activeActionMode: JoinMode | '' = '';
+	let lastRoomInputSource: RoomInputSource = 'name';
 	let isJoining = false;
 	let joinError = '';
+	let roomNameInputElement: HTMLInputElement | null = null;
+	let normalizedRoomName = '';
+	let normalizedRoomCode = '';
+	let partialRoomCode = '';
+	let subtleInputError = '';
+	let canCreate = false;
+	let canJoinExisting = false;
+	let loginBackgroundSeed = 'tora-login';
+	let isReviveDragActive = false;
+	let isRevivingRoom = false;
+	let reviveDragDepth = 0;
 
 	function persistSessionRoomPreferences() {
 		const normalized = writeSessionRoomPreferences({
@@ -89,44 +110,201 @@
 		e2eEnabled = preferences.e2eEnabled;
 		sessionAIEnabled.set(preferences.aiEnabled);
 		sessionE2EEnabled.set(preferences.e2eEnabled);
+
+		window.addEventListener('dragenter', onWindowDragEnter);
+		window.addEventListener('dragover', onWindowDragOver);
+		window.addEventListener('dragleave', onWindowDragLeave);
+		window.addEventListener('drop', onWindowDrop);
+		return () => {
+			window.removeEventListener('dragenter', onWindowDragEnter);
+			window.removeEventListener('dragover', onWindowDragOver);
+			window.removeEventListener('dragleave', onWindowDragLeave);
+			window.removeEventListener('drop', onWindowDrop);
+		};
 	});
 
-	function onRoomNameFocus(event: FocusEvent) {
-		const input = event.currentTarget as HTMLInputElement | null;
-		input?.select();
+	function selectRoomNameInput() {
+		tick().then(() => {
+			if (!roomNameInputElement) {
+				return;
+			}
+			roomNameInputElement.focus();
+			roomNameInputElement.select();
+		});
+	}
+
+	function onRoomNameFocus() {
+		const switchedFromCode = lastRoomInputSource === 'code';
+		lastRoomInputSource = 'name';
+		joinError = '';
+		if (switchedFromCode) {
+			roomName = generateRoomName();
+		}
+		selectRoomNameInput();
+	}
+
+	function onRoomCodeFocus() {
+		lastRoomInputSource = 'code';
+		joinError = '';
+	}
+
+	function isFileDragEvent(event: DragEvent) {
+		if (!event.dataTransfer || !event.dataTransfer.types) {
+			return false;
+		}
+		return Array.from(event.dataTransfer.types).includes('Files');
+	}
+
+	function isSupportedReviveFile(file: File) {
+		const fileName = (file.name || '').toLowerCase();
+		const fileType = (file.type || '').toLowerCase();
+		return fileName.endsWith('.tora') || fileType === 'application/json';
+	}
+
+	function readFileAsText(file: File) {
+		return new Promise<string>((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(String(reader.result ?? ''));
+			reader.onerror = () => reject(new Error('Failed to read archive file'));
+			reader.readAsText(file);
+		});
+	}
+
+	async function reviveRoomFromArchive(file: File) {
+		if (!isSupportedReviveFile(file)) {
+			joinError = 'Unsupported file type. Use a .tora file or JSON.';
+			return;
+		}
+
+		isRevivingRoom = true;
+		joinError = '';
+		try {
+			const fileContent = await readFileAsText(file);
+			const payload = JSON.parse(fileContent);
+			clientLog('api-rooms-revive-request', {
+				fileName: file.name,
+				fileType: file.type || 'unknown'
+			});
+			const response = await fetch(`${API_BASE}/api/rooms/revive`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+			const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+			if (!response.ok) {
+				throw new Error(String(data.error || 'Failed to revive room'));
+			}
+
+			const newRoomId = normalizeRoomIdValue(
+				String(data.newRoomId ?? data.roomId ?? data.new_room_id ?? '')
+			);
+			if (!newRoomId) {
+				throw new Error('Server returned an invalid room id');
+			}
+			clientLog('navigate-revived-room', { roomId: newRoomId });
+			goto(`/room/${encodeURIComponent(newRoomId)}`);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : 'Failed to revive room';
+			clientLog('api-rooms-revive-error', { error: message });
+			joinError = message;
+		} finally {
+			isRevivingRoom = false;
+		}
+	}
+
+	function onWindowDragEnter(event: DragEvent) {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+		event.preventDefault();
+		reviveDragDepth += 1;
+		isReviveDragActive = true;
+	}
+
+	function onWindowDragOver(event: DragEvent) {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+		event.preventDefault();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		isReviveDragActive = true;
+	}
+
+	function onWindowDragLeave(event: DragEvent) {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+		event.preventDefault();
+		reviveDragDepth = Math.max(0, reviveDragDepth - 1);
+		if (reviveDragDepth === 0) {
+			isReviveDragActive = false;
+		}
+	}
+
+	async function onWindowDrop(event: DragEvent) {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+		event.preventDefault();
+		reviveDragDepth = 0;
+		isReviveDragActive = false;
+
+		const files = event.dataTransfer?.files;
+		if (!files || files.length === 0) {
+			return;
+		}
+		const droppedFile = files.item(0);
+		if (!droppedFile) {
+			return;
+		}
+		await reviveRoomFromArchive(droppedFile);
 	}
 
 	async function handleRoomAction(mode: JoinMode) {
-		const normalizedRoomName = normalizeRoomNameInput(roomName);
-		const normalizedRoomCode = normalizeRoomCodeInput(roomCode);
-		if (mode === 'create' && !normalizedRoomName) {
-			joinError = 'New rooms require a room name';
-			return;
-		}
-		if (mode === 'join' && !normalizedRoomName && !normalizedRoomCode) {
-			joinError = 'Enter a room name or a 6-digit room code';
+		const nextNormalizedRoomName = normalizeRoomNameInput(roomName);
+		const nextNormalizedRoomCode = normalizeRoomCodeInput(roomCode);
+		let requestRoomName = nextNormalizedRoomName;
+		let requestRoomCode = '';
+
+		if (lastRoomInputSource === 'code') {
+			if (!nextNormalizedRoomCode) {
+				joinError = INCOMPLETE_CODE_MESSAGE;
+				return;
+			}
+			requestRoomName = nextNormalizedRoomCode;
+			requestRoomCode = nextNormalizedRoomCode;
+		} else if (!nextNormalizedRoomName) {
+			if (mode === 'create') {
+				joinError = 'New rooms require a room name';
+			} else {
+				joinError = `Enter a room name or a ${ROOM_CODE_DIGITS}-digit room code`;
+			}
 			return;
 		}
 
 		isJoining = true;
 		activeActionMode = mode;
 		joinError = '';
-		roomName = normalizedRoomName;
-		roomCode = normalizedRoomCode;
+		roomName = lastRoomInputSource === 'code' ? '' : requestRoomName;
+		roomCode = lastRoomInputSource === 'code' ? requestRoomCode : '';
 
 		const identity = getOrInitIdentity();
 		const requestedUsername = normalizeUsernameInput(guestUsername);
 		const userIdentity = requestedUsername ? updateUsername(requestedUsername) : identity;
 		const userToJoin = userIdentity.username;
 		guestUsername = userToJoin;
-		const normalizedRoomPassword = (roomPassword || '').trim().slice(0, 32);
+		const normalizedRoomPassword = (roomPassword || '')
+			.trim()
+			.slice(0, ROOM_PASSWORD_MAX_LENGTH);
 		activeRoomPassword.set(normalizedRoomPassword);
 		const sessionPreferences = persistSessionRoomPreferences();
 
 		try {
 			clientLog('api-rooms-join-request', {
-				roomName: normalizedRoomName,
-				roomCode: normalizedRoomCode,
+				roomName: requestRoomName,
+				roomCode: requestRoomCode,
 				userToJoin,
 				mode,
 				roomDurationHours,
@@ -137,8 +315,8 @@
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					roomName: normalizedRoomName,
-					roomCode: normalizedRoomCode,
+					roomName: requestRoomName,
+					roomCode: requestRoomCode,
 					username: userToJoin,
 					userId: userIdentity.id,
 					type: 'ephemeral',
@@ -162,7 +340,8 @@
 			if (!resolvedRoomID) {
 				throw new Error('Server returned an invalid room id');
 			}
-			const resolvedRoomName = data.roomName || normalizedRoomName;
+			const resolvedRoomName =
+				lastRoomInputSource === 'code' ? requestRoomName : data.roomName || requestRoomName;
 			clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
 			const roomPasswordHash = normalizedRoomPassword
 				? `#key=${encodeURIComponent(normalizedRoomPassword)}`
@@ -179,12 +358,34 @@
 		}
 	}
 
-	$: canCreate = normalizeRoomNameInput(roomName) !== '';
+	$: normalizedRoomName = normalizeRoomNameInput(roomName);
+	$: normalizedRoomCode = normalizeRoomCodeInput(roomCode);
+	$: partialRoomCode = sanitizeRoomCodePartial(roomCode);
+	$: if (lastRoomInputSource === 'code' && partialRoomCode !== '' && roomName !== '') {
+		roomName = '';
+	}
+	$: subtleInputError = lastRoomInputSource === 'code' && !normalizedRoomCode ? INCOMPLETE_CODE_MESSAGE : '';
+	$: canCreate =
+		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
 	$: canJoinExisting =
-		normalizeRoomNameInput(roomName) !== '' || normalizeRoomCodeInput(roomCode) !== '';
+		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
+	$: loginBackgroundSeed = normalizedRoomCode || normalizedRoomName || 'tora-login';
 </script>
 
 	<div class="container">
+		<MonochromeRoomBackground seed={loginBackgroundSeed} />
+		{#if isReviveDragActive}
+			<div class="revive-dropzone-overlay" aria-live="polite" role="status">
+				<div class="revive-dropzone-panel">
+					<strong>Drop Room Archive To Revive</strong>
+					<p>Accepted formats: <code>.tora</code> or <code>application/json</code></p>
+					{#if isRevivingRoom}
+						<p class="revive-dropzone-loading">Reviving room...</p>
+					{/if}
+				</div>
+			</div>
+		{/if}
+
 		<header>
 			<div class="logo">
 				<div class="logo-mark-wrap">
@@ -212,15 +413,22 @@
 							type="text"
 							placeholder="e.g. Product Sprint"
 							bind:value={roomName}
-							maxlength="20"
+							bind:this={roomNameInputElement}
+							maxlength={ROOM_NAME_MAX_LENGTH}
 							on:focus={onRoomNameFocus}
 						/>
-						<small>Used as display name (max 20 chars). Spaces are converted to underscores.</small>
+						<small>
+							Used as display name (max {ROOM_NAME_MAX_LENGTH} chars). Spaces are converted to
+							underscores.
+						</small>
 					</div>
 					<div class="or-divider" aria-hidden="true">or</div>
-					<div class="field-group room-code-group">
-						<label for="room-code-digit-0">6-digit code</label>
+					<div class="field-group room-code-group" on:focusin={onRoomCodeFocus}>
+						<label for="room-code-digit-0">{ROOM_CODE_DIGITS}-digit code</label>
 						<OtpCodeInput idPrefix="room-code-digit" bind:value={roomCode} disabled={isJoining} />
+						{#if subtleInputError}
+							<small class="subtle-code-error">{subtleInputError}</small>
+						{/if}
 						<small>For quick join when someone shares a code.</small>
 					</div>
 				</div>
@@ -265,7 +473,7 @@
 									type="password"
 									placeholder="Optional password"
 									bind:value={roomPassword}
-									maxlength="32"
+									maxlength={ROOM_PASSWORD_MAX_LENGTH}
 									autocomplete="off"
 								/>
 								<small>Private, Secured</small>
@@ -407,9 +615,76 @@
 		height: auto;
 		display: flex;
 		flex-direction: column;
+		position: relative;
+		isolation: isolate;
 		background: var(--bg-primary);
 		overflow-y: auto;
 		overflow-x: hidden;
+	}
+
+	.container :global(.monochrome-room-background) {
+		opacity: 0;
+		transition: opacity 0.2s ease;
+	}
+
+	:global(:root[data-theme='dark']) .container :global(.monochrome-room-background),
+	:global(.theme-dark) .container :global(.monochrome-room-background) {
+		opacity: 1;
+	}
+
+	.container > :not(:first-child) {
+		position: relative;
+		z-index: 1;
+	}
+
+	.revive-dropzone-overlay {
+		position: fixed;
+		inset: 0;
+		z-index: 80;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+		pointer-events: none;
+		background: rgba(13, 13, 18, 0.56);
+		backdrop-filter: blur(4px);
+		-webkit-backdrop-filter: blur(4px);
+	}
+
+	.revive-dropzone-panel {
+		width: min(90vw, 32rem);
+		border: 1px dashed rgba(191, 219, 254, 0.72);
+		border-radius: 14px;
+		background: rgba(15, 23, 42, 0.86);
+		box-shadow: 0 16px 34px rgba(2, 6, 23, 0.48);
+		padding: 1.1rem 1.25rem;
+		text-align: center;
+		color: #dbeafe;
+	}
+
+	.revive-dropzone-panel strong {
+		display: block;
+		font-size: 1rem;
+		letter-spacing: 0.01em;
+	}
+
+	.revive-dropzone-panel p {
+		margin: 0.45rem 0 0;
+		font-size: 0.84rem;
+		color: #bfdbfe;
+	}
+
+	.revive-dropzone-panel code {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+		font-size: 0.78rem;
+		background: rgba(148, 163, 184, 0.24);
+		border-radius: 5px;
+		padding: 0.1rem 0.3rem;
+		color: #e2e8f0;
+	}
+
+	.revive-dropzone-loading {
+		font-weight: 700;
 	}
 
 	header {
@@ -721,6 +996,11 @@
 		border-radius: 4px;
 		margin-bottom: 15px;
 	}
+
+	.subtle-code-error {
+		color: color-mix(in srgb, var(--accent-danger) 72%, var(--text-secondary));
+	}
+
 	.hint {
 		font-size: 0.8rem;
 		color: var(--text-tertiary);

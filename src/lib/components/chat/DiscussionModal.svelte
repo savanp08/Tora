@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
 	import TaskCard from '$lib/components/chat/TaskCard.svelte';
+	import { APP_LIMITS } from '$lib/config/limits';
 	import type { ChatMessage } from '$lib/types/chat';
 	import { normalizeIdentifier, normalizeMessageID } from '$lib/utils/chat/core';
 
@@ -43,12 +44,12 @@
 	let expandedCommentBodyById: Record<string, boolean> = {};
 	let notes: string[] = [];
 	let noteDraft = '';
-	const MAX_REPLY_DEPTH = 4;
-	const REPLIES_PAGE_SIZE = 5;
-	const MAX_NOTES = 5;
-	const NOTES_STORAGE_PREFIX = 'converse:pinned-notes:v1';
-	const COMMENT_PREVIEW_MAX_LENGTH = 360;
-	const COMMENT_PREVIEW_MAX_LINES = 7;
+	const MAX_REPLY_DEPTH = APP_LIMITS.chat.discussionMaxReplyDepth;
+	const REPLIES_PAGE_SIZE = APP_LIMITS.chat.discussionRepliesPageSize;
+	const MAX_NOTES = APP_LIMITS.chat.discussionMaxNotes;
+	const NOTES_STORAGE_PREFIX = 'converse:discussion-notes:v1';
+	const COMMENT_PREVIEW_MAX_LENGTH = APP_LIMITS.chat.discussionCommentPreviewMaxLength;
+	const COMMENT_PREVIEW_MAX_LINES = APP_LIMITS.chat.discussionCommentPreviewMaxLines;
 
 	const dispatch = createEventDispatcher<{
 		close: void;
@@ -768,18 +769,18 @@
 
 	function pinnedContentLabel(message: ChatMessage) {
 		if (message.type === 'image') {
-			return 'Pinned image';
+			return 'Discussion image';
 		}
 		if (message.type === 'video') {
-			return 'Pinned video';
+			return 'Discussion video';
 		}
 		if (message.type === 'audio') {
-			return 'Pinned audio';
+			return 'Discussion audio';
 		}
 		if (message.type === 'file') {
-			return message.fileName ? `Pinned file: ${message.fileName}` : 'Pinned file';
+			return message.fileName ? `Discussion file: ${message.fileName}` : 'Discussion file';
 		}
-		return 'Pinned message';
+		return 'Discussion message';
 	}
 </script>
 
@@ -794,7 +795,7 @@
 		<button
 			type="button"
 			class="nav-arrow left"
-			title="Previous pinned discussion"
+			title="Previous discussion"
 			on:click={() => dispatch('navigatePrevious')}
 		>
 			&lt;
@@ -802,7 +803,7 @@
 		<button
 			type="button"
 			class="nav-arrow right"
-			title="Next pinned discussion"
+			title="Next discussion"
 			on:click={() => dispatch('navigateNext')}
 		>
 			&gt;
@@ -812,14 +813,14 @@
 			class="discussion-modal"
 			role="dialog"
 			aria-modal="true"
-			aria-label="Pinned discussion"
+			aria-label="Discussion thread"
 			tabindex="-1"
 			on:keydown={onDialogKeyDown}
 		>
 				<header class="modal-header-grid">
 					<section class="context-column">
 						<div class="column-title-row">
-							<h3>Pinned Message</h3>
+							<h3>Discussion Anchor</h3>
 						{#if backgroundUnreadCount > 0}
 							<span class="chat-unread-pill">
 								{backgroundUnreadCount} new in chat
@@ -894,7 +895,7 @@
 										</div>
 								{/if}
 							{:else}
-								<div class="empty-pinned-message">No pinned message selected.</div>
+								<div class="empty-pinned-message">No discussion anchor selected.</div>
 							{/if}
 						</div>
 					</section>

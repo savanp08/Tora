@@ -10,13 +10,26 @@
 </nav>
 
 <style>
+	:global(:root) {
+		--legacy-navbar-bg: rgba(8, 12, 20, 0.72);
+		--legacy-navbar-border: rgba(255, 255, 255, 0.12);
+		--legacy-navbar-text: #e2e8f0;
+	}
+
+	:global(:root[data-theme='dark']),
+	:global(.theme-dark) {
+		--legacy-navbar-bg: rgba(250, 252, 255, 0.72);
+		--legacy-navbar-border: rgba(221, 231, 246, 0.92);
+		--legacy-navbar-text: #111827;
+	}
+
 	.navbar {
 		width: 100%;
 		padding: 0.75rem 1rem;
-		background: rgba(8, 12, 20, 0.72);
-		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-		backdrop-filter: blur(10px);
-		-webkit-backdrop-filter: blur(10px);
+		background: var(--legacy-navbar-bg);
+		border-bottom: 1px solid var(--legacy-navbar-border);
+		backdrop-filter: blur(14px) saturate(155%);
+		-webkit-backdrop-filter: blur(14px) saturate(155%);
 	}
 
 	.brand {
@@ -36,6 +49,6 @@
 		font-size: 1.1rem;
 		font-weight: 700;
 		letter-spacing: 0.02em;
-		color: #e2e8f0;
+		color: var(--legacy-navbar-text);
 	}
 </style>

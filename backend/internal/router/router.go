@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	jwtutil "github.com/savanp08/converse/internal/auth"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/handlers"
 	"github.com/savanp08/converse/internal/monitor"
@@ -46,7 +47,8 @@ func New(
 		r.Use(usageTracker.Middleware)
 	}
 
-	authHandler := handlers.NewAuthHandler()
+	authHandler := handlers.NewAuthHandler(scyllaStore)
+	dashboardHandler := handlers.NewDashboardHandler(scyllaStore)
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
 	handlers.ConfigureCanvasPersistence(redisStore, scyllaStore, r2Client, usageTracker)
@@ -123,11 +125,16 @@ func New(
 		r.Post("/execute", handlers.HandleCodeExecution)
 		r.Post("/ai/chat", handlers.HandlePrivateAIChat)
 		r.Post("/ai/private-chat", handlers.HandlePrivateAIChat)
+		r.Post("/auth/register", authHandler.Register)
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
 		r.Post("/auth/anonymous", authHandler.Anonymous)
+		r.Get("/auth/google", authHandler.GoogleLogin)
+		r.Get("/auth/google/callback", authHandler.GoogleCallback)
+		r.With(authJWTContextMiddleware()).Get("/dashboard/rooms", dashboardHandler.GetRooms)
 
 		r.Post("/rooms", roomHandler.CreateRoom)
+		r.Post("/rooms/revive", roomHandler.ReviveRoom)
 		r.Post("/rooms/join", roomHandler.JoinRoom)
 		r.Post("/rooms/leave", roomHandler.LeaveRoom)
 		r.Post("/rooms/extend", roomHandler.ExtendRoom)
@@ -142,7 +149,9 @@ func New(
 		r.Get("/rooms/sidebar", roomHandler.GetSidebarRooms)
 		r.Get("/rooms/{id}", roomHandler.GetRoom)
 		r.Get("/rooms/{id}/board", roomHandler.GetBoardElements)
+		r.Get("/rooms/{roomId}/tasks", roomHandler.GetRoomTasks)
 		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
+		r.Post("/rooms/{roomId}/ai-organize", roomHandler.AIOrganizeDashboard)
 		r.Post("/rooms/{roomId}/pins", roomHandler.UpsertRoomPin)
 		r.Get("/rooms/{roomId}/pins/navigate", roomHandler.NavigateRoomPins)
 		r.Get("/rooms/{roomId}/pins/{pinMessageId}/discussion/comments", roomHandler.GetPinnedDiscussionComments)
@@ -160,6 +169,53 @@ func New(
 	})
 
 	return r
+}
+
+func authJWTContextMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := readJWTFromRequest(r)
+			if token == "" {
+				writeUnauthorizedJSON(w)
+				return
+			}
+
+			claims, err := jwtutil.ValidateToken(token)
+			if err != nil || claims == nil || strings.TrimSpace(claims.UserID) == "" {
+				writeUnauthorizedJSON(w)
+				return
+			}
+
+			ctx := handlers.WithAuthUserID(r.Context(), claims.UserID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func readJWTFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if cookie, err := r.Cookie("tora_auth"); err == nil {
+		if token := strings.TrimSpace(cookie.Value); token != "" {
+			return token
+		}
+	}
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authorization == "" {
+		return ""
+	}
+	const bearerPrefix = "Bearer "
+	if !strings.HasPrefix(authorization, bearerPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))
+}
+
+func writeUnauthorizedJSON(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "Authentication required"})
 }
 
 func rateLimitMiddleware(limiter *security.Limiter, message string) func(http.Handler) http.Handler {

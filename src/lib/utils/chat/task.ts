@@ -1,8 +1,9 @@
 import type { TaskChecklistItem, TaskMessagePayload } from '$lib/types/chat';
+import { APP_LIMITS } from '$lib/config/limits';
 
-const MAX_TITLE_LENGTH = 120;
-const MAX_TASK_TEXT_LENGTH = 280;
-const MAX_TASK_ITEMS = 200;
+const MAX_TITLE_LENGTH = APP_LIMITS.tasks.maxTitleLength;
+const MAX_TASK_TEXT_LENGTH = APP_LIMITS.tasks.maxTaskTextLength;
+const MAX_TASK_ITEMS = APP_LIMITS.tasks.maxItems;
 
 function normalizeTitle(value: unknown) {
 	if (typeof value !== 'string') {

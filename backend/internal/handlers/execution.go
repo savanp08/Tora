@@ -17,6 +17,7 @@ var DefaultExecutionManager = execution.NewExecutionManager()
 type codeExecutionRequest struct {
 	Language string `json:"language"`
 	Code     string `json:"code"`
+	Stdin    string `json:"stdin"`
 }
 
 type codeExecutionResponse struct {
@@ -78,6 +79,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 
 	executionRequest := execution.ExecutionRequest{
 		Language: req.Language,
+		Stdin:    req.Stdin,
 		Files: []execution.ExecutionFile{
 			{
 				Name:    selectedFilename,

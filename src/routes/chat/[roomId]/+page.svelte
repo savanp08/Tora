@@ -6,14 +6,20 @@
 	import Board from '$lib/components/chat/Board.svelte';
 	import CodeCanvas from '$lib/components/canvas/CodeCanvas.svelte';
 	import DiscussionModal from '$lib/components/chat/DiscussionModal.svelte';
+	import FloatingActivityBox from '$lib/components/chat/FloatingActivityBox.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
+	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import PrivateAiChat from '$lib/components/chat/PrivateAiChat.svelte';
 	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
+	import RoomDashboard from '$lib/components/chat/RoomDashboard.svelte';
 	import ChatStatusBars from '$lib/components/chat/ChatStatusBars.svelte';
 	import ChatSidebar from '$lib/components/chat/ChatSidebar.svelte';
+	import TaskBoard from '$lib/components/workspace/TaskBoard.svelte';
 	import ChatUiDialog from '$lib/components/chat/ChatUiDialog.svelte';
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
+	import { APP_LIMITS } from '$lib/config/limits';
+	import { clearTaskStore, initializeTaskStoreForRoom } from '$lib/stores/tasks';
 	import {
 		activeRoomPassword,
 		authToken,
@@ -37,6 +43,11 @@
 		ThreadStatus,
 		UiDialogState
 	} from '$lib/types/chat';
+	import type {
+		RoomDashboardItem,
+		RoomDashboardOrganizeSections,
+		WorkspaceModule
+	} from '$lib/types/dashboard';
 	import {
 		getUTF8ByteLength,
 		createMessageId,
@@ -73,6 +84,10 @@
 		stringifyTaskMessagePayload,
 		toggleTaskItem
 	} from '$lib/utils/chat/task';
+	import {
+		formatBeaconTimestamp,
+		parseBeaconMessagePayload
+	} from '$lib/utils/chat/beacon';
 	import {
 		buildDiscussionCommentMap,
 		discussionCommentsEndpoint,
@@ -161,8 +176,8 @@
 	const TYPING_PING_INTERVAL_MS = 3000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
-	const REMOTE_TYPING_MAX_FUTURE_MS = 120000;
-	const DISCUSSION_MAX_REPLY_DEPTH = 4;
+	const REMOTE_TYPING_MAX_FUTURE_MS = APP_LIMITS.chat.remoteTypingMaxFutureMs;
+	const DISCUSSION_MAX_REPLY_DEPTH = APP_LIMITS.chat.discussionMaxReplyDepth;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const PROTECTED_ROOM_PREVIEW_TEXT = 'Protected room. Join with password to preview messages.';
 	const CANVAS_SNIPPET_PAYLOAD_KIND = 'canvas_snippet_v1';
@@ -194,6 +209,17 @@
 		aiEnabled: boolean;
 		e2eEnabled: boolean;
 	};
+	type GlobalQuickAction =
+		| 'create-room'
+		| 'open-room-list'
+		| 'open-chat-pane'
+		| 'toggle-search'
+		| 'toggle-discussion-mode'
+		| 'open-board-dashboard'
+		| 'open-board-draw'
+		| 'open-board-code'
+		| 'open-board-tasks'
+		| 'mark-active-read';
 
 	const CALL_SIGNAL_TYPES = new Set([
 		'call_invite',
@@ -202,9 +228,18 @@
 		'webrtc_ice',
 		'call_cancel'
 	]);
-	const CALL_MAX_PARTICIPANTS = 5;
-	const INCOMING_CALL_TIMEOUT_MS = 30000;
-	const EMPTY_CALL_GRACE_MS = 4500;
+	const CALL_MAX_PARTICIPANTS = APP_LIMITS.calls.maxParticipants;
+	const INCOMING_CALL_TIMEOUT_MS = APP_LIMITS.calls.incomingTimeoutMs;
+	const EMPTY_CALL_GRACE_MS = APP_LIMITS.calls.emptyGraceMs;
+	const TASK_BOARD_LIMIT_BYTES = APP_LIMITS.tasks.boardMaxBytes;
+	const TASK_BOARD_LIMIT_MESSAGE = `Task Board memory limit (${Math.max(
+		1,
+		Math.round(TASK_BOARD_LIMIT_BYTES / (1024 * 1024))
+	)}MB) reached.`;
+	const DASHBOARD_STORAGE_PREFIX = 'converse:room-dashboard:v1';
+	const MAX_ACTIVE_NON_DASHBOARD_MODULES = APP_LIMITS.workspace.maxActiveNonDashboardModules;
+	const WORKSPACE_MODULES: WorkspaceModule[] = ['dashboard', 'draw', 'code', 'tasks'];
+	const COMPACT_NAV_BREAKPOINT = 600;
 
 	function getCanvasPresenceColor(user: { color?: unknown } | null | undefined) {
 		if (typeof user?.color === 'string') {
@@ -214,6 +249,130 @@
 			}
 		}
 		return '#3b82f6';
+	}
+
+	function isTaskBoardPayloadWithinLimit(payload: ReturnType<typeof parseTaskMessagePayload>) {
+		if (!payload) {
+			return false;
+		}
+		const taskArrayJSON = JSON.stringify(payload.tasks ?? []);
+		return getUTF8ByteLength(taskArrayJSON) <= TASK_BOARD_LIMIT_BYTES;
+	}
+
+	function roomDashboardStorageKey(targetRoomId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return '';
+		}
+		return `${DASHBOARD_STORAGE_PREFIX}:${normalizedRoomID}`;
+	}
+
+	function parseRoomDashboardItem(
+		source: unknown,
+		fallbackRoomId: string
+	): RoomDashboardItem | null {
+		if (!source || typeof source !== 'object' || Array.isArray(source)) {
+			return null;
+		}
+		const record = source as Record<string, unknown>;
+		const roomId = normalizeRoomIDValue(toStringValue(record.roomId || fallbackRoomId));
+		const messageId = normalizeMessageID(toStringValue(record.messageId));
+		const id = normalizeMessageID(toStringValue(record.id));
+		const kindValue = toStringValue(record.kind).toLowerCase();
+		const kind = kindValue === 'task' || kindValue === 'note' ? kindValue : 'message';
+		const beaconData =
+			record.beaconData && typeof record.beaconData === 'object' && !Array.isArray(record.beaconData)
+				? { ...(record.beaconData as Record<string, unknown>) }
+				: null;
+		if (!roomId || !messageId || !id) {
+			return null;
+		}
+		return {
+			id,
+			roomId,
+			messageId,
+			kind,
+			senderId: normalizeIdentifier(toStringValue(record.senderId)),
+			senderName: normalizeUsernameValue(toStringValue(record.senderName)) || 'User',
+			pinnedByUserId: normalizeIdentifier(toStringValue(record.pinnedByUserId)),
+			pinnedByName: normalizeUsernameValue(toStringValue(record.pinnedByName)) || 'User',
+			originalCreatedAt: parseOptionalTimestamp(record.originalCreatedAt) || Date.now(),
+			pinnedAt: parseOptionalTimestamp(record.pinnedAt) || Date.now(),
+			messageText: toStringValue(record.messageText).trim(),
+			mediaUrl: toStringValue(record.mediaUrl).trim(),
+			mediaType: toStringValue(record.mediaType).trim(),
+			fileName: toStringValue(record.fileName).trim(),
+			note: toStringValue(record.note).trim(),
+			beaconAt: parseOptionalTimestamp(record.beaconAt) || null,
+			beaconLabel: toStringValue(record.beaconLabel).trim(),
+			beaconData,
+			taskTitle: toStringValue(record.taskTitle).trim(),
+			topic: toStringValue(record.topic).trim()
+		};
+	}
+
+	function readRoomDashboardItems(targetRoomId: string) {
+		if (!browser) {
+			return [] as RoomDashboardItem[];
+		}
+		const key = roomDashboardStorageKey(targetRoomId);
+		if (!key) {
+			return [] as RoomDashboardItem[];
+		}
+		try {
+			const raw = window.localStorage.getItem(key);
+			if (!raw) {
+				return [] as RoomDashboardItem[];
+			}
+			const parsed = JSON.parse(raw);
+			if (!Array.isArray(parsed)) {
+				return [] as RoomDashboardItem[];
+			}
+			return parsed
+				.map((entry) => parseRoomDashboardItem(entry, targetRoomId))
+				.filter((entry): entry is RoomDashboardItem => Boolean(entry))
+				.sort((left, right) => right.pinnedAt - left.pinnedAt);
+		} catch {
+			return [] as RoomDashboardItem[];
+		}
+	}
+
+	function writeRoomDashboardItems(targetRoomId: string, items: RoomDashboardItem[]) {
+		if (!browser) {
+			return;
+		}
+		const key = roomDashboardStorageKey(targetRoomId);
+		if (!key) {
+			return;
+		}
+		window.localStorage.setItem(key, JSON.stringify(items));
+	}
+
+	function resolveDashboardBeaconAt(
+		message: ChatMessage,
+		taskPayload: ReturnType<typeof parseTaskMessagePayload>
+	) {
+		const source = message as Record<string, unknown>;
+		const beaconPayload = parseBeaconMessagePayload(toStringValue(message.content));
+		if (beaconPayload && beaconPayload.beaconAt > 0) {
+			return beaconPayload.beaconAt;
+		}
+		const directCandidate =
+			parseOptionalTimestamp(source.beaconAt ?? source.beacon_at ?? source.scheduledAt ?? source.scheduled_at) ||
+			parseOptionalTimestamp(source.deadline ?? source.dueAt ?? source.due_at);
+		if (directCandidate > 0) {
+			return directCandidate;
+		}
+		if (!taskPayload) {
+			return null;
+		}
+		const taskTimes = (taskPayload.tasks || [])
+			.map((task) => parseOptionalTimestamp(task.timestamp))
+			.filter((timestamp) => timestamp > 0);
+		if (taskTimes.length === 0) {
+			return null;
+		}
+		return Math.min(...taskTimes);
 	}
 
 	function normalizeRoomFeatureFlags(aiEnabled: boolean, e2eEnabled: boolean): RoomFeatureFlags {
@@ -278,7 +437,14 @@
 	let showLeftMenu = false;
 	let showRoomSearch = false;
 	let showRoomDetails = false;
-	let showBoardView = false;
+	let selectedWorkspaceModule: WorkspaceModule | null = null;
+	let activeWorkspaceModules: WorkspaceModule[] = ['dashboard'];
+	let roomDashboardItems: RoomDashboardItem[] = [];
+	let roomDashboardOrganizePreview: RoomDashboardOrganizeSections | null = null;
+	let isDrawBoardActive = false;
+	let isTaskBoardActive = false;
+	let isDashboardActive = false;
+	let addableWorkspaceModules: WorkspaceModule[] = [];
 	let showPrivateAiChat = false;
 	let isCanvasOpen = false;
 	let isCanvasFullscreen = false;
@@ -293,14 +459,19 @@
 	let roomMembershipSynced: Record<string, boolean> = {};
 	let roomMembershipSyncing: Record<string, boolean> = {};
 	let isMobileView = false;
+	let isCompactNavViewport = false;
 	let mobilePane: 'list' | 'chat' = 'chat';
 	let focusMessageId = '';
 	let focusConsumedForRoom = false;
 	let focusRoomTracker = '';
+	let lastTaskStoreRoomId = '';
 	let activeRoomId = '';
 	let activeFirstUnreadMessageId = '';
 
 	let roomThreads: ChatThread[] = [];
+	let totalUnreadMessages = 0;
+	let unseenBoardChangeCount = 0;
+	let seenDashboardItemIdsByRoom: Record<string, string[]> = {};
 	let messagesByRoom: Record<string, ChatMessage[]> = {};
 	let onlineByRoom: Record<string, OnlineMember[]> = {};
 	let roomMetaById: Record<string, RoomMeta> = {};
@@ -334,6 +505,7 @@
 	let activeRoomRemainingMs = 0;
 	let activeRoomCreatedAtMs = 0;
 	let activeRoomExpiresAtMs = 0;
+	let isActiveRoomEphemeral = true;
 	let activeRemainingLabel = '--';
 	let isRoomExpired = false;
 	let serverClockOffsetMs = 0;
@@ -446,6 +618,23 @@
 	);
 	$: activeRoomAllowsAI = activeRoomFeatures.aiEnabled && !activeRoomFeatures.e2eEnabled;
 	$: currentMessages = activeThread?.status === 'left' ? [] : (messagesByRoom[roomId] ?? []);
+	$: isDrawBoardActive = selectedWorkspaceModule === 'draw';
+	$: isTaskBoardActive = selectedWorkspaceModule === 'tasks';
+	$: isDashboardActive = selectedWorkspaceModule === 'dashboard';
+	$: addableWorkspaceModules =
+		activeWorkspaceModules.filter((module) => module !== 'dashboard').length >=
+		MAX_ACTIVE_NON_DASHBOARD_MODULES
+			? []
+			: WORKSPACE_MODULES.filter(
+					(module) => module !== 'dashboard' && !activeWorkspaceModules.includes(module)
+				);
+	$: if (selectedWorkspaceModule === 'code' && !isCanvasOpen) {
+		isCanvasOpen = true;
+	}
+	$: if (selectedWorkspaceModule !== 'code' && isCanvasOpen) {
+		isCanvasOpen = false;
+		isCanvasFullscreen = false;
+	}
 	$: activeDiscussionTask =
 		(activeDiscussionTaskId &&
 			currentMessages.find(
@@ -559,6 +748,26 @@
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: canModerateBoard = isMember && !isRoomExpired && isActiveRoomAdmin;
 	$: activeUnreadCount = activeThread?.unread ?? 0;
+	$: totalUnreadMessages = roomThreads.reduce((total, thread) => {
+		const unread = Number.isFinite(thread.unread) ? Math.max(0, Math.floor(thread.unread)) : 0;
+		return total + unread;
+	}, 0);
+	$: {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		const seenIds = new Set(
+			normalizedRoomID ? (seenDashboardItemIdsByRoom[normalizedRoomID] ?? []) : []
+		);
+		unseenBoardChangeCount = roomDashboardItems.filter((entry) => {
+			const entryId = normalizeMessageID(entry.id);
+			if (!entryId) {
+				return false;
+			}
+			return !seenIds.has(entryId);
+		}).length;
+	}
+	$: if (roomId && selectedWorkspaceModule === 'dashboard') {
+		markDashboardItemsSeen(roomId, roomDashboardItems);
+	}
 	$: activeFirstUnreadMessageId = getUnreadStartMessageId(roomId);
 	$: activeLastReadTimestamp = getLastReadTimestamp(roomId);
 	$: {
@@ -570,6 +779,7 @@
 	$: hasTypingUsers = activeTypingUsers.length > 0;
 	$: activeRoomCreatedAtMs = roomId ? (roomMetaById[roomId]?.createdAt ?? 0) : 0;
 	$: activeRoomExpiresAtMs = roomId ? (roomMetaById[roomId]?.expiresAt ?? 0) : 0;
+	$: isActiveRoomEphemeral = activeRoomExpiresAtMs > 0;
 	$: activeRoomRemainingMs =
 		activeRoomExpiresAtMs > 0
 			? activeRoomExpiresAtMs - getApproxServerNowMs(roomExpiryTickMs)
@@ -613,6 +823,16 @@
 		void refreshRoomMetaFromServer(roomId);
 	}
 	$: if (browser && identityReady) {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		if (!normalizedRoomID) {
+			lastTaskStoreRoomId = '';
+			clearTaskStore();
+		} else if (normalizedRoomID !== lastTaskStoreRoomId) {
+			lastTaskStoreRoomId = normalizedRoomID;
+			void initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE });
+		}
+	}
+	$: if (browser && identityReady) {
 		initGlobalSocket(currentUserId, currentUsername);
 	}
 	$: if (browser && identityReady && $globalMessages) {
@@ -652,6 +872,17 @@
 	$: if (browser && roomId && roomId !== lastToastRoom) {
 		showJoinToast(roomId);
 	}
+	$: if (browser) {
+		roomThreads;
+		mobilePane;
+		isMobileView;
+		isCompactNavViewport;
+		totalUnreadMessages;
+		activeUnreadCount;
+		discussionBackgroundUnreadCount;
+		unseenBoardChangeCount;
+		publishQuickNavState();
+	}
 	$: if (roomId && focusRoomTracker !== roomId) {
 		focusRoomTracker = roomId;
 		focusConsumedForRoom = false;
@@ -663,6 +894,21 @@
 		messageActionMode = 'none';
 		isSelectionMode = false;
 		selectedActionMessageId = '';
+		selectedWorkspaceModule = null;
+		activeWorkspaceModules = ['dashboard'];
+		const initialDashboardItems = readRoomDashboardItems(roomId);
+		roomDashboardItems = initialDashboardItems;
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		if (normalizedRoomID && !seenDashboardItemIdsByRoom[normalizedRoomID]) {
+			seenDashboardItemIdsByRoom = {
+				...seenDashboardItemIdsByRoom,
+				[normalizedRoomID]: initialDashboardItems
+					.map((entry) => normalizeMessageID(entry.id))
+					.filter((entry): entry is string => Boolean(entry))
+			};
+		}
+		roomDashboardOrganizePreview = null;
+		isCanvasOpen = false;
 		isCanvasFullscreen = false;
 	}
 	$: if (isDiscussionOpen && !activeDiscussionTask) {
@@ -683,7 +929,9 @@
 
 	onDestroy(() => {
 		clientLog('component-destroy', { roomId });
+		clearQuickNavState();
 		typingController.destroy();
+		clearTaskStore();
 		clearAllCachePersistTimers();
 		clearSidebarRefreshTimer();
 		clearRoomExpiryTicker();
@@ -711,6 +959,7 @@
 		void initializeIdentity();
 		updateViewportMode();
 		window.addEventListener('resize', updateViewportMode);
+		window.addEventListener('converse:quick-action', onGlobalQuickAction as EventListener);
 		clearRoomExpiryTicker();
 		roomExpiryTickMs = Date.now();
 		roomExpiryTicker = setInterval(() => {
@@ -722,6 +971,8 @@
 		}, 60000);
 		return () => {
 			window.removeEventListener('resize', updateViewportMode);
+			window.removeEventListener('converse:quick-action', onGlobalQuickAction as EventListener);
+			clearQuickNavState();
 			clearRoomExpiryTicker();
 			if (removeSystemThemeListener) {
 				removeSystemThemeListener();
@@ -735,8 +986,109 @@
 			return;
 		}
 		isMobileView = window.innerWidth <= 900;
+		isCompactNavViewport = window.innerWidth < COMPACT_NAV_BREAKPOINT;
 		if (!isMobileView) {
 			mobilePane = 'chat';
+		}
+	}
+
+	function markDashboardItemsSeen(targetRoomId: string, items: RoomDashboardItem[]) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID) {
+			return;
+		}
+		const nextSeen = items
+			.map((entry) => normalizeMessageID(entry.id))
+			.filter((entry): entry is string => Boolean(entry));
+		const prevSeen = seenDashboardItemIdsByRoom[normalizedRoomID] ?? [];
+		const unchanged =
+			nextSeen.length === prevSeen.length &&
+			nextSeen.every((entry, index) => entry === prevSeen[index]);
+		if (unchanged) {
+			return;
+		}
+		seenDashboardItemIdsByRoom = {
+			...seenDashboardItemIdsByRoom,
+			[normalizedRoomID]: nextSeen
+		};
+	}
+
+	function publishQuickNavState() {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		window.dispatchEvent(
+			new CustomEvent('converse:chat-nav-state', {
+				detail: {
+					isCompact: isCompactNavViewport,
+					pane: isMobileView ? mobilePane : 'chat',
+					totalUnread: totalUnreadMessages,
+					activeUnread: activeUnreadCount,
+					discussionUnread: discussionBackgroundUnreadCount,
+					boardUnread: unseenBoardChangeCount
+				}
+			})
+		);
+	}
+
+	function clearQuickNavState() {
+		if (!browser || typeof window === 'undefined') {
+			return;
+		}
+		window.dispatchEvent(new CustomEvent('converse:chat-nav-state', { detail: null }));
+	}
+
+	function onGlobalQuickAction(event: Event) {
+		const customEvent = event as CustomEvent<{ action?: unknown }>;
+		const action = toStringValue(customEvent.detail?.action).trim().toLowerCase() as GlobalQuickAction;
+		if (!action) {
+			return;
+		}
+		switch (action) {
+			case 'create-room':
+				void createRoomFromMenu();
+				return;
+			case 'open-room-list':
+				showMobileRoomList();
+				return;
+			case 'open-chat-pane':
+				if (isMobileView) {
+					mobilePane = 'chat';
+				}
+				return;
+			case 'toggle-search':
+				toggleRoomSearch();
+				return;
+			case 'toggle-discussion-mode':
+				toggleDiscussionSelectionMode();
+				return;
+			case 'open-board-dashboard':
+				if (isMobileView) {
+					mobilePane = 'chat';
+				}
+				openWorkspaceModule('dashboard', { allowSplitCanvas: true });
+				return;
+			case 'open-board-draw':
+				if (isMobileView) {
+					mobilePane = 'chat';
+				}
+				openWorkspaceModule('draw', { allowSplitCanvas: true });
+				return;
+			case 'open-board-code':
+				if (isMobileView) {
+					mobilePane = 'chat';
+				}
+				openWorkspaceModule('code', { allowSplitCanvas: true });
+				return;
+			case 'open-board-tasks':
+				if (isMobileView) {
+					mobilePane = 'chat';
+				}
+				openWorkspaceModule('tasks', { allowSplitCanvas: true });
+				return;
+			case 'mark-active-read':
+				markRoomAsRead(roomId);
+				return;
 		}
 	}
 
@@ -2467,26 +2819,120 @@
 		mobilePane = 'list';
 	}
 
-	function toggleBoardView() {
-		showBoardView = !showBoardView;
-		if (showBoardView) {
+	function workspaceModuleLabel(module: WorkspaceModule) {
+		if (module === 'draw') {
+			return 'Draw';
+		}
+		if (module === 'code') {
+			return 'Code';
+		}
+		if (module === 'tasks') {
+			return 'Tasks';
+		}
+		return 'Dashboard';
+	}
+
+	function activateWorkspaceModule(module: WorkspaceModule) {
+		if (activeWorkspaceModules.includes(module)) {
+			return true;
+		}
+		if (module !== 'dashboard') {
+			const nonDashboardCount = activeWorkspaceModules.filter(
+				(entry) => entry !== 'dashboard'
+			).length;
+			if (nonDashboardCount >= MAX_ACTIVE_NON_DASHBOARD_MODULES) {
+				showErrorToast('Close one active board before adding another.');
+				return false;
+			}
+		}
+		activeWorkspaceModules = [...activeWorkspaceModules, module];
+		return true;
+	}
+
+	function deactivateWorkspaceModule(module: WorkspaceModule) {
+		if (module === 'dashboard') {
+			selectedWorkspaceModule = null;
+			return;
+		}
+		activeWorkspaceModules = activeWorkspaceModules.filter((entry) => entry !== module);
+		if (selectedWorkspaceModule === module) {
+			selectedWorkspaceModule = null;
+		}
+		if (module === 'code') {
+			isCanvasOpen = false;
+			isCanvasFullscreen = false;
+		}
+	}
+
+	function openWorkspaceModule(
+		module: WorkspaceModule,
+		options?: {
+			allowSplitCanvas?: boolean;
+		}
+	) {
+		const activated = activateWorkspaceModule(module);
+		if (!activated) {
+			return false;
+		}
+		selectedWorkspaceModule = module;
+		if (module === 'draw' || module === 'dashboard' || module === 'tasks') {
 			setMessageActionMode('none');
 			showRoomSearch = false;
 			activeReply = null;
 		}
+		if (module === 'code') {
+			isCanvasOpen = true;
+			isCanvasFullscreen = !options?.allowSplitCanvas;
+		}
+		return true;
+	}
+
+	function onWorkspaceModuleSelect(event: CustomEvent<{ module: WorkspaceModule }>) {
+		const module = event.detail.module;
+		if (selectedWorkspaceModule === module) {
+			deactivateWorkspaceModule(module);
+			return;
+		}
+		openWorkspaceModule(module);
+	}
+
+	function onWorkspaceModuleAdd(event: CustomEvent<{ module: WorkspaceModule }>) {
+		const module = event.detail.module;
+		const opened = openWorkspaceModule(module);
+		if (!opened) {
+			return;
+		}
+		showErrorToast(`${workspaceModuleLabel(module)} board activated`);
+	}
+
+	function onWorkspaceModuleLimit(event: CustomEvent<{ message: string }>) {
+		showErrorToast(event.detail.message || 'Close one active board before adding another.');
+	}
+
+	function toggleBoardView() {
+		if (selectedWorkspaceModule === 'draw') {
+			deactivateWorkspaceModule('draw');
+			return;
+		}
+		openWorkspaceModule('draw');
 	}
 
 	function toggleCanvas() {
-		if (isCanvasOpen) {
-			isCanvasOpen = false;
-			isCanvasFullscreen = false;
+		if (selectedWorkspaceModule === 'code') {
+			deactivateWorkspaceModule('code');
 			return;
 		}
-		isCanvasOpen = true;
-		isCanvasFullscreen = false;
+		openWorkspaceModule('code', { allowSplitCanvas: true });
 	}
 
 	function toggleCanvasFullscreen() {
+		if (selectedWorkspaceModule !== 'code') {
+			const opened = openWorkspaceModule('code');
+			if (!opened) {
+				return;
+			}
+			return;
+		}
 		if (!isCanvasOpen) {
 			isCanvasOpen = true;
 		}
@@ -2768,7 +3214,7 @@
 		}
 
 		if (kind === 'message_pin_updated' && targetRoomId) {
-			applyMessagePinState(targetRoomId, payload);
+			applyMessageDiscussionState(targetRoomId, payload);
 			return;
 		}
 
@@ -3081,6 +3527,7 @@
 			normalizeIdentifier(message.senderId) === normalizeIdentifier(currentUserId);
 		const shouldCountUnread = !isOwnMessage;
 		upsertMessage(message.roomId, message, shouldCountUnread);
+		addBeaconMessageToDashboard(message);
 	}
 
 	function upsertMessage(targetRoomId: string, message: ChatMessage, shouldCountUnread: boolean) {
@@ -3178,7 +3625,7 @@
 		queueOfflineCachePersist(normalizedRoomID);
 	}
 
-	function applyMessagePinState(targetRoomId: string, payload: unknown) {
+	function applyMessageDiscussionState(targetRoomId: string, payload: unknown) {
 		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
 		if (!normalizedRoomID || !payload || typeof payload !== 'object') {
 			return;
@@ -3388,14 +3835,47 @@
 		}
 		const payloadType = (payload?.type || '').trim().toLowerCase();
 		const payloadContent = payload?.content?.trim() ?? '';
+		const isBeaconMessage = payloadType === 'beacon' && payloadContent !== '';
 		const isTaskMessage = payloadType === 'task' && payloadContent !== '';
-		const isMediaMessage = payloadType !== '' && payloadType !== 'task' && payloadContent !== '';
-		if (!text && !isMediaMessage && !isTaskMessage) {
+		const isMediaMessage =
+			payloadType !== '' && payloadType !== 'task' && payloadType !== 'beacon' && payloadContent !== '';
+		if (!text && !isMediaMessage && !isTaskMessage && !isBeaconMessage) {
+			return;
+		}
+		if (isBeaconMessage && !isActiveRoomEphemeral) {
+			showErrorToast('Beacons are available only in ephemeral rooms');
 			return;
 		}
 		if (isTaskMessage && getUTF8ByteLength(payloadContent) > MESSAGE_TEXT_MAX_BYTES) {
 			showErrorToast('Task payload is too large');
 			return;
+		}
+		let beaconPayload: ReturnType<typeof parseBeaconMessagePayload> = null;
+		if (isBeaconMessage) {
+			if (getUTF8ByteLength(payloadContent) > MESSAGE_TEXT_MAX_BYTES) {
+				showErrorToast('Beacon payload is too large');
+				return;
+			}
+			beaconPayload = parseBeaconMessagePayload(payloadContent);
+			if (!beaconPayload) {
+				showErrorToast('Beacon data is invalid');
+				return;
+			}
+			if (getUTF8ByteLength(beaconPayload.text) > MESSAGE_TEXT_MAX_BYTES) {
+				showErrorToast('Beacon text exceeds the message limit');
+				return;
+			}
+		}
+		if (isTaskMessage) {
+			const parsedTaskPayload = parseTaskMessagePayload(payloadContent);
+			if (!parsedTaskPayload) {
+				showErrorToast('Task data is invalid');
+				return;
+			}
+			if (isActiveRoomEphemeral && !isTaskBoardPayloadWithinLimit(parsedTaskPayload)) {
+				showErrorToast(TASK_BOARD_LIMIT_MESSAGE);
+				return;
+			}
 		}
 		const replyTarget = activeReply;
 		const replyToMessageId = replyTarget ? normalizeMessageID(replyTarget.messageId) : '';
@@ -3417,6 +3897,29 @@
 				fileName: '',
 				replyToMessageId,
 				replyToSnippet,
+				createdAt: Date.now(),
+				pending: true
+			};
+		} else if (isBeaconMessage && beaconPayload) {
+			const beaconLabel = beaconPayload.beaconLabel || formatBeaconTimestamp(beaconPayload.beaconAt);
+			outgoing = {
+				id: createMessageId(roomId),
+				roomId,
+				senderId: currentUserId,
+				senderName: currentUsername,
+				content: payloadContent,
+				type: 'text',
+				mediaUrl: '',
+				mediaType: '',
+				fileName: '',
+				replyToMessageId,
+				replyToSnippet,
+				beaconAt: beaconPayload.beaconAt,
+				beaconLabel,
+				beaconData: {
+					kind: 'beacon',
+					text: beaconPayload.text
+				},
 				createdAt: Date.now(),
 				pending: true
 			};
@@ -3455,6 +3958,9 @@
 		}
 
 		upsertMessage(roomId, outgoing, false);
+		if (isBeaconMessage && addBeaconMessageToDashboard(outgoing)) {
+			showErrorToast('Beacon added to dashboard');
+		}
 		const encryptedContent = await encryptMessageContent(outgoing.content);
 		sendSocketPayload(
 			toWireMessage({
@@ -3469,7 +3975,7 @@
 		activeReply = null;
 	}
 
-	async function ensureMessagePinned(message: ChatMessage) {
+	async function ensureMessageInDiscussion(message: ChatMessage) {
 		if (!roomId || !isMember) {
 			return false;
 		}
@@ -3491,9 +3997,9 @@
 			});
 			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
 			if (!res.ok) {
-				throw new Error(toStringValue(data.error) || 'Failed to pin message');
+				throw new Error(toStringValue(data.error) || 'Failed to link message discussion');
 			}
-			applyMessagePinState(roomId, {
+			applyMessageDiscussionState(roomId, {
 				messageId: normalizedMessageID,
 				isPinned: toBool(data.isPinned ?? true),
 				pinnedBy: toStringValue(data.pinnedBy ?? normalizedUserID),
@@ -3501,9 +4007,206 @@
 			});
 			return true;
 		} catch (error) {
-			showErrorToast(error instanceof Error ? error.message : 'Failed to pin message');
+			showErrorToast(error instanceof Error ? error.message : 'Failed to link message discussion');
 			return false;
 		}
+	}
+
+	function persistCurrentRoomDashboardItems(nextItems: RoomDashboardItem[]) {
+		if (!roomId) {
+			return;
+		}
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		const sortedItems = [...nextItems]
+			.filter((entry) => normalizeRoomIDValue(entry.roomId) === normalizedRoomID)
+			.sort((left, right) => right.pinnedAt - left.pinnedAt);
+		roomDashboardItems = sortedItems;
+		writeRoomDashboardItems(normalizedRoomID, sortedItems);
+		syncDashboardOrganizePreviewWithItems(sortedItems);
+	}
+
+	function flattenRoomDashboardOrganizePreview(sections: RoomDashboardOrganizeSections) {
+		const seen = new Set<string>();
+		const ordered = [...sections.priority, ...sections.pinnedItems, ...sections.expired];
+		const deduped: RoomDashboardItem[] = [];
+		for (const item of ordered) {
+			const itemId = normalizeMessageID(item.id);
+			if (!itemId || seen.has(itemId)) {
+				continue;
+			}
+			seen.add(itemId);
+			deduped.push(item);
+		}
+		return deduped;
+	}
+
+	function syncDashboardOrganizePreviewWithItems(sourceItems = roomDashboardItems) {
+		if (!roomDashboardOrganizePreview || !roomId) {
+			return;
+		}
+		const byId = new Map(
+			sourceItems.map((entry) => [normalizeMessageID(entry.id), entry] as const)
+		);
+		const remap = (entries: RoomDashboardItem[]) =>
+			entries
+				.map((entry) => byId.get(normalizeMessageID(entry.id)) ?? entry)
+				.filter((entry) => normalizeRoomIDValue(entry.roomId) === normalizeRoomIDValue(roomId));
+		roomDashboardOrganizePreview = {
+			priority: remap(roomDashboardOrganizePreview.priority),
+			pinnedItems: remap(roomDashboardOrganizePreview.pinnedItems),
+			expired: remap(roomDashboardOrganizePreview.expired)
+		};
+	}
+
+	function upsertRoomDashboardItem(item: RoomDashboardItem) {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		if (!normalizedRoomID) {
+			return;
+		}
+		roomDashboardOrganizePreview = null;
+		const nextItems = [
+			item,
+			...roomDashboardItems.filter(
+				(entry) => normalizeMessageID(entry.messageId) !== normalizeMessageID(item.messageId)
+			)
+		];
+		persistCurrentRoomDashboardItems(nextItems);
+	}
+
+	function addBeaconMessageToDashboard(message: ChatMessage) {
+		const normalizedActiveRoomID = normalizeRoomIDValue(roomId);
+		const normalizedMessageRoomID = normalizeRoomIDValue(message.roomId);
+		if (!normalizedActiveRoomID || normalizedMessageRoomID !== normalizedActiveRoomID) {
+			return false;
+		}
+		const beaconPayload = parseBeaconMessagePayload(toStringValue(message.content));
+		if (!beaconPayload) {
+			return false;
+		}
+		const dashboardItem = buildRoomDashboardItem(message, beaconPayload.text);
+		if (!dashboardItem) {
+			return false;
+		}
+		upsertRoomDashboardItem({
+			...dashboardItem,
+			note: beaconPayload.text,
+			beaconAt: dashboardItem.beaconAt || beaconPayload.beaconAt,
+			beaconLabel:
+				dashboardItem.beaconLabel ||
+				beaconPayload.beaconLabel ||
+				formatBeaconTimestamp(beaconPayload.beaconAt),
+			beaconData: {
+				...(dashboardItem.beaconData ?? {}),
+				kind: 'beacon',
+				text: beaconPayload.text
+			}
+		});
+		return true;
+	}
+
+	function buildRoomDashboardItem(message: ChatMessage, note: string) {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		const normalizedMessageID = normalizeMessageID(message.id);
+		const normalizedUserID = normalizeIdentifier(currentUserId);
+		const normalizedUsername = normalizeUsernameValue(currentUsername) || 'User';
+		if (!normalizedRoomID || !normalizedMessageID || !normalizedUserID) {
+			return null;
+		}
+		const parsedTask = parseTaskMessagePayload(message.content || '');
+		const beaconPayload = parseBeaconMessagePayload(toStringValue(message.content));
+		const messageSource = message as Record<string, unknown>;
+		const beaconDataSource =
+			messageSource.beaconData ?? messageSource.beacon_data ?? messageSource.beacon;
+		const sourceBeaconData =
+			beaconDataSource && typeof beaconDataSource === 'object' && !Array.isArray(beaconDataSource)
+				? { ...(beaconDataSource as Record<string, unknown>) }
+				: null;
+		const beaconData = beaconPayload
+			? {
+					...(sourceBeaconData ?? {}),
+					kind: 'beacon',
+					text: beaconPayload.text
+				}
+			: sourceBeaconData;
+		const kind: RoomDashboardItem['kind'] =
+			(message.type || '').toLowerCase() === 'task'
+				? 'task'
+				: (message.type || '').toLowerCase() === 'note'
+					? 'note'
+					: 'message';
+		const beaconAt = resolveDashboardBeaconAt(message, parsedTask);
+		const taskTitle = parsedTask?.title?.trim() || '';
+		const contentText = beaconPayload ? beaconPayload.text : (message.content || '').trim();
+		const normalizedNote = note.trim() || (beaconPayload ? beaconPayload.text : '');
+		const beaconLabel =
+			(beaconPayload?.beaconLabel || '').trim() ||
+			(beaconAt ? formatDateTime(beaconAt) : '');
+		return {
+			id: createMessageId(normalizedRoomID),
+			roomId: normalizedRoomID,
+			messageId: normalizedMessageID,
+			kind,
+			senderId: normalizeIdentifier(message.senderId),
+			senderName: normalizeUsernameValue(message.senderName) || 'User',
+			pinnedByUserId: normalizedUserID,
+			pinnedByName: normalizedUsername,
+			originalCreatedAt: parseOptionalTimestamp(message.createdAt) || Date.now(),
+			pinnedAt: Date.now(),
+			messageText: contentText,
+			mediaUrl: toStringValue(message.mediaUrl).trim(),
+			mediaType: toStringValue(message.mediaType).trim(),
+			fileName: toStringValue(message.fileName).trim(),
+			note: normalizedNote,
+			beaconAt,
+			beaconLabel,
+			beaconData,
+			taskTitle
+		} satisfies RoomDashboardItem;
+	}
+
+	async function openDashboardPinPrompt(message: ChatMessage) {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const noteValue = await openPromptDialog({
+			title: 'Pin to Dashboard',
+			message: 'Add a note for this pinned item (optional).',
+			initialValue: '',
+			placeholder: 'Add a note',
+			maxLength: 600,
+			confirmLabel: 'Pin',
+			emptyConfirmLabel: 'Pin without note',
+			cancelLabel: 'Cancel',
+			multiline: true,
+			allowEmptySubmit: true
+		});
+		if (noteValue === null) {
+			return;
+		}
+		const dashboardItem = buildRoomDashboardItem(message, noteValue);
+		if (!dashboardItem) {
+			showErrorToast('Unable to pin item to dashboard');
+			return;
+		}
+		upsertRoomDashboardItem(dashboardItem);
+		showErrorToast('Pinned to dashboard');
+	}
+
+	function updateRoomDashboardItemNote(itemId: string, note: string) {
+		const normalizedItemID = normalizeMessageID(itemId);
+		if (!normalizedItemID) {
+			return;
+		}
+		const nextItems = roomDashboardItems.map((item) =>
+			normalizeMessageID(item.id) === normalizedItemID
+				? {
+						...item,
+						note: note.trim(),
+						pinnedAt: item.pinnedAt || Date.now()
+					}
+				: item
+		);
+		persistCurrentRoomDashboardItems(nextItems);
 	}
 
 	function upsertDiscussionCommentLocal(
@@ -3669,6 +4372,10 @@
 		if (!nextPayload) {
 			return;
 		}
+		if (isActiveRoomEphemeral && !isTaskBoardPayloadWithinLimit(nextPayload)) {
+			showErrorToast(TASK_BOARD_LIMIT_MESSAGE);
+			return;
+		}
 		const nextContent = stringifyTaskMessagePayload(nextPayload);
 		if (getUTF8ByteLength(nextContent) > MESSAGE_TEXT_MAX_BYTES) {
 			showErrorToast('Task update is too large');
@@ -3701,6 +4408,10 @@
 		const nextPayload = addTaskItem(parsedPayload, taskText, currentUsername, Date.now());
 		if (!nextPayload) {
 			showErrorToast('Unable to add task item');
+			return;
+		}
+		if (isActiveRoomEphemeral && !isTaskBoardPayloadWithinLimit(nextPayload)) {
+			showErrorToast(TASK_BOARD_LIMIT_MESSAGE);
 			return;
 		}
 		const nextContent = stringifyTaskMessagePayload(nextPayload);
@@ -3963,24 +4674,22 @@
 			);
 			const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
 			if (!res.ok) {
-				throw new Error(toStringValue(data.error) || 'Failed to navigate pinned discussions');
+				throw new Error(toStringValue(data.error) || 'Failed to navigate discussions');
 			}
 			const rawMessage = data.message;
 			const parsed = await parseIncomingMessageWithE2EE(rawMessage, roomId);
 			if (!parsed) {
 				showErrorToast(
 					direction === 'previous'
-						? 'No previous pinned discussion in this room'
-						: 'No next pinned discussion in this room'
+						? 'No previous discussion in this room'
+						: 'No next discussion in this room'
 				);
 				return;
 			}
 			mergeMessages(roomId, [parsed]);
 			openDiscussionForMessage(parsed.id);
 		} catch (error) {
-			showErrorToast(
-				error instanceof Error ? error.message : 'Failed to navigate pinned discussions'
-			);
+			showErrorToast(error instanceof Error ? error.message : 'Failed to navigate discussions');
 		}
 	}
 
@@ -4412,8 +5121,9 @@
 		setMessageActionMode(nextMode);
 	}
 
-	function togglePinSelectionMode() {
-		const nextMode: MessageActionMode = messageActionMode === 'pin' ? 'none' : 'pin';
+	function toggleDiscussionSelectionMode() {
+		const nextMode: MessageActionMode =
+			messageActionMode === 'discussion' ? 'none' : 'discussion';
 		setMessageActionMode(nextMode);
 	}
 
@@ -4865,16 +5575,16 @@
 			return;
 		}
 
-		if (messageActionMode === 'pin') {
+		if (messageActionMode === 'discussion') {
 			const loweredType = (message.type || '').toLowerCase();
 			if (
 				loweredType === 'deleted' ||
 				(message.content || '').trim() === DELETED_MESSAGE_PLACEHOLDER
 			) {
-				showErrorToast('Deleted messages cannot be pinned');
+				showErrorToast('Deleted messages cannot be attached to a discussion');
 				return;
 			}
-			const pinned = await ensureMessagePinned(message);
+			const pinned = await ensureMessageInDiscussion(message);
 			if (!pinned) {
 				return;
 			}
@@ -4940,7 +5650,7 @@
 	async function onMessageContextAction(
 		event: CustomEvent<{
 			messageId: string;
-			action: 'reply' | 'edit' | 'delete' | 'pin' | 'branch';
+			action: 'reply' | 'edit' | 'delete' | 'discussion' | 'pin' | 'branch';
 		}>
 	) {
 		if (!roomId || !isMember) {
@@ -4964,6 +5674,10 @@
 			showErrorToast(
 				action === 'reply'
 					? 'Deleted messages cannot be replied to'
+					: action === 'discussion'
+						? 'Deleted messages cannot be used for discussions'
+						: action === 'pin'
+							? 'Deleted messages cannot be pinned to dashboard'
 					: 'Deleted messages cannot be selected'
 			);
 			return;
@@ -5008,12 +5722,17 @@
 			return;
 		}
 
-		if (action === 'pin') {
-			const pinned = await ensureMessagePinned(message);
+		if (action === 'discussion') {
+			const pinned = await ensureMessageInDiscussion(message);
 			if (!pinned) {
 				return;
 			}
 			openDiscussionForMessage(message.id);
+			return;
+		}
+
+		if (action === 'pin') {
+			await openDashboardPinPrompt(message);
 			return;
 		}
 
@@ -5022,12 +5741,83 @@
 		}
 	}
 
-	function onPinnedDiscussionOpen(event: CustomEvent<{ messageId: string }>) {
+	function onDiscussionOpen(event: CustomEvent<{ messageId: string }>) {
 		const messageId = normalizeMessageID(event.detail.messageId);
 		if (!messageId) {
 			return;
 		}
 		openDiscussionForMessage(messageId);
+	}
+
+	async function onMessagePinToDashboard(event: CustomEvent<{ messageId: string }>) {
+		if (!roomId || !isMember) {
+			return;
+		}
+		const messageId = normalizeMessageID(event.detail.messageId);
+		if (!messageId) {
+			return;
+		}
+		const message = (messagesByRoom[roomId] ?? []).find(
+			(entry) => normalizeMessageID(entry.id) === messageId
+		);
+		if (!message) {
+			return;
+		}
+		await openDashboardPinPrompt(message);
+	}
+
+	function onDashboardItemNoteEdit(event: CustomEvent<{ itemId: string; note: string }>) {
+		updateRoomDashboardItemNote(event.detail.itemId, event.detail.note);
+	}
+
+	function onDashboardOrganizePreview(event: CustomEvent<RoomDashboardOrganizeSections>) {
+		if (!roomId) {
+			return;
+		}
+		const preview = event.detail;
+		roomDashboardOrganizePreview = preview;
+
+		const updatesById = new Map(
+			flattenRoomDashboardOrganizePreview(preview).map((entry) => [
+				normalizeMessageID(entry.id),
+				entry
+			] as const)
+		);
+		if (updatesById.size === 0) {
+			showErrorToast('AI organize returned no dashboard updates.');
+			return;
+		}
+
+		const nextItems = [...roomDashboardItems];
+		const existingById = new Map(
+			nextItems.map((entry, index) => [normalizeMessageID(entry.id), index] as const)
+		);
+		for (const [entryId, update] of updatesById.entries()) {
+			if (!entryId) {
+				continue;
+			}
+			const existingIndex = existingById.get(entryId);
+			if (typeof existingIndex === 'number') {
+				nextItems[existingIndex] = {
+					...nextItems[existingIndex],
+					note: update.note || nextItems[existingIndex].note,
+					topic: update.topic || '',
+					beaconAt: update.beaconAt ?? nextItems[existingIndex].beaconAt,
+					beaconLabel: update.beaconLabel || nextItems[existingIndex].beaconLabel,
+					messageText: update.messageText || nextItems[existingIndex].messageText,
+					taskTitle: update.taskTitle || nextItems[existingIndex].taskTitle
+				};
+				continue;
+			}
+			nextItems.push(update);
+		}
+
+		persistCurrentRoomDashboardItems(nextItems);
+		showErrorToast('AI organize preview ready.');
+	}
+
+	function onDashboardOrganizeError(event: CustomEvent<{ message: string }>) {
+		showErrorToast(event.detail.message || 'Failed to organize dashboard.');
 	}
 
 	async function onSelectedMessageEdit(event: CustomEvent<{ messageId: string }>) {
@@ -5216,6 +6006,8 @@
 	class:mobile-list-only={isMobileView && mobilePane === 'list'}
 	class:mobile-chat-only={isMobileView && mobilePane === 'chat'}
 >
+	<MonochromeRoomBackground seed={roomId || activeThread.id || 'chat-room'} />
+
 	<div class="sidebar-pane">
 		<ChatSidebar
 			myRooms={filteredMyRooms}
@@ -5254,7 +6046,7 @@
 					isDarkMode={$isDarkMode}
 					{messageActionMode}
 					{showRoomSearch}
-					isBoardView={showBoardView}
+					isBoardView={isDrawBoardActive}
 					{isCanvasOpen}
 					hasMinimizedCall={activeCall && isCallMinimized}
 					minimizedCallLabel={callDurationLabel}
@@ -5270,7 +6062,7 @@
 					on:toggleRoomSearch={toggleRoomSearch}
 					on:renameRoom={() => void renameRoom(roomId)}
 					on:toggleBreakSelectionMode={toggleBreakSelectionMode}
-					on:togglePinSelectionMode={togglePinSelectionMode}
+					on:toggleDiscussionSelectionMode={toggleDiscussionSelectionMode}
 					on:toggleReplySelectionMode={toggleReplySelectionMode}
 					on:toggleEditSelectionMode={toggleEditSelectionMode}
 					on:toggleDeleteSelectionMode={toggleDeleteSelectionMode}
@@ -5281,7 +6073,7 @@
 					on:disconnect={() => void disconnectAndWipe()}
 				/>
 
-				{#if !showBoardView}
+				{#if !isDrawBoardActive && !isDashboardActive && !isTaskBoardActive}
 					<ChatStatusBars
 						{showTrustedDevicePrompt}
 						{isSelectionMode}
@@ -5562,7 +6354,7 @@
 				{/if}
 
 				<div class="chat-window-shell" class:is-expired={isRoomExpired}>
-					{#if showBoardView}
+					{#if isDrawBoardActive}
 						<Board
 							{roomId}
 							messages={currentMessages}
@@ -5571,8 +6363,23 @@
 							{canModerateBoard}
 							{currentUserId}
 							{currentUsername}
-							on:close={() => (showBoardView = false)}
+							isEphemeralRoom={isActiveRoomEphemeral}
+							on:close={() => deactivateWorkspaceModule('draw')}
+							on:toastError={(event) => showErrorToast(event.detail.message)}
 						/>
+					{:else if isDashboardActive}
+						<RoomDashboard
+							{roomId}
+							items={roomDashboardItems}
+							isDarkMode={$isDarkMode}
+							currentUserId={currentUserId}
+							organizePreview={roomDashboardOrganizePreview}
+							on:editNote={onDashboardItemNoteEdit}
+							on:aiOrganizePreview={onDashboardOrganizePreview}
+							on:aiOrganizeError={onDashboardOrganizeError}
+						/>
+					{:else if isTaskBoardActive}
+						<TaskBoard {roomId} canEdit={isMember && !isRoomExpired} />
 					{:else}
 						<ChatWindow
 							bind:this={chatWindowRef}
@@ -5599,7 +6406,8 @@
 							on:joinBreakRoom={onJoinBreakRoom}
 							on:joinRoom={() => void joinCurrentRoom()}
 							on:messageSelect={onMessageSelected}
-							on:openPinnedDiscussion={onPinnedDiscussionOpen}
+							on:openDiscussion={onDiscussionOpen}
+							on:pinToDashboard={(event) => void onMessagePinToDashboard(event)}
 							on:reply={onReplyRequest}
 							on:toggleReaction={onMessageReactionToggle}
 							on:messageContextAction={onMessageContextAction}
@@ -5614,7 +6422,7 @@
 					{/if}
 				</div>
 
-				{#if !showBoardView}
+				{#if !isDrawBoardActive && !isDashboardActive && !isTaskBoardActive}
 					<div class="composer-typing-slot" role="status" aria-live="polite" aria-atomic="true">
 						{#if hasTypingUsers}
 							{#key `${roomId}:${typingIndicatorText}`}
@@ -5628,15 +6436,16 @@
 						{/if}
 					</div>
 				{/if}
-				{#if isMember && !showBoardView}
-					<ChatComposer
-						bind:draftMessage
-						bind:attachedFile
-						{roomId}
-						disabled={isRoomExpired}
-						{activeReply}
-						isDarkMode={$isDarkMode}
-						{currentUsername}
+				{#if isMember && !isDrawBoardActive && !isDashboardActive && !isTaskBoardActive}
+						<ChatComposer
+							bind:draftMessage
+							bind:attachedFile
+							{roomId}
+							disabled={isRoomExpired}
+							isEphemeralRoom={isActiveRoomEphemeral}
+							{activeReply}
+							isDarkMode={$isDarkMode}
+							{currentUsername}
 						aiEnabled={activeRoomAllowsAI}
 						mentionCandidates={currentOnlineMembers.map((member) => member.name)}
 						messageLimit={MESSAGE_TEXT_MAX_BYTES}
@@ -5706,7 +6515,12 @@
 					</div>
 				</header>
 				<div class="canvas-pane-body">
-					<CodeCanvas {roomId} currentUser={canvasUser} on:sendSnippet={onCanvasSnippetSend} />
+					<CodeCanvas
+						{roomId}
+						currentUser={canvasUser}
+						isEphemeralRoom={isActiveRoomEphemeral}
+						on:sendSnippet={onCanvasSnippetSend}
+					/>
 				</div>
 			</section>
 		{/if}
@@ -5716,6 +6530,17 @@
 		<OnlinePanel members={currentOnlineMembers} isDarkMode={$isDarkMode} />
 	</div>
 </section>
+
+{#if !isCompactNavViewport}
+	<FloatingActivityBox
+		activeModules={activeWorkspaceModules}
+		selectedModule={selectedWorkspaceModule}
+		addableModules={addableWorkspaceModules}
+		on:selectModule={onWorkspaceModuleSelect}
+		on:addModule={onWorkspaceModuleAdd}
+		on:limitReached={onWorkspaceModuleLimit}
+	/>
+{/if}
 
 <PrivateAiChat
 	open={showPrivateAiChat}

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
 	import { createEventDispatcher } from 'svelte';
 	import toraLogo from '$lib/assets/tora-logo.svg';
 	import { normalizeUsernameInput } from '$lib/utils/homeJoin';
@@ -20,7 +21,7 @@
 
 	$: normalizedEmail = email.trim().toLowerCase();
 	$: normalizedPassword = password.trim();
-	$: normalizedUsername = normalizeUsernameInput(username);
+	$: normalizedUsername = normalizeUsernameInput(username).toLowerCase().slice(0, 32);
 	$: hasValidEmail = emailRegex.test(normalizedEmail);
 	$: hasPassword = normalizedPassword.length > 0;
 	$: hasSignupUsername = normalizedUsername.length > 0;
@@ -31,7 +32,7 @@
 	$: switchPrompt = isRegisterMode
 		? 'Prefer quick access with just email + password?'
 		: 'Want to lock in a custom handle for this session?';
-	$: submitLabel = isLoading ? 'Processing...' : isRegisterMode ? 'Create Session' : 'Start Session';
+	$: submitLabel = isLoading ? 'Processing...' : isRegisterMode ? 'Create Account' : 'Start Session';
 
 	function clientLog(event: string, payload?: unknown) {
 		const timestamp = new Date().toISOString();
@@ -59,11 +60,13 @@
 		error = '';
 
 		const endpoint = isRegisterMode ? '/api/auth/signup' : '/api/auth/login';
-		const payload = {
+		const payload: Record<string, string> = {
 			email: normalizedEmail,
-			password: normalizedPassword,
-			username: normalizedUsername
+			password: normalizedPassword
 		};
+		if (isRegisterMode) {
+			payload.username = normalizedUsername;
+		}
 
 		try {
 			clientLog('api-auth-request', {
@@ -75,6 +78,7 @@
 			const res = await fetch(`${API_BASE}${endpoint}`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
 				body: JSON.stringify(payload)
 			});
 
@@ -91,6 +95,13 @@
 		} finally {
 			isLoading = false;
 		}
+	}
+
+	function handleGoogleLogin() {
+		if (!browser || isLoading) {
+			return;
+		}
+		window.location.href = `${API_BASE}/api/auth/google`;
 	}
 </script>
 
@@ -151,9 +162,9 @@
 						required={isRegisterMode}
 					/>
 						<small class="input-helper">
-							Required for signup. Letters, numbers, spaces, hyphens, and underscores only.
+							Required for signup. Must be unique. Saved lowercase with underscores.
 						</small>
-						{#if username.trim() !== '' && normalizedUsername !== username.trim()}
+						{#if username.trim() !== '' && normalizedUsername !== username.trim().toLowerCase()}
 							<small class="input-helper">Will be normalized to {normalizedUsername}.</small>
 						{/if}
 					{#if username.trim() !== '' && !hasSignupUsername}
@@ -185,10 +196,10 @@
 
 			<div class="divider">OR</div>
 
-			<button class="btn-google" type="button" disabled>
-				Google Sign-In (Coming Soon)
+			<button class="btn-google" type="button" on:click={handleGoogleLogin} disabled={isLoading}>
+				Continue with Google
 			</button>
-			<small class="input-helper muted">Password auth is active today. OAuth is not wired yet.</small>
+			<small class="input-helper muted">Google login uses your configured OAuth redirect.</small>
 
 			<p class="switch-mode">
 				{switchPrompt}

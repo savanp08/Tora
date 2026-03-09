@@ -16,6 +16,7 @@ import (
 
 	"github.com/gocql/gocql"
 	"github.com/redis/go-redis/v9"
+	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/security"
@@ -41,7 +42,6 @@ const (
 	boardElementMoveType       = "board_element_move"
 	boardElementDeleteType     = "board_element_delete"
 	boardEventBatchType        = "board_event_batch"
-	boardMaxStorageBytes       = int64(10 * 1024 * 1024)
 	boardSizeTotalPrefix       = "board:size:total:"
 	boardSizeElementsPrefix    = "board:size:elements:"
 	boardSizeEntryTTL          = scyllaMessageTTL
@@ -50,6 +50,14 @@ const (
 )
 
 var ErrBoardSizeLimitExceeded = errors.New("board storage limit exceeded")
+
+func boardMaxStorageLimitBytes() int64 {
+	return config.LoadAppLimits().Board.MaxStorageBytes
+}
+
+func wsMaxTextCharsLimit() int {
+	return config.LoadAppLimits().WS.MaxTextChars
+}
 
 var supportedBoardEventTypes = map[string]struct{}{
 	boardDrawStartType:     {},
@@ -365,7 +373,7 @@ func (s *MessageService) UpsertBoardElement(ctx context.Context, element models.
 			"%w: room=%s projected_bytes_exceed_limit=%d",
 			ErrBoardSizeLimitExceeded,
 			roomID,
-			boardMaxStorageBytes,
+			boardMaxStorageLimitBytes(),
 		)
 	}
 
@@ -801,7 +809,7 @@ func (s *MessageService) reserveBoardStorageBytes(
 		projectedWithoutRedis = 0
 	}
 	if s == nil || s.Redis == nil || s.Redis.Client == nil {
-		if projectedWithoutRedis > boardMaxStorageBytes {
+		if projectedWithoutRedis > boardMaxStorageLimitBytes() {
 			return false, fallbackElementBytes, projectedWithoutRedis, nil
 		}
 		return true, fallbackElementBytes, projectedWithoutRedis, nil
@@ -860,11 +868,11 @@ return {1, existingSize, projected}
 		fallbackRoomTotal,
 		fallbackElementBytes,
 		newBytes,
-		boardMaxStorageBytes,
+		boardMaxStorageLimitBytes(),
 		boardSizeEntryTTL,
 	).Result()
 	if evalErr != nil {
-		if projectedWithoutRedis > boardMaxStorageBytes {
+		if projectedWithoutRedis > boardMaxStorageLimitBytes() {
 			return false, fallbackElementBytes, projectedWithoutRedis, nil
 		}
 		return true, fallbackElementBytes, projectedWithoutRedis, nil
@@ -1740,8 +1748,8 @@ func (s *MessageService) UpdateMessageContent(ctx context.Context, roomID, messa
 	if roomID == "" || messageID == "" || content == "" {
 		return "", fmt.Errorf("invalid edit payload")
 	}
-	if len(content) > maxTextChars {
-		content = content[:maxTextChars]
+	if len(content) > wsMaxTextCharsLimit() {
+		content = content[:wsMaxTextCharsLimit()]
 	}
 	if editedAt.IsZero() {
 		editedAt = time.Now().UTC()
@@ -1981,8 +1989,8 @@ func (s *MessageService) CreatePinnedDiscussionComment(
 	if roomID == "" || pinMessageID == "" || senderID == "" || content == "" {
 		return models.Message{}, fmt.Errorf("invalid discussion comment payload")
 	}
-	if len(content) > maxTextChars {
-		content = content[:maxTextChars]
+	if len(content) > wsMaxTextCharsLimit() {
+		content = content[:wsMaxTextCharsLimit()]
 	}
 	if strings.TrimSpace(content) == "" {
 		return models.Message{}, fmt.Errorf("discussion comment is empty")

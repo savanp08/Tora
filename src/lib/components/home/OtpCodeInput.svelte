@@ -1,11 +1,12 @@
 <script lang="ts">
+	import { APP_LIMITS } from '$lib/config/limits';
 	import { sanitizeRoomCodePartial } from '$lib/utils/homeJoin';
 
 	export let value = '';
 	export let disabled = false;
 	export let idPrefix = 'otp-digit';
 
-	const CODE_LENGTH = 6;
+	const CODE_LENGTH = APP_LIMITS.room.codeDigits;
 	let digits = Array.from({ length: CODE_LENGTH }, () => '');
 	let rootEl: HTMLDivElement | null = null;
 
@@ -112,7 +113,13 @@
 	}
 </script>
 
-<div class="otp-row" role="group" aria-label="6-digit room code" bind:this={rootEl}>
+<div
+	class="otp-row"
+	role="group"
+	aria-label={`${CODE_LENGTH}-digit room code`}
+	style={`--otp-columns:${CODE_LENGTH};`}
+	bind:this={rootEl}
+>
 	{#each digits as digit, index (index)}
 		<input
 			type="text"
@@ -170,7 +177,7 @@
 	@media (max-width: 420px) {
 		.otp-row {
 			display: grid;
-			grid-template-columns: repeat(6, minmax(0, 1fr));
+			grid-template-columns: repeat(var(--otp-columns), minmax(0, 1fr));
 			gap: 0.32rem;
 		}
 

@@ -22,6 +22,7 @@ import (
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
 	"github.com/savanp08/converse/internal/websocket"
+	"github.com/savanp08/converse/internal/workers"
 )
 
 func main() {
@@ -76,6 +77,18 @@ func main() {
 	mainRouter := router.New(hub, redisStore, scyllaStore, r2Client, usageTracker)
 	mainRouter.Get("/metrics", promhttp.Handler().ServeHTTP)
 	go startRoomExpiryCleanupWorker(redisStore, scyllaStore, r2Client)
+
+	expiryEmailQueue, queueErr := workers.NewExpiryEmailQueue(cfg.RedisAddr, cfg.RedisPass, scyllaStore, r2Client)
+	if queueErr != nil {
+		log.Printf("⚠️  Warning: Could not initialize expiry email queue: %v", queueErr)
+	} else {
+		defer expiryEmailQueue.Shutdown()
+		go func() {
+			if runErr := expiryEmailQueue.Run(); runErr != nil {
+				log.Printf("[expiry-email-worker] run failed: %v", runErr)
+			}
+		}()
+	}
 
 	log.Printf("📡 Server listening on port %s", cfg.Port)
 	server := &http.Server{

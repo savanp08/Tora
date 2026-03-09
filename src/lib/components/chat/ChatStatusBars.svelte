@@ -41,8 +41,8 @@
 				Break mode active: click a message to start a new topic room.
 			{:else if messageActionMode === 'reply'}
 				Reply mode active: click one message to set it as your reply target.
-			{:else if messageActionMode === 'pin'}
-				Pin mode active: click any message to pin it and open a discussion.
+			{:else if messageActionMode === 'discussion'}
+				Discussion mode active: click any message to attach/open discussion.
 			{:else if messageActionMode === 'edit'}
 				Edit mode active: click one of your messages, then use the action buttons.
 			{:else if messageActionMode === 'delete'}

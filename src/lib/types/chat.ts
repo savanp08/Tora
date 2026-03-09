@@ -1,5 +1,5 @@
 export type ThreadStatus = 'joined' | 'discoverable' | 'left';
-export type MessageActionMode = 'none' | 'break' | 'reply' | 'edit' | 'delete' | 'pin';
+export type MessageActionMode = 'none' | 'break' | 'reply' | 'edit' | 'delete' | 'discussion';
 export type RoomMenuMode = 'create' | 'join';
 export type ThemePreference = 'system' | 'light' | 'dark';
 
@@ -64,6 +64,9 @@ export type ChatMessage = {
 	isPinned?: boolean;
 	pinnedBy?: string;
 	pinnedByName?: string;
+	beaconAt?: number;
+	beaconLabel?: string;
+	beaconData?: Record<string, unknown> | null;
 	pending?: boolean;
 };
 
@@ -82,7 +85,7 @@ export type TaskMessagePayload = {
 };
 
 export type ComposerMediaPayload = {
-	type: 'image' | 'video' | 'file' | 'audio' | 'task';
+	type: 'image' | 'video' | 'file' | 'audio' | 'task' | 'beacon';
 	content: string;
 	fileName?: string;
 	text?: string;

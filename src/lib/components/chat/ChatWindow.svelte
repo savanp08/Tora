@@ -2,8 +2,10 @@
 	import { afterUpdate, createEventDispatcher, onDestroy, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
 	import TaskCard from '$lib/components/chat/TaskCard.svelte';
+	import { APP_LIMITS } from '$lib/config/limits';
 	import type { ChatMessage, MessageActionMode } from '$lib/types/chat';
 	import { normalizeIdentifier } from '$lib/utils/chat/core';
+	import { formatBeaconTimestamp, parseBeaconMessagePayload } from '$lib/utils/chat/beacon';
 	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 
 	type ReplyPreview = {
@@ -29,7 +31,13 @@
 		users: string[];
 	};
 
-	type MessageContextAction = 'reply' | 'edit' | 'delete' | 'pin' | 'branch';
+	type MessageContextAction =
+		| 'reply'
+		| 'edit'
+		| 'delete'
+		| 'discussion'
+		| 'pin'
+		| 'branch';
 
 	export let messages: ChatMessage[] = [];
 	export let roomId = '';
@@ -56,7 +64,8 @@
 		joinBreakRoom: { roomId: string };
 		joinRoom: void;
 		messageSelect: { messageId: string };
-		openPinnedDiscussion: { messageId: string };
+		openDiscussion: { messageId: string };
+		pinToDashboard: { messageId: string };
 		focusHandled: { messageId: string };
 		reply: { messageId: string; senderName: string; content: string };
 		editSelected: { messageId: string };
@@ -69,14 +78,14 @@
 		messageContextAction: { messageId: string; action: MessageContextAction };
 	}>();
 
-	const COLLAPSED_MESSAGE_LENGTH = 500;
-	const COLLAPSED_SNIPPET_CODE_MAX_LINES = 20;
-	const COLLAPSED_SNIPPET_CODE_MAX_CHARS = 1400;
-	const COLLAPSED_SNIPPET_MESSAGE_MAX_LINES = 8;
-	const COLLAPSED_SNIPPET_MESSAGE_MAX_CHARS = 560;
+	const COLLAPSED_MESSAGE_LENGTH = APP_LIMITS.chat.collapsedMessageLength;
+	const COLLAPSED_SNIPPET_CODE_MAX_LINES = APP_LIMITS.chat.collapsedSnippetCodeMaxLines;
+	const COLLAPSED_SNIPPET_CODE_MAX_CHARS = APP_LIMITS.chat.collapsedSnippetCodeMaxChars;
+	const COLLAPSED_SNIPPET_MESSAGE_MAX_LINES = APP_LIMITS.chat.collapsedSnippetMessageMaxLines;
+	const COLLAPSED_SNIPPET_MESSAGE_MAX_CHARS = APP_LIMITS.chat.collapsedSnippetMessageMaxChars;
 	const CANVAS_SNIPPET_PAYLOAD_KIND = 'canvas_snippet_v1';
-	const MESSAGE_CONTEXT_MENU_WIDTH_PX = 186;
-	const MESSAGE_CONTEXT_MENU_HEIGHT_PX = 220;
+	const MESSAGE_CONTEXT_MENU_WIDTH_PX = 198;
+	const MESSAGE_CONTEXT_MENU_HEIGHT_PX = 262;
 	const MESSAGE_CONTEXT_MENU_MARGIN_PX = 8;
 	const MESSAGE_LONG_PRESS_DELAY_MS = 520;
 	const MESSAGE_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
@@ -714,7 +723,7 @@
 				}
 				return snippetPayload.snippet.toLowerCase().includes(normalized);
 			}
-			return message.content.toLowerCase().includes(normalized);
+			return getMessageDisplayText(message).toLowerCase().includes(normalized);
 		});
 	}
 
@@ -850,6 +859,33 @@
 		};
 	}
 
+	function getBeaconPayload(message: ChatMessage) {
+		if (!message || (message.type || '').trim().toLowerCase() !== 'text') {
+			return null;
+		}
+		return parseBeaconMessagePayload(message.content || '');
+	}
+
+	function getMessageDisplayText(message: ChatMessage) {
+		const beaconPayload = getBeaconPayload(message);
+		if (beaconPayload) {
+			return beaconPayload.text;
+		}
+		return message.content || '';
+	}
+
+	function getBeaconLabel(message: ChatMessage) {
+		const beaconPayload = getBeaconPayload(message);
+		if (!beaconPayload) {
+			return '';
+		}
+		const label = (beaconPayload.beaconLabel || '').trim();
+		if (label) {
+			return label;
+		}
+		return formatBeaconTimestamp(beaconPayload.beaconAt);
+	}
+
 	function buildSnippetCopyText(payload: SnippetPayload) {
 		const extension = (payload.fileName.split('.').pop() || '').trim();
 		const languageHint = /^[a-z0-9_+-]+$/i.test(extension) ? extension : '';
@@ -926,7 +962,7 @@
 			}
 			return 'Task';
 		}
-		const textContent = (message.content || '').trim();
+		const textContent = getMessageDisplayText(message).trim();
 		if (textContent) {
 			return truncateInlineText(textContent, 220);
 		}
@@ -1331,7 +1367,7 @@
 
 	async function copyMessage(message: ChatMessage) {
 		const snippetPayload = getSnippetPayload(message);
-		const copyContent = snippetPayload ? buildSnippetCopyText(snippetPayload) : message.content;
+		const copyContent = snippetPayload ? buildSnippetCopyText(snippetPayload) : getMessageDisplayText(message);
 		if (!copyContent) {
 			return;
 		}
@@ -1610,6 +1646,13 @@
 			action
 		});
 	}
+
+	function onPinToDashboardRequest(messageId: string) {
+		if (!isMember || !messageId) {
+			return;
+		}
+		dispatch('pinToDashboard', { messageId });
+	}
 </script>
 
 <div
@@ -1650,6 +1693,7 @@
 				{@const branchesCreated = getBranchesCreated(message)}
 				{@const replyPreview = getReplyPreview(message)}
 				{@const snippetPayload = getSnippetPayload(message)}
+				{@const beaconPayload = getBeaconPayload(message)}
 				{@const reactionEntries = !isDeletedMessage(message) ? getReactionEntries(message) : []}
 				{@const isMultiDeleteSelected =
 					messageActionMode === 'delete' &&
@@ -1666,12 +1710,12 @@
 								<button
 									type="button"
 									class="gutter-pin-btn"
-									title="Open pinned discussion"
-									aria-label="Open pinned discussion"
+									title="Open discussion"
+									aria-label="Open discussion"
 									on:click|stopPropagation={() =>
-										dispatch('openPinnedDiscussion', { messageId: message.id })}
+										dispatch('openDiscussion', { messageId: message.id })}
 								>
-									<span class="gutter-pin-emoji" aria-hidden="true">📌</span>
+									<IconSet name="discussion" size={12} className="gutter-pin-emoji" />
 									</button>
 								{/if}
 								{#if totalReplies > 1 || branchesCreated > 1}
@@ -1755,6 +1799,11 @@
 								<div class="meta-right">
 								<span class="time-meta">
 									<time>{formatClock(message.createdAt)}</time>
+									{#if beaconPayload}
+										<span class="beacon-meta" title={getBeaconLabel(message)}>
+											<IconSet name="beacon" size={11} />
+										</span>
+									{/if}
 									{#if message.isEdited && !isDeletedMessage(message)}
 										<span class="edited-meta">edited {formatEditedClock(message.editedAt)}</span>
 									{/if}
@@ -1770,6 +1819,18 @@
 											on:click|stopPropagation={() => void copyMessage(message)}
 										>
 											<IconSet name="copy" size={12} className="copy-icon" />
+										</button>
+									{/if}
+									{#if isMember}
+										<button
+											type="button"
+											class="copy-btn"
+											class:pin-dashboard-btn={message.type !== 'task'}
+											title="Pin to dashboard"
+											aria-label="Pin to dashboard"
+											on:click|stopPropagation={() => onPinToDashboardRequest(message.id)}
+										>
+											<IconSet name="pin" size={12} className="copy-icon" />
 										</button>
 									{/if}
 								</span>
@@ -1805,7 +1866,7 @@
 						class:deleted-text={isDeletedMessage(message)}
 						class:collapsed={!snippetPayload &&
 							message.type === 'text' &&
-							isLongMessage(message.content) &&
+							isLongMessage(getMessageDisplayText(message)) &&
 							!Boolean(expandedMessages[message.id])}
 						>
 							{#if isDeletedMessage(message)}
@@ -2001,6 +2062,20 @@
 								on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
 								on:addTask={(event) => dispatch('addTask', event.detail)}
 							/>
+						{:else if beaconPayload}
+							<div class="beacon-inline-meta">
+								<IconSet name="beacon" size={13} />
+								<span>{getBeaconLabel(message)}</span>
+							</div>
+							{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
+								{#if segment.isEmoji}
+									<span class="emoji-boost">{segment.value}</span>
+								{:else if segment.isMention}
+									<span class="mention-tag">{segment.value}</span>
+								{:else}
+									{segment.value}
+								{/if}
+							{/each}
 						{:else if isCallLogMessage(message)}
 							<div class="call-log-entry">
 								<svg
@@ -2019,10 +2094,10 @@
 									</div>
 								</div>
 							</div>
-						{:else if isCodeBlock(message.content)}
-							<pre class="code-block"><code>{getCodeContent(message.content)}</code></pre>
+						{:else if isCodeBlock(getMessageDisplayText(message))}
+							<pre class="code-block"><code>{getCodeContent(getMessageDisplayText(message))}</code></pre>
 						{:else}
-							{#each splitMessageTextByEmoji(cleanAiText(message.content)) as segment}
+							{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
 								{#if segment.isEmoji}
 									<span class="emoji-boost">{segment.value}</span>
 								{:else if segment.isMention}
@@ -2107,7 +2182,7 @@
 							{/if}
 						</div>
 					{/if}
-					{#if !snippetPayload && message.type === 'text' && isLongMessage(message.content)}
+					{#if !snippetPayload && message.type === 'text' && isLongMessage(getMessageDisplayText(message))}
 						<button
 							type="button"
 							class="read-more-btn"
@@ -2145,12 +2220,12 @@
 								<button
 									type="button"
 									class="gutter-pin-btn"
-									title="Open pinned discussion"
-									aria-label="Open pinned discussion"
+									title="Open discussion"
+									aria-label="Open discussion"
 									on:click|stopPropagation={() =>
-										dispatch('openPinnedDiscussion', { messageId: message.id })}
+										dispatch('openDiscussion', { messageId: message.id })}
 								>
-									<span class="gutter-pin-emoji" aria-hidden="true">📌</span>
+									<IconSet name="discussion" size={12} className="gutter-pin-emoji" />
 									</button>
 								{/if}
 								{#if totalReplies > 1 || branchesCreated > 1}
@@ -2248,11 +2323,21 @@
 					type="button"
 					class="message-context-menu-item"
 					role="menuitem"
+					disabled={isContextMenuActionDisabled('discussion', contextMenuMessage, contextMenuIsMine)}
+					on:click={() => onMessageContextAction('discussion')}
+				>
+					<IconSet name="discussion" size={14} />
+					<span>Discussion</span>
+				</button>
+				<button
+					type="button"
+					class="message-context-menu-item"
+					role="menuitem"
 					disabled={isContextMenuActionDisabled('pin', contextMenuMessage, contextMenuIsMine)}
 					on:click={() => onMessageContextAction('pin')}
 				>
 					<IconSet name="pin" size={14} />
-					<span>Pin</span>
+					<span>Pin to dashboard</span>
 				</button>
 				<button
 					type="button"
@@ -2304,6 +2389,7 @@
 	.messages {
 		--meta-gutter-size: clamp(2.6rem, 7vw, 3.1rem);
 		--bubble-max-width: 470px;
+		--media-bubble-max-width: 380px;
 		--action-icon-size: clamp(1.2rem, 2.8vw, 1.5rem);
 		--action-hit-size: clamp(1.76rem, 3.7vw, 2.2rem);
 		--copy-icon-size: calc(var(--action-icon-size) * 0.84);
@@ -2573,9 +2659,10 @@
 		color: #fca5a5;
 	}
 
-	.gutter-pin-emoji {
-		font-size: 0.86rem;
-		line-height: 1;
+	:global(.gutter-pin-emoji) {
+		display: inline-flex;
+		width: 0.9rem;
+		height: 0.9rem;
 	}
 
 	.gutter-stat strong {
@@ -2660,7 +2747,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.16rem;
-		width: 11.6rem;
+		width: 12.4rem;
 		padding: 0.35rem;
 		border-radius: 10px;
 		border: 1px solid #c9d3e2;
@@ -2776,14 +2863,14 @@
 
 	.bubble.media-bubble {
 		display: block;
-		width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--bubble-max-width));
-		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--bubble-max-width));
+		width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--media-bubble-max-width));
+		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--media-bubble-max-width));
 		min-width: 0;
 	}
 
 	.bubble.media-bubble.sticker-bubble {
 		width: fit-content;
-		max-width: min(184px, calc(100% - var(--meta-gutter-size) - 0.6rem));
+		max-width: min(148px, calc(100% - var(--meta-gutter-size) - 0.6rem));
 	}
 
 	.bubble.media-bubble .bubble-content {
@@ -2892,6 +2979,11 @@
 		opacity: 1;
 	}
 
+	.pin-dashboard-btn {
+		left: calc(50% + (var(--copy-hit-size) * 0.82));
+		background: rgba(86, 46, 24, 0.88);
+	}
+
 	.copied-tip {
 		position: absolute;
 		left: calc(100% + 0.25rem);
@@ -2960,6 +3052,19 @@
 		margin-left: 0.2rem;
 		font-size: 0.68rem;
 		opacity: 0.78;
+	}
+
+	.beacon-meta {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		color: #2563eb;
+		margin-left: 0.22rem;
+		opacity: 0.88;
+	}
+
+	.messages-shell.theme-dark .beacon-meta {
+		color: #93c5fd;
 	}
 
 	.reply-snippet {
@@ -3098,29 +3203,29 @@
 
 	.image-preview {
 		height: auto;
-		max-height: 460px;
+		max-height: 320px;
 		object-fit: contain;
 		background: #dbe2ec;
 	}
 
 	.image-preview.sticker-preview {
-		width: min(160px, 42vw);
-		max-width: 160px;
-		max-height: 160px;
+		width: min(132px, 42vw);
+		max-width: 132px;
+		max-height: 132px;
 		border: none;
 		background: transparent;
 		border-radius: 10px;
 	}
 
 	.video-preview {
-		max-height: 360px;
+		max-height: 250px;
 		background: #222d3f;
 	}
 
 	.audio-preview {
 		display: block;
-		width: 100%;
-		max-width: none;
+		width: min(100%, 300px);
+		max-width: 300px;
 	}
 
 	.file-link {
@@ -3192,7 +3297,7 @@
 
 	.pdf-preview {
 		width: 100%;
-		height: 260px;
+		height: 200px;
 		border: 1px solid #c4cedd;
 		border-radius: 8px;
 		background: #f4f7fc;
@@ -3238,6 +3343,26 @@
 
 	.messages-shell.theme-dark .bubble.mine .bubble-content.deleted-text {
 		color: #b3bfd3;
+	}
+
+	.beacon-inline-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.36rem;
+		margin-bottom: 0.38rem;
+		padding: 0.18rem 0.42rem;
+		border-radius: 999px;
+		border: 1px solid rgba(37, 99, 235, 0.28);
+		background: rgba(37, 99, 235, 0.08);
+		color: #1d4ed8;
+		font-size: 0.68rem;
+		font-weight: 700;
+	}
+
+	.messages-shell.theme-dark .beacon-inline-meta {
+		border-color: rgba(125, 211, 252, 0.35);
+		background: rgba(59, 130, 246, 0.16);
+		color: #bfdbfe;
 	}
 
 	.media-caption {
@@ -3947,6 +4072,7 @@
 	@media (max-width: 900px) {
 		.messages {
 			--meta-gutter-size: clamp(2.45rem, 12vw, 2.9rem);
+			--media-bubble-max-width: 312px;
 			padding: 0.82rem 0.68rem;
 		}
 
@@ -3956,12 +4082,12 @@
 		}
 
 		.bubble.media-bubble {
-			width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--bubble-max-width));
-			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--bubble-max-width));
+			width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--media-bubble-max-width));
+			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--media-bubble-max-width));
 		}
 
 		.bubble.media-bubble.sticker-bubble {
-			max-width: min(148px, calc(100% - var(--meta-gutter-size) - 0.45rem));
+			max-width: min(118px, calc(100% - var(--meta-gutter-size) - 0.45rem));
 		}
 
 		.gutter-stat {
@@ -3969,19 +4095,19 @@
 		}
 
 		.video-preview {
-			max-height: 300px;
+			max-height: 210px;
 		}
 
 		.image-preview.sticker-preview {
-			width: min(132px, 46vw);
-			max-width: 132px;
-			max-height: 132px;
+			width: min(110px, 44vw);
+			max-width: 110px;
+			max-height: 110px;
 		}
 
 		.pdf-preview {
-			height: 220px;
+			height: 170px;
 		}
-
+		
 		.scroll-bottom-button {
 			right: 0.8rem;
 			bottom: 0.8rem;

@@ -8,10 +8,12 @@
 	} from '$lib/utils/executionManager';
 	import { applyUpdate, encodeStateAsUpdate } from 'yjs';
 	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
+	import { APP_LIMITS } from '$lib/config/limits';
 	import 'xterm/css/xterm.css';
 
 	export let roomId: string;
 	export let currentUser: { id: string; name: string; color: string };
+	export let isEphemeralRoom = true;
 
 	type ProjectFileEntry = {
 		path: string;
@@ -83,6 +85,8 @@
 		fileName: string;
 	};
 
+	type TerminalPanelTab = 'out' | 'in';
+
 	type SidebarSearchResultKind = 'file' | 'folder' | 'text';
 
 	type SidebarSearchResult = {
@@ -117,8 +121,8 @@
 		| 'markdown'
 		| 'shell';
 
-	const DEFAULT_PROJECT_FILE_NAME = 'main.js';
-	const DEFAULT_PROJECT_FILE_CONTENT = "console.log('Hello from Converse canvas');\n";
+	const DEFAULT_PROJECT_FILE_NAME = 'ToraEditorInput.txt';
+	const DEFAULT_PROJECT_FILE_CONTENT = '';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 	const textEncoder = new TextEncoder();
@@ -138,7 +142,14 @@ If the user asks for edits, apply them to the existing code and return the full 
 	const EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
 	const EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS = 1400;
-	const MAX_FILE_EDITORS = 3;
+	const MAX_FILE_EDITORS = APP_LIMITS.codeCanvas.maxFileEditors;
+	const CODE_CANVAS_MEMORY_LIMIT_BYTES = APP_LIMITS.codeCanvas.memoryLimitBytes;
+	const CODE_CANVAS_MEMORY_LIMIT_MESSAGE = `Code Canvas memory limit (${Math.max(
+		1,
+		Math.round(CODE_CANVAS_MEMORY_LIMIT_BYTES / (1024 * 1024))
+	)}MB) reached.`;
+	const YDOC_LIMIT_REVERT_ORIGIN = 'canvas-memory-limit-revert';
+	const YDOC_LIMIT_ALERT_COOLDOWN_MS = APP_LIMITS.codeCanvas.yDocLimitAlertCooldownMs;
 	const FILE_ICON_SVG: Record<FileIconKind, string> = {
 		generic:
 			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#9FB2CC" d="M7 2.75h7.6L20.5 8.7V20a1.25 1.25 0 0 1-1.25 1.25h-12.5A1.25 1.25 0 0 1 5.5 20V4A1.25 1.25 0 0 1 6.75 2.75Zm7.1 1.6V8.4h4.07z"/><path fill="#6E84A3" d="M8 13h8v1.4H8zm0 3.2h8v1.4H8z"/></svg>',
@@ -190,11 +201,18 @@ If the user asks for edits, apply them to the existing code and return the full 
 	let terminalHeight = 200;
 	let terminalResizeStartY = 0;
 	let terminalResizeStartHeight = 200;
+	let terminalExpandedHeight = 200;
+	let terminalPanelCollapsed = false;
+	let activeTerminalPanelTab: TerminalPanelTab = 'out';
+	let terminalInputDraft = '';
 	let yjsApi: any = null;
 	let ydoc: any = null;
 	let yFileTree: any = null;
 	let yFileTreeObserver: ((event: any) => void) | null = null;
-	let ydocUpdateHandler: (() => void) | null = null;
+	let ydocUpdateHandler:
+		| ((update: Uint8Array, origin: unknown, doc: unknown, transaction: { local?: boolean }) => void)
+		| null = null;
+	let ydocBeforeTransactionHandler: ((transaction: { local?: boolean }) => void) | null = null;
 	let provider: any = null;
 	let providerSnapshotSocket: WebSocket | null = null;
 	let providerSnapshotMessageHandler: ((event: MessageEvent) => void) | null = null;
@@ -281,6 +299,9 @@ If the user asks for edits, apply them to the existing code and return the full 
 	let selectionSnippetActionTop = 0;
 	let selectionSnippetActionLeft = 0;
 	let selectedSnippetText = '';
+	let ydocSnapshotBeforeLocalTransaction: Uint8Array | null = null;
+	let isRevertingOversizedYDocState = false;
+	let lastYDocLimitAlertAt = 0;
 	const presenceSessionId = createPresenceSessionId();
 	const dispatch = createEventDispatcher<{
 		sendSnippet: CanvasSnippetPayload;
@@ -349,6 +370,29 @@ If the user asks for edits, apply them to the existing code and return the full 
 		const snapshotBytes = new Uint8Array(snapshot.length);
 		snapshotBytes.set(snapshot);
 		return snapshotBytes;
+	}
+
+	function isLocalYDocTransaction(origin: unknown, transaction: { local?: boolean } | undefined) {
+		if (typeof transaction?.local === 'boolean') {
+			return transaction.local;
+		}
+		if (typeof origin === 'string') {
+			return origin === MODEL_SYNC_ORIGIN || origin === FILE_TREE_SYNC_ORIGIN;
+		}
+		return false;
+	}
+
+	function notifyCodeCanvasMemoryLimitReached() {
+		const now = Date.now();
+		if (now - lastYDocLimitAlertAt < YDOC_LIMIT_ALERT_COOLDOWN_MS) {
+			return;
+		}
+		lastYDocLimitAlertAt = now;
+		fileExplorerError = CODE_CANVAS_MEMORY_LIMIT_MESSAGE;
+		writeTerminalLine(`\x1b[31m${CODE_CANVAS_MEMORY_LIMIT_MESSAGE}\x1b[0m`);
+		if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+			window.alert(CODE_CANVAS_MEMORY_LIMIT_MESSAGE);
+		}
 	}
 
 	function canvasSnapshotURL() {
@@ -1243,7 +1287,31 @@ If the user asks for edits, apply them to the existing code and return the full 
 		executionManager.stop(activeExecutionHandle.id);
 	}
 
-	async function executeCode(language: string, source: string, target: ProjectFileEntry) {
+	function resolveTerminalInputFallbackFromYDoc() {
+		const yText = ydoc?.getText?.(yTextKeyForFile(DEFAULT_PROJECT_FILE_NAME));
+		if (!yText || typeof yText.toString !== 'function') {
+			return '';
+		}
+		return String(yText.toString() || '');
+	}
+
+	async function resolveExecutionStdin() {
+		if (terminalInputDraft.length > 0) {
+			return terminalInputDraft;
+		}
+		const fromYDoc = resolveTerminalInputFallbackFromYDoc();
+		if (fromYDoc.length > 0) {
+			return fromYDoc;
+		}
+		return '';
+	}
+
+	async function executeCode(
+		language: string,
+		source: string,
+		target: ProjectFileEntry,
+		stdin: string
+	) {
 		if (!executionManager) {
 			throw new Error('Execution manager is not ready');
 		}
@@ -1252,7 +1320,7 @@ If the user asks for edits, apply them to the existing code and return the full 
 		}
 		isRunInProgress = true;
 		runningFilePath = target.relativePath;
-		activeExecutionHandle = await executionManager.run(language, source, 30000);
+		activeExecutionHandle = await executionManager.run(language, source, 30000, stdin);
 		removeExecutionOutputSubscription = activeExecutionHandle.subscribe((output) => {
 			writeExecutionLineToTerminal(output);
 		});
@@ -1827,6 +1895,16 @@ If the user asks for edits, apply them to the existing code and return the full 
 		});
 	}
 
+	function switchTerminalPanelTab(tab: TerminalPanelTab) {
+		if (activeTerminalPanelTab === tab) {
+			return;
+		}
+		activeTerminalPanelTab = tab;
+		if (tab === 'out' && !terminalPanelCollapsed) {
+			scheduleTerminalFit();
+		}
+	}
+
 	function writeTerminalLine(message: string) {
 		terminal?.writeln(message);
 	}
@@ -1843,7 +1921,23 @@ If the user asks for edits, apply them to the existing code and return the full 
 		};
 	}
 
+	function toggleTerminalPanelCollapse() {
+		if (terminalPanelCollapsed) {
+			terminalPanelCollapsed = false;
+			const { min, max } = getTerminalResizeBounds();
+			const restoredHeight = Math.max(min, Math.min(max, terminalExpandedHeight));
+			terminalHeight = restoredHeight;
+			scheduleTerminalFit();
+			return;
+		}
+		terminalExpandedHeight = terminalHeight;
+		terminalPanelCollapsed = true;
+	}
+
 	function handleTerminalResizeMove(event: PointerEvent) {
+		if (terminalPanelCollapsed) {
+			return;
+		}
 		const deltaY = terminalResizeStartY - event.clientY;
 		const { min, max } = getTerminalResizeBounds();
 		terminalHeight = Math.max(min, Math.min(max, terminalResizeStartHeight + deltaY));
@@ -1860,6 +1954,9 @@ If the user asks for edits, apply them to the existing code and return the full 
 	}
 
 	function startTerminalResize(event: PointerEvent) {
+		if (terminalPanelCollapsed) {
+			return;
+		}
 		terminalResizeStartY = event.clientY;
 		terminalResizeStartHeight = terminalHeight;
 		document.body.style.cursor = 'row-resize';
@@ -3737,6 +3834,7 @@ Return only the final code for this file.`;
 		}
 		fileExplorerError = '';
 		try {
+			activeTerminalPanelTab = 'out';
 			clearTerminal();
 			writeTerminalLine(`\x1b[36m> Executing ${target.name}...\x1b[0m`);
 			let source = '';
@@ -3745,8 +3843,9 @@ Return only the final code for this file.`;
 			} else {
 				source = String(await getActiveFS().promises.readFile(target.path, { encoding: 'utf8' }));
 			}
+			const stdin = await resolveExecutionStdin();
 			const language = resolveExecutionLanguageForEntry(target);
-			await executeCode(language, source, target);
+			await executeCode(language, source, target, stdin);
 			writeTerminalLine('\x1b[32m> Script finished.\x1b[0m');
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : 'Run failed';
@@ -3972,12 +4071,13 @@ Return only the final code for this file.`;
 		updateSidebarSearchResults();
 	}
 
-	$: if (canvasEditorBodyElement) {
+	$: if (canvasEditorBodyElement && !terminalPanelCollapsed) {
 		const { min, max } = getTerminalResizeBounds();
 		const clampedHeight = Math.max(min, Math.min(max, terminalHeight));
 		if (clampedHeight !== terminalHeight) {
 			terminalHeight = clampedHeight;
 		}
+		terminalExpandedHeight = terminalHeight;
 	}
 
 	function registerGlobalContextHandlers() {
@@ -4129,7 +4229,57 @@ Return only the final code for this file.`;
 			});
 
 			ydoc = new Y.Doc();
-			ydocUpdateHandler = () => {
+			ydocBeforeTransactionHandler = (transaction: { local?: boolean }) => {
+				if (!ydoc || !isEphemeralRoom || isRevertingOversizedYDocState) {
+					return;
+				}
+				if (!transaction?.local) {
+					return;
+				}
+				// Capture a stable pre-change state so local oversized edits can be reverted.
+				ydocSnapshotBeforeLocalTransaction = new Uint8Array(encodeStateAsUpdate(ydoc));
+			};
+			ydoc.on('beforeTransaction', ydocBeforeTransactionHandler);
+			ydocUpdateHandler = (
+				_update: Uint8Array,
+				origin: unknown,
+				_doc: unknown,
+				transaction: { local?: boolean }
+			) => {
+				if (!ydoc || isRevertingOversizedYDocState || origin === YDOC_LIMIT_REVERT_ORIGIN) {
+					return;
+				}
+				if (isEphemeralRoom && isLocalYDocTransaction(origin, transaction)) {
+					const currentSnapshot = encodeStateAsUpdate(ydoc);
+					if (currentSnapshot.byteLength > CODE_CANVAS_MEMORY_LIMIT_BYTES) {
+						const rollbackSnapshot = ydocSnapshotBeforeLocalTransaction;
+						if (rollbackSnapshot && rollbackSnapshot.byteLength > 0) {
+							const shouldReconnectProvider =
+								Boolean(provider) &&
+								typeof provider?.disconnect === 'function' &&
+								typeof provider?.connect === 'function';
+							if (shouldReconnectProvider) {
+								provider.disconnect();
+							}
+							isRevertingOversizedYDocState = true;
+							try {
+								applyUpdate(ydoc, rollbackSnapshot, YDOC_LIMIT_REVERT_ORIGIN);
+							} finally {
+								isRevertingOversizedYDocState = false;
+								if (shouldReconnectProvider) {
+									window.setTimeout(() => {
+										if (provider && typeof provider.connect === 'function') {
+											provider.connect();
+										}
+									}, 0);
+								}
+							}
+						}
+						notifyCodeCanvasMemoryLimitReached();
+						return;
+					}
+					ydocSnapshotBeforeLocalTransaction = null;
+				}
 				scheduleCanvasSnapshotSave();
 			};
 			ydoc.on('update', ydocUpdateHandler);
@@ -4321,7 +4471,13 @@ Return only the final code for this file.`;
 		if (ydoc && ydocUpdateHandler) {
 			ydoc.off('update', ydocUpdateHandler);
 		}
+		if (ydoc && ydocBeforeTransactionHandler) {
+			ydoc.off('beforeTransaction', ydocBeforeTransactionHandler);
+		}
 		ydocUpdateHandler = null;
+		ydocBeforeTransactionHandler = null;
+		ydocSnapshotBeforeLocalTransaction = null;
+		isRevertingOversizedYDocState = false;
 		detachProviderTransportDebugListener();
 		detachProviderSnapshotListener();
 		if (saveTimeout) {
@@ -4991,15 +5147,21 @@ Return only the final code for this file.`;
 						</button>
 					{/if}
 				</div>
-				<div class="terminal-panel" style:height={`${terminalHeight}px`}>
-					<button
-						type="button"
-						class="terminal-resize-handle"
-						on:pointerdown={startTerminalResize}
-						aria-label="Resize terminal"
-					>
-						<span class="terminal-resize-grip" aria-hidden="true"></span>
-					</button>
+				<div
+					class="terminal-panel"
+					class:is-collapsed={terminalPanelCollapsed}
+					style={terminalPanelCollapsed ? '' : `height:${terminalHeight}px`}
+				>
+					{#if !terminalPanelCollapsed}
+						<button
+							type="button"
+							class="terminal-resize-handle"
+							on:pointerdown={startTerminalResize}
+							aria-label="Resize terminal"
+						>
+							<span class="terminal-resize-grip" aria-hidden="true"></span>
+						</button>
+					{/if}
 					<div class="terminal-header">
 						<span class="terminal-title">
 							{#if isRunInProgress && runningFilePath}
@@ -5008,43 +5170,96 @@ Return only the final code for this file.`;
 								Terminal
 							{/if}
 						</span>
-						<div class="terminal-action-group">
+						<div class="terminal-header-right">
+							<div class="terminal-action-group">
+								<button
+									type="button"
+									class="terminal-action-button terminal-action-run"
+									on:click={() => void runFile(currentFileEntry() ?? firstFileEntry())}
+									disabled={isRunInProgress}
+								>
+									{isRunInProgress ? 'Running...' : 'Run'}
+								</button>
+								<button
+									type="button"
+									class="terminal-action-button terminal-action-snippet"
+									on:click={openSnippetComposerForSelection}
+									disabled={!canSendSnippetFromSelection}
+									title="Send selected code to chat"
+									aria-label="Send selected code to chat"
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M4 7.5h16v9H4z" />
+										<path d="m4 8 8 6 8-6" />
+									</svg>
+									<span>Snippet</span>
+								</button>
+								<button
+									type="button"
+									class="terminal-action-button terminal-action-stop"
+									on:click={stopRunningCode}
+									disabled={!isRunInProgress}
+								>
+									Stop
+								</button>
+								<button type="button" class="terminal-action-button" on:click={clearTerminal}>
+									Clear
+								</button>
+							</div>
 							<button
 								type="button"
-								class="terminal-action-button terminal-action-run"
-								on:click={() => void runFile(currentFileEntry() ?? firstFileEntry())}
-								disabled={isRunInProgress}
-							>
-								{isRunInProgress ? 'Running...' : 'Run'}
-							</button>
-							<button
-								type="button"
-								class="terminal-action-button terminal-action-snippet"
-								on:click={openSnippetComposerForSelection}
-								disabled={!canSendSnippetFromSelection}
-								title="Send selected code to chat"
-								aria-label="Send selected code to chat"
+								class="terminal-action-button terminal-collapse-button"
+								on:click={toggleTerminalPanelCollapse}
+								aria-label={terminalPanelCollapsed ? 'Expand terminal' : 'Collapse terminal'}
+								title={terminalPanelCollapsed ? 'Expand terminal' : 'Collapse terminal'}
 							>
 								<svg viewBox="0 0 24 24" aria-hidden="true">
-									<path d="M4 7.5h16v9H4z" />
-									<path d="m4 8 8 6 8-6" />
+									{#if terminalPanelCollapsed}
+										<path d="M7 15l5-6 5 6" />
+									{:else}
+										<path d="m7 9 5 6 5-6" />
+									{/if}
 								</svg>
-								<span>Snippet</span>
-							</button>
-							<button
-								type="button"
-								class="terminal-action-button terminal-action-stop"
-								on:click={stopRunningCode}
-								disabled={!isRunInProgress}
-							>
-								Stop
-							</button>
-							<button type="button" class="terminal-action-button" on:click={clearTerminal}>
-								Clear
 							</button>
 						</div>
 					</div>
-					<div class="terminal-container" bind:this={terminalContainer}></div>
+					<div class="terminal-body" class:is-hidden={terminalPanelCollapsed}>
+						<div class="terminal-tabs" role="tablist" aria-label="Terminal panels">
+							<button
+								type="button"
+								class="terminal-tab-button"
+								class:is-active={activeTerminalPanelTab === 'out'}
+								role="tab"
+								aria-selected={activeTerminalPanelTab === 'out'}
+								on:click={() => switchTerminalPanelTab('out')}
+							>
+								Out
+							</button>
+							<button
+								type="button"
+								class="terminal-tab-button"
+								class:is-active={activeTerminalPanelTab === 'in'}
+								role="tab"
+								aria-selected={activeTerminalPanelTab === 'in'}
+								on:click={() => switchTerminalPanelTab('in')}
+							>
+								In
+							</button>
+						</div>
+						<div class="terminal-tab-panel" class:is-active={activeTerminalPanelTab === 'out'}>
+							<div class="terminal-container" bind:this={terminalContainer}></div>
+						</div>
+						<div class="terminal-tab-panel terminal-tab-panel-in" class:is-active={activeTerminalPanelTab === 'in'}>
+							<textarea
+								class="terminal-input-area"
+								bind:value={terminalInputDraft}
+								placeholder="Program stdin (optional). If empty, ToraEditorInput.txt is used."
+								spellcheck="false"
+								autocomplete="off"
+								autocapitalize="off"
+							></textarea>
+						</div>
+					</div>
 				</div>
 			</div>
 	</div>
@@ -6540,6 +6755,11 @@ Return only the final code for this file.`;
 		overflow: hidden;
 	}
 
+	.terminal-panel.is-collapsed {
+		min-height: 0;
+		height: auto !important;
+	}
+
 	.terminal-resize-handle {
 		position: absolute;
 		top: 0;
@@ -6581,6 +6801,13 @@ Return only the final code for this file.`;
 
 	.terminal-title {
 		white-space: nowrap;
+	}
+
+	.terminal-header-right {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		min-width: 0;
 	}
 
 	.terminal-action-group {
@@ -6641,6 +6868,89 @@ Return only the final code for this file.`;
 	.terminal-action-stop {
 		border-color: rgba(239, 68, 68, 0.72);
 		background: rgba(127, 29, 29, 0.45);
+	}
+
+	.terminal-collapse-button {
+		padding: 0.22rem 0.38rem;
+	}
+
+	.terminal-body {
+		display: flex;
+		flex: 1;
+		min-height: 0;
+		flex-direction: column;
+	}
+
+	.terminal-body.is-hidden {
+		display: none;
+	}
+
+	.terminal-tabs {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.28rem;
+		padding: 0.38rem 0.72rem 0.2rem;
+		border-bottom: 1px solid rgba(58, 73, 98, 0.48);
+		background: rgba(11, 16, 25, 0.72);
+	}
+
+	.terminal-tab-button {
+		border: 1px solid rgba(96, 117, 149, 0.45);
+		background: rgba(23, 34, 51, 0.82);
+		color: #c6d4ea;
+		border-radius: 0.38rem;
+		padding: 0.2rem 0.58rem;
+		font-size: 0.66rem;
+		font-weight: 700;
+		cursor: pointer;
+		text-transform: uppercase;
+		letter-spacing: 0.02em;
+	}
+
+	.terminal-tab-button.is-active {
+		border-color: rgba(110, 184, 255, 0.72);
+		background: rgba(34, 82, 133, 0.72);
+		color: #ecf6ff;
+	}
+
+	.terminal-tab-panel {
+		display: none;
+		flex: 1;
+		min-height: 0;
+	}
+
+	.terminal-tab-panel.is-active {
+		display: flex;
+	}
+
+	.terminal-tab-panel-in {
+		padding: 0.65rem 0.72rem 0.72rem;
+	}
+
+	.terminal-input-area {
+		width: 100%;
+		height: 100%;
+		min-height: 88px;
+		border: 1px solid rgba(83, 109, 145, 0.65);
+		border-radius: 0.5rem;
+		background: rgba(10, 16, 24, 0.95);
+		color: #dbe6f8;
+		font-size: 0.78rem;
+		line-height: 1.42;
+		padding: 0.56rem 0.62rem;
+		resize: none;
+		font-family:
+			'SFMono-Regular',
+			Consolas,
+			'Liberation Mono',
+			Menlo,
+			monospace;
+	}
+
+	.terminal-input-area:focus {
+		outline: none;
+		border-color: rgba(110, 184, 255, 0.78);
+		box-shadow: 0 0 0 2px rgba(110, 184, 255, 0.22);
 	}
 
 	.terminal-container {
