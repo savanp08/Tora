@@ -95,6 +95,9 @@ func NewScyllaStore(cfg config.Config) (*ScyllaStore, error) {
 	if err := ensureBaseSchema(session, keyspace); err != nil {
 		log.Printf("⚠️  Warning: Could not ensure base schema: %v", err)
 	}
+	if err := ensurePersistenceSchema(session, keyspace); err != nil {
+		log.Printf("⚠️  Warning: Could not ensure persistence schema: %v", err)
+	}
 
 	return &ScyllaStore{Session: session, Keyspace: keyspace}, nil
 }
@@ -267,6 +270,101 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
+	if session == nil {
+		return fmt.Errorf("scylla session is not configured")
+	}
+	normalizedKeyspace := strings.TrimSpace(keyspace)
+	if normalizedKeyspace == "" {
+		normalizedKeyspace = "converse"
+	}
+
+	userRoomsTable := normalizedKeyspace + ".user_rooms"
+	userConnectionsTable := normalizedKeyspace + ".user_connections"
+	personalItemsTable := normalizedKeyspace + ".personal_items"
+	tasksTable := normalizedKeyspace + ".tasks"
+	roomsTable := normalizedKeyspace + ".rooms"
+
+	persistenceQueries := []string{
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				user_id uuid,
+				room_id uuid,
+				room_name text,
+				role text,
+				joined_at timestamp,
+				last_accessed timestamp,
+				PRIMARY KEY ((user_id), room_id)
+			) WITH CLUSTERING ORDER BY (room_id ASC)`,
+			userRoomsTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				user_id uuid,
+				target_id uuid,
+				status text,
+				created_at timestamp,
+				PRIMARY KEY (user_id, target_id)
+			)`,
+			userConnectionsTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				user_id uuid,
+				item_id uuid,
+				type text,
+				content text,
+				status text,
+				due_at timestamp,
+				created_at timestamp,
+				PRIMARY KEY ((user_id), item_id)
+			) WITH CLUSTERING ORDER BY (item_id DESC)`,
+			personalItemsTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				room_id uuid,
+				id uuid,
+				title text,
+				description text,
+				status text,
+				assignee_id uuid,
+				created_at timestamp,
+				updated_at timestamp,
+				PRIMARY KEY ((room_id), id)
+			) WITH CLUSTERING ORDER BY (id ASC)`,
+			tasksTable,
+		),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (assignee_id)`, tasksTable),
+	}
+
+	for _, query := range persistenceQueries {
+		if err := session.Query(query).Exec(); err != nil {
+			return err
+		}
+	}
+
+	alterRoomsQueries := []string{
+		fmt.Sprintf(`ALTER TABLE %s ADD id uuid`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD owner_id uuid`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD is_ephemeral boolean`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD is_direct boolean`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD expires_at timestamp`, roomsTable),
+	}
+	for _, alterQuery := range alterRoomsQueries {
+		err := session.Query(alterQuery).Exec()
+		if err != nil {
+			lowered := strings.ToLower(strings.TrimSpace(err.Error()))
+			if strings.Contains(lowered, "duplicate") || strings.Contains(lowered, "already exists") {
+				continue
+			}
+			return err
+		}
+	}
+
 	return nil
 }
 

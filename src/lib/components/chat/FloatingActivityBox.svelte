@@ -377,6 +377,7 @@
 
 <style>
 	.activity-box-shell {
+		display:none;
 		--activity-box-size: 64px;
 		--activity-icon-size: clamp(1.05rem, calc(var(--activity-box-size) * 0.34), 1.45rem);
 		--activity-shell-text: #132742;
@@ -388,7 +389,7 @@
 		top: 0;
 		width: var(--activity-box-size);
 		z-index: 350;
-		display: grid;
+		/* display: grid; */
 		gap: 0.45rem;
 		user-select: none;
 		touch-action: none;

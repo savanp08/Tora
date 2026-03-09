@@ -306,6 +306,122 @@ type PromoteToAdminResponse struct {
 	ServerNow int64  `json:"serverNow,omitempty"`
 }
 
+type CreateDirectRoomRequest struct {
+	TargetID string `json:"target_id"`
+}
+
+type CreateDirectRoomResponse struct {
+	RoomID    string `json:"room_id"`
+	RoomName  string `json:"room_name"`
+	ServerNow int64  `json:"server_now"`
+}
+
+func (h *RoomHandler) CreateDirectRoom(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Room storage unavailable"})
+		return
+	}
+
+	fromIDRaw := strings.TrimSpace(AuthUserIDFromContext(r.Context()))
+	if fromIDRaw == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Authenticated user context is required"})
+		return
+	}
+	fromID, err := gocql.ParseUUID(fromIDRaw)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid authenticated user context"})
+		return
+	}
+
+	var req CreateDirectRoomRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	targetID, err := gocql.ParseUUID(strings.TrimSpace(req.TargetID))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid target_id"})
+		return
+	}
+	if targetID == fromID {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Cannot create direct room with self"})
+		return
+	}
+
+	roomID, err := gocql.RandomUUID()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate room id"})
+		return
+	}
+
+	now := time.Now().UTC()
+	roomName := "Direct Message"
+	roomsTable := h.scylla.Table("rooms")
+	userRoomsTable := h.scylla.Table("user_rooms")
+
+	batch := h.scylla.Session.NewBatch(gocql.LoggedBatch)
+	batch.Query(
+		fmt.Sprintf(
+			`INSERT INTO %s (id, name, owner_id, is_ephemeral, is_direct, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			roomsTable,
+		),
+		roomID,
+		roomName,
+		fromID,
+		false,
+		true,
+		nil,
+		now,
+	)
+	batch.Query(
+		fmt.Sprintf(
+			`INSERT INTO %s (user_id, room_id, room_name, role, joined_at, last_accessed) VALUES (?, ?, ?, ?, ?, ?)`,
+			userRoomsTable,
+		),
+		fromID,
+		roomID,
+		roomName,
+		"owner",
+		now,
+		now,
+	)
+	batch.Query(
+		fmt.Sprintf(
+			`INSERT INTO %s (user_id, room_id, room_name, role, joined_at, last_accessed) VALUES (?, ?, ?, ?, ?, ?)`,
+			userRoomsTable,
+		),
+		targetID,
+		roomID,
+		roomName,
+		"member",
+		now,
+		now,
+	)
+
+	if err := h.scylla.Session.ExecuteBatch(batch.WithContext(r.Context())); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create direct room"})
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(CreateDirectRoomResponse{
+		RoomID:    roomID.String(),
+		RoomName:  roomName,
+		ServerNow: time.Now().UnixMilli(),
+	})
+}
+
 func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractClientIP(r)
 	if !JoinRoomLimiter.Allow(clientIP) {

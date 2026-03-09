@@ -692,12 +692,13 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string) (models.
 }
 
 func setAuthCookie(w http.ResponseWriter, r *http.Request, token string) {
+	secureCookie := shouldUseSecureCookies(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   shouldUseSecureCookies(r),
+		Secure:   secureCookie,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().UTC().Add(7 * 24 * time.Hour),
 	})
@@ -1146,32 +1147,35 @@ func parsePasswordResetSMTPPort(raw string) int {
 }
 
 func shouldUseSecureCookies(r *http.Request) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUTH_COOKIE_SECURE"))) {
+	secureEnv := strings.ToLower(strings.TrimSpace(os.Getenv("AUTH_COOKIE_SECURE")))
+	switch secureEnv {
 	case "1", "true", "yes", "on":
 		return true
-	case "0", "false", "no", "off":
-		return false
 	}
 
+	if isLocalRequestHost(r) {
+		return false
+	}
+	return true
+}
+
+func isLocalRequestHost(r *http.Request) bool {
 	if r == nil {
-		return true
-	}
-	if r.TLS != nil {
-		return true
-	}
-	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
-		return true
+		return false
 	}
 
 	host := strings.TrimSpace(r.Host)
 	if host == "" {
-		return true
+		return false
 	}
 	if parsedHost, _, err := net.SplitHostPort(host); err == nil && strings.TrimSpace(parsedHost) != "" {
 		host = parsedHost
 	}
 	normalizedHost := strings.Trim(strings.ToLower(host), "[]")
-	return normalizedHost != "localhost" && normalizedHost != "127.0.0.1" && normalizedHost != "::1"
+	return normalizedHost == "localhost" ||
+		strings.HasSuffix(normalizedHost, ".localhost") ||
+		normalizedHost == "127.0.0.1" ||
+		normalizedHost == "::1"
 }
 
 func newToken() (string, error) {

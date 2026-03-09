@@ -1,60 +1,109 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import PersonalTaskboard from '$lib/components/dashboard/PersonalTaskboard.svelte';
+	import {
+		acceptPendingRequest,
+		declinePendingRequest,
+		fetchDashboardOverview,
+		overview,
+		overviewError,
+		overviewLoading
+	} from '$lib/stores/dashboard';
+	import type { DashboardConnection } from '$lib/stores/dashboard';
 	import type { PageData } from './$types';
 
-	type DashboardRoom = PageData['rooms'][number];
+	export let data: PageData;
 
-	type TaskPriority = 'High' | 'Medium' | 'Low';
-	type DashboardTask = {
-		id: string;
-		title: string;
-		roomName: string;
-		priority: TaskPriority;
-		dueLabel: string;
-	};
-
-	const mockTasks: DashboardTask[] = [
-		{ id: 't1', title: 'Prepare rollout checklist', roomName: 'Launch War Room', priority: 'High', dueLabel: 'Due in 3h' },
-		{ id: 't2', title: 'Review API timeout regressions', roomName: 'Infra Reliability', priority: 'High', dueLabel: 'Due today' },
-		{ id: 't3', title: 'Consolidate stakeholder notes', roomName: 'Client Discovery', priority: 'Medium', dueLabel: 'Due tomorrow' },
-		{ id: 't4', title: 'Update task board labels', roomName: 'Launch War Room', priority: 'Low', dueLabel: 'Due this week' }
-	];
-
-	const priorityRank: Record<TaskPriority, number> = {
-		High: 0,
-		Medium: 1,
-		Low: 2
-	};
+	let pendingRequestUserID = '';
+	let actionError = '';
 
 	const relativeFormatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
+	const dateFormatter = new Intl.DateTimeFormat('en-US', {
+		month: 'short',
+		day: 'numeric',
+		hour: 'numeric',
+		minute: '2-digit'
+	});
 
-	function formatRelativeTime(rawTimestamp: string) {
-		const parsed = Date.parse(rawTimestamp);
-		if (!Number.isFinite(parsed)) {
+	onMount(() => {
+		void loadOverview();
+	});
+
+	async function loadOverview() {
+		actionError = '';
+		try {
+			await fetchDashboardOverview();
+		} catch (error) {
+			actionError = error instanceof Error ? error.message : 'Failed to load dashboard overview';
+		}
+	}
+
+	function parseTimestamp(raw: string) {
+		const value = Date.parse(raw);
+		return Number.isFinite(value) ? value : null;
+	}
+
+	function formatRelative(raw: string) {
+		const parsed = parseTimestamp(raw);
+		if (parsed === null) {
 			return 'Unknown';
 		}
-
 		const deltaSeconds = Math.round((parsed - Date.now()) / 1000);
-		const absoluteSeconds = Math.abs(deltaSeconds);
-		if (absoluteSeconds < 60) {
-			return relativeFormatter.format(Math.round(deltaSeconds), 'second');
+		const absSeconds = Math.abs(deltaSeconds);
+
+		if (absSeconds < 60) {
+			return relativeFormatter.format(deltaSeconds, 'second');
 		}
-		if (absoluteSeconds < 60 * 60) {
+		if (absSeconds < 3600) {
 			return relativeFormatter.format(Math.round(deltaSeconds / 60), 'minute');
 		}
-		if (absoluteSeconds < 60 * 60 * 24) {
+		if (absSeconds < 86400) {
 			return relativeFormatter.format(Math.round(deltaSeconds / 3600), 'hour');
 		}
-		if (absoluteSeconds < 60 * 60 * 24 * 30) {
+		if (absSeconds < 86400 * 30) {
 			return relativeFormatter.format(Math.round(deltaSeconds / 86400), 'day');
 		}
 		return relativeFormatter.format(Math.round(deltaSeconds / (86400 * 30)), 'month');
 	}
 
-	export let data: PageData;
+	function formatDate(raw: string | null) {
+		if (!raw) {
+			return 'No due date';
+		}
+		const parsed = parseTimestamp(raw);
+		if (parsed === null) {
+			return 'No due date';
+		}
+		return dateFormatter.format(parsed);
+	}
 
-	$: sortedTasks = [...mockTasks].sort((left, right) => priorityRank[left.priority] - priorityRank[right.priority]);
-	$: welcomeName = data.user?.name || 'there';
-	$: rooms = data.rooms ?? [];
+	function roomName(value: string, fallback: string) {
+		const trimmed = value.trim();
+		return trimmed || fallback;
+	}
+
+	async function handleAccept(connection: DashboardConnection) {
+		if (pendingRequestUserID) {
+			return;
+		}
+
+		pendingRequestUserID = connection.user_id;
+		actionError = '';
+		try {
+			await acceptPendingRequest(connection.user_id);
+		} catch (error) {
+			actionError = error instanceof Error ? error.message : 'Failed to accept request';
+		} finally {
+			pendingRequestUserID = '';
+		}
+	}
+
+	function handleDecline(connection: DashboardConnection) {
+		if (pendingRequestUserID) {
+			return;
+		}
+		declinePendingRequest(connection.user_id);
+	}
 </script>
 
 <svelte:head>
@@ -63,214 +112,472 @@
 
 <main class="dashboard-shell">
 	<header class="top-header">
-		<h1>Welcome back, {welcomeName}</h1>
-		<p>Monitor active collaboration rooms and cross-room assignments in one place.</p>
+		<div>
+			<h1>Welcome back, {data.user?.name || 'there'}</h1>
+			<p>Personal priorities, active rooms, and network activity in one place.</p>
+		</div>
+		<button type="button" class="refresh-btn" on:click={loadOverview} disabled={$overviewLoading}>
+			{$overviewLoading ? 'Refreshing...' : 'Refresh'}
+		</button>
 	</header>
 
-	<section class="dashboard-grid">
-		<article class="panel panel-main">
-			<div class="panel-head">
-				<h2>Active Rooms</h2>
-				<span>{rooms.length}</span>
-			</div>
-			<div class="room-list">
-				{#if rooms.length === 0}
-					<div class="empty-state">No persistent rooms yet.</div>
-				{:else}
-					{#each rooms as room (room.room_id)}
-						<a class="room-card-link" href={`/room/${encodeURIComponent(room.room_id)}`}>
-							<div class="room-card">
-								<h3>{room.room_name || room.room_id}</h3>
-								<p>Last accessed: {formatRelativeTime(room.last_accessed)}</p>
-								<small>{room.role || 'member'}</small>
-							</div>
-						</a>
-					{/each}
-				{/if}
-			</div>
-		</article>
+	{#if $overviewLoading && !$overview}
+		<section class="glass-panel state-card">
+			<p>Loading dashboard overview...</p>
+		</section>
+	{:else if !$overview}
+		<section class="glass-panel state-card error">
+			<p>{$overviewError || actionError || 'Unable to load dashboard overview.'}</p>
+			<button type="button" class="refresh-btn" on:click={loadOverview}>Try again</button>
+		</section>
+	{:else}
+		<section class="dashboard-grid">
+			<div class="column left-column">
+				<PersonalTaskboard />
 
-		<aside class="panel panel-side">
-			<div class="panel-head">
-				<h2>Global Tasks</h2>
-				<span>{sortedTasks.length}</span>
-			</div>
-			<div class="task-list">
-				{#each sortedTasks as task (task.id)}
-					<div class="task-row priority-{task.priority.toLowerCase()}">
-						<div>
-							<strong>{task.title}</strong>
-							<small>{task.roomName}</small>
-						</div>
-						<div class="task-meta">
-							<span>{task.priority}</span>
-							<small>{task.dueLabel}</small>
-						</div>
+				<article class="glass-panel section-card">
+					<div class="section-head">
+						<h2>Upcoming Items</h2>
+						<span>{$overview.upcoming_items.length}</span>
 					</div>
-				{/each}
+
+					{#if $overview.upcoming_items.length === 0}
+						<div class="empty-state">No pending personal items.</div>
+					{:else}
+						<div class="entity-stack">
+							{#each $overview.upcoming_items as item (item.item_id)}
+								<div class="entity-row">
+									<div class="entity-main">
+										<p>{item.content || 'Untitled item'}</p>
+										<small>{item.type || 'task'} • {item.status || 'pending'}</small>
+									</div>
+									<small class="entity-meta">{formatDate(item.due_at)}</small>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</article>
 			</div>
-		</aside>
-	</section>
+
+			<div class="column center-column">
+				<article class="glass-panel section-card">
+					<div class="section-head">
+						<h2>Active Workspaces</h2>
+						<span>{$overview.recent_rooms.length}</span>
+					</div>
+
+					{#if $overview.recent_rooms.length === 0}
+						<div class="empty-state">No recent rooms yet.</div>
+					{:else}
+						<div class="entity-stack">
+							{#each $overview.recent_rooms as room (room.room_id)}
+								<a class="entity-row link-row" href={`/chat/${encodeURIComponent(room.room_id)}`}>
+									<div class="entity-main">
+										<p>{roomName(room.room_name, room.room_id)}</p>
+										<small>{room.role || 'member'}</small>
+									</div>
+									<small class="entity-meta">{formatRelative(room.last_accessed)}</small>
+								</a>
+							{/each}
+						</div>
+					{/if}
+				</article>
+
+				<article class="glass-panel section-card">
+					<div class="section-head">
+						<h2>Global Tasks</h2>
+						<span>{$overview.assigned_tasks.length}</span>
+					</div>
+
+					{#if $overview.assigned_tasks.length === 0}
+						<div class="empty-state">No assigned tasks right now.</div>
+					{:else}
+						<div class="entity-stack">
+							{#each $overview.assigned_tasks as task (task.id)}
+								<div class="entity-row">
+									<div class="entity-main">
+										<p>{task.title || 'Untitled task'}</p>
+										<small>{task.description || 'No description'}</small>
+									</div>
+									<div class="task-meta">
+										<span class="status-pill">{task.status || 'open'}</span>
+										<small>{formatRelative(task.updated_at || task.created_at)}</small>
+									</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</article>
+			</div>
+
+			<div class="column right-column">
+				<article class="glass-panel section-card">
+					<div class="section-head">
+						<h2>Network</h2>
+						<span>{$overview.pending_requests.length}</span>
+					</div>
+
+					{#if actionError}
+						<div class="error-inline">{actionError}</div>
+					{/if}
+
+					{#if $overview.pending_requests.length === 0}
+						<div class="empty-state">No pending requests.</div>
+					{:else}
+						<div class="entity-stack">
+							{#each $overview.pending_requests as request (request.user_id)}
+								<div class="entity-row network-row">
+									<div class="entity-main">
+										<p>{request.user_id}</p>
+										<small>{formatRelative(request.created_at)}</small>
+									</div>
+									<div class="network-actions">
+										<button
+											type="button"
+											class="action-btn accept"
+											on:click={() => {
+												void handleAccept(request);
+											}}
+											disabled={pendingRequestUserID === request.user_id}
+										>
+											Accept
+										</button>
+										<button
+											type="button"
+											class="action-btn decline"
+											on:click={() => {
+												handleDecline(request);
+											}}
+											disabled={pendingRequestUserID === request.user_id}
+										>
+											Decline
+										</button>
+									</div>
+								</div>
+							{/each}
+						</div>
+					{/if}
+				</article>
+			</div>
+		</section>
+	{/if}
 </main>
 
 <style>
+	:global(:root) {
+		--dashboard-shell-bg:
+			radial-gradient(circle at 12% -8%, rgba(157, 193, 247, 0.2), transparent 36%),
+			radial-gradient(circle at 90% 12%, rgba(188, 210, 245, 0.18), transparent 34%),
+			#f3f7ff;
+		--dashboard-text-color: #111a2f;
+		--dashboard-muted-text: rgba(42, 58, 90, 0.74);
+		--dashboard-refresh-border: rgba(94, 123, 176, 0.26);
+		--dashboard-refresh-bg: rgba(255, 255, 255, 0.72);
+		--dashboard-refresh-text: #0f2342;
+		--dashboard-panel-bg: rgba(255, 255, 255, 0.62);
+		--dashboard-panel-border: rgba(175, 197, 231, 0.5);
+		--dashboard-panel-shadow: 0 18px 44px rgba(93, 120, 168, 0.22);
+		--dashboard-section-heading: rgba(28, 45, 74, 0.9);
+		--dashboard-section-count: rgba(62, 80, 114, 0.86);
+		--dashboard-row-bg: rgba(255, 255, 255, 0.56);
+		--dashboard-row-border: rgba(171, 193, 229, 0.54);
+		--dashboard-subtle-text: rgba(58, 77, 110, 0.76);
+		--dashboard-link-hover-border: rgba(109, 142, 201, 0.5);
+		--dashboard-empty-border: rgba(150, 178, 224, 0.52);
+		--dashboard-empty-bg: rgba(255, 255, 255, 0.48);
+		--dashboard-empty-text: rgba(66, 84, 119, 0.76);
+		--dashboard-status-pill-border: rgba(121, 149, 202, 0.52);
+		--dashboard-status-pill-text: rgba(20, 39, 68, 0.9);
+		--dashboard-action-btn-border: rgba(98, 127, 179, 0.34);
+		--dashboard-action-btn-bg: rgba(255, 255, 255, 0.62);
+		--dashboard-action-btn-text: #122646;
+		--dashboard-action-accept-border: rgba(35, 154, 110, 0.52);
+		--dashboard-action-accept-text: #0f6f4f;
+		--dashboard-action-decline-border: rgba(211, 79, 104, 0.45);
+		--dashboard-action-decline-text: #9e2940;
+		--dashboard-error-bg: rgba(220, 38, 38, 0.13);
+		--dashboard-error-border: rgba(220, 38, 38, 0.36);
+		--dashboard-error-text: #8f2235;
+	}
+
+	:global(:root[data-theme='dark']),
+	:global(.theme-dark) {
+		--dashboard-shell-bg:
+			radial-gradient(circle at 12% -8%, rgba(255, 255, 255, 0.08), transparent 36%),
+			radial-gradient(circle at 90% 12%, rgba(255, 255, 255, 0.05), transparent 34%),
+			#0d0d12;
+		--dashboard-text-color: #f4f6ff;
+		--dashboard-muted-text: rgba(229, 233, 246, 0.76);
+		--dashboard-refresh-border: rgba(255, 255, 255, 0.16);
+		--dashboard-refresh-bg: rgba(255, 255, 255, 0.07);
+		--dashboard-refresh-text: #f7f9ff;
+		--dashboard-panel-bg: rgba(255, 255, 255, 0.03);
+		--dashboard-panel-border: rgba(255, 255, 255, 0.09);
+		--dashboard-panel-shadow: 0 18px 44px rgba(0, 0, 0, 0.36);
+		--dashboard-section-heading: rgba(244, 247, 255, 0.9);
+		--dashboard-section-count: rgba(199, 206, 226, 0.9);
+		--dashboard-row-bg: rgba(255, 255, 255, 0.03);
+		--dashboard-row-border: rgba(255, 255, 255, 0.08);
+		--dashboard-subtle-text: rgba(201, 208, 228, 0.74);
+		--dashboard-link-hover-border: rgba(173, 194, 238, 0.34);
+		--dashboard-empty-border: rgba(255, 255, 255, 0.18);
+		--dashboard-empty-bg: rgba(255, 255, 255, 0.02);
+		--dashboard-empty-text: rgba(202, 208, 226, 0.78);
+		--dashboard-status-pill-border: rgba(255, 255, 255, 0.22);
+		--dashboard-status-pill-text: rgba(241, 245, 255, 0.92);
+		--dashboard-action-btn-border: rgba(255, 255, 255, 0.16);
+		--dashboard-action-btn-bg: rgba(255, 255, 255, 0.06);
+		--dashboard-action-btn-text: #f8f9ff;
+		--dashboard-action-accept-border: rgba(94, 228, 171, 0.45);
+		--dashboard-action-accept-text: #b4f1d4;
+		--dashboard-action-decline-border: rgba(246, 120, 140, 0.4);
+		--dashboard-action-decline-text: #ffc1cc;
+		--dashboard-error-bg: rgba(220, 38, 38, 0.2);
+		--dashboard-error-border: rgba(248, 113, 113, 0.4);
+		--dashboard-error-text: #ffd3db;
+	}
+
 	.dashboard-shell {
-		min-height: 100dvh;
+		height: 100dvh;
+		box-sizing: border-box;
 		padding: 5.6rem 1.2rem 1.4rem;
-		background: #0d0d12;
-		color: #f2f6ff;
+		background: var(--dashboard-shell-bg);
+		color: var(--dashboard-text-color);
+		display: grid;
+		grid-template-rows: auto 1fr;
+		gap: 1rem;
+		overflow: hidden;
+	}
+
+	.top-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 0.8rem;
+		min-height: 0;
 	}
 
 	.top-header h1 {
 		margin: 0;
-		font-size: clamp(1.35rem, 2.4vw, 2rem);
+		font-size: clamp(1.2rem, 2.4vw, 1.9rem);
 		letter-spacing: -0.02em;
 	}
 
 	.top-header p {
-		margin: 0.45rem 0 0;
-		color: rgba(202, 209, 227, 0.85);
-		font-size: 0.92rem;
+		margin: 0.35rem 0 0;
+		font-size: 0.88rem;
+		color: var(--dashboard-muted-text);
+	}
+
+	.refresh-btn {
+		border: 1px solid var(--dashboard-refresh-border);
+		background: var(--dashboard-refresh-bg);
+		color: var(--dashboard-refresh-text);
+		padding: 0.56rem 0.86rem;
+		border-radius: 10px;
+		font-size: 0.78rem;
+		cursor: pointer;
+	}
+
+	.refresh-btn:disabled {
+		opacity: 0.68;
+		cursor: not-allowed;
 	}
 
 	.dashboard-grid {
-		margin-top: 1.15rem;
 		display: grid;
-		grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+		grid-template-columns: minmax(280px, 1.05fr) minmax(320px, 1.4fr) minmax(260px, 0.95fr);
 		gap: 0.95rem;
+		min-height: 0;
+		overflow: hidden;
 	}
 
-	.panel {
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 14px;
-		padding: 0.85rem;
+	.column {
+		display: grid;
+		gap: 0.95rem;
+		align-content: start;
+		min-height: 0;
+		overflow: auto;
+		padding-right: 0.18rem;
 	}
 
-	.panel-head {
+	.glass-panel {
+		background: var(--dashboard-panel-bg);
+		border: 1px solid var(--dashboard-panel-border);
+		border-radius: 16px;
+		box-shadow: var(--dashboard-panel-shadow);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+	}
+
+	.section-card {
+		padding: 0.86rem;
+		display: grid;
+		gap: 0.75rem;
+	}
+
+	.section-head {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		margin-bottom: 0.7rem;
+		gap: 0.75rem;
 	}
 
-	.panel-head h2 {
+	.section-head h2 {
 		margin: 0;
-		font-size: 0.95rem;
-		letter-spacing: 0.03em;
+		font-size: 0.84rem;
 		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--dashboard-section-heading);
 	}
 
-	.panel-head span {
+	.section-head span {
+		font-size: 0.68rem;
 		font-family: 'JetBrains Mono', monospace;
-		font-size: 0.7rem;
-		color: rgba(154, 169, 196, 0.92);
+		color: var(--dashboard-section-count);
 	}
 
-	.room-list,
-	.task-list {
+	.entity-stack {
 		display: grid;
-		gap: 0.62rem;
+		gap: 0.6rem;
 	}
 
-	.room-card-link {
-		display: block;
+	.entity-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 0.58rem 0.64rem;
+		border-radius: 11px;
+		background: var(--dashboard-row-bg);
+		border: 1px solid var(--dashboard-row-border);
+	}
+
+	.entity-main {
+		min-width: 0;
+	}
+
+	.entity-main p {
+		margin: 0;
+		font-size: 0.82rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.entity-main small,
+	.entity-meta,
+	.task-meta small {
+		font-size: 0.68rem;
+		color: var(--dashboard-subtle-text);
+	}
+
+	.link-row {
 		text-decoration: none;
 		color: inherit;
-	}
-
-	.room-card {
-		padding: 0.68rem;
-		border-radius: 11px;
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
 		transition: border-color 0.18s ease, transform 0.18s ease;
 	}
 
-	.room-card-link:hover .room-card {
-		border-color: rgba(169, 193, 238, 0.35);
+	.link-row:hover {
+		border-color: var(--dashboard-link-hover-border);
 		transform: translateY(-1px);
 	}
 
-	.room-card h3 {
-		margin: 0;
-		font-size: 0.92rem;
-	}
-
-	.room-card p {
-		margin: 0.22rem 0 0.26rem;
-		color: rgba(199, 207, 223, 0.84);
-		font-size: 0.78rem;
-	}
-
-	.room-card small {
-		color: rgba(147, 217, 189, 0.95);
-		font-family: 'JetBrains Mono', monospace;
-		font-size: 0.67rem;
-		text-transform: uppercase;
-	}
-
 	.empty-state {
-		padding: 0.7rem;
+		padding: 0.72rem;
 		border-radius: 11px;
-		border: 1px dashed rgba(255, 255, 255, 0.2);
-		background: rgba(255, 255, 255, 0.02);
-		font-size: 0.8rem;
-		color: rgba(187, 197, 216, 0.85);
-	}
-
-	.task-row {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 0.6rem 0.62rem;
-		border-radius: 10px;
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		gap: 0.8rem;
-	}
-
-	.task-row strong {
-		display: block;
-		font-size: 0.82rem;
-	}
-
-	.task-row small {
-		display: block;
-		margin-top: 0.18rem;
-		font-size: 0.67rem;
-		color: rgba(189, 199, 218, 0.86);
+		border: 1px dashed var(--dashboard-empty-border);
+		background: var(--dashboard-empty-bg);
+		font-size: 0.78rem;
+		color: var(--dashboard-empty-text);
 	}
 
 	.task-meta {
-		text-align: right;
+		display: grid;
+		justify-items: end;
+		gap: 0.2rem;
 	}
 
-	.task-meta span {
+	.status-pill {
 		display: inline-block;
-		padding: 0.18rem 0.4rem;
+		padding: 0.16rem 0.44rem;
 		border-radius: 999px;
-		font-size: 0.65rem;
+		border: 1px solid var(--dashboard-status-pill-border);
+		font-size: 0.62rem;
 		font-family: 'JetBrains Mono', monospace;
-		border: 1px solid rgba(255, 255, 255, 0.2);
+		text-transform: lowercase;
+		color: var(--dashboard-status-pill-text);
 	}
 
-	.priority-high .task-meta span {
-		border-color: rgba(252, 96, 119, 0.5);
-		color: #ffbac7;
+	.network-row {
+		align-items: flex-start;
 	}
 
-	.priority-medium .task-meta span {
-		border-color: rgba(255, 214, 128, 0.45);
-		color: #ffe5b0;
+	.network-actions {
+		display: inline-flex;
+		gap: 0.35rem;
 	}
 
-	.priority-low .task-meta span {
-		border-color: rgba(139, 225, 187, 0.44);
-		color: #b5f0d7;
+	.action-btn {
+		border: 1px solid var(--dashboard-action-btn-border);
+		background: var(--dashboard-action-btn-bg);
+		color: var(--dashboard-action-btn-text);
+		border-radius: 9px;
+		padding: 0.35rem 0.55rem;
+		font-size: 0.68rem;
+		cursor: pointer;
 	}
 
-	@media (max-width: 980px) {
+	.action-btn:disabled {
+		opacity: 0.62;
+		cursor: not-allowed;
+	}
+
+	.action-btn.accept {
+		border-color: var(--dashboard-action-accept-border);
+		color: var(--dashboard-action-accept-text);
+	}
+
+	.action-btn.decline {
+		border-color: var(--dashboard-action-decline-border);
+		color: var(--dashboard-action-decline-text);
+	}
+
+	.error-inline {
+		padding: 0.5rem 0.6rem;
+		border-radius: 10px;
+		background: var(--dashboard-error-bg);
+		border: 1px solid var(--dashboard-error-border);
+		font-size: 0.75rem;
+		color: var(--dashboard-error-text);
+	}
+
+	.state-card {
+		padding: 1rem;
+		display: grid;
+		gap: 0.6rem;
+	}
+
+	.state-card p {
+		margin: 0;
+		font-size: 0.86rem;
+	}
+
+	.state-card.error {
+		border-color: var(--dashboard-error-border);
+	}
+
+	@media (max-width: 1180px) {
+		.dashboard-grid {
+			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		}
+
+		.right-column {
+			grid-column: 1 / -1;
+		}
+	}
+
+	@media (max-width: 920px) {
 		.dashboard-shell {
 			padding-top: 5.1rem;
 		}

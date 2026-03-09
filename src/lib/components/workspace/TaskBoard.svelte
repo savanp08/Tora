@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { activeContext } from '$lib/stores/jiraContext';
 	import {
 		moveTaskOptimistic,
 		taskStore,
@@ -6,12 +7,16 @@
 		taskStoreLoading,
 		type Task
 	} from '$lib/stores/tasks';
-	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
+	import { normalizeRoomIDValue, toStringValue } from '$lib/utils/chat/core';
 	import { sendSocketPayload } from '$lib/ws';
 	import { buildTaskSocketPayload } from '$lib/ws/client';
 
 	export let roomId = '';
 	export let canEdit = true;
+	export let contextAware = false;
+
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
 
 	const COLUMNS = [
 		{ key: 'todo', label: 'To Do' },
@@ -20,22 +25,70 @@
 	] as const;
 
 	type ColumnKey = (typeof COLUMNS)[number]['key'];
+	type ContextTask = {
+		id: string;
+		title: string;
+		description: string;
+		status: string;
+		assigneeId: string;
+		createdAt: number;
+		updatedAt: number;
+		source: 'personal' | 'room';
+	};
+
+	type PersonalItemResponse = {
+		item_id?: unknown;
+		content?: unknown;
+		status?: unknown;
+		created_at?: unknown;
+	};
+
+	type RoomTaskResponse = {
+		id?: unknown;
+		title?: unknown;
+		description?: unknown;
+		status?: unknown;
+		assignee_id?: unknown;
+		created_at?: unknown;
+		updated_at?: unknown;
+	};
 
 	let draggedTaskId = '';
 	let activeDropColumn: ColumnKey | '' = '';
+	let contextDraggedTaskId = '';
+	let contextActiveDropColumn: ColumnKey | '' = '';
+	let contextTasks: ContextTask[] = [];
+	let contextLoading = false;
+	let contextError = '';
+	let creatingTask = false;
+	let newTaskContent = '';
+	let lastContextKey = '';
+	let contextLoadToken = 0;
 
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: todoTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'todo');
 	$: inProgressTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'in_progress');
 	$: doneTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'done');
 	$: hasAnyTasks = $taskStore.length > 0;
+	$: contextTodoTasks = contextTasks.filter((task) => resolveColumn(task.status) === 'todo');
+	$: contextInProgressTasks = contextTasks.filter((task) => resolveColumn(task.status) === 'in_progress');
+	$: contextDoneTasks = contextTasks.filter((task) => resolveColumn(task.status) === 'done');
+	$: hasAnyContextTasks = contextTasks.length > 0;
+	$: boardTitle = contextAware
+		? $activeContext.name.trim() || 'Workspace Tasks'
+		: 'Room Tasks';
+	$: contextKey = `${$activeContext.type}:${$activeContext.id}`;
+	$: if (contextAware && contextKey !== lastContextKey) {
+		lastContextKey = contextKey;
+		void loadContextTasks();
+	}
 
 	function resolveColumn(statusValue: string): ColumnKey {
-		const normalized = (statusValue || '').trim().toLowerCase().replace(/\s+/g, '_');
+		const normalized = toStringValue(statusValue).toLowerCase().replace(/\s+/g, '_');
 		if (normalized === 'in_progress') {
 			return 'in_progress';
 		}
-		if (normalized === 'done') {
+		if (normalized === 'done' || normalized === 'completed') {
 			return 'done';
 		}
 		return 'todo';
@@ -49,6 +102,328 @@
 			return doneTasks;
 		}
 		return todoTasks;
+	}
+
+	function getContextColumnTasks(columnKey: ColumnKey): ContextTask[] {
+		if (columnKey === 'in_progress') {
+			return contextInProgressTasks;
+		}
+		if (columnKey === 'done') {
+			return contextDoneTasks;
+		}
+		return contextTodoTasks;
+	}
+
+	function parseTimestamp(value: unknown) {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return value;
+		}
+		if (typeof value === 'string') {
+			const parsed = Date.parse(value);
+			if (Number.isFinite(parsed)) {
+				return parsed;
+			}
+		}
+		return Date.now();
+	}
+
+	function normalizePersonalItem(raw: unknown): ContextTask | null {
+		if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+			return null;
+		}
+		const source = raw as PersonalItemResponse;
+		const itemID = toStringValue(source.item_id);
+		const content = toStringValue(source.content);
+		if (!itemID || !content) {
+			return null;
+		}
+		const createdAt = parseTimestamp(source.created_at);
+		return {
+			id: itemID,
+			title: content,
+			description: '',
+			status: toStringValue(source.status) || 'pending',
+			assigneeId: '',
+			createdAt,
+			updatedAt: createdAt,
+			source: 'personal'
+		};
+	}
+
+	function normalizeRoomTask(raw: unknown): ContextTask | null {
+		if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+			return null;
+		}
+		const source = raw as RoomTaskResponse;
+		const taskID = toStringValue(source.id);
+		if (!taskID) {
+			return null;
+		}
+		const createdAt = parseTimestamp(source.created_at);
+		return {
+			id: taskID,
+			title: toStringValue(source.title) || 'Untitled Task',
+			description: toStringValue(source.description),
+			status: toStringValue(source.status) || 'todo',
+			assigneeId: toStringValue(source.assignee_id),
+			createdAt,
+			updatedAt: parseTimestamp(source.updated_at) || createdAt,
+			source: 'room'
+		};
+	}
+
+	async function parseErrorMessage(response: Response) {
+		const payload = (await response.json().catch(() => null)) as
+			| {
+					error?: string;
+			  }
+			| null;
+		return payload?.error?.trim() || `HTTP ${response.status}`;
+	}
+
+	async function loadContextTasks() {
+		if (!contextAware) {
+			return;
+		}
+
+		contextLoadToken += 1;
+		const loadToken = contextLoadToken;
+		contextLoading = true;
+		contextError = '';
+		try {
+			let endpoint = '';
+			let normalizeRow: (raw: unknown) => ContextTask | null = normalizeRoomTask;
+			if ($activeContext.type === 'personal') {
+				endpoint = `${API_BASE}/api/personal/items`;
+				normalizeRow = normalizePersonalItem;
+			} else {
+				const normalizedWorkspaceRoomID = normalizeRoomIDValue($activeContext.id);
+				if (!normalizedWorkspaceRoomID) {
+					contextTasks = [];
+					return;
+				}
+				endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(normalizedWorkspaceRoomID)}/tasks`;
+			}
+
+			const response = await fetch(endpoint, {
+				method: 'GET',
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				throw new Error(await parseErrorMessage(response));
+			}
+			const payload = (await response.json().catch(() => [])) as unknown;
+			const records = Array.isArray(payload) ? payload : [];
+			const normalized = records
+				.map((record) => normalizeRow(record))
+				.filter((record): record is ContextTask => Boolean(record))
+				.sort((left, right) => right.updatedAt - left.updatedAt);
+			if (loadToken !== contextLoadToken) {
+				return;
+			}
+			contextTasks = normalized;
+		} catch (error) {
+			if (loadToken !== contextLoadToken) {
+				return;
+			}
+			contextTasks = [];
+			contextError = error instanceof Error ? error.message : 'Failed to load tasks';
+		} finally {
+			if (loadToken === contextLoadToken) {
+				contextLoading = false;
+			}
+		}
+	}
+
+	function formatContextStatusForPersonal(column: ColumnKey) {
+		if (column === 'done') {
+			return 'completed';
+		}
+		if (column === 'in_progress') {
+			return 'in_progress';
+		}
+		return 'pending';
+	}
+
+	async function persistContextTaskStatus(taskID: string, columnKey: ColumnKey) {
+		if ($activeContext.type === 'personal') {
+			const response = await fetch(`${API_BASE}/api/personal/items/${encodeURIComponent(taskID)}/status`, {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({
+					status: formatContextStatusForPersonal(columnKey)
+				})
+			});
+			if (!response.ok) {
+				throw new Error(await parseErrorMessage(response));
+			}
+			return;
+		}
+
+		const normalizedWorkspaceRoomID = normalizeRoomIDValue($activeContext.id);
+		if (!normalizedWorkspaceRoomID) {
+			throw new Error('Invalid workspace room id');
+		}
+		const response = await fetch(
+			`${API_BASE}/api/rooms/${encodeURIComponent(normalizedWorkspaceRoomID)}/tasks/${encodeURIComponent(taskID)}/status`,
+			{
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'include',
+				body: JSON.stringify({ status: columnKey })
+			}
+		);
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+	}
+
+	async function moveContextTaskToColumn(taskID: string, columnKey: ColumnKey) {
+		if (!canEdit) {
+			return;
+		}
+		const targetTask = contextTasks.find((task) => task.id === taskID);
+		if (!targetTask) {
+			return;
+		}
+
+		const previousStatus = targetTask.status;
+		if (resolveColumn(previousStatus) === columnKey) {
+			return;
+		}
+
+		contextTasks = contextTasks.map((task) =>
+			task.id === taskID
+				? {
+						...task,
+						status: $activeContext.type === 'personal' ? formatContextStatusForPersonal(columnKey) : columnKey,
+						updatedAt: Date.now()
+					}
+				: task
+		);
+
+		try {
+			await persistContextTaskStatus(taskID, columnKey);
+		} catch (error) {
+			contextTasks = contextTasks.map((task) =>
+				task.id === taskID
+					? {
+							...task,
+							status: previousStatus
+						}
+					: task
+			);
+			contextError = error instanceof Error ? error.message : 'Failed to update task status';
+		}
+	}
+
+	async function handleCreateTask(contentValue: string) {
+		if (!contextAware || creatingTask) {
+			return;
+		}
+		const content = contentValue.trim();
+		if (!content) {
+			return;
+		}
+
+		creatingTask = true;
+		contextError = '';
+		try {
+			if ($activeContext.type === 'personal') {
+				const response = await fetch(`${API_BASE}/api/personal/items`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					credentials: 'include',
+					body: JSON.stringify({
+						type: 'task',
+						content
+					})
+				});
+				if (!response.ok) {
+					throw new Error(await parseErrorMessage(response));
+				}
+				const created = normalizePersonalItem(await response.json().catch(() => null));
+				if (!created) {
+					throw new Error('Invalid personal task response');
+				}
+				contextTasks = [created, ...contextTasks];
+			} else {
+				const normalizedWorkspaceRoomID = normalizeRoomIDValue($activeContext.id);
+				if (!normalizedWorkspaceRoomID) {
+					throw new Error('Invalid workspace room id');
+				}
+				const response = await fetch(
+					`${API_BASE}/api/rooms/${encodeURIComponent(normalizedWorkspaceRoomID)}/tasks`,
+					{
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						credentials: 'include',
+						body: JSON.stringify({
+							content
+						})
+					}
+				);
+				if (!response.ok) {
+					throw new Error(await parseErrorMessage(response));
+				}
+				const created = normalizeRoomTask(await response.json().catch(() => null));
+				if (!created) {
+					throw new Error('Invalid room task response');
+				}
+				contextTasks = [created, ...contextTasks];
+			}
+			newTaskContent = '';
+		} catch (error) {
+			contextError = error instanceof Error ? error.message : 'Failed to create task';
+		} finally {
+			creatingTask = false;
+		}
+	}
+
+	function startContextDragging(event: DragEvent, taskID: string) {
+		if (!canEdit || !contextAware) {
+			return;
+		}
+		contextDraggedTaskId = taskID;
+		if (event.dataTransfer) {
+			event.dataTransfer.effectAllowed = 'move';
+			event.dataTransfer.setData('application/x-tora-context-task-id', taskID);
+			event.dataTransfer.setData('text/plain', taskID);
+		}
+	}
+
+	function stopContextDragging() {
+		contextDraggedTaskId = '';
+		contextActiveDropColumn = '';
+	}
+
+	function onContextColumnDragOver(event: DragEvent, columnKey: ColumnKey) {
+		if (!canEdit || !contextAware) {
+			return;
+		}
+		event.preventDefault();
+		contextActiveDropColumn = columnKey;
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'move';
+		}
+	}
+
+	function onContextColumnDrop(event: DragEvent, columnKey: ColumnKey) {
+		if (!canEdit || !contextAware) {
+			return;
+		}
+		event.preventDefault();
+		const incomingTaskID =
+			event.dataTransfer?.getData('application/x-tora-context-task-id') ||
+			event.dataTransfer?.getData('text/plain') ||
+			contextDraggedTaskId;
+		if (!incomingTaskID) {
+			stopContextDragging();
+			return;
+		}
+		void moveContextTaskToColumn(incomingTaskID, columnKey);
+		stopContextDragging();
 	}
 
 	function startDragging(event: DragEvent, taskId: string) {
@@ -132,67 +507,303 @@
 	}
 </script>
 
-<section class="task-board" aria-label="Task board">
-	{#if $taskStoreLoading}
-		<div class="board-state">Loading tasks...</div>
-	{:else if $taskStoreError}
-		<div class="board-state error">Unable to load tasks: {$taskStoreError}</div>
-	{:else if !hasAnyTasks}
-		<div class="board-state">No tasks in this room yet.</div>
-	{:else}
-		<div class="task-grid">
-			{#each COLUMNS as column}
-				<section
-					class="task-column"
-					class:is-drop-target={activeDropColumn === column.key && canEdit}
-					aria-label={column.label}
-					on:dragover={(event) => onColumnDragOver(event, column.key)}
-					on:drop={(event) => onColumnDrop(event, column.key)}
-				>
-					<header class="task-column-header">
-						<h3>{column.label}</h3>
-						<span>{getColumnTasks(column.key).length}</span>
-					</header>
+{#if contextAware}
+	<section class="task-board context-aware-board" aria-label="Task board">
+		<header class="board-header">
+			<h2>{boardTitle}</h2>
+			<span>{contextTasks.length}</span>
+		</header>
 
-					<div class="task-column-body">
-						{#if getColumnTasks(column.key).length === 0}
-							<p class="task-column-empty">
-								{canEdit ? 'Drop tasks here' : 'No tasks in this column'}
-							</p>
-						{:else}
-							{#each getColumnTasks(column.key) as task (task.id)}
-								<article
-									class="task-item"
-									draggable={canEdit}
-									on:dragstart={(event) => startDragging(event, task.id)}
-									on:dragend={stopDragging}
-								>
-									<div class="task-item-title">{task.title}</div>
-									{#if task.description}
-										<div class="task-item-description">{task.description}</div>
-									{/if}
-									<div class="task-item-meta">
-										<span>{formatUpdatedAt(task.updatedAt)}</span>
-										{#if task.assigneeId}
-											<span>Assignee: {task.assigneeId}</span>
+		<form
+			class="new-task-form"
+			on:submit|preventDefault={() => {
+				void handleCreateTask(newTaskContent);
+			}}
+		>
+			<input
+				type="text"
+				bind:value={newTaskContent}
+				placeholder="New Task"
+				autocomplete="off"
+				disabled={creatingTask}
+			/>
+			<button type="submit" disabled={creatingTask || !newTaskContent.trim()}>
+				{creatingTask ? 'Adding...' : 'Add'}
+			</button>
+		</form>
+
+		{#if contextLoading}
+			<div class="board-state">Loading tasks...</div>
+		{:else if contextError}
+			<div class="board-state error">Unable to load tasks: {contextError}</div>
+		{:else if !hasAnyContextTasks}
+			<div class="board-state">No tasks yet in this workspace.</div>
+		{:else}
+			<div class="task-grid">
+				{#each COLUMNS as column}
+					<section
+						class="task-column"
+						class:is-drop-target={contextActiveDropColumn === column.key && canEdit}
+						aria-label={column.label}
+						on:dragover={(event) => onContextColumnDragOver(event, column.key)}
+						on:drop={(event) => onContextColumnDrop(event, column.key)}
+					>
+						<header class="task-column-header">
+							<h3>{column.label}</h3>
+							<span>{getContextColumnTasks(column.key).length}</span>
+						</header>
+
+						<div class="task-column-body">
+							{#if getContextColumnTasks(column.key).length === 0}
+								<p class="task-column-empty">
+									{canEdit ? 'Drop tasks here' : 'No tasks in this column'}
+								</p>
+							{:else}
+								{#each getContextColumnTasks(column.key) as task (task.id)}
+									<article
+										class="task-item"
+										draggable={canEdit}
+										on:dragstart={(event) => startContextDragging(event, task.id)}
+										on:dragend={stopContextDragging}
+									>
+										<div class="task-item-title">{task.title}</div>
+										{#if task.description}
+											<div class="task-item-description">{task.description}</div>
 										{/if}
-									</div>
-								</article>
-							{/each}
-						{/if}
-					</div>
-				</section>
-			{/each}
-		</div>
-	{/if}
-</section>
+										<div class="task-item-meta">
+											<span>{formatUpdatedAt(task.updatedAt)}</span>
+											{#if task.assigneeId}
+												<span>Assignee: {task.assigneeId}</span>
+											{/if}
+										</div>
+									</article>
+								{/each}
+							{/if}
+						</div>
+					</section>
+				{/each}
+			</div>
+		{/if}
+	</section>
+{:else}
+	<section class="task-board" aria-label="Task board">
+		{#if $taskStoreLoading}
+			<div class="board-state">Loading tasks...</div>
+		{:else if $taskStoreError}
+			<div class="board-state error">Unable to load tasks: {$taskStoreError}</div>
+		{:else if !hasAnyTasks}
+			<div class="board-state">No tasks in this room yet.</div>
+		{:else}
+			<div class="task-grid">
+				{#each COLUMNS as column}
+					<section
+						class="task-column"
+						class:is-drop-target={activeDropColumn === column.key && canEdit}
+						aria-label={column.label}
+						on:dragover={(event) => onColumnDragOver(event, column.key)}
+						on:drop={(event) => onColumnDrop(event, column.key)}
+					>
+						<header class="task-column-header">
+							<h3>{column.label}</h3>
+							<span>{getColumnTasks(column.key).length}</span>
+						</header>
+
+						<div class="task-column-body">
+							{#if getColumnTasks(column.key).length === 0}
+								<p class="task-column-empty">
+									{canEdit ? 'Drop tasks here' : 'No tasks in this column'}
+								</p>
+							{:else}
+								{#each getColumnTasks(column.key) as task (task.id)}
+									<article
+										class="task-item"
+										draggable={canEdit}
+										on:dragstart={(event) => startDragging(event, task.id)}
+										on:dragend={stopDragging}
+									>
+										<div class="task-item-title">{task.title}</div>
+										{#if task.description}
+											<div class="task-item-description">{task.description}</div>
+										{/if}
+										<div class="task-item-meta">
+											<span>{formatUpdatedAt(task.updatedAt)}</span>
+											{#if task.assigneeId}
+												<span>Assignee: {task.assigneeId}</span>
+											{/if}
+										</div>
+									</article>
+								{/each}
+							{/if}
+						</div>
+					</section>
+				{/each}
+			</div>
+		{/if}
+	</section>
+{/if}
 
 <style>
+	:global(:root) {
+		--workspace-taskboard-bg: rgba(255, 255, 255, 0.02);
+		--workspace-taskboard-header-bg: rgba(255, 255, 255, 0.6);
+		--workspace-taskboard-header-border: rgba(174, 198, 232, 0.5);
+		--workspace-taskboard-header-text: rgba(24, 42, 73, 0.94);
+		--workspace-taskboard-count-text: rgba(63, 82, 116, 0.88);
+		--workspace-taskboard-count-bg: rgba(226, 237, 252, 0.88);
+		--workspace-taskboard-count-border: rgba(143, 171, 216, 0.58);
+		--workspace-taskboard-form-bg: rgba(255, 255, 255, 0.58);
+		--workspace-taskboard-form-border: rgba(173, 196, 232, 0.5);
+		--workspace-taskboard-input-border: rgba(137, 167, 217, 0.5);
+		--workspace-taskboard-input-bg: rgba(255, 255, 255, 0.72);
+		--workspace-taskboard-input-text: #12223f;
+		--workspace-taskboard-input-placeholder: rgba(77, 100, 139, 0.6);
+		--workspace-taskboard-btn-border: rgba(101, 133, 191, 0.36);
+		--workspace-taskboard-btn-bg: rgba(255, 255, 255, 0.78);
+		--workspace-taskboard-btn-text: #122647;
+		--workspace-taskboard-state-text: rgba(61, 80, 113, 0.78);
+		--workspace-taskboard-state-border: rgba(152, 178, 220, 0.42);
+		--workspace-taskboard-state-bg: rgba(255, 255, 255, 0.46);
+		--workspace-taskboard-error-text: #9d2b41;
+		--workspace-taskboard-column-border: rgba(169, 191, 227, 0.5);
+		--workspace-taskboard-column-bg: rgba(255, 255, 255, 0.48);
+		--workspace-taskboard-drop-border: rgba(92, 142, 221, 0.66);
+		--workspace-taskboard-drop-bg: rgba(159, 197, 253, 0.28);
+		--workspace-taskboard-column-divider: rgba(162, 186, 226, 0.5);
+		--workspace-taskboard-column-title: rgba(27, 45, 77, 0.9);
+		--workspace-taskboard-column-count-text: rgba(67, 86, 118, 0.88);
+		--workspace-taskboard-column-count-bg: rgba(226, 237, 252, 0.92);
+		--workspace-taskboard-empty-border: rgba(143, 171, 216, 0.5);
+		--workspace-taskboard-empty-text: rgba(66, 86, 120, 0.76);
+		--workspace-taskboard-item-border: rgba(163, 186, 223, 0.54);
+		--workspace-taskboard-item-bg: rgba(255, 255, 255, 0.6);
+		--workspace-taskboard-item-text: #142443;
+		--workspace-taskboard-item-hover-bg: rgba(236, 245, 255, 0.88);
+		--workspace-taskboard-item-hover-border: rgba(111, 144, 205, 0.56);
+		--workspace-taskboard-description: rgba(70, 90, 124, 0.86);
+		--workspace-taskboard-meta: rgba(80, 99, 131, 0.8);
+	}
+
+	:global(:root[data-theme='dark']),
+	:global(.theme-dark) {
+		--workspace-taskboard-bg: #0d0d12;
+		--workspace-taskboard-header-bg: rgba(255, 255, 255, 0.03);
+		--workspace-taskboard-header-border: rgba(255, 255, 255, 0.09);
+		--workspace-taskboard-header-text: rgba(242, 245, 255, 0.95);
+		--workspace-taskboard-count-text: rgba(198, 206, 226, 0.9);
+		--workspace-taskboard-count-bg: rgba(255, 255, 255, 0.06);
+		--workspace-taskboard-count-border: rgba(255, 255, 255, 0.1);
+		--workspace-taskboard-form-bg: rgba(255, 255, 255, 0.03);
+		--workspace-taskboard-form-border: rgba(255, 255, 255, 0.09);
+		--workspace-taskboard-input-border: rgba(255, 255, 255, 0.13);
+		--workspace-taskboard-input-bg: rgba(255, 255, 255, 0.03);
+		--workspace-taskboard-input-text: #eef3ff;
+		--workspace-taskboard-input-placeholder: rgba(206, 214, 236, 0.62);
+		--workspace-taskboard-btn-border: rgba(255, 255, 255, 0.2);
+		--workspace-taskboard-btn-bg: rgba(255, 255, 255, 0.08);
+		--workspace-taskboard-btn-text: #f2f6ff;
+		--workspace-taskboard-state-text: rgba(236, 240, 255, 0.78);
+		--workspace-taskboard-state-border: rgba(255, 255, 255, 0.05);
+		--workspace-taskboard-state-bg: rgba(255, 255, 255, 0.02);
+		--workspace-taskboard-error-text: rgba(255, 150, 150, 0.92);
+		--workspace-taskboard-column-border: rgba(255, 255, 255, 0.05);
+		--workspace-taskboard-column-bg: rgba(255, 255, 255, 0.02);
+		--workspace-taskboard-drop-border: rgba(120, 179, 255, 0.6);
+		--workspace-taskboard-drop-bg: rgba(120, 179, 255, 0.08);
+		--workspace-taskboard-column-divider: rgba(255, 255, 255, 0.05);
+		--workspace-taskboard-column-title: rgba(240, 244, 255, 0.9);
+		--workspace-taskboard-column-count-text: rgba(194, 201, 225, 0.85);
+		--workspace-taskboard-column-count-bg: rgba(255, 255, 255, 0.05);
+		--workspace-taskboard-empty-border: rgba(255, 255, 255, 0.09);
+		--workspace-taskboard-empty-text: rgba(210, 216, 236, 0.62);
+		--workspace-taskboard-item-border: rgba(255, 255, 255, 0.07);
+		--workspace-taskboard-item-bg: rgba(255, 255, 255, 0.03);
+		--workspace-taskboard-item-text: #f6f8ff;
+		--workspace-taskboard-item-hover-bg: rgba(255, 255, 255, 0.06);
+		--workspace-taskboard-item-hover-border: rgba(255, 255, 255, 0.15);
+		--workspace-taskboard-description: rgba(215, 222, 247, 0.87);
+		--workspace-taskboard-meta: rgba(190, 197, 220, 0.82);
+	}
+
 	.task-board {
 		height: 100%;
 		min-height: 0;
 		padding: 1rem;
-		background: #0d0d12;
+		background: var(--workspace-taskboard-bg);
+	}
+
+	.context-aware-board {
+		display: grid;
+		grid-template-rows: auto auto 1fr;
+		gap: 0.8rem;
+	}
+
+	.board-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem;
+		padding: 0.7rem 0.9rem;
+		border-radius: 14px;
+		background: var(--workspace-taskboard-header-bg);
+		border: 1px solid var(--workspace-taskboard-header-border);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+	}
+
+	.board-header h2 {
+		margin: 0;
+		font-size: 0.92rem;
+		letter-spacing: 0.03em;
+		color: var(--workspace-taskboard-header-text);
+	}
+
+	.board-header span {
+		font-size: 0.75rem;
+		color: var(--workspace-taskboard-count-text);
+		border-radius: 999px;
+		padding: 0.18rem 0.55rem;
+		background: var(--workspace-taskboard-count-bg);
+		border: 1px solid var(--workspace-taskboard-count-border);
+	}
+
+	.new-task-form {
+		display: flex;
+		gap: 0.55rem;
+		padding: 0.75rem;
+		border-radius: 14px;
+		background: var(--workspace-taskboard-form-bg);
+		border: 1px solid var(--workspace-taskboard-form-border);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+	}
+
+	.new-task-form input {
+		flex: 1;
+		min-width: 0;
+		border-radius: 10px;
+		border: 1px solid var(--workspace-taskboard-input-border);
+		background: var(--workspace-taskboard-input-bg);
+		color: var(--workspace-taskboard-input-text);
+		padding: 0.56rem 0.7rem;
+	}
+
+	.new-task-form input::placeholder {
+		color: var(--workspace-taskboard-input-placeholder);
+	}
+
+	.new-task-form button {
+		border-radius: 10px;
+		border: 1px solid var(--workspace-taskboard-btn-border);
+		background: var(--workspace-taskboard-btn-bg);
+		color: var(--workspace-taskboard-btn-text);
+		padding: 0.56rem 0.86rem;
+		font-size: 0.8rem;
+		cursor: pointer;
+	}
+
+	.new-task-form button:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
 	}
 
 	.board-state {
@@ -200,14 +811,14 @@
 		min-height: 240px;
 		display: grid;
 		place-items: center;
-		color: rgba(236, 240, 255, 0.78);
-		border: 1px solid rgba(255, 255, 255, 0.05);
-		background: rgba(255, 255, 255, 0.02);
+		color: var(--workspace-taskboard-state-text);
+		border: 1px solid var(--workspace-taskboard-state-border);
+		background: var(--workspace-taskboard-state-bg);
 		border-radius: 18px;
 	}
 
 	.board-state.error {
-		color: rgba(255, 150, 150, 0.92);
+		color: var(--workspace-taskboard-error-text);
 	}
 
 	.task-grid {
@@ -223,17 +834,18 @@
 		display: flex;
 		flex-direction: column;
 		border-radius: 16px;
-		border: 1px solid rgba(255, 255, 255, 0.05);
-		background: rgba(255, 255, 255, 0.02);
-		backdrop-filter: blur(12px);
+		border: 1px solid var(--workspace-taskboard-column-border);
+		background: var(--workspace-taskboard-column-bg);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
 		transition:
 			border-color 0.2s ease,
 			background 0.2s ease;
 	}
 
 	.task-column.is-drop-target {
-		border-color: rgba(120, 179, 255, 0.6);
-		background: rgba(120, 179, 255, 0.08);
+		border-color: var(--workspace-taskboard-drop-border);
+		background: var(--workspace-taskboard-drop-bg);
 	}
 
 	.task-column-header {
@@ -241,7 +853,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.85rem 0.95rem;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+		border-bottom: 1px solid var(--workspace-taskboard-column-divider);
 	}
 
 	.task-column-header h3 {
@@ -249,13 +861,13 @@
 		font-size: 0.86rem;
 		letter-spacing: 0.04em;
 		text-transform: uppercase;
-		color: rgba(240, 244, 255, 0.9);
+		color: var(--workspace-taskboard-column-title);
 	}
 
 	.task-column-header span {
 		font-size: 0.8rem;
-		color: rgba(194, 201, 225, 0.85);
-		background: rgba(255, 255, 255, 0.05);
+		color: var(--workspace-taskboard-column-count-text);
+		background: var(--workspace-taskboard-column-count-bg);
 		border-radius: 999px;
 		padding: 0.2rem 0.55rem;
 	}
@@ -274,20 +886,20 @@
 		margin: 0;
 		padding: 0.9rem;
 		border-radius: 12px;
-		border: 1px dashed rgba(255, 255, 255, 0.09);
-		color: rgba(210, 216, 236, 0.62);
+		border: 1px dashed var(--workspace-taskboard-empty-border);
+		color: var(--workspace-taskboard-empty-text);
 		font-size: 0.84rem;
 		text-align: center;
 	}
 
 	.task-item {
 		border-radius: 13px;
-		border: 1px solid rgba(255, 255, 255, 0.07);
-		background: rgba(255, 255, 255, 0.03);
+		border: 1px solid var(--workspace-taskboard-item-border);
+		background: var(--workspace-taskboard-item-bg);
 		padding: 0.75rem 0.8rem;
 		display: grid;
 		gap: 0.45rem;
-		color: #f6f8ff;
+		color: var(--workspace-taskboard-item-text);
 		cursor: grab;
 		transition:
 			transform 0.15s ease,
@@ -296,8 +908,8 @@
 	}
 
 	.task-item:hover {
-		background: rgba(255, 255, 255, 0.06);
-		border-color: rgba(255, 255, 255, 0.15);
+		background: var(--workspace-taskboard-item-hover-bg);
+		border-color: var(--workspace-taskboard-item-hover-border);
 		transform: translateY(-1px);
 	}
 
@@ -314,7 +926,7 @@
 	.task-item-description {
 		font-size: 0.86rem;
 		line-height: 1.42;
-		color: rgba(215, 222, 247, 0.87);
+		color: var(--workspace-taskboard-description);
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
@@ -322,14 +934,18 @@
 	.task-item-meta {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.4rem 0.7rem;
+		gap: 0.4rem 0.65rem;
 		font-size: 0.72rem;
-		color: rgba(191, 199, 223, 0.82);
+		color: var(--workspace-taskboard-meta);
 	}
 
-	@media (max-width: 1100px) {
+	@media (max-width: 980px) {
 		.task-grid {
 			grid-template-columns: 1fr;
+		}
+
+		.task-board {
+			padding: 0.75rem;
 		}
 	}
 </style>

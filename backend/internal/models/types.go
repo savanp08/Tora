@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"time"
+
+	"github.com/gocql/gocql"
+)
 
 const MaxRoomMembers = 1200
 
@@ -36,7 +40,36 @@ type Room struct {
 	ParentRoomID    string    `json:"parentRoomId,omitempty"`
 	OriginMessageID string    `json:"originMessageId,omitempty"`
 	MemberCount     int       `json:"memberCount"`
+	IsDirect        bool      `json:"is_direct"`
 	AdminCode       string    `json:"adminCode,omitempty"`
+}
+
+type UserConnection struct {
+	UserID    gocql.UUID `json:"user_id"`
+	TargetID  gocql.UUID `json:"target_id"`
+	Status    string     `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+type PersonalItem struct {
+	UserID    gocql.UUID `json:"user_id"`
+	ItemID    gocql.UUID `json:"item_id"`
+	Type      string     `json:"type"`
+	Content   string     `json:"content"`
+	Status    string     `json:"status"`
+	DueAt     *time.Time `json:"due_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+type Task struct {
+	RoomID      gocql.UUID  `json:"room_id"`
+	ID          gocql.UUID  `json:"id"`
+	Title       string      `json:"title"`
+	Description string      `json:"description"`
+	Status      string      `json:"status"`
+	AssigneeID  *gocql.UUID `json:"assignee_id,omitempty"`
+	CreatedAt   time.Time   `json:"created_at"`
+	UpdatedAt   time.Time   `json:"updated_at"`
 }
 
 type BoardElement struct {

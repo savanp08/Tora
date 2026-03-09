@@ -12,6 +12,7 @@ import (
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/handlers"
 	"github.com/savanp08/converse/internal/monitor"
+	"github.com/savanp08/converse/internal/repository"
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
 	"github.com/savanp08/converse/internal/websocket"
@@ -49,6 +50,10 @@ func New(
 
 	authHandler := handlers.NewAuthHandler(scyllaStore)
 	dashboardHandler := handlers.NewDashboardHandler(scyllaStore)
+	personalRepo := repository.NewPersonalRepo(scyllaStore)
+	personalHandler := handlers.NewPersonalHandler(personalRepo)
+	networkRepo := repository.NewNetworkRepo(scyllaStore)
+	networkHandler := handlers.NewNetworkHandler(networkRepo, scyllaStore)
 	roomHandler := handlers.NewRoomHandler(hub, redisStore, scyllaStore)
 	uploadHandler := handlers.NewUploadHandler(r2Client, redisStore, usageTracker)
 	handlers.ConfigureCanvasPersistence(redisStore, scyllaStore, r2Client, usageTracker)
@@ -134,6 +139,20 @@ func New(
 		r.Get("/auth/google", authHandler.GoogleLogin)
 		r.Get("/auth/google/callback", authHandler.GoogleCallback)
 		r.With(authJWTContextMiddleware()).Get("/dashboard/rooms", dashboardHandler.GetRooms)
+		r.With(authJWTContextMiddleware()).Get("/dashboard/overview", dashboardHandler.GetOverview)
+		r.With(authJWTContextMiddleware()).Route("/personal/items", func(r chi.Router) {
+			r.Get("/", personalHandler.GetItems)
+			r.Post("/", personalHandler.CreateItem)
+			r.Put("/{itemId}/status", personalHandler.UpdateItemStatus)
+			r.Delete("/{itemId}", personalHandler.DeleteItem)
+		})
+		r.With(authJWTContextMiddleware()).Post("/network/request", networkHandler.SendConnectionRequest)
+		r.With(authJWTContextMiddleware()).Post("/network/accept", networkHandler.AcceptConnectionRequest)
+		r.With(authJWTContextMiddleware()).Get("/network/pending", networkHandler.ListPendingRequests)
+		r.With(authJWTContextMiddleware()).Get("/network/connections", networkHandler.ListConnections)
+		r.With(authJWTContextMiddleware()).Post("/rooms/direct", roomHandler.CreateDirectRoom)
+		r.With(authJWTContextMiddleware()).Post("/rooms/{roomId}/tasks", roomHandler.CreateRoomTask)
+		r.With(authJWTContextMiddleware()).Put("/rooms/{roomId}/tasks/{taskId}/status", roomHandler.UpdateRoomTaskStatus)
 
 		r.Post("/rooms", roomHandler.CreateRoom)
 		r.Post("/rooms/revive", roomHandler.ReviveRoom)

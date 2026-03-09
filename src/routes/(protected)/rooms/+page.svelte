@@ -11,13 +11,16 @@
 
 <style>
 	.rooms-shell {
-		min-height: 100dvh;
+		height: 100dvh;
+		box-sizing: border-box;
 		padding: 5.6rem 1.2rem 1.4rem;
 		background: #0d0d12;
 		color: #f2f6ff;
+		overflow: hidden;
 	}
 
 	.card {
+		height: 100%;
 		max-width: 920px;
 		margin: 0 auto;
 		border-radius: 14px;

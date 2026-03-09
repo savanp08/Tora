@@ -24,6 +24,17 @@ type TaskRecordResponse struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type TaskCreateRequest struct {
+	Content     string `json:"content"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
+type TaskStatusUpdateRequest struct {
+	Status string `json:"status"`
+}
+
 func (h *RoomHandler) ensureTaskSchema() {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return
@@ -107,6 +118,154 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(tasks)
+}
+
+func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task storage unavailable"})
+		return
+	}
+
+	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
+	roomUUID, err := parseFlexibleTaskUUID(rawRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
+		return
+	}
+
+	var req TaskCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	content := strings.TrimSpace(req.Content)
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = content
+	}
+	if title == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task content or title is required"})
+		return
+	}
+	if len(title) > 240 {
+		title = title[:240]
+	}
+
+	description := strings.TrimSpace(req.Description)
+	if description == "" && content != "" && content != title {
+		description = content
+	}
+	if len(description) > 4000 {
+		description = description[:4000]
+	}
+	status := normalizeTaskStatusValue(req.Status)
+	if status == "" {
+		status = "todo"
+	}
+
+	taskUUID, err := gocql.RandomUUID()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to generate task id"})
+		return
+	}
+	now := time.Now().UTC()
+
+	var assigneeID *gocql.UUID
+	if userIDRaw := strings.TrimSpace(AuthUserIDFromContext(r.Context())); userIDRaw != "" {
+		if parsedUserID, parseErr := gocql.ParseUUID(userIDRaw); parseErr == nil {
+			assigneeID = &parsedUserID
+		}
+	}
+
+	query := fmt.Sprintf(
+		`INSERT INTO %s (room_id, id, title, description, status, assignee_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		h.scylla.Table("tasks"),
+	)
+	if err := h.scylla.Session.Query(
+		query,
+		roomUUID,
+		taskUUID,
+		title,
+		description,
+		status,
+		assigneeID,
+		now,
+		now,
+	).WithContext(r.Context()).Exec(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create room task"})
+		return
+	}
+
+	response := TaskRecordResponse{
+		ID:          strings.TrimSpace(taskUUID.String()),
+		RoomID:      strings.TrimSpace(roomUUID.String()),
+		Title:       title,
+		Description: description,
+		Status:      status,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if assigneeID != nil {
+		response.AssigneeID = strings.TrimSpace(assigneeID.String())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *RoomHandler) UpdateRoomTaskStatus(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task storage unavailable"})
+		return
+	}
+
+	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
+	roomUUID, err := parseFlexibleTaskUUID(rawRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
+		return
+	}
+	taskID, err := parseFlexibleTaskUUID(strings.TrimSpace(chi.URLParam(r, "taskId")))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid task id"})
+		return
+	}
+
+	var req TaskStatusUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+	status := normalizeTaskStatusValue(req.Status)
+	if status == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "status is required"})
+		return
+	}
+
+	now := time.Now().UTC()
+	query := fmt.Sprintf(`UPDATE %s SET status = ?, updated_at = ? WHERE room_id = ? AND id = ?`, h.scylla.Table("tasks"))
+	if err := h.scylla.Session.Query(query, status, now, roomUUID, taskID).WithContext(r.Context()).Exec(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update room task status"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
 
 func parseFlexibleTaskUUID(raw string) (gocql.UUID, error) {

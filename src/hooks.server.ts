@@ -1,8 +1,10 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { env } from '$env/dynamic/private';
 import type { Handle } from '@sveltejs/kit';
 
 const AUTH_COOKIE_NAME = 'tora_auth';
 const FALLBACK_ROLE = 'member' as const;
+const AUTH_DEBUG_LOG_PREFIX = '[google-auth-route-debug]';
 
 type JwtPayload = {
 	userId?: unknown;
@@ -18,6 +20,32 @@ type AuthenticatedUser = {
 	avatarUrl: string;
 	role: 'admin' | 'member' | 'viewer';
 };
+
+function isAuthDebugEnabled() {
+	const privateEnv = env as Record<string, string | undefined>;
+	for (const key of ['DEBUG_LOGS_ENABLED', 'debug_logs_enabled']) {
+		const raw = (privateEnv[key] ?? '').trim().toLowerCase();
+		if (['1', 'true', 'yes', 'on'].includes(raw)) {
+			return true;
+		}
+		if (['0', 'false', 'no', 'off'].includes(raw)) {
+			return false;
+		}
+	}
+	return false;
+}
+
+function authDebugLog(event: string, payload?: Record<string, unknown>) {
+	if (!isAuthDebugEnabled()) {
+		return;
+	}
+	const timestamp = new Date().toISOString();
+	if (!payload) {
+		console.log(`${AUTH_DEBUG_LOG_PREFIX} ${timestamp} ${event}`);
+		return;
+	}
+	console.log(`${AUTH_DEBUG_LOG_PREFIX} ${timestamp} ${event}`, payload);
+}
 
 function base64urlDecode(segment: string) {
 	const normalized = segment.replace(/-/g, '+').replace(/_/g, '/');
@@ -65,11 +93,16 @@ function verifyHS256(token: string, secret: string) {
 }
 
 function parseUserFromToken(token: string): AuthenticatedUser | null {
-	const secret = process.env.APP_SECRET_KEY?.trim();
+	authDebugLog('Token parse started.', {
+		tokenLength: token.length
+	});
+	const secret = env.APP_SECRET_KEY?.trim();
 	if (!secret) {
+		authDebugLog('Token parse failed: APP_SECRET_KEY is missing.');
 		return null;
 	}
 	if (!verifyHS256(token, secret)) {
+		authDebugLog('Token parse failed: signature validation failed.');
 		return null;
 	}
 
@@ -83,13 +116,26 @@ function parseUserFromToken(token: string): AuthenticatedUser | null {
 		const exp = typeof payload.exp === 'number' ? payload.exp : Number(payload.exp);
 
 		if (!userId || !Number.isFinite(exp)) {
+			authDebugLog('Token parse failed: payload missing required fields.', {
+				hasUserId: Boolean(userId),
+				hasExp: Number.isFinite(exp)
+			});
 			return null;
 		}
 		const nowSeconds = Math.floor(Date.now() / 1000);
 		if (exp <= nowSeconds) {
+			authDebugLog('Token parse failed: token expired.', {
+				exp,
+				nowSeconds
+			});
 			return null;
 		}
 
+		authDebugLog('Token parse succeeded.', {
+			userId,
+			email,
+			username
+		});
 		return {
 			id: userId,
 			email,
@@ -98,12 +144,23 @@ function parseUserFromToken(token: string): AuthenticatedUser | null {
 			role: FALLBACK_ROLE
 		};
 	} catch {
+		authDebugLog('Token parse failed: payload JSON decode error.');
 		return null;
 	}
 }
 
 export const handle: Handle = async ({ event, resolve }) => {
 	const token = event.cookies.get(AUTH_COOKIE_NAME)?.trim() || '';
+	authDebugLog('Incoming request auth check.', {
+		pathname: event.url.pathname,
+		hasAuthCookie: token.length > 0,
+		authCookieLength: token.length
+	});
 	event.locals.user = token ? parseUserFromToken(token) : null;
+	authDebugLog('Request auth check complete.', {
+		pathname: event.url.pathname,
+		isAuthenticated: Boolean(event.locals.user),
+		userId: event.locals.user?.id ?? ''
+	});
 	return resolve(event);
 };

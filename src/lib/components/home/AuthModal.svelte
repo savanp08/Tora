@@ -99,9 +99,15 @@
 
 	function handleGoogleLogin() {
 		if (!browser || isLoading) {
+			clientLog('google-oauth-click-ignored', {
+				reason: !browser ? 'not-in-browser' : 'request-in-flight',
+				isLoading
+			});
 			return;
 		}
-		window.location.href = `${API_BASE}/api/auth/google`;
+		const target = `${API_BASE}/api/auth/google`;
+		clientLog('google-oauth-redirect-start', { target });
+		window.location.href = target;
 	}
 </script>
 

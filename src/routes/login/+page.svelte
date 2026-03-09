@@ -2,11 +2,13 @@
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { onMount } from 'svelte';
 	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import { login } from '$lib/stores/auth';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const OAUTH_CLIENT_LOG_PREFIX = '[google-auth-client]';
 
 	let email = '';
 	let password = '';
@@ -33,6 +35,28 @@
 	$: canForgotRequest = normalizedForgotEmail.length > 0;
 	$: canForgotVerify = normalizedForgotEmail.length > 0 && normalizedForgotOtp.length === 6;
 	$: requestedRedirect = resolveSafeRedirect($page.url.searchParams.get('redirect'));
+
+	type OAuthFragmentPayload = {
+		token: string;
+		user: {
+			id: string;
+			email: string;
+			username: string;
+			fullName: string;
+			avatarUrl: string;
+		};
+	};
+
+	type OAuthParamsSource = 'hash' | 'search';
+
+	function oauthDebugLog(event: string, payload?: unknown) {
+		const timestamp = new Date().toISOString();
+		if (payload === undefined) {
+			console.log(`${OAUTH_CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
+			return;
+		}
+		console.log(`${OAUTH_CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
+	}
 
 	function resolveSafeRedirect(rawPath: string | null) {
 		if (!rawPath) {
@@ -64,6 +88,202 @@
 			.map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
 			.join(' ');
 	}
+
+	function parseOAuthPayloadFromParams(
+		params: URLSearchParams,
+		source: OAuthParamsSource
+	): OAuthFragmentPayload | null {
+		const token = params.get('oauth_token')?.trim() || '';
+		const userID = params.get('oauth_user_id')?.trim() || '';
+		const email = params.get('oauth_email')?.trim().toLowerCase() || '';
+		if (!token || !userID || !email) {
+			oauthDebugLog('OAuth payload source is missing required fields.', {
+				source,
+				hasToken: token.length > 0,
+				hasUserId: userID.length > 0,
+				hasEmail: email.length > 0
+			});
+			return null;
+		}
+		oauthDebugLog('OAuth payload parsed successfully.', {
+			source,
+			hasToken: token.length > 0,
+			userId: userID,
+			email
+		});
+		return {
+			token,
+			user: {
+				id: userID,
+				email,
+				username: params.get('oauth_username')?.trim() || '',
+				fullName: params.get('oauth_full_name')?.trim() || '',
+				avatarUrl: params.get('oauth_avatar_url')?.trim() || ''
+			}
+		};
+	}
+
+	function parseOAuthLocationPayload(rawHash: string, rawSearch: string): OAuthFragmentPayload | null {
+		const trimmedHash = rawHash.trim();
+		if (trimmedHash) {
+			oauthDebugLog('OAuth fragment found. Attempting to parse payload.', {
+				hashLength: trimmedHash.length
+			});
+			const fragment = trimmedHash.startsWith('#') ? trimmedHash.slice(1) : trimmedHash;
+			const payload = parseOAuthPayloadFromParams(new URLSearchParams(fragment), 'hash');
+			if (payload) {
+				return payload;
+			}
+		}
+
+		oauthDebugLog('No valid OAuth payload found in hash. Checking URL search params as fallback.', {
+			search: rawSearch
+		});
+		const search = rawSearch.startsWith('?') ? rawSearch.slice(1) : rawSearch;
+		if (!search.trim()) {
+			oauthDebugLog('No OAuth payload found in URL search params fallback.');
+			return null;
+		}
+		return parseOAuthPayloadFromParams(new URLSearchParams(search), 'search');
+	}
+
+	async function trySessionCookieRedirect() {
+		if (!browser) {
+			return;
+		}
+		oauthDebugLog('No OAuth payload found. Probing backend auth session before staying on login page.');
+		try {
+			const response = await fetch(`${API_BASE}/api/dashboard/rooms`, {
+				method: 'GET',
+				credentials: 'include'
+			});
+			oauthDebugLog('Backend auth session probe completed.', {
+				status: response.status,
+				ok: response.ok
+			});
+			if (!response.ok) {
+				return;
+			}
+				const postAuthRedirect = requestedRedirect || '/dashboard';
+				oauthDebugLog('Backend session exists. Redirecting to dashboard.', {
+					postAuthRedirect
+				});
+				await goto(postAuthRedirect);
+				const expected = new URL(postAuthRedirect, window.location.origin);
+				if (window.location.pathname !== expected.pathname || window.location.search !== expected.search) {
+					window.location.assign(postAuthRedirect);
+				}
+		} catch (error: unknown) {
+			oauthDebugLog('Backend auth session probe failed.', { error });
+		}
+	}
+
+	onMount(() => {
+		if (!browser) {
+			return;
+		}
+		const rawHash = window.location.hash;
+		const rawSearch = window.location.search;
+		oauthDebugLog('Login page mounted. Checking for OAuth callback payload.', {
+			pathname: window.location.pathname,
+			search: rawSearch,
+			href: window.location.href,
+			hashLength: rawHash.length
+		});
+
+		const hashParams = new URLSearchParams(rawHash.startsWith('#') ? rawHash.substring(1) : rawHash);
+		const oauthToken = hashParams.get('oauth_token')?.trim() || '';
+		const oauthUserID = hashParams.get('oauth_user_id')?.trim() || '';
+		const oauthUsername = hashParams.get('oauth_username')?.trim() || '';
+		const oauthEmail = hashParams.get('oauth_email')?.trim().toLowerCase() || '';
+		const oauthAvatarURL = hashParams.get('oauth_avatar_url')?.trim() || '';
+		const oauthFullName = hashParams.get('oauth_full_name')?.trim() || '';
+		if (oauthToken) {
+			oauthDebugLog('Raw hash OAuth payload detected in onMount. Applying immediate login.', {
+				hasToken: oauthToken.length > 0,
+				hasUserId: oauthUserID.length > 0,
+				hasEmail: oauthEmail.length > 0
+			});
+
+			const fallbackEmail = oauthEmail || 'oauth-user@local.invalid';
+			const displayName =
+				oauthUsername ||
+				oauthFullName ||
+				buildFallbackName(fallbackEmail) ||
+				'User';
+			login(oauthToken, {
+				id: oauthUserID || `oauth-${Date.now()}`,
+				email: fallbackEmail,
+				name: displayName,
+				avatarUrl: oauthAvatarURL,
+				role: 'member'
+			});
+
+			window.history.replaceState(null, '', window.location.pathname + window.location.search);
+			const postAuthRedirect = '/dashboard';
+			void goto(postAuthRedirect).then(() => {
+				const expected = new URL(postAuthRedirect, window.location.origin);
+				if (window.location.pathname !== expected.pathname || window.location.search !== expected.search) {
+					window.location.assign(postAuthRedirect);
+				}
+			});
+			return;
+		}
+
+		const payload = parseOAuthLocationPayload(rawHash, rawSearch);
+		if (!payload) {
+			oauthDebugLog('No valid OAuth payload found. Staying on login page.');
+			void trySessionCookieRedirect();
+			return;
+		}
+
+		const displayName =
+			payload.user.username ||
+			payload.user.fullName ||
+			buildFallbackName(payload.user.email) ||
+			'User';
+		oauthDebugLog('Applying OAuth login payload to client auth store.', {
+			userId: payload.user.id,
+			email: payload.user.email,
+			displayName
+		});
+		login(payload.token, {
+			id: payload.user.id,
+			email: payload.user.email,
+			name: displayName,
+			avatarUrl: payload.user.avatarUrl,
+			role: 'member'
+		});
+
+		oauthDebugLog('OAuth payload applied. Clearing URL hash and redirecting to dashboard.');
+		window.history.replaceState(null, '', window.location.pathname + window.location.search);
+		const postAuthRedirect = requestedRedirect || '/dashboard';
+		oauthDebugLog('Attempting client navigation after OAuth login.', {
+			redirectTarget: postAuthRedirect,
+			requestedRedirect
+		});
+		void goto(postAuthRedirect).then(() => {
+			oauthDebugLog('Client navigation completed after OAuth login.', {
+				currentPath: window.location.pathname,
+				currentSearch: window.location.search
+			});
+			const expected = new URL(postAuthRedirect, window.location.origin);
+			if (window.location.pathname !== expected.pathname || window.location.search !== expected.search) {
+				oauthDebugLog('Current URL still does not match expected target. Forcing full-page navigation.', {
+					expectedPath: expected.pathname,
+					expectedSearch: expected.search,
+					actualPath: window.location.pathname,
+					actualSearch: window.location.search
+				});
+				window.location.assign(postAuthRedirect);
+			}
+		}).catch((error: unknown) => {
+			oauthDebugLog('Client navigation after OAuth login failed.', {
+				redirectTarget: postAuthRedirect,
+				error
+			});
+		});
+	});
 
 	async function handleAuth(event: SubmitEvent) {
 		event.preventDefault();
@@ -252,9 +472,15 @@
 
 	function handleGoogleLogin() {
 		if (!browser || isSubmitting) {
+			oauthDebugLog('Google login click ignored.', {
+				isBrowser: browser,
+				isSubmitting
+			});
 			return;
 		}
-		window.location.href = `${API_BASE}/api/auth/google`;
+		const target = `${API_BASE}/api/auth/google`;
+		oauthDebugLog('Redirecting browser to backend Google login endpoint.', { target });
+		window.location.href = target;
 	}
 </script>
 

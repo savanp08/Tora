@@ -60,3 +60,24 @@ CREATE TABLE IF NOT EXISTS converse.tasks (
 ) WITH CLUSTERING ORDER BY (id ASC);
 
 CREATE INDEX IF NOT EXISTS tasks_assignee_id_idx ON converse.tasks (assignee_id);
+
+ALTER TABLE converse.rooms ADD is_direct boolean;
+
+CREATE TABLE IF NOT EXISTS converse.user_connections (
+	user_id uuid,
+	target_id uuid,
+	status text,
+	created_at timestamp,
+	PRIMARY KEY (user_id, target_id)
+);
+
+CREATE TABLE IF NOT EXISTS converse.personal_items (
+	user_id uuid,
+	item_id uuid,
+	type text,
+	content text,
+	status text,
+	due_at timestamp,
+	created_at timestamp,
+	PRIMARY KEY ((user_id), item_id)
+) WITH CLUSTERING ORDER BY (item_id DESC);

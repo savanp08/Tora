@@ -724,7 +724,8 @@
 		display: flex;
 		justify-content: center;
 		align-items: center;
-		padding: 6px 0 14px;
+		padding: 15px;
+		
 	}
 
 	.hero-box {

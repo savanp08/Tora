@@ -5,6 +5,7 @@
 	import { fade, scale } from 'svelte/transition';
 	import toraLogo from '$lib/assets/tora-logo.svg';
 	import { authState, logout } from '$lib/stores/auth';
+	import { isDarkMode } from '$lib/store';
 
 	export let isHighContrast = false;
 	export let scrollY = 0;
@@ -49,9 +50,10 @@
 	];
 	const MOBILE_BREAKPOINT = 600;
 	const FAB_SIZE_PX = 56;
-	const FAB_PADDING_PX = 15;
+	const FAB_PADDING_PX = 2;
 	const FAB_DEFAULT_TOP_OFFSET_PX = 80;
 	const FAB_DRAG_THRESHOLD_PX = 10;
+	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const BOARD_MENU_ACTIONS: Array<{ label: string; action: BoardQuickAction }> = [
 		{ label: 'Dashboard Board', action: 'open-board-dashboard' },
 		{ label: 'Draw Board', action: 'open-board-draw' },
@@ -67,19 +69,22 @@
 	let mobileMenuItems: MobileMenuItem[] = [];
 	let chatQuickState: ChatQuickState | null = null;
 
-	let isProfileMenuOpen = false;
-	let profileMenuRoot: HTMLDivElement | null = null;
-
 	$: pathname = $page.url.pathname;
 	$: isGhostMode = scrollY < 50 && !isHovered;
 	$: navLinks = buildNavLinks(pathname, $authState.isAuthenticated);
 	$: hideDesktopNavForRoute = pathname.startsWith('/chat/') || pathname === '/rooms' || pathname.startsWith('/rooms/');
+	$: isPublicCompactNavRoute =
+		pathname === '/' ||
+		pathname === '/login' ||
+		pathname === '/home' ||
+		pathname.startsWith('/home/');
+	$: hideFloatingFabForRoute = isPublicCompactNavRoute && innerWidth >= MOBILE_BREAKPOINT;
 	$: activeLabel =
 		navLinks.find((link) => isPathActiveForNavLink(pathname, link.href))?.label ??
 		navLinks[0]?.label ??
 		'';
 	$: desktopNavVisible = innerWidth >= MOBILE_BREAKPOINT && !hideDesktopNavForRoute;
-	$: mobileFabVisible = innerWidth > 0 && innerWidth < MOBILE_BREAKPOINT;
+	$: mobileFabVisible = innerWidth > 0 && !hideFloatingFabForRoute;
 	$: mobileMenuConfig = buildMobileMenu(pathname, $authState.isAuthenticated, chatQuickState);
 	$: mobileMenuTitle = mobileMenuConfig.title;
 	$: mobileMenuItems = mobileMenuConfig.items;
@@ -106,9 +111,14 @@
 			mobileMenuItems.length * 48 +
 			($authState.isAuthenticated ? 136 : 72);
 		const gap = 12;
+		const horizontalNudgeLeft = 12;
+		const horizontalNudgeLeftRightEdge = 24;
+		const leftViewportPadding = 10;
+		const rightViewportPadding = 22;
 
 		let top = 0;
 		let left = 0;
+		const isRightSide = fabPosition.x + FAB_SIZE_PX / 2 > innerWidth / 2;
 
 		if (fabPosition.y + FAB_SIZE_PX + gap + menuHeight > innerHeight) {
 			top = fabPosition.y - menuHeight - gap;
@@ -116,13 +126,15 @@
 			top = fabPosition.y + FAB_SIZE_PX + gap;
 		}
 
-		if (fabPosition.x + FAB_SIZE_PX / 2 > innerWidth / 2) {
+		if (isRightSide) {
 			left = fabPosition.x + FAB_SIZE_PX - menuWidth;
 		} else {
 			left = fabPosition.x;
 		}
 
-		left = Math.max(10, Math.min(innerWidth - menuWidth - 10, left));
+		left -= isRightSide ? horizontalNudgeLeftRightEdge : horizontalNudgeLeft;
+
+		left = Math.max(leftViewportPadding, Math.min(innerWidth - menuWidth - rightViewportPadding, left));
 		top = Math.max(10, Math.min(innerHeight - menuHeight - 10, top));
 
 		return { top, left };
@@ -326,7 +338,7 @@
 			isSnapping = true;
 			suppressToggleAfterDrag = true;
 
-			const padding = 20;
+			const padding = FAB_PADDING_PX;
 			const centerX = fabPosition.x + FAB_SIZE_PX / 2;
 
 			if (centerX < innerWidth / 2) {
@@ -353,7 +365,6 @@
 
 	function closeAllMenus() {
 		isMobileMenuOpen = false;
-		isProfileMenuOpen = false;
 	}
 
 	function dispatchQuickAction(action: QuickAction) {
@@ -382,16 +393,6 @@
 		return String(normalized);
 	}
 
-	function handleGlobalPointerDown(event: PointerEvent) {
-		const target = event.target;
-		if (!(target instanceof Node)) {
-			return;
-		}
-		if (profileMenuRoot && !profileMenuRoot.contains(target)) {
-			isProfileMenuOpen = false;
-		}
-	}
-
 	function handleChatNavState(event: Event) {
 		const customEvent = event as CustomEvent<unknown>;
 		chatQuickState = parseChatQuickState(customEvent.detail);
@@ -407,6 +408,14 @@
 		void goto('/dashboard');
 	}
 
+	function toggleThemePreference() {
+		const nextDarkMode = !$isDarkMode;
+		isDarkMode.set(nextDarkMode);
+		if (typeof window !== 'undefined') {
+			window.localStorage.setItem(THEME_PREFERENCE_KEY, nextDarkMode ? 'dark' : 'light');
+		}
+	}
+
 	function handleLogout() {
 		logout();
 		closeAllMenus();
@@ -420,18 +429,16 @@
 	onMount(() => {
 		if (typeof window !== 'undefined') {
 			fabPosition = {
-				x: window.innerWidth - 76,
+				x: window.innerWidth - FAB_SIZE_PX - FAB_PADDING_PX,
 				y: FAB_DEFAULT_TOP_OFFSET_PX
 			};
 			isSnapping = true;
-			window.addEventListener('pointerdown', handleGlobalPointerDown);
 			window.addEventListener('converse:chat-nav-state', handleChatNavState as EventListener);
 		}
 	});
 
 	onDestroy(() => {
 		if (typeof window !== 'undefined') {
-			window.removeEventListener('pointerdown', handleGlobalPointerDown);
 			window.removeEventListener('converse:chat-nav-state', handleChatNavState as EventListener);
 		}
 	});
@@ -468,38 +475,11 @@
 					{/if}
 				</a>
 			{/each}
-		</div>
-	</nav>
+			</div>
+		</nav>
+{/if}
 
-	{#if $authState.isAuthenticated}
-		<div class="desktop-auth-corner" bind:this={profileMenuRoot}>
-			<button
-				type="button"
-				class="desktop-avatar-btn"
-				aria-label="Open user menu"
-				on:click={() => (isProfileMenuOpen = !isProfileMenuOpen)}
-			>
-				{#if userAvatarUrl}
-					<img src={userAvatarUrl} alt={userDisplayName} />
-				{:else}
-					<span>{userInitials}</span>
-				{/if}
-			</button>
-			{#if isProfileMenuOpen}
-				<div class="desktop-user-menu" transition:fade={{ duration: 140 }}>
-					<div class="desktop-user-meta">
-						<strong>{userDisplayName}</strong>
-						{#if userEmail}
-							<small>{userEmail}</small>
-						{/if}
-					</div>
-					<button type="button" on:click={handleSettings}>Settings</button>
-					<button type="button" class="danger" on:click={handleLogout}>Logout</button>
-				</div>
-				{/if}
-		</div>
-	{/if}
-{:else if mobileFabVisible}
+{#if mobileFabVisible}
 	{#if isMobileMenuOpen}
 		<div
 			class="mobile-overlay"
@@ -519,7 +499,32 @@
 			tabindex="0"
 			on:keydown={() => {}}
 		>
-			<div class="menu-header">{mobileMenuTitle}</div>
+			<div class="menu-header">
+				<span>{mobileMenuTitle}</span>
+				<button
+					type="button"
+					class="menu-theme-toggle {$isDarkMode ? 'active' : ''}"
+					on:click={toggleThemePreference}
+					title={$isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+					aria-label={$isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+				>
+					{#if $isDarkMode}
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								d="M12 4.5a1 1 0 0 1 1 1v1.4a1 1 0 1 1-2 0V5.5a1 1 0 0 1 1-1Zm0 12.1a1 1 0 0 1 1 1V19a1 1 0 1 1-2 0v-1.4a1 1 0 0 1 1-1Zm7.5-5.2a1 1 0 0 1 0 2h-1.4a1 1 0 1 1 0-2h1.4Zm-12.1 0a1 1 0 0 1 0 2H6a1 1 0 1 1 0-2h1.4Zm8.3-4.3a1 1 0 0 1 1.4 0l1 1a1 1 0 1 1-1.4 1.4l-1-1a1 1 0 0 1 0-1.4Zm-9.8 9.8a1 1 0 0 1 1.4 0l1 1a1 1 0 0 1-1.4 1.4l-1-1a1 1 0 0 1 0-1.4Zm11.2 1.4a1 1 0 0 1 0-1.4l1-1a1 1 0 1 1 1.4 1.4l-1 1a1 1 0 0 1-1.4 0Zm-9.8-9.8a1 1 0 0 1 0-1.4l1-1a1 1 0 0 1 1.4 1.4l-1 1a1 1 0 0 1-1.4 0ZM12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"
+								fill="currentColor"
+							/>
+						</svg>
+					{:else}
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								d="M15.4 2.7a1 1 0 0 1 .8 1.6 8 8 0 1 0 3.5 13.9 1 1 0 0 1 1.6.8 9.9 9.9 0 1 1-6.7-16.2 1 1 0 0 1 .8-.1Z"
+								fill="currentColor"
+							/>
+						</svg>
+					{/if}
+				</button>
+			</div>
 			{#each mobileMenuItems as item}
 				{#if item.href}
 					<a
@@ -611,36 +616,41 @@
 		--navbar-auth-text: #f7f8fd;
 		--navbar-auth-hover-bg: rgba(33, 52, 81, 0.56);
 		--navbar-auth-hover-border: rgba(163, 201, 255, 0.52);
-		--navbar-menu-bg: rgba(14, 20, 32, 0.94);
-		--navbar-menu-border: rgba(255, 255, 255, 0.22);
-		--navbar-menu-text: #ecf1ff;
-		--navbar-menu-muted: rgba(202, 206, 225, 0.82);
-		--navbar-menu-hover: rgba(255, 255, 255, 0.08);
-			--navbar-overlay: rgba(225, 236, 250, 0.46);
-			--navbar-mobile-bg: rgba(255, 255, 255, 0.7);
-			--navbar-mobile-border: rgba(223, 234, 249, 0.9);
+			--navbar-menu-bg: rgba(14, 20, 32, 0.94);
+			--navbar-menu-border: rgba(255, 255, 255, 0.22);
+			--navbar-menu-text: #ecf1ff;
+			--navbar-menu-muted: rgba(202, 206, 225, 0.82);
+			--navbar-menu-hover: rgba(255, 255, 255, 0.08);
+			--navbar-theme-toggle-bg: rgba(255, 255, 255, 0.62);
+			--navbar-theme-toggle-border: rgba(129, 161, 209, 0.48);
+			--navbar-theme-toggle-text: #123156;
+			--navbar-theme-toggle-active-bg: rgba(203, 224, 252, 0.88);
+			--navbar-theme-toggle-active-border: rgba(104, 142, 204, 0.62);
+				--navbar-overlay: rgba(225, 236, 250, 0.46);
+				--navbar-mobile-bg: rgba(255, 255, 255, 0.7);
+				--navbar-mobile-border: rgba(223, 234, 249, 0.9);
 			--navbar-mobile-text: #10233b;
 			--navbar-mobile-muted: rgba(73, 94, 128, 0.8);
 			--navbar-mobile-hover: rgba(208, 224, 248, 0.5);
 			--navbar-mobile-active: rgba(164, 196, 239, 0.44);
 			--navbar-mobile-shadow: 0 20px 56px rgba(118, 149, 196, 0.36);
 			--navbar-fab-bg:
-				radial-gradient(circle at 22% 14%, rgba(255, 255, 255, 0.66), transparent 48%),
+				radial-gradient(circle at 22% 14%, rgba(255, 255, 255, 0.34), transparent 48%),
 				linear-gradient(
 					150deg,
-					rgba(255, 255, 255, 0.46),
-					rgba(198, 217, 245, 0.16) 58%,
-					rgba(173, 202, 236, 0.12)
+					rgba(255, 255, 255, 0.12),
+					rgba(198, 217, 245, 0.05) 58%,
+					rgba(173, 202, 236, 0.03)
 				),
-				rgba(255, 255, 255, 0.38);
-			--navbar-fab-border: rgba(255, 255, 255, 0.82);
-			--navbar-fab-shadow: 0 18px 38px rgba(104, 137, 186, 0.34);
+				rgba(255, 255, 255, 0.1);
+			--navbar-fab-border: rgba(255, 255, 255, 0.36);
+			--navbar-fab-shadow: 0 10px 24px rgba(104, 137, 186, 0.12);
 			--navbar-fab-open-bg:
-				radial-gradient(circle at 20% 14%, rgba(255, 255, 255, 0.72), transparent 46%),
-				linear-gradient(145deg, rgba(255, 255, 255, 0.56), rgba(190, 215, 248, 0.24)),
-				rgba(255, 255, 255, 0.5);
-			--navbar-fab-open-border: rgba(163, 195, 240, 0.82);
-			--navbar-fab-open-glow: 0 0 22px rgba(145, 184, 239, 0.55);
+				radial-gradient(circle at 20% 14%, rgba(255, 255, 255, 0.44), transparent 46%),
+				linear-gradient(145deg, rgba(255, 255, 255, 0.2), rgba(190, 215, 248, 0.1)),
+				rgba(255, 255, 255, 0.16);
+			--navbar-fab-open-border: rgba(163, 195, 240, 0.42);
+			--navbar-fab-open-glow: 0 0 12px rgba(145, 184, 239, 0.22);
 		}
 
 		:global(:root[data-theme='dark']),
@@ -659,31 +669,36 @@
 		--navbar-auth-text: #0f172a;
 		--navbar-auth-hover-bg: rgba(255, 255, 255, 0.9);
 		--navbar-auth-hover-border: rgba(180, 198, 225, 0.95);
-		--navbar-menu-bg: rgba(255, 255, 255, 0.94);
-		--navbar-menu-border: rgba(212, 224, 245, 0.92);
-		--navbar-menu-text: #122238;
-		--navbar-menu-muted: rgba(62, 84, 118, 0.78);
-		--navbar-menu-hover: rgba(202, 220, 248, 0.4);
-			--navbar-overlay: rgba(6, 12, 24, 0.62);
-			--navbar-mobile-bg: rgba(20, 35, 60, 0.76);
-			--navbar-mobile-border: rgba(129, 167, 227, 0.42);
+			--navbar-menu-bg: rgba(255, 255, 255, 0.94);
+			--navbar-menu-border: rgba(212, 224, 245, 0.92);
+			--navbar-menu-text: #122238;
+			--navbar-menu-muted: rgba(62, 84, 118, 0.78);
+			--navbar-menu-hover: rgba(202, 220, 248, 0.4);
+			--navbar-theme-toggle-bg: rgba(196, 218, 255, 0.12);
+			--navbar-theme-toggle-border: rgba(148, 180, 232, 0.34);
+			--navbar-theme-toggle-text: #dce9ff;
+			--navbar-theme-toggle-active-bg: rgba(124, 165, 231, 0.28);
+			--navbar-theme-toggle-active-border: rgba(172, 206, 255, 0.58);
+				--navbar-overlay: rgba(2, 8, 18, 0.56);
+				--navbar-mobile-bg: rgba(17, 24, 35, 0.66);
+				--navbar-mobile-border: rgba(140, 163, 201, 0.3);
 			--navbar-mobile-text: #ecf4ff;
-			--navbar-mobile-muted: rgba(177, 202, 241, 0.84);
-			--navbar-mobile-hover: rgba(93, 137, 208, 0.28);
-			--navbar-mobile-active: rgba(124, 172, 248, 0.34);
-			--navbar-mobile-shadow: 0 24px 60px rgba(3, 12, 31, 0.68);
+			--navbar-mobile-muted: rgba(191, 209, 236, 0.84);
+			--navbar-mobile-hover: rgba(132, 168, 228, 0.18);
+			--navbar-mobile-active: rgba(142, 180, 240, 0.28);
+			--navbar-mobile-shadow: 0 22px 56px rgba(0, 0, 0, 0.58);
 			--navbar-fab-bg:
-				radial-gradient(circle at 20% 13%, rgba(132, 176, 245, 0.35), transparent 52%),
-				linear-gradient(150deg, rgba(31, 55, 92, 0.72), rgba(20, 34, 58, 0.8)),
-				rgba(18, 33, 57, 0.72);
-			--navbar-fab-border: rgba(132, 174, 240, 0.5);
-			--navbar-fab-shadow: 0 18px 40px rgba(3, 11, 28, 0.64);
+				radial-gradient(circle at 21% 13%, rgba(156, 191, 248, 0.12), transparent 53%),
+				linear-gradient(152deg, rgba(30, 42, 62, 0.34), rgba(15, 22, 34, 0.38)),
+				rgba(16, 23, 35, 0.24);
+			--navbar-fab-border: rgba(141, 170, 216, 0.2);
+			--navbar-fab-shadow: 0 10px 24px rgba(1, 5, 14, 0.34);
 			--navbar-fab-open-bg:
-				radial-gradient(circle at 18% 12%, rgba(148, 190, 255, 0.42), transparent 50%),
-				linear-gradient(145deg, rgba(44, 74, 120, 0.74), rgba(23, 39, 64, 0.82)),
-				rgba(26, 46, 77, 0.76);
-			--navbar-fab-open-border: rgba(167, 202, 250, 0.66);
-			--navbar-fab-open-glow: 0 0 22px rgba(123, 170, 246, 0.5);
+				radial-gradient(circle at 20% 12%, rgba(169, 203, 255, 0.16), transparent 51%),
+				linear-gradient(148deg, rgba(43, 61, 89, 0.4), rgba(18, 27, 43, 0.44)),
+				rgba(20, 30, 46, 0.3);
+			--navbar-fab-open-border: rgba(182, 209, 247, 0.3);
+			--navbar-fab-open-glow: 0 0 10px rgba(124, 167, 236, 0.2);
 		}
 
 	.desktop-nav {
@@ -760,109 +775,6 @@
 		box-shadow: var(--navbar-dot-glow);
 	}
 
-	.desktop-auth-corner {
-		position: fixed;
-		top: 22px;
-		right: 20px;
-		z-index: 1100;
-	}
-
-	.desktop-avatar-btn {
-		height: 42px;
-		border-radius: 999px;
-		border: 1px solid var(--navbar-auth-border);
-		background: var(--navbar-auth-bg);
-		color: var(--navbar-auth-text);
-		font-family: 'Inter', sans-serif;
-		font-weight: 650;
-		cursor: pointer;
-		backdrop-filter: blur(12px) saturate(145%);
-		-webkit-backdrop-filter: blur(12px) saturate(145%);
-	}
-
-	.desktop-avatar-btn:hover {
-		border-color: var(--navbar-auth-hover-border);
-		background: var(--navbar-auth-hover-bg);
-	}
-
-	.desktop-avatar-btn {
-		min-width: 42px;
-		width: 42px;
-		border-radius: 999px;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 0;
-		overflow: hidden;
-	}
-
-	.desktop-avatar-btn img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-	}
-
-	.desktop-avatar-btn span {
-		font-size: 0.78rem;
-		font-weight: 700;
-	}
-
-	.desktop-user-menu {
-		margin-top: 0.5rem;
-		padding: 0.48rem;
-		width: 198px;
-		border-radius: 14px;
-		border: 1px solid var(--navbar-menu-border);
-		background: var(--navbar-menu-bg);
-		box-shadow: 0 16px 40px rgba(0, 0, 0, 0.62);
-		display: grid;
-		gap: 0.28rem;
-	}
-
-	.desktop-user-meta {
-		padding: 0.25rem 0.4rem 0.5rem;
-		border-bottom: 1px solid color-mix(in srgb, var(--navbar-menu-border) 70%, transparent);
-	}
-
-	.desktop-user-meta strong {
-		display: block;
-		color: var(--navbar-menu-text);
-		font-size: 0.82rem;
-		line-height: 1.2;
-	}
-
-	.desktop-user-meta small {
-		display: block;
-		color: var(--navbar-menu-muted);
-		font-size: 0.69rem;
-		font-family: 'JetBrains Mono', monospace;
-		margin-top: 0.2rem;
-	}
-
-	.desktop-user-menu button {
-		text-align: left;
-		border: none;
-		background: transparent;
-		color: var(--navbar-menu-text);
-		padding: 0.5rem 0.58rem;
-		border-radius: 9px;
-		cursor: pointer;
-		font-size: 0.82rem;
-		font-weight: 540;
-	}
-
-	.desktop-user-menu button:hover {
-		background: var(--navbar-menu-hover);
-	}
-
-	.desktop-user-menu button.danger {
-		color: #ffd3d8;
-	}
-
-	.desktop-user-menu button.danger:hover {
-		background: rgba(255, 82, 112, 0.2);
-	}
-
 	.holo-fab {
 		position: fixed;
 		top: 0;
@@ -921,7 +833,7 @@
 	.fab-logo {
 		width: 82%;
 		height: 82%;
-		opacity: 0.72;
+		opacity: 0.58;
 		filter: saturate(0.95) contrast(1.02);
 		user-select: none;
 		pointer-events: none;
@@ -953,6 +865,10 @@
 	}
 
 	.menu-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.55rem;
 		font-family: 'JetBrains Mono', monospace;
 		font-size: 0.6rem;
 		color: var(--navbar-mobile-muted);
@@ -960,6 +876,38 @@
 		border-bottom: 1px solid color-mix(in srgb, var(--navbar-mobile-border) 75%, transparent);
 		margin-bottom: 4px;
 		letter-spacing: 1px;
+	}
+
+	.menu-theme-toggle {
+		width: 1.75rem;
+		height: 1.75rem;
+		border-radius: 999px;
+		border: 1px solid var(--navbar-theme-toggle-border);
+		background: var(--navbar-theme-toggle-bg);
+		color: var(--navbar-theme-toggle-text);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		cursor: pointer;
+		transition:
+			border-color 0.2s ease,
+			background 0.2s ease,
+			transform 0.16s ease;
+	}
+
+	.menu-theme-toggle svg {
+		width: 13px;
+		height: 13px;
+	}
+
+	.menu-theme-toggle:hover {
+		transform: translateY(-1px);
+	}
+
+	.menu-theme-toggle.active {
+		background: var(--navbar-theme-toggle-active-bg);
+		border-color: var(--navbar-theme-toggle-active-border);
 	}
 
 	.mobile-link {
