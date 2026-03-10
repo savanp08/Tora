@@ -340,14 +340,12 @@
 				<button type="button" on:click|stopPropagation={() => closeMenuThen('toggleRoomSearch')}>
 					{showRoomSearch ? 'Hide search' : 'Search messages'}
 				</button>
-				<button type="button" on:click|stopPropagation={() => closeMenuThen('renameRoom')}>
-					Rename room
-				</button>
+				
 				<button
 					type="button"
 					on:click|stopPropagation={() => closeMenuThen('toggleBreakSelectionMode')}
 				>
-					{messageActionMode === 'break' ? 'Cancel Break Mode' : 'Start Break / New Topic'}
+					{messageActionMode === 'break' ? 'Cancel Break Mode' : 'Branch / Break'}
 				</button>
 				<button
 					type="button"
@@ -374,6 +372,9 @@
 					on:click|stopPropagation={() => closeMenuThen('toggleDeleteSelectionMode')}
 				>
 					{messageActionMode === 'delete' ? 'Cancel Delete Mode' : 'Delete Messages'}
+				</button>
+				<button type="button" on:click|stopPropagation={() => closeMenuThen('renameRoom')}>
+					Rename room
 				</button>
 				{#if isMember}
 					<button type="button" on:click|stopPropagation={() => closeMenuThen('leaveRoom')}>

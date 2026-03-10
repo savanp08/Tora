@@ -3287,6 +3287,7 @@
 		position: absolute;
 		left: 0;
 		right: 0;
+		max-width: 150px;
 		bottom: calc(100% + 8px);
 		z-index: 118;
 		border: 1px solid var(--border-default);
@@ -3306,6 +3307,7 @@
 		align-items: center;
 		justify-content: space-between;
 		width: 100%;
+		max-width: 150px;
 		border: none;
 		background: transparent;
 		border-radius: 8px;
