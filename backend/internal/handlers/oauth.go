@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -503,24 +502,8 @@ func resolveFrontendBaseURL() *url.URL {
 	return parsed
 }
 
-func oauthDebugEnabled() bool {
-	for _, key := range []string{"DEBUG_LOGS_ENABLED", "debug_logs_enabled"} {
-		raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-		switch raw {
-		case "1", "true", "yes", "on":
-			return true
-		case "0", "false", "no", "off":
-			return false
-		}
-	}
-	return false
-}
-
-func oauthDebugf(format string, args ...any) {
-	if !oauthDebugEnabled() {
-		return
-	}
-	log.Printf("[google-auth-debug] "+format, args...)
+func oauthDebugf(_ string, _ ...any) {
+	// Google OAuth debug logs intentionally disabled.
 }
 
 func maskEmailForDebug(raw string) string {

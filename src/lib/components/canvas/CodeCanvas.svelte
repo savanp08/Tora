@@ -4,7 +4,8 @@
 	import {
 		ExecutionManager,
 		type ExecutionOutputLine,
-		type ExecutionRunHandle
+		type ExecutionRunHandle,
+		type ExecutionWorkspaceFile
 	} from '$lib/utils/executionManager';
 	import { applyUpdate, encodeStateAsUpdate } from 'yjs';
 	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
@@ -1392,11 +1393,53 @@ Rules:
 		return '';
 	}
 
+	async function buildExecutionWorkspaceFiles(
+		activeRelativePath: string,
+		activeSource: string
+	): Promise<ExecutionWorkspaceFile[]> {
+		const normalizedActivePath = normalizeProjectName(activeRelativePath);
+		if (!normalizedActivePath) {
+			return [];
+		}
+		const workspaceFiles = await Promise.all(
+			fileTree
+				.filter((entry) => !entry.isDir)
+				.map(async (entry) => {
+					const normalizedPath = normalizeProjectName(entry.relativePath);
+					if (!normalizedPath) {
+						return null;
+					}
+					if (normalizedPath === normalizedActivePath) {
+						return {
+							name: normalizedPath,
+							content: activeSource
+						};
+					}
+					return {
+						name: normalizedPath,
+						content: await resolveCanvasAIFileContent(normalizedPath)
+					};
+				})
+		);
+
+		const normalizedWorkspaceFiles = workspaceFiles.filter(
+			(file): file is ExecutionWorkspaceFile => Boolean(file && file.name)
+		);
+		if (!normalizedWorkspaceFiles.some((file) => file.name === normalizedActivePath)) {
+			normalizedWorkspaceFiles.unshift({
+				name: normalizedActivePath,
+				content: activeSource
+			});
+		}
+		return normalizedWorkspaceFiles;
+	}
+
 	async function executeCode(
 		language: string,
 		source: string,
 		target: ProjectFileEntry,
-		stdin: string
+		stdin: string,
+		workspaceFiles: ExecutionWorkspaceFile[]
 	) {
 		if (!executionManager) {
 			throw new Error('Execution manager is not ready');
@@ -1405,8 +1448,11 @@ Rules:
 			throw new Error('Another execution is already running');
 		}
 		isRunInProgress = true;
-		runningFilePath = target.relativePath;
-		activeExecutionHandle = await executionManager.run(language, source, 30000, stdin);
+		runningFilePath = normalizeProjectName(target.relativePath || target.name);
+		activeExecutionHandle = await executionManager.run(language, source, 30000, stdin, {
+			activeFile: normalizeProjectName(target.relativePath || target.name),
+			workspaceFiles
+		});
 		removeExecutionOutputSubscription = activeExecutionHandle.subscribe((output) => {
 			writeExecutionLineToTerminal(output);
 		});
@@ -4785,7 +4831,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			}
 			const stdin = await resolveExecutionStdin();
 			const language = resolveExecutionLanguageForEntry(target);
-			await executeCode(language, source, target, stdin);
+			const activeRelativePath = normalizeProjectName(target.relativePath || target.name);
+			const workspaceFiles = await buildExecutionWorkspaceFiles(activeRelativePath, source);
+			await executeCode(language, source, target, stdin, workspaceFiles);
 			writeTerminalLine('\x1b[32m> Script finished.\x1b[0m');
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : 'Run failed';

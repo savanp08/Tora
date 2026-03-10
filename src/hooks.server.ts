@@ -4,7 +4,6 @@ import type { Handle } from '@sveltejs/kit';
 
 const AUTH_COOKIE_NAME = 'tora_auth';
 const FALLBACK_ROLE = 'member' as const;
-const AUTH_DEBUG_LOG_PREFIX = '[google-auth-route-debug]';
 
 type JwtPayload = {
 	userId?: unknown;
@@ -21,30 +20,8 @@ type AuthenticatedUser = {
 	role: 'admin' | 'member' | 'viewer';
 };
 
-function isAuthDebugEnabled() {
-	const privateEnv = env as Record<string, string | undefined>;
-	for (const key of ['DEBUG_LOGS_ENABLED', 'debug_logs_enabled']) {
-		const raw = (privateEnv[key] ?? '').trim().toLowerCase();
-		if (['1', 'true', 'yes', 'on'].includes(raw)) {
-			return true;
-		}
-		if (['0', 'false', 'no', 'off'].includes(raw)) {
-			return false;
-		}
-	}
-	return false;
-}
-
-function authDebugLog(event: string, payload?: Record<string, unknown>) {
-	if (!isAuthDebugEnabled()) {
-		return;
-	}
-	const timestamp = new Date().toISOString();
-	if (!payload) {
-		console.log(`${AUTH_DEBUG_LOG_PREFIX} ${timestamp} ${event}`);
-		return;
-	}
-	console.log(`${AUTH_DEBUG_LOG_PREFIX} ${timestamp} ${event}`, payload);
+function authDebugLog(_event: string, _payload?: Record<string, unknown>) {
+	// Auth route debug logs intentionally disabled.
 }
 
 function base64urlDecode(segment: string) {

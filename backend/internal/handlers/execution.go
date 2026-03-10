@@ -16,7 +16,11 @@ var DefaultExecutionManager = execution.NewExecutionManager()
 
 type codeExecutionRequest struct {
 	Language string `json:"language"`
-	Code     string `json:"code"`
+	Files    []struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	} `json:"files"`
+	MainFile string `json:"main_file"`
 	Stdin    string `json:"stdin"`
 }
 
@@ -66,26 +70,71 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decodedCodeBytes, decodeErr := base64.StdEncoding.DecodeString(req.Code)
-	if decodeErr != nil {
+	req.MainFile = strings.TrimSpace(req.MainFile)
+	if req.MainFile == "" {
 		recordExecutionStatus(req.Language, "error")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Code must be valid Base64"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "main_file is required"})
 		return
 	}
-	decodedCode := string(decodedCodeBytes)
-	selectedFilename := defaultSourceFilename(req.Language)
+
+	if len(req.Files) == 0 {
+		recordExecutionStatus(req.Language, "error")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "files are required"})
+		return
+	}
+
+	decodedFiles := make([]execution.ExecutionFile, 0, len(req.Files))
+	mainFileIndex := -1
+	for _, file := range req.Files {
+		fileName := strings.TrimSpace(file.Name)
+		if fileName == "" {
+			recordExecutionStatus(req.Language, "error")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "each file must include a name"})
+			return
+		}
+
+		decodedContent, decodeErr := base64.StdEncoding.DecodeString(file.Content)
+		if decodeErr != nil {
+			recordExecutionStatus(req.Language, "error")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "each file content must be valid Base64"})
+			return
+		}
+
+		if fileName == req.MainFile && mainFileIndex < 0 {
+			mainFileIndex = len(decodedFiles)
+		}
+		decodedFiles = append(decodedFiles, execution.ExecutionFile{
+			Name:    fileName,
+			Content: string(decodedContent),
+		})
+	}
+
+	if mainFileIndex < 0 {
+		recordExecutionStatus(req.Language, "error")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "main_file must match one of files[].name"})
+		return
+	}
+
+	if mainFileIndex > 0 {
+		mainFile := decodedFiles[mainFileIndex]
+		copy(decodedFiles[1:mainFileIndex+1], decodedFiles[0:mainFileIndex])
+		decodedFiles[0] = mainFile
+	}
 
 	executionRequest := execution.ExecutionRequest{
 		Language: req.Language,
 		Stdin:    req.Stdin,
-		Files: []execution.ExecutionFile{
-			{
-				Name:    selectedFilename,
-				Content: decodedCode,
-			},
-		},
+		Files:    decodedFiles,
 	}
 
 	response, err := DefaultExecutionManager.Execute(r.Context(), executionRequest)
@@ -132,29 +181,6 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(result)
-}
-
-func defaultSourceFilename(language string) string {
-	switch strings.ToLower(strings.TrimSpace(language)) {
-	case "java":
-		return "Main.java"
-	case "cpp", "c++":
-		return "main.cpp"
-	case "c":
-		return "main.c"
-	case "go", "golang":
-		return "main.go"
-	case "rust", "rs":
-		return "main.rs"
-	case "python", "py":
-		return "main.py"
-	case "typescript", "ts":
-		return "main.ts"
-	case "javascript", "js", "mjs", "cjs":
-		return "main.js"
-	default:
-		return "main.txt"
-	}
 }
 
 func parseExecutionResponse(body []byte) (codeExecutionResponse, error) {

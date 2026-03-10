@@ -2,13 +2,20 @@ const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 const EXECUTE_ENDPOINT = `${API_BASE}/api/execute`;
 
+type PythonWorkerCommand = 'SYNC_WORKSPACE' | 'RUN_CODE';
+
 type WorkerInboundMessage = {
-	code: string;
 	id: string;
+	code?: string;
+	command?: PythonWorkerCommand;
+	main_file?: string;
+	files?: ExecutionWorkspaceFile[] | Record<string, string>;
 };
 
 type WorkerOutboundMessage = {
 	id: string;
+	command?: PythonWorkerCommand;
+	phase?: 'synced';
 	status: 'running' | 'success' | 'error';
 	stream?: 'stdout' | 'stderr';
 	output?: string;
@@ -36,10 +43,10 @@ type RemoteExecutionStrategy = {
 	language: string;
 	aliases: string[];
 	runRemote: (
-		code: string,
 		language: string,
 		signal: AbortSignal,
-		stdin: string
+		stdin: string,
+		workspace: NormalizedExecutionWorkspace
 	) => Promise<RemoteExecutionPayload>;
 };
 
@@ -92,6 +99,31 @@ export type ExecutionRunHandle = {
 	cancel: () => void;
 };
 
+export type ExecutionWorkspaceFile = {
+	name: string;
+	content: string;
+};
+
+export type ExecutionWorkspaceInput = {
+	activeFile: string;
+	workspaceFiles: ExecutionWorkspaceFile[];
+};
+
+type NormalizedExecutionWorkspace = {
+	mainFile: string;
+	files: ExecutionWorkspaceFile[];
+};
+
+type RemoteExecutionRequest = {
+	language: string;
+	stdin: string;
+	main_file: string;
+	files: Array<{
+		name: string;
+		content: string;
+	}>;
+};
+
 class RemoteExecutionError extends Error {
 	readonly stdout: string;
 	readonly stderr: string;
@@ -117,7 +149,239 @@ function createExecutionId() {
 }
 
 function encodeCodeAsBase64(code: string) {
-	return btoa(unescape(encodeURIComponent(code)));
+	const text = String(code ?? '');
+	const bytes = new TextEncoder().encode(text);
+	let binary = '';
+	const chunkSize = 0x8000;
+	for (let index = 0; index < bytes.length; index += chunkSize) {
+		const chunk = bytes.subarray(index, index + chunkSize);
+		binary += String.fromCharCode(...chunk);
+	}
+	return btoa(binary);
+}
+
+function defaultSourceFilename(language: string) {
+	switch ((language || '').trim().toLowerCase()) {
+		case 'java':
+			return 'Main.java';
+		case 'cpp':
+		case 'c++':
+			return 'main.cpp';
+		case 'c':
+			return 'main.c';
+		case 'go':
+		case 'golang':
+			return 'main.go';
+		case 'rust':
+		case 'rs':
+			return 'main.rs';
+		case 'python':
+		case 'py':
+			return 'main.py';
+		case 'typescript':
+		case 'ts':
+			return 'main.ts';
+		case 'javascript':
+		case 'js':
+		case 'mjs':
+		case 'cjs':
+			return 'main.js';
+		default:
+			return 'main.txt';
+	}
+}
+
+function ensureMainFileFirst(files: ExecutionWorkspaceFile[], mainFile: string) {
+	const mainIndex = files.findIndex((file) => file.name === mainFile);
+	if (mainIndex <= 0) {
+		return files;
+	}
+	const ordered = files.slice();
+	const [mainEntry] = ordered.splice(mainIndex, 1);
+	ordered.unshift(mainEntry);
+	return ordered;
+}
+
+function resolveExecutionWorkspace(
+	language: string,
+	code: string,
+	input?: ExecutionWorkspaceInput
+): NormalizedExecutionWorkspace {
+	const normalizedLanguage = (language || '').trim().toLowerCase();
+	const defaultMainFile = defaultSourceFilename(normalizedLanguage);
+	const requestedMainFile = (input?.activeFile || '').trim();
+	const mainFile = requestedMainFile || defaultMainFile;
+	const nextFiles = (input?.workspaceFiles || [])
+		.map((file) => ({
+			name: (file?.name || '').trim(),
+			content: String(file?.content ?? '')
+		}))
+		.filter((file) => file.name.length > 0);
+
+	const normalizedCode = String(code ?? '');
+	const existingMainFileIndex = nextFiles.findIndex((file) => file.name === mainFile);
+	if (existingMainFileIndex >= 0) {
+		nextFiles[existingMainFileIndex] = {
+			name: mainFile,
+			content: normalizedCode
+		};
+	} else {
+		nextFiles.unshift({
+			name: mainFile,
+			content: normalizedCode
+		});
+	}
+
+	return {
+		mainFile,
+		files: ensureMainFileFirst(nextFiles, mainFile)
+	};
+}
+
+export function buildExecutionPayload(
+	language: string,
+	stdin: string,
+	activeFile: string,
+	workspaceFiles: ExecutionWorkspaceFile[]
+): RemoteExecutionRequest {
+	const normalizedLanguage = (language || '').trim().toLowerCase();
+	const normalizedMainFile = (activeFile || '').trim() || defaultSourceFilename(normalizedLanguage);
+	const normalizedWorkspaceFiles = (workspaceFiles || [])
+		.map((file) => ({
+			name: (file?.name || '').trim(),
+			content: String(file?.content ?? '')
+		}))
+		.filter((file) => file.name.length > 0);
+
+	const workspaceWithMain = ensureMainFileFirst(
+		normalizedWorkspaceFiles.some((file) => file.name === normalizedMainFile)
+			? normalizedWorkspaceFiles
+			: [{ name: normalizedMainFile, content: '' }, ...normalizedWorkspaceFiles],
+		normalizedMainFile
+	);
+
+	return {
+		language: normalizedLanguage,
+		stdin: String(stdin ?? ''),
+		main_file: normalizedMainFile,
+		files: workspaceWithMain.map((file) => ({
+			name: file.name,
+			content: encodeCodeAsBase64(file.content)
+		}))
+	};
+}
+
+type ExecutePythonWorkspaceOptions = {
+	signal?: AbortSignal;
+	executionId?: string;
+	onOutput?: (payload: { stream: 'stdout' | 'stderr'; output: string }) => void;
+};
+
+export async function executePythonWorkspace(
+	worker: Worker,
+	files: Record<string, string>,
+	activeFile: string,
+	options?: ExecutePythonWorkspaceOptions
+): Promise<RemoteExecutionPayload> {
+	const runId = options?.executionId || createExecutionId();
+	const normalizedActiveFile = (activeFile || '').trim();
+	if (!normalizedActiveFile) {
+		throw new Error('activeFile is required for Python workspace execution');
+	}
+
+	let stdout = '';
+	let stderr = '';
+	return await new Promise<RemoteExecutionPayload>((resolve, reject) => {
+		const signal = options?.signal;
+		let runTriggered = false;
+
+		const cleanup = () => {
+			worker.removeEventListener('message', onMessage);
+			worker.removeEventListener('error', onError);
+			signal?.removeEventListener('abort', onAbort);
+		};
+		const finishResolve = (payload: RemoteExecutionPayload) => {
+			cleanup();
+			resolve(payload);
+		};
+		const finishReject = (error: Error) => {
+			cleanup();
+			reject(error);
+		};
+
+		const onMessage = (event: MessageEvent<WorkerOutboundMessage>) => {
+			const payload = event.data;
+			if (!payload || payload.id !== runId) {
+				return;
+			}
+
+			if (payload.status === 'running' && payload.output) {
+				const stream: 'stdout' | 'stderr' = payload.stream === 'stderr' ? 'stderr' : 'stdout';
+				if (stream === 'stderr') {
+					stderr += payload.output;
+				} else {
+					stdout += payload.output;
+				}
+				options?.onOutput?.({
+					stream,
+					output: payload.output
+				});
+			}
+
+			if (
+				payload.command === 'SYNC_WORKSPACE' &&
+				payload.phase === 'synced' &&
+				payload.status === 'running'
+			) {
+				if (runTriggered) {
+					return;
+				}
+				runTriggered = true;
+				worker.postMessage({
+					id: runId,
+					command: 'RUN_CODE',
+					main_file: normalizedActiveFile
+				} satisfies WorkerInboundMessage);
+				return;
+			}
+
+			if (payload.status === 'success') {
+				finishResolve({
+					stdout: payload.stdout ?? stdout,
+					stderr: payload.stderr ?? stderr
+				});
+				return;
+			}
+
+			if (payload.status === 'error') {
+				const fallbackMessage = stderr || payload.error || 'Python execution failed';
+				finishReject(new Error((fallbackMessage || 'Python execution failed').trim()));
+			}
+		};
+		const onError = (event: ErrorEvent) => {
+			const message = event.message || 'Python worker crashed';
+			finishReject(new Error(message));
+		};
+		const onAbort = () => {
+			finishReject(new Error('Execution aborted'));
+		};
+
+		worker.addEventListener('message', onMessage);
+		worker.addEventListener('error', onError);
+		if (signal) {
+			if (signal.aborted) {
+				onAbort();
+				return;
+			}
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
+
+		worker.postMessage({
+			id: runId,
+			command: 'SYNC_WORKSPACE',
+			files
+		} satisfies WorkerInboundMessage);
+	});
 }
 
 export async function executeCodeWithRouter(
@@ -127,10 +391,17 @@ export async function executeCodeWithRouter(
 		pythonWorker?: Worker;
 		signal?: AbortSignal;
 		endpoint?: string;
+		stdin?: string;
+		activeFile?: string;
+		workspaceFiles?: ExecutionWorkspaceFile[];
 	}
 ): Promise<RoutedExecutionResult> {
 	const normalizedLanguage = (language || '').trim().toLowerCase();
 	const signal = options?.signal;
+	const workspace = resolveExecutionWorkspace(normalizedLanguage, code, {
+		activeFile: options?.activeFile || '',
+		workspaceFiles: options?.workspaceFiles || []
+	});
 	if (normalizedLanguage === 'python' || normalizedLanguage === 'py') {
 		let worker = options?.pythonWorker ?? null;
 		let ownsWorker = false;
@@ -140,98 +411,50 @@ export async function executeCodeWithRouter(
 			});
 			ownsWorker = true;
 		}
-
-		const runId = createExecutionId();
-		let stdout = '';
-		let stderr = '';
-		return await new Promise<RoutedExecutionResult>((resolve, reject) => {
-			if (!worker) {
-				reject(new Error('Python worker is not available'));
-				return;
+		if (!worker) {
+			throw new Error('Python worker is not available');
+		}
+		try {
+			const workspaceFileMap = Object.fromEntries(
+				workspace.files.map((file) => [file.name, file.content])
+			);
+			const result = await executePythonWorkspace(worker, workspaceFileMap, workspace.mainFile, {
+				signal
+			});
+			return {
+				output: result.stdout,
+				error: result.stderr
+			};
+		} finally {
+			if (ownsWorker) {
+				worker.terminate();
 			}
-			const cleanup = () => {
-				worker?.removeEventListener('message', onMessage);
-				worker?.removeEventListener('error', onError);
-				signal?.removeEventListener('abort', onAbort);
-				if (ownsWorker && worker) {
-					worker.terminate();
-				}
-			};
-			const finishResolve = (value: RoutedExecutionResult) => {
-				cleanup();
-				resolve(value);
-			};
-			const finishReject = (error: Error) => {
-				cleanup();
-				reject(error);
-			};
-			const onMessage = (event: MessageEvent<WorkerOutboundMessage>) => {
-				const payload = event.data;
-				if (!payload || payload.id !== runId) {
-					return;
-				}
-				if (payload.status === 'running') {
-					if (payload.stream === 'stderr') {
-						stderr += payload.output || '';
-					} else {
-						stdout += payload.output || '';
-					}
-					return;
-				}
-				if (payload.stdout) {
-					stdout = payload.stdout;
-				}
-				if (payload.stderr) {
-					stderr = payload.stderr;
-				}
-				if (payload.status === 'error') {
-					const errorMessage =
-						(payload.error || stderr || 'Python execution failed').trim() ||
-						'Python execution failed';
-					finishReject(new Error(errorMessage));
-					return;
-				}
-				finishResolve({
-					output: stdout,
-					error: stderr
-				});
-			};
-			const onError = (event: ErrorEvent) => {
-				const message = event.message || 'Python worker crashed';
-				finishReject(new Error(message));
-			};
-			const onAbort = () => {
-				finishReject(new Error('Execution aborted'));
-			};
-
-			worker.addEventListener('message', onMessage);
-			worker.addEventListener('error', onError);
-			if (signal) {
-				if (signal.aborted) {
-					onAbort();
-					return;
-				}
-				signal.addEventListener('abort', onAbort, { once: true });
-			}
-
-			worker.postMessage({
-				id: runId,
-				code
-			} satisfies WorkerInboundMessage);
-		});
+		}
 	}
 
-	if (normalizedLanguage === 'cpp' || normalizedLanguage === 'c' || normalizedLanguage === 'java') {
+	if (
+		normalizedLanguage === 'cpp' ||
+		normalizedLanguage === 'c++' ||
+		normalizedLanguage === 'c' ||
+		normalizedLanguage === 'java' ||
+		normalizedLanguage === 'go' ||
+		normalizedLanguage === 'golang' ||
+		normalizedLanguage === 'rust' ||
+		normalizedLanguage === 'rs'
+	) {
 		const endpoint = (options?.endpoint || EXECUTE_ENDPOINT).trim() || EXECUTE_ENDPOINT;
+		const requestPayload = buildExecutionPayload(
+			normalizedLanguage,
+			options?.stdin || '',
+			workspace.mainFile,
+			workspace.files
+		);
 		const response = await fetch(endpoint, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json'
 			},
-			body: JSON.stringify({
-				language: normalizedLanguage,
-				code: encodeCodeAsBase64(code)
-			}),
+			body: JSON.stringify(requestPayload),
 			signal
 		});
 		const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
@@ -285,31 +508,36 @@ export class ExecutionManager {
 				mode: 'remote',
 				language: 'cpp',
 				aliases: ['c++'],
-				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
+				runRemote: (language, signal, stdin, workspace) =>
+					this.runRemote(language, signal, stdin, workspace)
 			},
 			{
 				mode: 'remote',
 				language: 'c',
 				aliases: [],
-				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
+				runRemote: (language, signal, stdin, workspace) =>
+					this.runRemote(language, signal, stdin, workspace)
 			},
 			{
 				mode: 'remote',
 				language: 'java',
 				aliases: [],
-				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
+				runRemote: (language, signal, stdin, workspace) =>
+					this.runRemote(language, signal, stdin, workspace)
 			},
 			{
 				mode: 'remote',
 				language: 'go',
 				aliases: ['golang'],
-				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
+				runRemote: (language, signal, stdin, workspace) =>
+					this.runRemote(language, signal, stdin, workspace)
 			},
 			{
 				mode: 'remote',
 				language: 'rust',
 				aliases: ['rs'],
-				runRemote: (code, language, signal, stdin) => this.runRemote(code, language, signal, stdin)
+				runRemote: (language, signal, stdin, workspace) =>
+					this.runRemote(language, signal, stdin, workspace)
 			}
 		];
 
@@ -328,7 +556,8 @@ export class ExecutionManager {
 		language: string,
 		code: string,
 		timeoutMs = 5000,
-		stdin = ''
+		stdin = '',
+		workspaceInput?: ExecutionWorkspaceInput
 	): Promise<ExecutionRunHandle> {
 		const normalizedLanguage = this.normalizeLanguage(language);
 		const strategy = this.strategyByLanguage.get(normalizedLanguage);
@@ -338,6 +567,7 @@ export class ExecutionManager {
 			);
 		}
 		const runtimeLanguage = strategy.language;
+		const workspace = resolveExecutionWorkspace(normalizedLanguage, code, workspaceInput);
 		if (this.activeRunIdByRuntimeLanguage.has(runtimeLanguage)) {
 			throw new Error(
 				`Execution for ${runtimeLanguage} is already in progress. Wait for it to finish or cancel it first.`
@@ -382,20 +612,24 @@ export class ExecutionManager {
 		this.activeRunIdByRuntimeLanguage.set(runtimeLanguage, executionId);
 
 		if (strategy.mode === 'worker') {
-			worker?.postMessage({
-				code,
-				id: executionId
-			} satisfies WorkerInboundMessage);
+			if (runtimeLanguage === 'python' && worker) {
+				this.startPythonWorkspaceRun(worker, executionId, workspace);
+			} else {
+				worker?.postMessage({
+					code,
+					id: executionId
+				} satisfies WorkerInboundMessage);
+			}
 		} else {
 			const abortController = new AbortController();
 			context.abortController = abortController;
 			void this.executeRemoteRun(
 				context,
 				strategy,
-				code,
 				normalizedLanguage,
 				abortController.signal,
-				stdin
+				stdin,
+				workspace
 			);
 		}
 
@@ -442,6 +676,44 @@ export class ExecutionManager {
 		for (const alias of strategy.aliases) {
 			this.strategyByLanguage.set(alias, strategy);
 		}
+	}
+
+	private startPythonWorkspaceRun(
+		worker: Worker,
+		executionId: string,
+		workspace: NormalizedExecutionWorkspace
+	) {
+		const workspaceFileMap = Object.fromEntries(
+			workspace.files.map((file) => [file.name, file.content])
+		);
+		const onWorkspaceSynced = (event: MessageEvent<WorkerOutboundMessage>) => {
+			const payload = event.data;
+			if (!payload || payload.id !== executionId) {
+				return;
+			}
+			if (payload.command !== 'SYNC_WORKSPACE') {
+				return;
+			}
+			if (payload.status === 'error') {
+				worker.removeEventListener('message', onWorkspaceSynced);
+				return;
+			}
+			if (payload.phase !== 'synced' || payload.status !== 'running') {
+				return;
+			}
+			worker.removeEventListener('message', onWorkspaceSynced);
+			worker.postMessage({
+				id: executionId,
+				command: 'RUN_CODE',
+				main_file: workspace.mainFile
+			} satisfies WorkerInboundMessage);
+		};
+		worker.addEventListener('message', onWorkspaceSynced);
+		worker.postMessage({
+			id: executionId,
+			command: 'SYNC_WORKSPACE',
+			files: workspaceFileMap
+		} satisfies WorkerInboundMessage);
 	}
 
 	private normalizeLanguage(language: string) {
@@ -517,13 +789,13 @@ export class ExecutionManager {
 	private async executeRemoteRun(
 		context: RunContext,
 		strategy: RemoteExecutionStrategy,
-		code: string,
 		language: string,
 		signal: AbortSignal,
-		stdin: string
+		stdin: string,
+		workspace: NormalizedExecutionWorkspace
 	) {
 		try {
-			const remotePayload = await strategy.runRemote(code, language, signal, stdin);
+			const remotePayload = await strategy.runRemote(language, signal, stdin, workspace);
 			if (context.settled) {
 				return;
 			}
@@ -568,8 +840,13 @@ export class ExecutionManager {
 		}
 	}
 
-	private async runRemote(code: string, language: string, signal: AbortSignal, stdin: string) {
-		const base64Code = encodeCodeAsBase64(code);
+	private async runRemote(
+		language: string,
+		signal: AbortSignal,
+		stdin: string,
+		workspace: NormalizedExecutionWorkspace
+	) {
+		const requestPayload = buildExecutionPayload(language, stdin, workspace.mainFile, workspace.files);
 		let response: Response;
 		try {
 			response = await fetch(EXECUTE_ENDPOINT, {
@@ -577,11 +854,7 @@ export class ExecutionManager {
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({
-					language,
-					code: base64Code,
-					stdin
-				}),
+				body: JSON.stringify(requestPayload),
 				signal
 			});
 		} catch (error) {

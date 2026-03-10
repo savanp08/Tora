@@ -8,7 +8,6 @@
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
-	const OAUTH_CLIENT_LOG_PREFIX = '[google-auth-client]';
 
 	let email = '';
 	let password = '';
@@ -49,13 +48,8 @@
 
 	type OAuthParamsSource = 'hash' | 'search';
 
-	function oauthDebugLog(event: string, payload?: unknown) {
-		const timestamp = new Date().toISOString();
-		if (payload === undefined) {
-			console.log(`${OAUTH_CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
-			return;
-		}
-		console.log(`${OAUTH_CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
+	function oauthDebugLog(_event: string, _payload?: unknown) {
+		// Login/OAuth debug logs intentionally disabled.
 	}
 
 	function resolveSafeRedirect(rawPath: string | null) {

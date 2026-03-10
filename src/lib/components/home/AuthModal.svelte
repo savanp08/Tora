@@ -5,7 +5,6 @@
 	import { normalizeUsernameInput } from '$lib/utils/homeJoin';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
-	const CLIENT_LOG_PREFIX = '[auth-client]';
 
 	export let isOpen: boolean = false;
 	let isRegisterMode: boolean = false;
@@ -34,13 +33,8 @@
 		: 'Want to lock in a custom handle for this session?';
 	$: submitLabel = isLoading ? 'Processing...' : isRegisterMode ? 'Create Account' : 'Start Session';
 
-	function clientLog(event: string, payload?: unknown) {
-		const timestamp = new Date().toISOString();
-		if (payload === undefined) {
-			console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
-			return;
-		}
-		console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
+	function clientLog(_event: string, _payload?: unknown) {
+		// Auth modal debug logs intentionally disabled.
 	}
 
 	function close() {
