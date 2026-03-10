@@ -12,6 +12,8 @@ type PyodideRuntime = {
 	runPython: (code: string) => unknown;
 	FS: {
 		writeFile: (path: string, data: string) => void;
+		readFile: (path: string, options?: { encoding?: 'utf8' }) => string | Uint8Array;
+		readdir: (path: string) => string[];
 		unlink: (path: string) => void;
 		mkdirTree: (path: string) => void;
 		rmdir: (path: string) => void;
@@ -38,6 +40,7 @@ type PyodideWorkerMessage = {
 	error?: string;
 	stdout?: string;
 	stderr?: string;
+	artifacts?: WorkspaceFile[];
 };
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -275,6 +278,8 @@ async function runWorkspace(pyodide: PyodideRuntime, payload: PyodideExecuteMess
 		typeof payload.main_file === 'string' ? payload.main_file : ''
 	);
 	const mainFile = requestedMainFile || session.defaultMainFile;
+	const mainDirSeparator = mainFile.lastIndexOf('/');
+	const mainDir = mainDirSeparator > 0 ? mainFile.slice(0, mainDirSeparator) : '';
 	const mainEntry = session.files.find((file) => file.name === mainFile);
 	if (!mainEntry) {
 		throw new Error('main_file must match one of files[].name');
@@ -311,6 +316,56 @@ _globals = {'__name__': '__main__', '__file__': abs_main_file, '__builtins__': _
 exec(compile(_code, abs_main_file, 'exec'), _globals)
 `;
 		await pyodide.runPythonAsync(executeScript);
+		const artifactByName = new Map<string, string>();
+		const originalByName = new Map(session.files.map((file) => [file.name, file.content] as const));
+		const newlyCreatedFiles = new Set<string>();
+		for (const file of session.files) {
+			try {
+				const currentContent = pyodide.FS.readFile(file.name, { encoding: 'utf8' });
+				if (typeof currentContent === 'string' && currentContent !== file.content) {
+					artifactByName.set(file.name, currentContent);
+				}
+			} catch {
+				// Ignore missing files; user code may have deleted them.
+			}
+		}
+		try {
+			const discoveredEntries = pyodide.FS.readdir(mainDir || '.');
+			for (const entryName of discoveredEntries) {
+				if (entryName === '.' || entryName === '..') {
+					continue;
+				}
+				const discoveredPath = mainDir ? `${mainDir}/${entryName}` : entryName;
+				if (originalByName.has(discoveredPath) || artifactByName.has(discoveredPath)) {
+					continue;
+				}
+				try {
+					const discoveredContent = pyodide.FS.readFile(discoveredPath, { encoding: 'utf8' });
+					if (typeof discoveredContent === 'string') {
+						artifactByName.set(discoveredPath, discoveredContent);
+						newlyCreatedFiles.add(discoveredPath);
+					}
+				} catch {
+					// Ignore directories and non-readable paths.
+				}
+			}
+		} catch {
+			// Ignore directory scan errors and continue with collected artifacts.
+		}
+		const artifacts = Array.from(artifactByName.entries()).map(([name, content]) => ({
+			name,
+			content
+		}));
+		if (newlyCreatedFiles.size > 0) {
+			const mountedFiles = new Set(session.mounted.files);
+			for (const filePath of newlyCreatedFiles) {
+				if (mountedFiles.has(filePath)) {
+					continue;
+				}
+				session.mounted.files.push(filePath);
+				mountedFiles.add(filePath);
+			}
+		}
 		const buffers = readBuffers(pyodide);
 		emitBufferedOutput(payload.id, buffers);
 		emit({
@@ -318,7 +373,8 @@ exec(compile(_code, abs_main_file, 'exec'), _globals)
 			command: 'RUN_CODE',
 			status: 'success',
 			stdout: buffers.stdout,
-			stderr: buffers.stderr
+			stderr: buffers.stderr,
+			artifacts
 		});
 	} catch (error) {
 		let stdout = '';

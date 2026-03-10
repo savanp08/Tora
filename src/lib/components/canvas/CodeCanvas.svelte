@@ -1434,6 +1434,50 @@ Rules:
 		return normalizedWorkspaceFiles;
 	}
 
+	async function applyExecutionArtifacts(artifacts: ExecutionWorkspaceFile[]) {
+		if (!artifacts.length) {
+			return;
+		}
+		await ensureProjectDirectory();
+		const knownFiles = new Set(
+			fileTree
+				.filter((entry) => !entry.isDir)
+				.map((entry) => normalizeProjectName(entry.relativePath))
+				.filter(Boolean)
+		);
+		const upserts: Array<{ relativePath: string; isDir: boolean; content: string }> = [];
+		const createdFiles: string[] = [];
+		for (const artifact of artifacts) {
+			const normalizedPath = normalizeProjectName(artifact?.name || '');
+			if (!normalizedPath) {
+				continue;
+			}
+			const targetPath = toProjectPath(normalizedPath);
+			await ensureDirectoryPathExists(splitPath(targetPath).dir);
+			const nextContent = String(artifact?.content ?? '');
+			await getActiveFS().promises.writeFile(targetPath, nextContent);
+			upserts.push({
+				relativePath: normalizedPath,
+				isDir: false,
+				content: nextContent
+			});
+			if (!knownFiles.has(normalizedPath)) {
+				knownFiles.add(normalizedPath);
+				createdFiles.push(normalizedPath);
+			}
+			clearFileDirty(normalizedPath);
+		}
+		if (upserts.length === 0) {
+			return;
+		}
+		await upsertSharedEntries(upserts);
+		await refreshFileTree();
+		for (const relativePath of createdFiles) {
+			ensureTabOpen(relativePath);
+		}
+		scheduleCanvasSnapshotSave();
+	}
+
 	async function executeCode(
 		language: string,
 		source: string,
@@ -1451,7 +1495,13 @@ Rules:
 		runningFilePath = normalizeProjectName(target.relativePath || target.name);
 		activeExecutionHandle = await executionManager.run(language, source, 30000, stdin, {
 			activeFile: normalizeProjectName(target.relativePath || target.name),
-			workspaceFiles
+			workspaceFiles,
+			onArtifacts: (artifacts) => {
+				void applyExecutionArtifacts(artifacts).catch((error) => {
+					fileExplorerError =
+						error instanceof Error ? error.message : 'Failed to apply Python artifacts';
+				});
+			}
 		});
 		removeExecutionOutputSubscription = activeExecutionHandle.subscribe((output) => {
 			writeExecutionLineToTerminal(output);

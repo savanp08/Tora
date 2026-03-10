@@ -5,6 +5,10 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = fileURLToPath(new URL('.', import.meta.url));
+const crossOriginIsolationHeaders = {
+	'Cross-Origin-Embedder-Policy': 'require-corp',
+	'Cross-Origin-Opener-Policy': 'same-origin'
+} as const;
 
 export default defineConfig({
 	plugins: [
@@ -13,10 +17,14 @@ export default defineConfig({
 	],
 	server: {
 		host: true, // Enable this if you want to access the dev server from other devices on the network
+		headers: crossOriginIsolationHeaders,
 		fs: {
 			// Allow importing shared root config (e.g. /limits.ts) from src/.
 			allow: [projectRoot]
 		}
+	},
+	preview: {
+		headers: crossOriginIsolationHeaders
 	},
 
 	test: {

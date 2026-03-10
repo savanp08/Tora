@@ -1,8 +1,14 @@
+import { executeNodeWorkspace } from './webcontainer';
+
 const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 const EXECUTE_ENDPOINT = `${API_BASE}/api/execute`;
 
 type PythonWorkerCommand = 'SYNC_WORKSPACE' | 'RUN_CODE';
+type ExecutionArtifact = {
+	name: string;
+	content: string;
+};
 
 type WorkerInboundMessage = {
 	id: string;
@@ -22,6 +28,7 @@ type WorkerOutboundMessage = {
 	error?: string;
 	stdout?: string;
 	stderr?: string;
+	artifacts?: ExecutionArtifact[];
 };
 
 type WorkerFactory = () => Promise<Worker>;
@@ -29,6 +36,7 @@ type WorkerFactory = () => Promise<Worker>;
 type RemoteExecutionPayload = {
 	stdout: string;
 	stderr: string;
+	artifacts?: ExecutionArtifact[];
 };
 
 type WorkerExecutionStrategy = {
@@ -66,6 +74,7 @@ type RunContext = {
 		stdout: string;
 		stderr: string;
 	};
+	onArtifacts?: (files: ExecutionArtifact[]) => void;
 	settled: boolean;
 };
 
@@ -99,14 +108,13 @@ export type ExecutionRunHandle = {
 	cancel: () => void;
 };
 
-export type ExecutionWorkspaceFile = {
-	name: string;
-	content: string;
-};
+export type ExecutionWorkspaceFile = ExecutionArtifact;
+export type ExecutionArtifactsCallback = (files: ExecutionWorkspaceFile[]) => void;
 
 export type ExecutionWorkspaceInput = {
 	activeFile: string;
 	workspaceFiles: ExecutionWorkspaceFile[];
+	onArtifacts?: ExecutionArtifactsCallback;
 };
 
 type NormalizedExecutionWorkspace = {
@@ -148,6 +156,119 @@ function createExecutionId() {
 	return `exec-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function createAbortError() {
+	const error = new Error('Execution aborted') as Error & { name: string };
+	error.name = 'AbortError';
+	return error;
+}
+
+function isCrossOriginIsolatedPage() {
+	return typeof crossOriginIsolated === 'boolean' && crossOriginIsolated;
+}
+
+function usesNodeRuntimeSyntax(source: string) {
+	const text = String(source || '');
+	if (!text) {
+		return false;
+	}
+	return (
+		/\brequire\s*\(/.test(text) ||
+		/\bprocess\b/.test(text) ||
+		/\b__dirname\b/.test(text) ||
+		/\b__filename\b/.test(text) ||
+		/\bnode:/.test(text) ||
+		/\bfrom\s+['"](?:node:)?(?:fs|path|os|crypto|child_process|http|https|url|util)['"]/.test(text)
+	);
+}
+
+function crossOriginIsolationRequiredError() {
+	return new Error(
+		'Node-style JavaScript execution requires WebContainer, but this page is not cross-origin isolated (`crossOriginIsolated=false`). Use COOP/COEP headers, open the app directly (not in an iframe), use localhost or HTTPS, then restart dev server and hard refresh.'
+	);
+}
+
+function resolveMainWorkspaceSource(workspace: NormalizedExecutionWorkspace, fallbackCode = '') {
+	const mainFile = workspace.mainFile;
+	const entry = workspace.files.find((file) => file.name === mainFile);
+	if (entry) {
+		return String(entry.content ?? '');
+	}
+	return String(fallbackCode ?? '');
+}
+
+async function executeJavaScriptWorkerFallback(
+	code: string,
+	options?: {
+		signal?: AbortSignal;
+	}
+) {
+	const runId = createExecutionId();
+	const { default: JavaScriptWorker } = await import('$lib/workers/javascript.worker?worker');
+	const worker = new JavaScriptWorker();
+	let stdout = '';
+	let stderr = '';
+
+	return await new Promise<RemoteExecutionPayload>((resolve, reject) => {
+		const signal = options?.signal;
+		const cleanup = () => {
+			worker.removeEventListener('message', onMessage);
+			worker.removeEventListener('error', onError);
+			signal?.removeEventListener('abort', onAbort);
+			worker.terminate();
+		};
+		const onAbort = () => {
+			cleanup();
+			reject(createAbortError());
+		};
+		const onError = (event: ErrorEvent) => {
+			cleanup();
+			reject(new Error(event.message || 'JavaScript worker crashed'));
+		};
+		const onMessage = (event: MessageEvent<WorkerOutboundMessage>) => {
+			const payload = event.data;
+			if (!payload || payload.id !== runId) {
+				return;
+			}
+			if (payload.status === 'running' && payload.output) {
+				if (payload.stream === 'stderr') {
+					stderr += payload.output;
+				} else {
+					stdout += payload.output;
+				}
+				return;
+			}
+			if (payload.status === 'success') {
+				cleanup();
+				resolve({
+					stdout,
+					stderr
+				});
+				return;
+			}
+			if (payload.status === 'error') {
+				const message =
+					(payload.error || stderr || 'JavaScript execution failed in fallback runtime').trim();
+				cleanup();
+				reject(new RemoteExecutionError(message, stdout, stderr));
+			}
+		};
+
+		worker.addEventListener('message', onMessage);
+		worker.addEventListener('error', onError);
+		if (signal) {
+			if (signal.aborted) {
+				onAbort();
+				return;
+			}
+			signal.addEventListener('abort', onAbort, { once: true });
+		}
+		worker.postMessage({
+			id: runId,
+			code: String(code ?? '')
+		});
+	});
+}
+
 function encodeCodeAsBase64(code: string) {
 	const text = String(code ?? '');
 	const bytes = new TextEncoder().encode(text);
@@ -183,6 +304,7 @@ function defaultSourceFilename(language: string) {
 			return 'main.ts';
 		case 'javascript':
 		case 'js':
+		case 'node':
 		case 'mjs':
 		case 'cjs':
 			return 'main.js';
@@ -286,6 +408,7 @@ type ExecutePythonWorkspaceOptions = {
 	signal?: AbortSignal;
 	executionId?: string;
 	onOutput?: (payload: { stream: 'stdout' | 'stderr'; output: string }) => void;
+	onArtifacts?: ExecutionArtifactsCallback;
 };
 
 export async function executePythonWorkspace(
@@ -357,6 +480,22 @@ export async function executePythonWorkspace(
 			}
 
 			if (payload.status === 'success') {
+				const artifacts =
+					Array.isArray(payload.artifacts) && payload.artifacts.length > 0
+						? payload.artifacts
+								.map((file) => ({
+									name: (file?.name || '').trim(),
+									content: String(file?.content ?? '')
+								}))
+								.filter((file) => file.name.length > 0)
+						: [];
+				if (artifacts.length > 0 && options?.onArtifacts) {
+					try {
+						options.onArtifacts(artifacts);
+					} catch {
+						// Ignore artifact callback errors and allow execution response to resolve.
+					}
+				}
 				finishResolve({
 					stdout: payload.stdout ?? stdout,
 					stderr: payload.stderr ?? stderr
@@ -405,6 +544,7 @@ export async function executeCodeWithRouter(
 		stdin?: string;
 		activeFile?: string;
 		workspaceFiles?: ExecutionWorkspaceFile[];
+		onArtifacts?: ExecutionArtifactsCallback;
 	}
 ): Promise<RoutedExecutionResult> {
 	const normalizedLanguage = (language || '').trim().toLowerCase();
@@ -430,7 +570,8 @@ export async function executeCodeWithRouter(
 				workspace.files.map((file) => [file.name, file.content])
 			);
 			const result = await executePythonWorkspace(worker, workspaceFileMap, workspace.mainFile, {
-				signal
+				signal,
+				onArtifacts: options?.onArtifacts
 			});
 			return {
 				output: result.stdout,
@@ -441,6 +582,49 @@ export async function executeCodeWithRouter(
 				worker.terminate();
 			}
 		}
+	}
+
+	if (
+		normalizedLanguage === 'javascript' ||
+		normalizedLanguage === 'js' ||
+		normalizedLanguage === 'node' ||
+		normalizedLanguage === 'mjs' ||
+		normalizedLanguage === 'cjs'
+	) {
+		if (signal?.aborted) {
+			throw createAbortError();
+		}
+		if (!isCrossOriginIsolatedPage()) {
+			const fallbackCode = resolveMainWorkspaceSource(workspace, code);
+			if (usesNodeRuntimeSyntax(fallbackCode)) {
+				throw crossOriginIsolationRequiredError();
+			}
+			const fallbackResult = await executeJavaScriptWorkerFallback(fallbackCode, { signal });
+			return {
+				output: fallbackResult.stdout,
+				error: fallbackResult.stderr
+			};
+		}
+		const result = await executeNodeWorkspace(workspace.files, workspace.mainFile);
+		if (signal?.aborted) {
+			throw createAbortError();
+		}
+		if (result.exitCode !== 0) {
+			const failureMessage =
+				result.stderr.trim() || `JavaScript execution failed (exit code ${result.exitCode})`;
+			throw new RemoteExecutionError(failureMessage, result.stdout, result.stderr);
+		}
+		if (result.artifacts.length > 0 && options?.onArtifacts) {
+			try {
+				options.onArtifacts(result.artifacts);
+			} catch {
+				// Ignore artifact callback failures and keep the execution result.
+			}
+		}
+		return {
+			output: result.stdout,
+			error: result.stderr
+		};
 	}
 
 	if (
@@ -504,14 +688,12 @@ export class ExecutionManager {
 					type: 'module'
 				})
 		};
-		const javascriptStrategy: WorkerExecutionStrategy = {
-			mode: 'worker',
+		const webcontainerStrategy: RemoteExecutionStrategy = {
+			mode: 'remote',
 			language: 'javascript',
-			aliases: ['js', 'mjs', 'cjs'],
-			workerFactory: async () => {
-				const { default: JavaScriptWorker } = await import('$lib/workers/javascript.worker?worker');
-				return new JavaScriptWorker();
-			}
+			aliases: ['js', 'node', 'mjs', 'cjs'],
+			runRemote: (_language, signal, _stdin, workspace) =>
+				this.runJavaScriptWorkspace(signal, workspace)
 		};
 
 		const remoteStrategies: RemoteExecutionStrategy[] = [
@@ -553,7 +735,7 @@ export class ExecutionManager {
 		];
 
 		this.registerStrategy(pythonStrategy);
-		this.registerStrategy(javascriptStrategy);
+		this.registerStrategy(webcontainerStrategy);
 		for (const strategy of remoteStrategies) {
 			this.registerStrategy(strategy);
 		}
@@ -612,6 +794,7 @@ export class ExecutionManager {
 				stdout: '',
 				stderr: ''
 			},
+			onArtifacts: workspaceInput?.onArtifacts,
 			settled: false
 		};
 
@@ -783,6 +966,22 @@ export class ExecutionManager {
 			this.streamOutput(context, message.output, message.status, stream);
 		}
 		if (message.status === 'success') {
+			const artifacts =
+				Array.isArray(message.artifacts) && message.artifacts.length > 0
+					? message.artifacts
+							.map((file) => ({
+								name: (file?.name || '').trim(),
+								content: String(file?.content ?? '')
+							}))
+							.filter((file) => file.name.length > 0)
+					: [];
+			if (artifacts.length > 0 && context.onArtifacts) {
+				try {
+					context.onArtifacts(artifacts);
+				} catch {
+					// Ignore callback errors so terminal output + success status still propagate.
+				}
+			}
 			this.flushBufferedOutput(context, 'success', 'stdout');
 			this.flushBufferedOutput(context, 'success', 'stderr');
 			this.finishWithSuccess(context);
@@ -809,6 +1008,22 @@ export class ExecutionManager {
 			const remotePayload = await strategy.runRemote(language, signal, stdin, workspace);
 			if (context.settled) {
 				return;
+			}
+			const artifacts =
+				Array.isArray(remotePayload.artifacts) && remotePayload.artifacts.length > 0
+					? remotePayload.artifacts
+							.map((file) => ({
+								name: (file?.name || '').trim(),
+								content: String(file?.content ?? '')
+							}))
+							.filter((file) => file.name.length > 0)
+					: [];
+			if (artifacts.length > 0 && context.onArtifacts) {
+				try {
+					context.onArtifacts(artifacts);
+				} catch {
+					// Ignore callback errors so execution output still completes.
+				}
 			}
 			if (remotePayload.stdout) {
 				this.streamOutput(context, remotePayload.stdout, 'running', 'stdout');
@@ -849,6 +1064,33 @@ export class ExecutionManager {
 			this.emitLine(context, errorMessage, 'error', 'stderr');
 			this.finishWithError(context, new Error(errorMessage));
 		}
+	}
+
+	private async runJavaScriptWorkspace(signal: AbortSignal, workspace: NormalizedExecutionWorkspace) {
+		if (signal.aborted) {
+			throw createAbortError();
+		}
+		if (!isCrossOriginIsolatedPage()) {
+			const fallbackCode = resolveMainWorkspaceSource(workspace);
+			if (usesNodeRuntimeSyntax(fallbackCode)) {
+				throw crossOriginIsolationRequiredError();
+			}
+			return await executeJavaScriptWorkerFallback(fallbackCode, { signal });
+		}
+		const result = await executeNodeWorkspace(workspace.files, workspace.mainFile);
+		if (signal.aborted) {
+			throw createAbortError();
+		}
+		if (result.exitCode !== 0) {
+			const failureMessage =
+				result.stderr.trim() || `JavaScript execution failed (exit code ${result.exitCode})`;
+			throw new RemoteExecutionError(failureMessage, result.stdout, result.stderr);
+		}
+		return {
+			stdout: result.stdout,
+			stderr: result.stderr,
+			artifacts: result.artifacts
+		} satisfies RemoteExecutionPayload;
 	}
 
 	private async runRemote(
