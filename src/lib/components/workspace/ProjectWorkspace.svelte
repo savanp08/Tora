@@ -8,6 +8,7 @@
 	import TableBoard from './TableBoard.svelte';
 	import ActivityFeedPanel from './ActivityFeedPanel.svelte';
 	import { currentUser } from '$lib/store';
+	import type { OnlineMember } from '$lib/types/chat';
 
 	const dispatch = createEventDispatcher<{ close: void }>();
 	import {
@@ -26,6 +27,7 @@
 
 	export let roomId = '';
 	export let canEdit = true;
+	export let onlineMembers: OnlineMember[] = [];
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
@@ -234,14 +236,14 @@
 				{:else if $activeProjectTab === 'overview'}
 					<TimelineBoard />
 				{:else if $activeProjectTab === 'tasks'}
-					<TaskBoard {roomId} {canEdit} />
+					<TaskBoard {roomId} {canEdit} {onlineMembers} />
 				{:else if $activeProjectTab === 'progress'}
-					<ProgressGanttTab />
+					<ProgressGanttTab {onlineMembers} />
 				{:else if $activeProjectTab === 'table'}
 					<TableBoard />
 				{:else}
 					<!-- tora_ai -->
-					<ToraAIPanel {roomId} />
+					<ToraAIPanel {roomId} contextKey="taskboard" />
 				{/if}
 			</main>
 		</div>

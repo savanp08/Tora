@@ -26,6 +26,8 @@ type RoomTaskRecord = {
 	title: string;
 	description: string;
 	status: string;
+	budget?: number;
+	actualCost?: number;
 	sprintName: string;
 	statusActorID: string;
 	statusActorName: string;
@@ -38,6 +40,8 @@ type ParsedTaskMetadata = {
 	cleanDescription: string;
 	type: string;
 	effortScore: number;
+	budget: number;
+	actualCost: number;
 	sprintStartDate: string;
 	sprintEndDate: string;
 	durationUnit: TimelineTaskDurationUnit;
@@ -53,6 +57,10 @@ type TimelineSprintAccumulator = {
 };
 
 export type ProjectTab = 'overview' | 'tasks' | 'progress' | 'table' | 'tora_ai';
+export type AITimelineResult = {
+	timeline: ProjectTimeline;
+	assistantReply: string;
+};
 
 // ─── AI Output Format Schema (injected into every AI prompt) ─────────────────
 // This tells the AI model exactly what JSON structure to return so the frontend
@@ -61,37 +69,42 @@ export type ProjectTab = 'overview' | 'tasks' | 'progress' | 'table' | 'tora_ai'
 export const AI_TIMELINE_FORMAT_HINT = `
 [OUTPUT FORMAT – return ONLY valid JSON, no markdown, no extra text]
 {
-  "project_name": "string",
-  "description": "string",
-  "tech_stack": ["string"],
-  "target_audience": "string",
-  "estimated_cost": "$N,NNN",
-  "budget_total": number,
-  "roles_needed": ["string"],
-  "sprints": [
-    {
-      "id": "sprint-N",
-      "name": "Sprint N: Label",
-      "start_date": "YYYY-MM-DD",
-      "end_date": "YYYY-MM-DD",
-      "goal": "one-line sprint goal",
-      "budget_allocated": number,
-      "tasks": [
-        {
-          "id": "t-N-N",
-          "title": "string",
-          "status": "todo | in_progress | done",
-          "priority": "critical | high | medium | low",
-          "effort_score": 1-10,
-          "type": "backend | frontend | design | qa | planning | strategy | general",
-          "assignee": "Role or Name",
-          "description": "string",
-          "duration_value": number,
-          "duration_unit": "days | hours"
-        }
-      ]
-    }
-  ]
+  "assistant_reply": "short user-facing explanation of what was generated/changed; tone must be professional, friendly, lightly witty/sarcastic, and never dismissive or arrogant",
+  "timeline": {
+    "project_name": "string",
+    "description": "string",
+    "tech_stack": ["string"],
+    "target_audience": "string",
+    "estimated_cost": "$N,NNN",
+    "budget_total": number,
+    "roles_needed": ["string"],
+    "sprints": [
+      {
+        "id": "sprint-N",
+        "name": "Sprint N: Label",
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD",
+        "goal": "one-line sprint goal",
+        "budget_allocated": number,
+        "tasks": [
+          {
+            "id": "t-N-N",
+            "title": "string",
+            "status": "todo | in_progress | done",
+            "priority": "critical | high | medium | low",
+            "effort_score": 1-10,
+            "type": "backend | frontend | design | qa | planning | strategy | general",
+            "assignee": "Role or Name",
+            "description": "string",
+            "budget": number,
+            "actual_cost": number,
+            "duration_value": number,
+            "duration_unit": "days | hours"
+          }
+        ]
+      }
+    ]
+  }
 }
 [END FORMAT]
 `.trim();
@@ -101,6 +114,7 @@ export const timelineLoading = writable(false);
 export const timelineError = writable('');
 export const activeProjectTab = writable<ProjectTab>('overview');
 export const isProjectNew = writable<boolean>(true);
+export const lastAIAssistantReply = writable('');
 
 let activeTimelineRoomId = '';
 let activeTimelineLoadToken = 0;
@@ -191,6 +205,23 @@ function normalizeTaskPriority(value: unknown): TimelineTaskPriority | undefined
 	return undefined;
 }
 
+function normalizeTaskBudget(value: unknown): number | undefined {
+	if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+		return value;
+	}
+	if (typeof value === 'string') {
+		const match = value.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+		if (!match) {
+			return undefined;
+		}
+		const parsed = Number(match[0]);
+		if (Number.isFinite(parsed) && parsed >= 0) {
+			return parsed;
+		}
+	}
+	return undefined;
+}
+
 function normalizeTask(raw: unknown, fallbackID: string): TimelineTask | null {
 	const source = toRecord(raw);
 	if (!source) {
@@ -208,6 +239,10 @@ function normalizeTask(raw: unknown, fallbackID: string): TimelineTask | null {
 		source.duration_value ?? source.durationValue,
 		durationUnit
 	);
+	const budget = normalizeTaskBudget(source.budget ?? source.task_budget ?? source.taskBudget);
+	const actualCost = normalizeTaskBudget(
+		source.actual_cost ?? source.actualCost ?? source.spent_cost ?? source.spentCost
+	);
 	const priority = normalizeTaskPriority(source.priority);
 	const assignee = toStringValue(source.assignee) || undefined;
 	const statusActorID = toStringValue(source.status_actor_id ?? source.statusActorId);
@@ -219,6 +254,8 @@ function normalizeTask(raw: unknown, fallbackID: string): TimelineTask | null {
 		title,
 		status: normalizeTaskStatus(source.status),
 		effort_score: effort,
+		budget,
+		actual_cost: actualCost,
 		type: toStringValue(source.type) || 'general',
 		priority,
 		assignee,
@@ -377,6 +414,14 @@ function normalizeRoomTaskRecord(raw: unknown): RoomTaskRecord | null {
 		title,
 		description: toStringValue(source.description),
 		status: toStringValue(source.status),
+		budget: normalizeTaskBudget(source.budget ?? source.task_budget ?? source.taskBudget),
+		actualCost: normalizeTaskBudget(
+			source.actual_cost ??
+				source.actualCost ??
+				source.spent ??
+				source.spent_cost ??
+				source.spentCost
+		),
 		sprintName: toStringValue(source.sprint_name ?? source.sprintName),
 		statusActorID: toStringValue(source.status_actor_id ?? source.statusActorId),
 		statusActorName: toStringValue(source.status_actor_name ?? source.statusActorName),
@@ -393,6 +438,8 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 			cleanDescription: '',
 			type: 'general',
 			effortScore: 3,
+			budget: 0,
+			actualCost: 0,
 			sprintStartDate: '',
 			sprintEndDate: '',
 			durationUnit: 'days',
@@ -406,6 +453,8 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 			cleanDescription: trimmed,
 			type: 'general',
 			effortScore: 3,
+			budget: 0,
+			actualCost: 0,
 			sprintStartDate: '',
 			sprintEndDate: '',
 			durationUnit: 'days',
@@ -415,6 +464,8 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 
 	let parsedType = 'general';
 	let parsedEffortScore = 3;
+	let parsedBudget = 0;
+	let parsedActualCost = 0;
 	let sprintStartDate = '';
 	let sprintEndDate = '';
 	let parsedDurationUnit: TimelineTaskDurationUnit = 'days';
@@ -435,6 +486,20 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 			const numeric = Number(rawValue);
 			if (Number.isFinite(numeric)) {
 				parsedEffortScore = Math.max(1, Math.min(10, Math.floor(numeric)));
+			}
+			continue;
+		}
+		if (key === 'budget') {
+			const parsed = normalizeTaskBudget(rawValue);
+			if (typeof parsed === 'number') {
+				parsedBudget = parsed;
+			}
+			continue;
+		}
+		if (key === 'actual cost' || key === 'actual_cost' || key === 'spent' || key === 'cost') {
+			const parsed = normalizeTaskBudget(rawValue);
+			if (typeof parsed === 'number') {
+				parsedActualCost = parsed;
 			}
 			continue;
 		}
@@ -459,6 +524,8 @@ function parseTaskMetadata(description: string): ParsedTaskMetadata {
 		cleanDescription: trimmed.slice(0, metadataMatch.index).trim(),
 		type: parsedType,
 		effortScore: parsedEffortScore,
+		budget: parsedBudget,
+		actualCost: parsedActualCost,
 		sprintStartDate,
 		sprintEndDate,
 		durationUnit: parsedDurationUnit,
@@ -503,11 +570,23 @@ function buildTimelineFromRoomTasks(
 			existing.endDate = metadata.sprintEndDate;
 		}
 		existing.earliestCreatedAt = Math.min(existing.earliestCreatedAt, taskRecord.createdAt);
+		const resolvedBudget =
+			typeof taskRecord.budget === 'number' && Number.isFinite(taskRecord.budget) && taskRecord.budget > 0
+				? taskRecord.budget
+				: metadata.budget;
+		const resolvedActualCost =
+			typeof taskRecord.actualCost === 'number' &&
+			Number.isFinite(taskRecord.actualCost) &&
+			taskRecord.actualCost >= 0
+				? taskRecord.actualCost
+				: metadata.actualCost;
 		existing.tasks.push({
 			id: taskRecord.id,
 			title: taskRecord.title,
 			status: normalizeTaskStatus(taskRecord.status),
 			effort_score: metadata.effortScore,
+			budget: resolvedBudget > 0 ? resolvedBudget : undefined,
+			actual_cost: resolvedActualCost >= 0 ? resolvedActualCost : undefined,
 			type: metadata.type,
 			status_actor_id: taskRecord.statusActorID || undefined,
 			status_actor_name: taskRecord.statusActorName || undefined,
@@ -547,11 +626,39 @@ function buildTimelineFromRoomTasks(
 		return null;
 	}
 
+	const allTasks = sprints.flatMap((sprint) => sprint.tasks);
+	const budgetTotal = allTasks.reduce(
+		(sum, task) =>
+			sum +
+			(typeof task.budget === 'number' && Number.isFinite(task.budget) && task.budget > 0
+				? task.budget
+				: 0),
+		0
+	);
+	const budgetSpent = allTasks.reduce(
+		(sum, task) =>
+			sum +
+			(typeof task.actual_cost === 'number' &&
+			Number.isFinite(task.actual_cost) &&
+			task.actual_cost >= 0
+				? task.actual_cost
+				: 0),
+		0
+	);
+	const hasAnySpentData = allTasks.some(
+		(task) =>
+			typeof task.actual_cost === 'number' &&
+			Number.isFinite(task.actual_cost) &&
+			task.actual_cost >= 0
+	);
+
 	return {
 		project_name: fallbackProjectName,
 		tech_stack: [],
 		target_audience: '',
 		estimated_cost: '',
+		budget_total: budgetTotal > 0 ? budgetTotal : undefined,
+		budget_spent: hasAnySpentData ? budgetSpent : undefined,
 		roles_needed: [],
 		is_partial: false,
 		missing_sprints: [],
@@ -680,8 +787,40 @@ export function setProjectTimeline(value: ProjectTimeline | null) {
 	isProjectNew.set(false);
 }
 
+function extractTimelinePayloadFromAIResponse(payload: unknown): unknown {
+	const source = toRecord(payload);
+	if (!source) {
+		return payload;
+	}
+
+	const nestedCandidates = [
+		source.timeline,
+		source.project_timeline,
+		source.projectTimeline,
+		source.project
+	];
+	for (const candidate of nestedCandidates) {
+		const candidateRecord = toRecord(candidate);
+		if (candidateRecord && Array.isArray(candidateRecord.sprints)) {
+			return candidate;
+		}
+	}
+	if (Array.isArray(source.sprints)) {
+		return source;
+	}
+	return payload;
+}
+
+function extractAssistantReplyFromAIResponse(payload: unknown) {
+	const source = toRecord(payload);
+	if (!source) {
+		return '';
+	}
+	return toStringValue(source.assistant_reply ?? source.assistantReply);
+}
+
 export function applyTimelinePayload(payload: unknown) {
-	const normalized = normalizeTimeline(payload);
+	const normalized = normalizeTimeline(extractTimelinePayloadFromAIResponse(payload));
 	setProjectTimeline(normalized);
 	timelineError.set('');
 	return normalized;
@@ -836,6 +975,8 @@ function compressTimelineForAI(timeline: ProjectTimeline): ProjectTimeline {
 				priority: task.priority,
 				type: task.type,
 				effort_score: task.effort_score,
+				budget: task.budget,
+				actual_cost: task.actual_cost,
 				assignee: task.assignee,
 				duration_value: task.duration_value,
 				duration_unit: task.duration_unit
@@ -845,7 +986,41 @@ function compressTimelineForAI(timeline: ProjectTimeline): ProjectTimeline {
 	};
 }
 
-export async function generateAITimeline(roomId: string, prompt: string) {
+function buildClientTimeContext() {
+	const now = new Date();
+	const timezone =
+		typeof Intl !== 'undefined'
+			? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+			: 'UTC';
+	const offsetMinutes = -now.getTimezoneOffset();
+	const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+	const absOffset = Math.abs(offsetMinutes);
+	const offsetHours = String(Math.floor(absOffset / 60)).padStart(2, '0');
+	const offsetMins = String(absOffset % 60).padStart(2, '0');
+	const utcOffset = `${offsetSign}${offsetHours}:${offsetMins}`;
+	const localDateTime = now
+		.toLocaleString('en-US', {
+			year: 'numeric',
+			month: 'long',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hour12: false
+		})
+		.replace(',', '');
+
+	return [
+		'CLIENT TIME CONTEXT (use this as the current reference for all scheduling):',
+		`- current_time_utc: ${now.toISOString()}`,
+		`- current_time_local: ${localDateTime}`,
+		`- timezone: ${timezone}`,
+		`- utc_offset: ${utcOffset}`,
+		'- If explicit dates are not provided, generate dates relative to this current time context.'
+	].join('\n');
+}
+
+export async function generateAITimeline(roomId: string, prompt: string): Promise<AITimelineResult> {
 	const normalizedRoomID = roomId.trim();
 	const normalizedPrompt = prompt.trim();
 	const sessionUserID = (get(currentUser)?.id ?? '').trim();
@@ -856,7 +1031,7 @@ export async function generateAITimeline(roomId: string, prompt: string) {
 		throw new Error('prompt is required');
 	}
 
-	const enrichedPrompt = `${AI_TIMELINE_FORMAT_HINT}\n\nUSER REQUEST:\n${normalizedPrompt}`;
+	const enrichedPrompt = `${AI_TIMELINE_FORMAT_HINT}\n\n${buildClientTimeContext()}\n\nUSER REQUEST:\n${normalizedPrompt}`;
 
 	timelineLoading.set(true);
 	timelineError.set('');
@@ -881,12 +1056,17 @@ export async function generateAITimeline(roomId: string, prompt: string) {
 
 		const payload = (await response.json().catch(() => null)) as unknown;
 		const normalized = applyTimelinePayload(payload);
+		const assistantReply = extractAssistantReplyFromAIResponse(payload);
+		lastAIAssistantReply.set(assistantReply);
 		addBoardActivity({
 			type: 'board_generated',
 			title: 'Board generated by Tora AI',
 			subtitle: normalized.project_name
 		});
-		return normalized;
+		return {
+			timeline: normalized,
+			assistantReply
+		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'Failed to generate project timeline';
 		timelineError.set(message);
@@ -900,7 +1080,7 @@ export async function editAITimeline(
 	roomId: string,
 	prompt: string,
 	currentState: ProjectTimeline | null
-) {
+): Promise<AITimelineResult> {
 	const normalizedRoomID = roomId.trim();
 	const normalizedPrompt = prompt.trim();
 	const sessionUserID = (get(currentUser)?.id ?? '').trim();
@@ -911,7 +1091,7 @@ export async function editAITimeline(
 		throw new Error('prompt is required');
 	}
 
-	const enrichedEditPrompt = `${AI_TIMELINE_FORMAT_HINT}\n\nEDIT REQUEST:\n${normalizedPrompt}`;
+	const enrichedEditPrompt = `${AI_TIMELINE_FORMAT_HINT}\n\n${buildClientTimeContext()}\n\nEDIT REQUEST:\n${normalizedPrompt}`;
 
 	timelineLoading.set(true);
 	timelineError.set('');
@@ -937,12 +1117,17 @@ export async function editAITimeline(
 
 		const payload = (await response.json().catch(() => null)) as unknown;
 		const normalized = applyTimelinePayload(payload);
+		const assistantReply = extractAssistantReplyFromAIResponse(payload);
+		lastAIAssistantReply.set(assistantReply);
 		addBoardActivity({
 			type: 'board_edited',
 			title: 'Board updated by Tora AI',
 			subtitle: normalized.project_name
 		});
-		return normalized;
+		return {
+			timeline: normalized,
+			assistantReply
+		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'Failed to edit project timeline';
 		timelineError.set(message);

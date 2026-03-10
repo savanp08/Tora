@@ -7,6 +7,8 @@ export interface TimelineTask {
 	title: string;
 	status: TimelineTaskStatus;
 	effort_score: number;
+	budget?: number;
+	actual_cost?: number;
 	type: string;
 	priority?: TimelineTaskPriority;
 	assignee?: string;

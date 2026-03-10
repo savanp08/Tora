@@ -120,14 +120,44 @@
 	$: budgetTotal = timeline?.budget_total ?? 0;
 	$: budgetSpent = timeline?.budget_spent ?? 0;
 	$: estimatedCost = timeline?.estimated_cost ?? '';
+	$: scopedBudgetFromTasks = scopedTasks.reduce(
+		(sum, task) =>
+			sum +
+			(typeof task.budget === 'number' && Number.isFinite(task.budget) && task.budget > 0
+				? task.budget
+				: 0),
+		0
+	);
+	$: scopedSpentFromTasks = scopedTasks.reduce(
+		(sum, task) =>
+			sum +
+			(typeof task.actual_cost === 'number' &&
+			Number.isFinite(task.actual_cost) &&
+			task.actual_cost >= 0
+				? task.actual_cost
+				: 0),
+		0
+	);
+	$: hasScopedSpentData = scopedTasks.some(
+		(task) =>
+			typeof task.actual_cost === 'number' &&
+			Number.isFinite(task.actual_cost) &&
+			task.actual_cost >= 0
+	);
 	$: scopedBudgetAllocated = scopedSprints.reduce(
 		(sum, sprint) => sum + (sprint.budget_allocated ?? 0),
 		0
 	);
-	$: totalBudgetValue = scopedBudgetAllocated > 0 ? scopedBudgetAllocated : budgetTotal;
+	$: totalBudgetValue =
+		scopedBudgetFromTasks > 0
+			? scopedBudgetFromTasks
+			: scopedBudgetAllocated > 0
+				? scopedBudgetAllocated
+				: budgetTotal;
+	$: effectiveBudgetSpent = hasScopedSpentData ? scopedSpentFromTasks : budgetSpent;
 	$: hasAnyBudget = totalBudgetValue > 0;
 	$: budgetPercent = hasAnyBudget
-		? Math.min(100, Math.round((budgetSpent / totalBudgetValue) * 100))
+		? Math.min(100, Math.round((effectiveBudgetSpent / totalBudgetValue) * 100))
 		: 0;
 
 	$: projectStartDate = firstValidDate(scopedSprints.map((sp) => sp.start_date));
@@ -139,7 +169,7 @@
 	$: elapsedProjectWeeks = computeElapsedWeeks(projectStartDate, projectEndDate);
 	$: remainingProjectWeeks = Math.max(0, projectDurationWeeks - elapsedProjectWeeks);
 	$: weeklyBudgetValue = hasAnyBudget ? totalBudgetValue / projectDurationWeeks : 0;
-	$: weeklySpendValue = hasAnyBudget ? budgetSpent / elapsedProjectWeeks : 0;
+	$: weeklySpendValue = hasAnyBudget ? effectiveBudgetSpent / elapsedProjectWeeks : 0;
 
 	$: activeWorkRows = (currentSprint?.tasks ?? [])
 		.map<ActiveRow>((task) => {
@@ -305,7 +335,7 @@
 			label: 'budget used',
 			value: hasAnyBudget ? `${budgetPercent}%` : '--',
 			sub: hasAnyBudget
-				? `${fmtMoney(budgetSpent)} / ${fmtMoney(totalBudgetValue)}`
+				? `${fmtMoney(effectiveBudgetSpent)} / ${fmtMoney(totalBudgetValue)}`
 				: estimatedCost || 'Budget not configured',
 			tone: hasAnyBudget ? (budgetPercent >= 85 ? 'orange' : 'purple') : 'neutral'
 		}
@@ -559,7 +589,7 @@
 			<div class="head-kpi">
 				<span>Usage</span>
 				<strong>{hasAnyBudget ? `${budgetPercent}%` : '--'}</strong>
-				<p>{hasAnyBudget ? `${fmtMoney(budgetSpent)} spent · ${fmtMoney(weeklySpendValue)} / week` : 'No usage data yet'}</p>
+				<p>{hasAnyBudget ? `${fmtMoney(effectiveBudgetSpent)} spent · ${fmtMoney(weeklySpendValue)} / week` : 'No usage data yet'}</p>
 			</div>
 		</header>
 
@@ -973,6 +1003,7 @@
 
 	.head-kpi {
 		min-width: 0;
+		max-width: 250px;
 		display: flex;
 		flex-direction: column;
 		gap: 0.2rem;
@@ -1583,7 +1614,9 @@
 
 	@media (max-width: 900px) {
 		.project-head {
-			grid-template-columns: 1fr;
+			display: flex;
+			flex-direction: row;
+			gap: 0.75rem;
 		}
 
 		.head-main {

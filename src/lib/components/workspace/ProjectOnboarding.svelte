@@ -63,6 +63,7 @@
 	let applyingTemplate = false;
 	let aiPartialWarning = '';
 	let aiMissingSprints: string[] = [];
+	let aiAssistantReply = '';
 
 	const TEMPLATE_KEY_MAP: Record<string, string> = {
 		agile_sprint_planner: 'software_agile',
@@ -117,6 +118,7 @@
 		localError = '';
 		aiPartialWarning = '';
 		aiMissingSprints = [];
+		aiAssistantReply = '';
 	}
 
 	function openPartialWorkspace() {
@@ -137,6 +139,7 @@
 		localError = '';
 		aiPartialWarning = '';
 		aiMissingSprints = [];
+		aiAssistantReply = '';
 		if (!normalizedRoomID) {
 			localError = 'Room id is required before generating a workspace.';
 			return;
@@ -147,7 +150,9 @@
 		}
 
 		try {
-			const generatedTimeline = await generateAITimeline(normalizedRoomID, normalizedPrompt);
+			const generationResult = await generateAITimeline(normalizedRoomID, normalizedPrompt);
+			const generatedTimeline = generationResult.timeline;
+			aiAssistantReply = generationResult.assistantReply;
 			await initializeTaskStoreForRoom(normalizeRoomIDValue(normalizedRoomID), {
 				apiBase: API_BASE
 			});
@@ -298,15 +303,9 @@
 				</button>
 			</div>
 
-			<!-- keep legacy field class for spacing parity -->
-			<label class="field ai-field-sr">
-				<span>Project description</span>
-				<textarea
-					bind:value={aiPrompt}
-					placeholder="Example: Build a multi-team launch plan for a mobile app with 3 sprints and clear ownership."
-					rows="7"
-				></textarea>
-			</label>
+			{#if aiAssistantReply}
+				<div class="ai-assistant-banner" aria-live="polite">{aiAssistantReply}</div>
+			{/if}
 
 			{#if aiPartialWarning}
 				<div class="partial-warning-banner">
@@ -725,6 +724,16 @@
 		color: var(--po-ai-hint);
 	}
 
+	.ai-assistant-banner {
+		border-radius: 12px;
+		border: 1px solid color-mix(in srgb, var(--po-accent) 44%, var(--po-border));
+		background: color-mix(in srgb, var(--po-accent-soft) 72%, var(--po-surface));
+		padding: 0.72rem 0.8rem;
+		font-size: 0.82rem;
+		line-height: 1.42;
+		color: var(--po-text);
+	}
+
 	.generate-btn {
 		border-color: color-mix(in srgb, var(--po-accent) 42%, var(--po-border));
 		background: linear-gradient(
@@ -742,10 +751,6 @@
 			color-mix(in srgb, var(--po-accent-soft) 100%, var(--po-surface)),
 			color-mix(in srgb, var(--po-accent-soft) 64%, var(--po-surface))
 		);
-	}
-
-	.ai-field-sr {
-		display: none;
 	}
 
 	.template-grid {

@@ -51,7 +51,7 @@
 	const MOBILE_BREAKPOINT = 600;
 	const FAB_SIZE_PX = 56;
 	const FAB_PADDING_PX = 2;
-	const FAB_DEFAULT_TOP_OFFSET_PX = 80;
+	const FAB_DEFAULT_TOP_OFFSET_PX = 132;
 	const FAB_DRAG_THRESHOLD_PX = 10;
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const BOARD_MENU_ACTIONS: Array<{ label: string; action: BoardQuickAction }> = [

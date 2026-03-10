@@ -100,7 +100,7 @@
 			var(--ws-muted, var(--text-tertiary, #747474))
 		);
 		--af-item-bg: var(
-			--workspace-taskboard-column-bg,
+			--workspace-taskboard-item-bg,
 			var(--ws-surface, var(--surface-primary, #ffffff))
 		);
 		--af-item-border: var(--workspace-taskboard-item-border, var(--af-border));
@@ -120,7 +120,14 @@
 
 	:global(:root[data-theme='dark']) .workspace-activity-panel,
 	:global(.theme-dark) .workspace-activity-panel {
-		background: transparent;
+		--af-bg: var(--workspace-taskboard-bg, #171717);
+		--af-border: var(--workspace-taskboard-column-border, #33333a);
+		--af-text: var(--workspace-taskboard-item-text, #f5f5f8);
+		--af-muted: var(--workspace-taskboard-meta, #a2a2ab);
+		--af-item-bg: var(--workspace-taskboard-item-bg, #222226);
+		--af-item-border: var(--workspace-taskboard-item-border, #3d3d43);
+		--af-header-text: var(--af-text);
+		background: var(--af-bg);
 	}
 
 	/* ── Header ──────────────────────────────────────────────────────── */

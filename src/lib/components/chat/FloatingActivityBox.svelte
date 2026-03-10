@@ -22,7 +22,7 @@
 	const LARGE_PANEL_SIZE = 350;
 	const LARGE_PANEL_BREAKPOINT = 600;
 	const VIEWPORT_MARGIN = 12;
-	const DESKTOP_DEFAULT_TOP_OFFSET_PX = 104;
+	const DESKTOP_DEFAULT_TOP_OFFSET_PX = 300;
 	const DRAG_THRESHOLD_PX = 8;
 
 	let shellEl: HTMLDivElement | null = null;

@@ -732,257 +732,268 @@
 		</section>
 	{/if}
 
-	<section class="dashboard-section section-priority">
-		<div class="section-head">
-			<h4>Priority</h4>
-			<span class="section-count">{priorityItems.length}</span>
-		</div>
-		{#if priorityItems.length === 0}
-			<div class="empty-state">No upcoming beacons/tasks.</div>
-		{:else}
-			<div class="card-list">
-				{#each priorityItems as item (item.id)}
-					<article class="dashboard-card kind-{item.kind}">
-						<div class="card-top">
-							<strong>{formatKindLabel(item.kind)}</strong>
-							<time>{formatDateTime(item.beaconAt)}</time>
-						</div>
-						<p>{item.taskTitle || item.messageText || 'No content'}</p>
-						{#if item.topic}
-							<div class="topic-chip chip">Topic: {item.topic}</div>
-						{/if}
-						{#if item.note}
-							<div class="note-chip chip">Note: {item.note}</div>
-						{/if}
-					</article>
-				{/each}
-			</div>
-		{/if}
+	<section class="dashboard-summary-strip" aria-label="Room dashboard summary">
+		<article class="summary-card">
+			<span>Priority Queue</span>
+			<strong>{priorityItems.length}</strong>
+		</article>
+		<article class="summary-card">
+			<span>Pinned Context</span>
+			<strong>{groupedPinnedItems.length}</strong>
+		</article>
+		<article class="summary-card">
+			<span>Expired Beacons</span>
+			<strong>{expiredItems.length}</strong>
+		</article>
 	</section>
 
-	<section class="dashboard-section section-pinned">
-		<div class="section-head">
-			<h4>Pinned Items</h4>
-			<span class="section-count">{groupedPinnedItems.length}</span>
-		</div>
-		{#if groupedPinnedItems.length === 0}
-			<div class="empty-state">No pinned items yet.</div>
-		{:else}
-			<div class="pinned-groups">
-				<div class="group-block">
-					<h5>Messages</h5>
-					{#if sectionItems('message').length === 0}
-						<div class="empty-state subtle">No pinned messages.</div>
-					{:else}
-						{#each sectionItems('message') as item (item.id)}
-							<article class="dashboard-card kind-message">
-								<div class="card-top">
-									<strong>{item.senderName || 'User'}</strong>
-									<time>{formatDateTime(item.originalCreatedAt)}</time>
-								</div>
-								<p>{item.messageText || 'No text content'}</p>
-								{#if item.topic}
-									<div class="topic-chip chip">Topic: {item.topic}</div>
-								{/if}
-								{#if item.mediaUrl}
-									{#if isImageItem(item)}
-										<img src={item.mediaUrl} alt={item.fileName || 'Pinned preview'} />
-									{:else}
-										<a href={item.mediaUrl} target="_blank" rel="noreferrer">
-											Open attachment{item.fileName ? ` (${item.fileName})` : ''}
-										</a>
+	<div class="dashboard-board">
+		<section class="dashboard-section section-priority">
+			<div class="section-head">
+				<h4>Priority</h4>
+				<span class="section-count">{priorityItems.length}</span>
+			</div>
+			{#if priorityItems.length === 0}
+				<div class="empty-state">No upcoming beacons/tasks.</div>
+			{:else}
+				<div class="card-list">
+					{#each priorityItems as item (item.id)}
+						<article class="dashboard-card kind-{item.kind}">
+							<div class="card-top">
+								<strong>{formatKindLabel(item.kind)}</strong>
+								<time>{formatDateTime(item.beaconAt)}</time>
+							</div>
+							<p>{item.taskTitle || item.messageText || 'No content'}</p>
+							{#if item.topic}
+								<div class="topic-chip chip">Topic: {item.topic}</div>
+							{/if}
+							{#if item.note}
+								<div class="note-chip chip">Note: {item.note}</div>
+							{/if}
+						</article>
+					{/each}
+				</div>
+			{/if}
+		</section>
+
+		<section class="dashboard-section section-expired">
+			<div class="section-head">
+				<h4>Expired</h4>
+				<span class="section-count">{expiredItems.length}</span>
+			</div>
+			{#if expiredItems.length === 0}
+				<div class="empty-state">Nothing expired.</div>
+			{:else}
+				<div class="card-list">
+					{#each expiredItems as item (item.id)}
+						<article class="dashboard-card kind-{item.kind}">
+							<div class="card-top">
+								<strong>{formatKindLabel(item.kind)}</strong>
+								<time>{formatDateTime(item.beaconAt)}</time>
+							</div>
+							<p>{item.taskTitle || item.messageText || 'No content'}</p>
+							{#if item.topic}
+								<div class="topic-chip chip">Topic: {item.topic}</div>
+							{/if}
+						</article>
+					{/each}
+				</div>
+			{/if}
+		</section>
+
+		<section class="dashboard-section section-pinned">
+			<div class="section-head">
+				<h4>Pinned Items</h4>
+				<span class="section-count">{groupedPinnedItems.length}</span>
+			</div>
+			{#if groupedPinnedItems.length === 0}
+				<div class="empty-state">No pinned items yet.</div>
+			{:else}
+				<div class="pinned-groups">
+					<div class="group-block">
+						<h5>Messages</h5>
+						{#if sectionItems('message').length === 0}
+							<div class="empty-state subtle">No pinned messages.</div>
+						{:else}
+							{#each sectionItems('message') as item (item.id)}
+								<article class="dashboard-card kind-message">
+									<div class="card-top">
+										<strong>{item.senderName || 'User'}</strong>
+										<time>{formatDateTime(item.originalCreatedAt)}</time>
+									</div>
+									<p>{item.messageText || 'No text content'}</p>
+									{#if item.topic}
+										<div class="topic-chip chip">Topic: {item.topic}</div>
 									{/if}
-								{/if}
-								<label class="note-editor">
-									<span>Attached note</span>
-									<textarea
-										value={resolveDraftNote(item)}
-										on:input={(event) =>
-											onNoteInput(item.id, (event.currentTarget as HTMLTextAreaElement).value)}
-										on:blur={() => saveInlineNote(item)}
-										on:keydown={(event) => onNoteKeydown(event, item)}
-										placeholder="Add note (optional)"
-									></textarea>
-								</label>
-							</article>
-						{/each}
-					{/if}
-				</div>
-				<div class="group-block">
-					<h5>Notes</h5>
-					{#if sectionItems('note').length === 0}
-						<div class="empty-state subtle">No pinned notes.</div>
-					{:else}
-						{#each sectionItems('note') as item (item.id)}
-							<article class="dashboard-card kind-note">
-								<div class="card-top">
-									<strong>{item.senderName || 'User'}</strong>
-									<time>{formatDateTime(item.originalCreatedAt)}</time>
-								</div>
-								<p>{item.messageText || 'No note content'}</p>
-								{#if item.topic}
-									<div class="topic-chip chip">Topic: {item.topic}</div>
-								{/if}
-								<label class="note-editor">
-									<span>Attached note</span>
-									<textarea
-										value={resolveDraftNote(item)}
-										on:input={(event) =>
-											onNoteInput(item.id, (event.currentTarget as HTMLTextAreaElement).value)}
-										on:blur={() => saveInlineNote(item)}
-										on:keydown={(event) => onNoteKeydown(event, item)}
-										placeholder="Add note (optional)"
-									></textarea>
-								</label>
-							</article>
-						{/each}
-					{/if}
-				</div>
-				<div class="group-block">
-					<h5>Tasks</h5>
-					{#if sectionItems('task').length === 0}
-						<div class="empty-state subtle">No pinned tasks.</div>
-					{:else}
-						{#each sectionItems('task') as item (item.id)}
-							<article class="dashboard-card kind-task">
-								<div class="card-top">
-									<strong>{item.taskTitle || 'Task'}</strong>
-									<time>{formatDateTime(item.beaconAt)}</time>
-								</div>
-								<p>{item.messageText || 'No task details'}</p>
-								{#if item.topic}
-									<div class="topic-chip chip">Topic: {item.topic}</div>
-								{/if}
-								<label class="note-editor">
-									<span>Attached note</span>
-									<textarea
-										value={resolveDraftNote(item)}
-										on:input={(event) =>
-											onNoteInput(item.id, (event.currentTarget as HTMLTextAreaElement).value)}
-										on:blur={() => saveInlineNote(item)}
-										on:keydown={(event) => onNoteKeydown(event, item)}
-										placeholder="Add note (optional)"
-									></textarea>
-								</label>
-							</article>
-						{/each}
-					{/if}
-				</div>
-			</div>
-		{/if}
-	</section>
-
-	<section class="dashboard-section section-expired">
-		<div class="section-head">
-			<h4>Expired</h4>
-			<span class="section-count">{expiredItems.length}</span>
-		</div>
-		{#if expiredItems.length === 0}
-			<div class="empty-state">Nothing expired.</div>
-		{:else}
-			<div class="card-list">
-				{#each expiredItems as item (item.id)}
-					<article class="dashboard-card kind-{item.kind}">
-						<div class="card-top">
-							<strong>{formatKindLabel(item.kind)}</strong>
-							<time>{formatDateTime(item.beaconAt)}</time>
-						</div>
-						<p>{item.taskTitle || item.messageText || 'No content'}</p>
-						{#if item.topic}
-							<div class="topic-chip chip">Topic: {item.topic}</div>
+									{#if item.mediaUrl}
+										{#if isImageItem(item)}
+											<img src={item.mediaUrl} alt={item.fileName || 'Pinned preview'} />
+										{:else}
+											<a href={item.mediaUrl} target="_blank" rel="noreferrer">
+												Open attachment{item.fileName ? ` (${item.fileName})` : ''}
+											</a>
+										{/if}
+									{/if}
+									<label class="note-editor">
+										<span>Attached note</span>
+										<textarea
+											value={resolveDraftNote(item)}
+											on:input={(event) =>
+												onNoteInput(item.id, (event.currentTarget as HTMLTextAreaElement).value)}
+											on:blur={() => saveInlineNote(item)}
+											on:keydown={(event) => onNoteKeydown(event, item)}
+											placeholder="Add note (optional)"
+										></textarea>
+									</label>
+								</article>
+							{/each}
 						{/if}
-					</article>
-				{/each}
-			</div>
-		{/if}
-	</section>
+					</div>
+					<div class="group-block">
+						<h5>Notes</h5>
+						{#if sectionItems('note').length === 0}
+							<div class="empty-state subtle">No pinned notes.</div>
+						{:else}
+							{#each sectionItems('note') as item (item.id)}
+								<article class="dashboard-card kind-note">
+									<div class="card-top">
+										<strong>{item.senderName || 'User'}</strong>
+										<time>{formatDateTime(item.originalCreatedAt)}</time>
+									</div>
+									<p>{item.messageText || 'No note content'}</p>
+									{#if item.topic}
+										<div class="topic-chip chip">Topic: {item.topic}</div>
+									{/if}
+									<label class="note-editor">
+										<span>Attached note</span>
+										<textarea
+											value={resolveDraftNote(item)}
+											on:input={(event) =>
+												onNoteInput(item.id, (event.currentTarget as HTMLTextAreaElement).value)}
+											on:blur={() => saveInlineNote(item)}
+											on:keydown={(event) => onNoteKeydown(event, item)}
+											placeholder="Add note (optional)"
+										></textarea>
+									</label>
+								</article>
+							{/each}
+						{/if}
+					</div>
+					<div class="group-block">
+						<h5>Tasks</h5>
+						{#if sectionItems('task').length === 0}
+							<div class="empty-state subtle">No pinned tasks.</div>
+						{:else}
+							{#each sectionItems('task') as item (item.id)}
+								<article class="dashboard-card kind-task">
+									<div class="card-top">
+										<strong>{item.taskTitle || 'Task'}</strong>
+										<time>{formatDateTime(item.beaconAt)}</time>
+									</div>
+									<p>{item.messageText || 'No task details'}</p>
+									{#if item.topic}
+										<div class="topic-chip chip">Topic: {item.topic}</div>
+									{/if}
+									<label class="note-editor">
+										<span>Attached note</span>
+										<textarea
+											value={resolveDraftNote(item)}
+											on:input={(event) =>
+												onNoteInput(item.id, (event.currentTarget as HTMLTextAreaElement).value)}
+											on:blur={() => saveInlineNote(item)}
+											on:keydown={(event) => onNoteKeydown(event, item)}
+											placeholder="Add note (optional)"
+										></textarea>
+									</label>
+								</article>
+							{/each}
+						{/if}
+					</div>
+				</div>
+			{/if}
+		</section>
+	</div>
 </section>
 
-<style>
-	.room-dashboard {
-		--dash-bg:
-			radial-gradient(160% 110% at 8% -4%, rgba(217, 230, 249, 0.62) 0%, transparent 52%),
-			linear-gradient(180deg, rgba(246, 250, 255, 0.96) 0%, rgba(238, 244, 252, 0.94) 100%);
-		--dash-header-bg: rgba(255, 255, 255, 0.72);
-		--dash-section-bg: rgba(255, 255, 255, 0.68);
-		--dash-group-bg: rgba(250, 253, 255, 0.62);
-		--dash-card-bg: rgba(255, 255, 255, 0.78);
-		--dash-input-bg: rgba(255, 255, 255, 0.9);
-		--dash-menu-bg: rgba(252, 254, 255, 0.92);
-		--dash-border: rgba(127, 147, 176, 0.32);
-		--dash-border-strong: rgba(104, 131, 167, 0.48);
-		--dash-text: #1c2738;
-		--dash-muted: #5a6980;
-		--dash-soft: #7185a2;
-		--dash-accent: #2f5d98;
-		--dash-accent-soft: rgba(47, 93, 152, 0.15);
-		--dash-chip-bg: rgba(232, 241, 254, 0.88);
-		--dash-chip-text: #2d4e79;
-		--dash-focus-ring: 0 0 0 3px rgba(77, 121, 184, 0.22);
-		--dash-primary-btn:
-			linear-gradient(180deg, rgba(74, 120, 186, 0.94) 0%, rgba(50, 87, 143, 0.96) 100%);
-		--dash-primary-btn-hover:
-			linear-gradient(180deg, rgba(81, 130, 198, 0.97) 0%, rgba(58, 97, 155, 0.99) 100%);
-		--dash-primary-btn-text: #f7fbff;
-		--dash-danger: #b93c55;
-		--dash-shadow-soft: 0 10px 24px rgba(28, 47, 76, 0.12);
-		--dash-shadow-strong: 0 18px 36px rgba(20, 38, 66, 0.16);
+	<style>
+		.room-dashboard {
+			--dash-bg: #f4f5f7;
+			--dash-header-bg: #ffffff;
+			--dash-section-bg: #ebecf0;
+			--dash-group-bg: #f1f2f4;
+			--dash-card-bg: #ffffff;
+			--dash-input-bg: #ffffff;
+			--dash-menu-bg: #ffffff;
+			--dash-border: #d0d4dc;
+			--dash-border-strong: #b9c0cc;
+			--dash-text: #172b4d;
+			--dash-muted: #5e6c84;
+			--dash-soft: #6b778c;
+			--dash-accent: #7a5a2f;
+			--dash-accent-soft: rgba(122, 90, 47, 0.16);
+			--dash-chip-bg: #f2ebe1;
+			--dash-chip-text: #614627;
+			--dash-focus-ring: 0 0 0 3px rgba(122, 90, 47, 0.24);
+			--dash-primary-btn:
+				linear-gradient(180deg, rgba(130, 92, 48, 0.98) 0%, rgba(96, 66, 35, 1) 100%);
+			--dash-primary-btn-hover:
+				linear-gradient(180deg, rgba(142, 104, 58, 0.99) 0%, rgba(108, 76, 43, 1) 100%);
+			--dash-primary-btn-text: #f7f5ef;
+			--dash-danger: #c33f5e;
+			--dash-shadow-soft: 0 1px 2px rgba(9, 30, 66, 0.18);
+			--dash-shadow-strong: 0 8px 18px rgba(9, 30, 66, 0.22);
 
-		flex: 1;
-		min-height: 0;
-		overflow: auto;
-		display: grid;
-		align-content: start;
-		gap: 0.86rem;
-		padding: 0.86rem;
-		background: var(--dash-bg);
-		color: var(--dash-text);
-		scrollbar-gutter: stable;
-	}
+			flex: 1;
+			min-height: 0;
+			overflow: auto;
+			display: grid;
+			align-content: start;
+			gap: 0.72rem;
+			padding: 0.8rem;
+			background: var(--dash-bg);
+			color: var(--dash-text);
+			scrollbar-gutter: stable;
+		}
 
-	.room-dashboard.theme-dark {
-		--dash-bg:
-			radial-gradient(145% 110% at 7% -6%, rgba(55, 86, 134, 0.34) 0%, transparent 50%),
-			linear-gradient(180deg, rgba(11, 17, 28, 0.97) 0%, rgba(8, 14, 25, 0.98) 100%);
-		--dash-header-bg: rgba(16, 24, 39, 0.74);
-		--dash-section-bg: rgba(15, 23, 38, 0.74);
-		--dash-group-bg: rgba(12, 21, 35, 0.68);
-		--dash-card-bg: rgba(20, 31, 49, 0.82);
-		--dash-input-bg: rgba(14, 24, 40, 0.92);
-		--dash-menu-bg: rgba(10, 18, 31, 0.94);
-		--dash-border: rgba(92, 118, 153, 0.42);
-		--dash-border-strong: rgba(124, 154, 196, 0.58);
-		--dash-text: #e5edf9;
-		--dash-muted: #a3b5cd;
-		--dash-soft: #89a0bf;
-		--dash-accent: #9cc1f6;
-		--dash-accent-soft: rgba(140, 181, 242, 0.2);
-		--dash-chip-bg: rgba(38, 56, 86, 0.9);
-		--dash-chip-text: #cbe0fe;
-		--dash-focus-ring: 0 0 0 3px rgba(126, 168, 224, 0.24);
-		--dash-primary-btn:
-			linear-gradient(180deg, rgba(70, 102, 153, 0.96) 0%, rgba(49, 76, 119, 0.98) 100%);
-		--dash-primary-btn-hover:
-			linear-gradient(180deg, rgba(83, 117, 172, 0.98) 0%, rgba(58, 88, 136, 1) 100%);
-		--dash-primary-btn-text: #eff6ff;
-		--dash-danger: #f2a9b7;
-		--dash-shadow-soft: 0 14px 30px rgba(0, 0, 0, 0.32);
-		--dash-shadow-strong: 0 22px 44px rgba(0, 0, 0, 0.44);
-	}
+		.room-dashboard.theme-dark {
+			--dash-bg: #1d2125;
+			--dash-header-bg: #272521;
+			--dash-section-bg: #312e29;
+			--dash-group-bg: #38342f;
+			--dash-card-bg: #403a34;
+			--dash-input-bg: #2a2722;
+			--dash-menu-bg: #35312c;
+			--dash-border: #4b463f;
+			--dash-border-strong: #655f56;
+			--dash-text: #ece6d9;
+			--dash-muted: #b8b0a2;
+			--dash-soft: #9e9588;
+			--dash-accent: #d2a96a;
+			--dash-accent-soft: rgba(210, 169, 106, 0.2);
+			--dash-chip-bg: rgba(210, 169, 106, 0.16);
+			--dash-chip-text: #f3dfbc;
+			--dash-focus-ring: 0 0 0 3px rgba(210, 169, 106, 0.28);
+			--dash-primary-btn:
+				linear-gradient(180deg, rgba(152, 117, 67, 0.98) 0%, rgba(118, 86, 44, 1) 100%);
+			--dash-primary-btn-hover:
+				linear-gradient(180deg, rgba(168, 130, 76, 1) 0%, rgba(132, 97, 52, 1) 100%);
+			--dash-primary-btn-text: #fff8ed;
+			--dash-danger: #f0a3b3;
+			--dash-shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.34);
+			--dash-shadow-strong: 0 16px 30px rgba(0, 0, 0, 0.46);
+		}
 
-	.dashboard-header {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 0.9rem;
-		padding: 0.74rem 0.78rem;
-		border: 1px solid var(--dash-border);
-		border-radius: 1rem;
-		background: var(--dash-header-bg);
-		box-shadow: var(--dash-shadow-soft);
-		backdrop-filter: blur(16px) saturate(150%);
-		-webkit-backdrop-filter: blur(16px) saturate(150%);
-	}
+		.dashboard-header {
+			display: flex;
+			align-items: flex-start;
+			justify-content: space-between;
+			gap: 0.72rem;
+			padding: 0.7rem 0.76rem;
+			border: 1px solid var(--dash-border);
+			border-radius: 0.75rem;
+			background: var(--dash-header-bg);
+			box-shadow: var(--dash-shadow-soft);
+		}
 
 	.header-actions {
 		display: inline-flex;
@@ -996,12 +1007,12 @@
 		position: relative;
 	}
 
-	.dashboard-title-wrap h3 {
-		margin: 0;
-		font-size: 0.99rem;
-		letter-spacing: 0.01em;
-		color: var(--dash-text);
-	}
+		.dashboard-title-wrap h3 {
+			margin: 0;
+			font-size: 0.95rem;
+			letter-spacing: 0.01em;
+			color: var(--dash-text);
+		}
 
 	.dashboard-title-wrap p {
 		margin: 0.24rem 0 0;
@@ -1011,28 +1022,26 @@
 		max-width: 34ch;
 	}
 
-	.add-action-btn,
-	.ai-organize-btn,
-	.dashboard-close-btn,
-	.composer-close-btn {
-		border: 1px solid var(--dash-border);
-		background: var(--dash-input-bg);
-		color: var(--dash-text);
-		border-radius: 0.66rem;
-		font-size: 0.73rem;
-		font-weight: 700;
-		cursor: pointer;
-		padding: 0.42rem 0.72rem;
-		line-height: 1;
-		transition:
-			background 0.2s ease,
-			border-color 0.2s ease,
-			box-shadow 0.2s ease,
-			transform 0.15s ease;
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
-		backdrop-filter: blur(10px) saturate(130%);
-		-webkit-backdrop-filter: blur(10px) saturate(130%);
-	}
+		.add-action-btn,
+		.ai-organize-btn,
+		.dashboard-close-btn,
+		.composer-close-btn {
+			border: 1px solid var(--dash-border);
+			background: var(--dash-input-bg);
+			color: var(--dash-text);
+			border-radius: 0.55rem;
+			font-size: 0.73rem;
+			font-weight: 650;
+			cursor: pointer;
+			padding: 0.4rem 0.66rem;
+			line-height: 1;
+			transition:
+				background 0.2s ease,
+				border-color 0.2s ease,
+				box-shadow 0.2s ease,
+				transform 0.15s ease;
+			box-shadow: var(--dash-shadow-soft);
+		}
 
 	.add-action-btn:hover,
 	.ai-organize-btn:hover:not(:disabled),
@@ -1091,22 +1100,20 @@
 		animation: dashboard-spin 0.82s linear infinite;
 	}
 
-	.add-menu {
-		position: absolute;
-		top: calc(100% + 0.45rem);
-		right: 0;
-		min-width: 11.4rem;
-		display: grid;
-		gap: 0.2rem;
-		padding: 0.36rem;
-		border: 1px solid var(--dash-border-strong);
-		border-radius: 0.78rem;
-		background: var(--dash-menu-bg);
-		box-shadow: var(--dash-shadow-strong);
-		backdrop-filter: blur(14px) saturate(145%);
-		-webkit-backdrop-filter: blur(14px) saturate(145%);
-		z-index: 24;
-	}
+		.add-menu {
+			position: absolute;
+			top: calc(100% + 0.45rem);
+			right: 0;
+			min-width: 11.4rem;
+			display: grid;
+			gap: 0.2rem;
+			padding: 0.36rem;
+			border: 1px solid var(--dash-border-strong);
+			border-radius: 0.64rem;
+			background: var(--dash-menu-bg);
+			box-shadow: var(--dash-shadow-strong);
+			z-index: 24;
+		}
 
 	.add-menu button {
 		border: 0;
@@ -1121,21 +1128,57 @@
 		transition: background 0.2s ease;
 	}
 
-	.add-menu button:hover {
-		background: var(--dash-accent-soft);
-	}
+		.add-menu button:hover {
+			background: var(--dash-accent-soft);
+		}
 
-	.dashboard-add-composer {
-		display: grid;
-		gap: 0.68rem;
-		padding: 0.74rem;
-		border-radius: 0.92rem;
-		border: 1px solid var(--dash-border);
-		background: var(--dash-section-bg);
-		box-shadow: var(--dash-shadow-soft);
-		backdrop-filter: blur(13px) saturate(145%);
-		-webkit-backdrop-filter: blur(13px) saturate(145%);
-	}
+		.dashboard-summary-strip {
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			gap: 0.52rem;
+		}
+
+		.summary-card {
+			display: grid;
+			gap: 0.2rem;
+			padding: 0.58rem 0.62rem;
+			border: 1px solid var(--dash-border);
+			border-radius: 0.64rem;
+			background: var(--dash-header-bg);
+			box-shadow: var(--dash-shadow-soft);
+		}
+
+		.summary-card span {
+			font-size: 0.67rem;
+			font-weight: 700;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+			color: var(--dash-soft);
+		}
+
+		.summary-card strong {
+			font-size: 1rem;
+			line-height: 1.1;
+			letter-spacing: 0.01em;
+			color: var(--dash-text);
+		}
+
+		.dashboard-board {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 0.64rem;
+			align-items: start;
+		}
+
+		.dashboard-add-composer {
+			display: grid;
+			gap: 0.68rem;
+			padding: 0.72rem;
+			border-radius: 0.72rem;
+			border: 1px solid var(--dash-border);
+			background: var(--dash-section-bg);
+			box-shadow: var(--dash-shadow-soft);
+		}
 
 	.composer-head {
 		display: flex;
@@ -1190,14 +1233,14 @@
 		resize: vertical;
 	}
 
-	.beacon-scheduler {
-		display: grid;
-		gap: 0.56rem;
-		padding: 0.56rem;
-		border: 1px solid var(--dash-border);
-		border-radius: 0.74rem;
-		background: color-mix(in srgb, var(--dash-card-bg) 85%, transparent);
-	}
+		.beacon-scheduler {
+			display: grid;
+			gap: 0.56rem;
+			padding: 0.56rem;
+			border: 1px solid var(--dash-border);
+			border-radius: 0.6rem;
+			background: color-mix(in srgb, var(--dash-card-bg) 85%, transparent);
+		}
 
 	.beacon-day-scroll {
 		display: flex;
@@ -1353,16 +1396,16 @@
 		opacity: 0.96;
 	}
 
-	.beacon-preview {
-		position: relative;
-		display: grid;
-		gap: 0.3rem;
-		padding: 0.56rem 0.6rem;
-		border: 1px solid var(--dash-border);
-		border-radius: 0.7rem;
-		background: var(--dash-card-bg);
-		overflow: hidden;
-	}
+		.beacon-preview {
+			position: relative;
+			display: grid;
+			gap: 0.3rem;
+			padding: 0.56rem 0.6rem;
+			border: 1px solid var(--dash-border);
+			border-radius: 0.58rem;
+			background: var(--dash-card-bg);
+			overflow: hidden;
+		}
 
 	.beacon-preview::after {
 		content: '';
@@ -1451,20 +1494,22 @@
 		filter: saturate(1.05);
 	}
 
-	.dashboard-section {
-		border: 1px solid var(--dash-border);
-		border-radius: 1rem;
-		background: var(--dash-section-bg);
-		padding: 0.74rem;
-		display: grid;
-		gap: 0.64rem;
-		box-shadow: var(--dash-shadow-soft);
-		backdrop-filter: blur(13px) saturate(145%);
-		-webkit-backdrop-filter: blur(13px) saturate(145%);
-	}
+		.dashboard-section {
+			border: 1px solid var(--dash-border);
+			border-radius: 0.72rem;
+			background: var(--dash-section-bg);
+			padding: 0.66rem;
+			display: grid;
+			gap: 0.56rem;
+			box-shadow: var(--dash-shadow-soft);
+		}
 
-	.section-priority {
-		border-top: 1px solid color-mix(in srgb, var(--dash-accent) 45%, var(--dash-border));
+		.section-pinned {
+			grid-column: 1 / -1;
+		}
+
+		.section-priority {
+			border-top: 1px solid color-mix(in srgb, var(--dash-accent) 45%, var(--dash-border));
 	}
 
 	.section-expired {
@@ -1500,20 +1545,28 @@
 		border: 1px solid var(--dash-border);
 	}
 
-	.card-list,
-	.pinned-groups {
-		display: grid;
-		gap: 0.52rem;
-	}
+		.card-list,
+		.pinned-groups {
+			display: grid;
+			gap: 0.52rem;
+		}
 
-	.group-block {
-		display: grid;
-		gap: 0.48rem;
-		padding: 0.5rem;
-		border: 1px solid var(--dash-border);
-		border-radius: 0.78rem;
-		background: var(--dash-group-bg);
-	}
+		.card-list {
+			grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+		}
+
+		.pinned-groups {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+
+		.group-block {
+			display: grid;
+			gap: 0.48rem;
+			padding: 0.5rem;
+			border: 1px solid var(--dash-border);
+			border-radius: 0.62rem;
+			background: var(--dash-group-bg);
+		}
 
 	.group-block h5 {
 		margin: 0;
@@ -1524,41 +1577,37 @@
 		color: var(--dash-soft);
 	}
 
-	.dashboard-card {
-		border: 1px solid var(--dash-border);
-		border-radius: 0.78rem;
-		padding: 0.56rem;
-		display: grid;
-		gap: 0.38rem;
-		background: var(--dash-card-bg);
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.25),
-			0 8px 16px rgba(27, 44, 70, 0.08);
-		transition:
-			transform 0.16s ease,
-			border-color 0.16s ease,
-			box-shadow 0.16s ease;
+		.dashboard-card {
+			border: 1px solid var(--dash-border);
+			border-radius: 0.56rem;
+			padding: 0.56rem;
+			display: grid;
+			gap: 0.38rem;
+			background: var(--dash-card-bg);
+			box-shadow: var(--dash-shadow-soft);
+			transition:
+				transform 0.16s ease,
+				border-color 0.16s ease,
+				box-shadow 0.16s ease;
 	}
 
-	.dashboard-card:hover {
-		border-color: var(--dash-border-strong);
-		transform: translateY(-1px);
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.32),
-			0 12px 22px rgba(24, 40, 67, 0.12);
-	}
+		.dashboard-card:hover {
+			border-color: var(--dash-border-strong);
+			transform: translateY(-1px);
+			box-shadow: var(--dash-shadow-strong);
+		}
 
-	.dashboard-card.kind-task {
-		border-left: 2px solid color-mix(in srgb, var(--dash-accent) 56%, transparent);
-	}
+		.dashboard-card.kind-task {
+			border-left: 3px solid color-mix(in srgb, #a8733c 74%, transparent);
+		}
 
-	.dashboard-card.kind-note {
-		border-left: 2px solid color-mix(in srgb, #7090b8 52%, transparent);
-	}
+		.dashboard-card.kind-note {
+			border-left: 3px solid color-mix(in srgb, #5d8f67 76%, transparent);
+		}
 
-	.dashboard-card.kind-message {
-		border-left: 2px solid color-mix(in srgb, #7f8796 42%, transparent);
-	}
+		.dashboard-card.kind-message {
+			border-left: 3px solid color-mix(in srgb, #7f8796 58%, transparent);
+		}
 
 	.card-top {
 		display: flex;
@@ -1656,24 +1705,36 @@
 		padding: 0.34rem 0.3rem;
 	}
 
-	@media (max-width: 900px) {
-		.room-dashboard {
-			padding: 0.7rem;
-			gap: 0.74rem;
+		@media (max-width: 900px) {
+			.room-dashboard {
+				padding: 0.7rem;
+				gap: 0.74rem;
+			}
+
+			.dashboard-header {
+				padding: 0.64rem 0.66rem;
+			}
+
+			.dashboard-title-wrap p {
+				max-width: 28ch;
+			}
+
+			.dashboard-board {
+				grid-template-columns: minmax(0, 1fr);
+			}
+
+			.section-pinned {
+				grid-column: auto;
+			}
+
+			.pinned-groups {
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+			}
 		}
 
-		.dashboard-header {
-			padding: 0.64rem 0.66rem;
-		}
-
-		.dashboard-title-wrap p {
-			max-width: 28ch;
-		}
-	}
-
-	@media (max-width: 620px) {
-		.dashboard-header {
-			flex-direction: column;
+		@media (max-width: 620px) {
+			.dashboard-header {
+				flex-direction: column;
 			align-items: stretch;
 			gap: 0.62rem;
 		}
@@ -1682,19 +1743,27 @@
 			justify-content: flex-start;
 		}
 
-		.dashboard-section,
-		.dashboard-add-composer {
-			border-radius: 0.9rem;
-			padding: 0.66rem;
-		}
+			.dashboard-section,
+			.dashboard-add-composer {
+				border-radius: 0.9rem;
+				padding: 0.66rem;
+			}
 
-		.group-block {
-			padding: 0.44rem;
-		}
+			.dashboard-summary-strip {
+				grid-template-columns: minmax(0, 1fr);
+			}
 
-		.beacon-datetime-grid {
-			grid-template-columns: minmax(0, 1fr);
-		}
+			.group-block {
+				padding: 0.44rem;
+			}
+
+			.pinned-groups {
+				grid-template-columns: minmax(0, 1fr);
+			}
+
+			.beacon-datetime-grid {
+				grid-template-columns: minmax(0, 1fr);
+			}
 	}
 
 	@keyframes dashboard-spin {

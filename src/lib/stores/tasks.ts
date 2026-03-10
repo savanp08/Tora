@@ -11,6 +11,9 @@ export type Task = {
 	title: string;
 	description: string;
 	status: TaskStatus;
+	budget?: number;
+	spent?: number;
+	sprintName: string;
 	assigneeId: string;
 	statusActorId?: string;
 	statusActorName?: string;
@@ -64,6 +67,59 @@ function normalizeApiBase(value?: string) {
 	return trimmed || DEFAULT_API_BASE;
 }
 
+function normalizeTaskBudgetValue(value: unknown): number | undefined {
+	if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+		return value;
+	}
+	if (typeof value === 'string') {
+		const match = value.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+		if (!match) {
+			return undefined;
+		}
+		const parsed = Number(match[0]);
+		if (Number.isFinite(parsed) && parsed >= 0) {
+			return parsed;
+		}
+	}
+	return undefined;
+}
+
+function parseTaskBudgetFromDescription(description: string): number | undefined {
+	const trimmed = description.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	const metadataMatch = trimmed.match(/\[([^\]]+)\]\s*$/);
+	const metadataBody = (metadataMatch?.[1] ?? '').trim();
+	if (!metadataBody) {
+		return undefined;
+	}
+	const budgetMatch = metadataBody.match(/(?:^|\|)\s*budget\s*:\s*([^|\]]+)/i);
+	if (!budgetMatch?.[1]) {
+		return undefined;
+	}
+	return normalizeTaskBudgetValue(budgetMatch[1]);
+}
+
+function parseTaskSpentFromDescription(description: string): number | undefined {
+	const trimmed = description.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	const metadataMatch = trimmed.match(/\[([^\]]+)\]\s*$/);
+	const metadataBody = (metadataMatch?.[1] ?? '').trim();
+	if (!metadataBody) {
+		return undefined;
+	}
+	const spentMatch = metadataBody.match(
+		/(?:^|\|)\s*(?:actual\s*cost|actual_cost|spent|cost)\s*:\s*([^|\]]+)/i
+	);
+	if (!spentMatch?.[1]) {
+		return undefined;
+	}
+	return normalizeTaskBudgetValue(spentMatch[1]);
+}
+
 function dedupeByTaskId(tasks: Task[]) {
 	const taskMap = new Map<string, Task>();
 	for (const task of tasks) {
@@ -93,6 +149,18 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 	const title = toStringValue(source.title).trim() || 'Untitled Task';
 	const description = toStringValue(source.description).trim();
 	const status = normalizeTaskStatus(source.status);
+	const budget =
+		normalizeTaskBudgetValue(source.budget ?? source.task_budget ?? source.taskBudget) ??
+		parseTaskBudgetFromDescription(description);
+	const spent =
+		normalizeTaskBudgetValue(
+			source.actual_cost ??
+				source.actualCost ??
+				source.spent ??
+				source.spent_cost ??
+				source.spentCost
+		) ?? parseTaskSpentFromDescription(description);
+	const sprintName = toStringValue(source.sprintName ?? source.sprint_name).trim();
 	const assigneeId = toStringValue(source.assigneeId ?? source.assignee_id).trim();
 	const statusActorId = toStringValue(source.statusActorId ?? source.status_actor_id).trim();
 	const statusActorName = toStringValue(source.statusActorName ?? source.status_actor_name).trim();
@@ -108,6 +176,9 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 		title,
 		description,
 		status,
+		budget,
+		spent,
+		sprintName,
 		assigneeId,
 		statusActorId: statusActorId || undefined,
 		statusActorName: statusActorName || undefined,

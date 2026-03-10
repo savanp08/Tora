@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,8 @@ type TaskRecordResponse struct {
 	Title           string     `json:"title"`
 	Description     string     `json:"description"`
 	Status          string     `json:"status"`
+	Budget          *float64   `json:"budget,omitempty"`
+	ActualCost      *float64   `json:"actual_cost,omitempty"`
 	SprintName      string     `json:"sprint_name,omitempty"`
 	AssigneeID      string     `json:"assignee_id,omitempty"`
 	StatusActorID   string     `json:"status_actor_id,omitempty"`
@@ -31,15 +35,41 @@ type TaskRecordResponse struct {
 }
 
 type TaskCreateRequest struct {
-	Content     string `json:"content"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
-	SprintName  string `json:"sprint_name"`
+	Content       string   `json:"content"`
+	Title         string   `json:"title"`
+	Description   string   `json:"description"`
+	Status        string   `json:"status"`
+	SprintName    string   `json:"sprint_name"`
+	Budget        *float64 `json:"budget,omitempty"`
+	ActualCost    *float64 `json:"actual_cost,omitempty"`
+	ActualCostAlt *float64 `json:"actualCost,omitempty"`
+	Spent         *float64 `json:"spent,omitempty"`
+	SpentCost     *float64 `json:"spent_cost,omitempty"`
+	SpentCostAlt  *float64 `json:"spentCost,omitempty"`
 }
 
 type TaskStatusUpdateRequest struct {
 	Status string `json:"status"`
+}
+
+type TaskUpdateRequest struct {
+	Title         *string  `json:"title"`
+	Description   *string  `json:"description"`
+	Budget        *float64 `json:"budget,omitempty"`
+	ActualCost    *float64 `json:"actual_cost,omitempty"`
+	ActualCostAlt *float64 `json:"actualCost,omitempty"`
+	Spent         *float64 `json:"spent,omitempty"`
+	SpentCost     *float64 `json:"spent_cost,omitempty"`
+	SpentCostAlt  *float64 `json:"spentCost,omitempty"`
+	SprintName    *string  `json:"sprint_name"`
+	SprintNameAlt *string  `json:"sprintName"`
+	AssigneeID    *string  `json:"assignee_id"`
+	AssigneeIDAlt *string  `json:"assigneeId"`
+}
+
+type taskMetadataEntry struct {
+	key string
+	raw string
 }
 
 func resolveTaskRequesterID(r *http.Request) string {
@@ -77,6 +107,167 @@ func nullableTrimmedText(value string) interface{} {
 		return nil
 	}
 	return trimmed
+}
+
+func parseTaskMetadataEntries(description string) (string, []taskMetadataEntry) {
+	trimmed := strings.TrimSpace(description)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	lastOpen := strings.LastIndex(trimmed, "[")
+	lastClose := strings.LastIndex(trimmed, "]")
+	if lastOpen < 0 || lastClose < lastOpen || strings.TrimSpace(trimmed[lastClose+1:]) != "" {
+		return trimmed, nil
+	}
+
+	baseDescription := strings.TrimSpace(trimmed[:lastOpen])
+	metadataBody := strings.TrimSpace(trimmed[lastOpen+1 : lastClose])
+	if metadataBody == "" {
+		return baseDescription, nil
+	}
+	if !strings.Contains(metadataBody, ":") {
+		return trimmed, nil
+	}
+
+	sections := strings.Split(metadataBody, "|")
+	entries := make([]taskMetadataEntry, 0, len(sections))
+	for _, section := range sections {
+		raw := strings.TrimSpace(section)
+		if raw == "" {
+			continue
+		}
+		key := raw
+		if idx := strings.Index(raw, ":"); idx >= 0 {
+			key = raw[:idx]
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		entries = append(entries, taskMetadataEntry{
+			key: key,
+			raw: raw,
+		})
+	}
+	return baseDescription, entries
+}
+
+func parseTaskBudgetValue(raw string) (float64, bool) {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return 0, false
+	}
+	normalized = strings.ReplaceAll(normalized, ",", "")
+	normalized = strings.ReplaceAll(normalized, "$", "")
+	normalized = strings.ReplaceAll(normalized, "USD", "")
+	parts := strings.Fields(normalized)
+	if len(parts) > 0 {
+		normalized = parts[0]
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(normalized), 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func formatTaskBudgetValue(value float64) string {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return "0"
+	}
+	formatted := strconv.FormatFloat(value, 'f', 2, 64)
+	formatted = strings.TrimRight(strings.TrimRight(formatted, "0"), ".")
+	if formatted == "" {
+		return "0"
+	}
+	return formatted
+}
+
+func isTaskCostMetadataKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	return normalized == "actual cost" || normalized == "actual_cost" || normalized == "spent" || normalized == "cost"
+}
+
+func firstTaskFinancialValue(values ...*float64) *float64 {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func applyTaskFinancialsToDescription(description string, budget *float64, actualCost *float64) string {
+	baseDescription, entries := parseTaskMetadataEntries(description)
+	metadataParts := make([]string, 0, len(entries)+2)
+	for _, entry := range entries {
+		if entry.key == "budget" || isTaskCostMetadataKey(entry.key) {
+			continue
+		}
+		metadataParts = append(metadataParts, entry.raw)
+	}
+
+	if budget != nil && !math.IsNaN(*budget) && !math.IsInf(*budget, 0) && *budget > 0 {
+		metadataParts = append(metadataParts, fmt.Sprintf("Budget: $%s", formatTaskBudgetValue(*budget)))
+	}
+	if actualCost != nil && !math.IsNaN(*actualCost) && !math.IsInf(*actualCost, 0) && *actualCost >= 0 {
+		metadataParts = append(metadataParts, fmt.Sprintf("Spent: $%s", formatTaskBudgetValue(*actualCost)))
+	}
+
+	if len(metadataParts) == 0 {
+		return strings.TrimSpace(baseDescription)
+	}
+
+	metadataBlock := "[" + strings.Join(metadataParts, " | ") + "]"
+	if strings.TrimSpace(baseDescription) == "" {
+		return metadataBlock
+	}
+	return strings.TrimSpace(baseDescription) + "\n\n" + metadataBlock
+}
+
+func applyTaskBudgetToDescription(description string, budget *float64) string {
+	return applyTaskFinancialsToDescription(description, budget, nil)
+}
+
+func extractTaskBudget(description string) *float64 {
+	_, entries := parseTaskMetadataEntries(description)
+	for _, entry := range entries {
+		if entry.key != "budget" {
+			continue
+		}
+		valuePortion := entry.raw
+		if idx := strings.Index(valuePortion, ":"); idx >= 0 {
+			valuePortion = valuePortion[idx+1:]
+		}
+		parsed, ok := parseTaskBudgetValue(valuePortion)
+		if !ok {
+			continue
+		}
+		budget := parsed
+		return &budget
+	}
+	return nil
+}
+
+func extractTaskActualCost(description string) *float64 {
+	_, entries := parseTaskMetadataEntries(description)
+	for _, entry := range entries {
+		if !isTaskCostMetadataKey(entry.key) {
+			continue
+		}
+		valuePortion := entry.raw
+		if idx := strings.Index(valuePortion, ":"); idx >= 0 {
+			valuePortion = valuePortion[idx+1:]
+		}
+		parsed, ok := parseTaskBudgetValue(valuePortion)
+		if !ok {
+			continue
+		}
+		actualCost := parsed
+		return &actualCost
+	}
+	return nil
 }
 
 func resolveTaskRequesterMemberID(r *http.Request) string {
@@ -223,6 +414,8 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:       createdAt.UTC(),
 			UpdatedAt:       updatedAt.UTC(),
 		}
+		task.Budget = extractTaskBudget(task.Description)
+		task.ActualCost = extractTaskActualCost(task.Description)
 		if assigneeID != nil {
 			task.AssigneeID = strings.TrimSpace(assigneeID.String())
 		}
@@ -297,6 +490,14 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	if description == "" && content != "" && content != title {
 		description = content
 	}
+	requestedActualCost := firstTaskFinancialValue(
+		req.ActualCost,
+		req.ActualCostAlt,
+		req.SpentCost,
+		req.SpentCostAlt,
+		req.Spent,
+	)
+	description = applyTaskFinancialsToDescription(description, req.Budget, requestedActualCost)
 	if len(description) > 4000 {
 		description = description[:4000]
 	}
@@ -358,12 +559,259 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	response.Budget = extractTaskBudget(response.Description)
+	response.ActualCost = extractTaskActualCost(response.Description)
 	if assigneeID != nil {
 		response.AssigneeID = strings.TrimSpace(assigneeID.String())
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task storage unavailable"})
+		return
+	}
+
+	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
+	roomUUID, normalizedRoomID, err := resolveTaskRoomUUID(rawRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
+		return
+	}
+	requesterMemberID := resolveTaskRequesterMemberID(r)
+	if requesterMemberID != "" {
+		isMember, memberErr := h.ensureTaskRequesterMembership(r.Context(), normalizedRoomID, requesterMemberID)
+		if memberErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+			return
+		}
+		if !isMember {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Join the room to update tasks"})
+			return
+		}
+	}
+	taskID, err := parseFlexibleTaskUUID(strings.TrimSpace(chi.URLParam(r, "taskId")))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid task id"})
+		return
+	}
+
+	var req TaskUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	setClauses := make([]string, 0, 6)
+	args := make([]interface{}, 0, 8)
+
+	if req.Title != nil {
+		title := strings.TrimSpace(*req.Title)
+		if title == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "title cannot be empty"})
+			return
+		}
+		if len(title) > 240 {
+			title = title[:240]
+		}
+		setClauses = append(setClauses, "title = ?")
+		args = append(args, title)
+	}
+
+	descriptionValue := req.Description
+	requestedActualCost := firstTaskFinancialValue(
+		req.ActualCost,
+		req.ActualCostAlt,
+		req.SpentCost,
+		req.SpentCostAlt,
+		req.Spent,
+	)
+	if req.Budget != nil || requestedActualCost != nil {
+		baseDescription := ""
+		if descriptionValue != nil {
+			baseDescription = strings.TrimSpace(*descriptionValue)
+		} else {
+			descriptionQuery := fmt.Sprintf(
+				`SELECT description FROM %s WHERE room_id = ? AND id = ?`,
+				h.scylla.Table("tasks"),
+			)
+			if err := h.scylla.Session.Query(descriptionQuery, roomUUID, taskID).
+				WithContext(r.Context()).
+				Scan(&baseDescription); err != nil {
+				if err == gocql.ErrNotFound {
+					w.WriteHeader(http.StatusNotFound)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task not found"})
+					return
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load existing task"})
+				return
+			}
+		}
+		nextBudget := extractTaskBudget(baseDescription)
+		if req.Budget != nil {
+			nextBudget = req.Budget
+		}
+		nextActualCost := extractTaskActualCost(baseDescription)
+		if requestedActualCost != nil {
+			nextActualCost = requestedActualCost
+		}
+		updatedDescription := applyTaskFinancialsToDescription(baseDescription, nextBudget, nextActualCost)
+		descriptionValue = &updatedDescription
+	}
+	if descriptionValue != nil {
+		description := strings.TrimSpace(*descriptionValue)
+		if len(description) > 4000 {
+			description = description[:4000]
+		}
+		setClauses = append(setClauses, "description = ?")
+		args = append(args, description)
+	}
+
+	sprintNameValue := req.SprintName
+	if sprintNameValue == nil {
+		sprintNameValue = req.SprintNameAlt
+	}
+	if sprintNameValue != nil {
+		sprintName := strings.TrimSpace(*sprintNameValue)
+		if len(sprintName) > 160 {
+			sprintName = sprintName[:160]
+		}
+		setClauses = append(setClauses, "sprint_name = ?")
+		args = append(args, nullableTrimmedText(sprintName))
+	}
+
+	assigneeIDValue := req.AssigneeID
+	if assigneeIDValue == nil {
+		assigneeIDValue = req.AssigneeIDAlt
+	}
+	if assigneeIDValue != nil {
+		assigneeRaw := strings.TrimSpace(*assigneeIDValue)
+		if assigneeRaw == "" {
+			setClauses = append(setClauses, "assignee_id = ?")
+			args = append(args, nil)
+		} else {
+			candidates := []string{assigneeRaw}
+			if strings.Contains(assigneeRaw, "_") {
+				candidates = append(candidates, strings.ReplaceAll(assigneeRaw, "_", "-"))
+			}
+			var assigneeUUID *gocql.UUID
+			for _, candidate := range candidates {
+				parsedAssignee, parseErr := parseFlexibleTaskUUID(candidate)
+				if parseErr != nil {
+					continue
+				}
+				assigneeCopy := parsedAssignee
+				assigneeUUID = &assigneeCopy
+				break
+			}
+			if assigneeUUID == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid assignee id"})
+				return
+			}
+			setClauses = append(setClauses, "assignee_id = ?")
+			args = append(args, assigneeUUID)
+		}
+	}
+
+	if len(setClauses) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "No editable fields provided"})
+		return
+	}
+
+	now := time.Now().UTC()
+	setClauses = append(setClauses, "updated_at = ?")
+	args = append(args, now)
+	args = append(args, roomUUID, taskID)
+
+	updateQuery := fmt.Sprintf(
+		`UPDATE %s SET %s WHERE room_id = ? AND id = ?`,
+		h.scylla.Table("tasks"),
+		strings.Join(setClauses, ", "),
+	)
+	if err := h.scylla.Session.Query(updateQuery, args...).WithContext(r.Context()).Exec(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update room task"})
+		return
+	}
+
+	selectQuery := fmt.Sprintf(
+		`SELECT id, title, description, status, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at FROM %s WHERE room_id = ? AND id = ?`,
+		h.scylla.Table("tasks"),
+	)
+	var (
+		foundTaskID     gocql.UUID
+		title           string
+		description     string
+		status          string
+		sprintName      string
+		assigneeID      *gocql.UUID
+		statusActorID   string
+		statusActorName string
+		statusChangedAt *time.Time
+		createdAt       time.Time
+		updatedAt       time.Time
+	)
+	if err := h.scylla.Session.Query(selectQuery, roomUUID, taskID).WithContext(r.Context()).Scan(
+		&foundTaskID,
+		&title,
+		&description,
+		&status,
+		&sprintName,
+		&assigneeID,
+		&statusActorID,
+		&statusActorName,
+		&statusChangedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		if err == gocql.ErrNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task not found"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to load updated task"})
+		return
+	}
+
+	response := TaskRecordResponse{
+		ID:              strings.TrimSpace(foundTaskID.String()),
+		RoomID:          normalizedRoomID,
+		Title:           strings.TrimSpace(title),
+		Description:     strings.TrimSpace(description),
+		Status:          normalizeTaskStatusValue(status),
+		SprintName:      strings.TrimSpace(sprintName),
+		StatusActorID:   strings.TrimSpace(statusActorID),
+		StatusActorName: strings.TrimSpace(statusActorName),
+		CreatedAt:       createdAt.UTC(),
+		UpdatedAt:       updatedAt.UTC(),
+	}
+	response.Budget = extractTaskBudget(response.Description)
+	response.ActualCost = extractTaskActualCost(response.Description)
+	if assigneeID != nil {
+		response.AssigneeID = strings.TrimSpace(assigneeID.String())
+	}
+	if statusChangedAt != nil && !statusChangedAt.IsZero() {
+		statusChangedAtUTC := statusChangedAt.UTC()
+		response.StatusChangedAt = &statusChangedAtUTC
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(response)
 }
 
@@ -491,6 +939,57 @@ func (h *RoomHandler) DeleteRoomTasks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+}
+
+func (h *RoomHandler) DeleteRoomTask(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task storage unavailable"})
+		return
+	}
+
+	rawRoomID := strings.TrimSpace(firstNonEmpty(chi.URLParam(r, "roomId"), chi.URLParam(r, "id")))
+	roomUUID, normalizedRoomID, err := resolveTaskRoomUUID(rawRoomID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid room id"})
+		return
+	}
+	requesterMemberID := resolveTaskRequesterMemberID(r)
+	if requesterMemberID != "" {
+		isMember, memberErr := h.ensureTaskRequesterMembership(r.Context(), normalizedRoomID, requesterMemberID)
+		if memberErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+			return
+		}
+		if !isMember {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Join the room to delete tasks"})
+			return
+		}
+	}
+
+	taskID, err := parseFlexibleTaskUUID(strings.TrimSpace(chi.URLParam(r, "taskId")))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid task id"})
+		return
+	}
+
+	query := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ? AND id = ?`, h.scylla.Table("tasks"))
+	if err := h.scylla.Session.Query(query, roomUUID, taskID).WithContext(r.Context()).Exec(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete room task"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":  "deleted",
+		"task_id": strings.TrimSpace(taskID.String()),
+	})
 }
 
 func parseFlexibleTaskUUID(raw string) (gocql.UUID, error) {

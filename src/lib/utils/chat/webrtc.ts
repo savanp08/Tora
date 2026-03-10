@@ -36,6 +36,8 @@ const WEBRTC_STUN_CONFIG: RTCConfiguration = {
 };
 
 const MAX_PARTICIPANTS_DEFAULT = APP_LIMITS.calls.maxParticipants;
+const ICE_CANDIDATE_BACKLOG_LIMIT = 64;
+const PEER_DISCONNECT_GRACE_MS = 8_000;
 
 function toStringValue(input: unknown) {
 	if (typeof input === 'string') {
@@ -101,6 +103,9 @@ export class WebRTCManager extends EventTarget {
 	private localStream: MediaStream | null = null;
 	private peerConnections = new Map<string, RTCPeerConnection>();
 	private remoteStreams = new Map<string, MediaStream>();
+	private pendingIceCandidates = new Map<string, RTCIceCandidateInit[]>();
+	private peerDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private makingOfferPeers = new Set<string>();
 	private callStartedAt = 0;
 	private currentCallType: CallType = 'audio';
 
@@ -199,14 +204,20 @@ export class WebRTCManager extends EventTarget {
 		return stream;
 	}
 
-	public async createPeerConnection(targetUserId: string, isInitiator: boolean) {
+	public async createPeerConnection(
+		targetUserId: string,
+		isInitiator: boolean
+	): Promise<RTCPeerConnection> {
 		const normalizedTarget = normalizeIdentifier(targetUserId);
 		if (!normalizedTarget || normalizedTarget === this.userId) {
 			throw new Error('invalid target user for peer connection');
 		}
-		const existing = this.peerConnections.get(normalizedTarget);
-		if (existing) {
+		const existing = this.peerConnections.get(normalizedTarget) ?? null;
+		if (existing && this.isPeerConnectionReusable(existing)) {
 			return existing;
+		}
+		if (existing) {
+			this.cleanupPeerConnection(normalizedTarget);
 		}
 		if (this.peerConnections.size >= this.maxParticipants - 1) {
 			throw new Error(`call is limited to ${this.maxParticipants} participants`);
@@ -214,6 +225,7 @@ export class WebRTCManager extends EventTarget {
 
 		const connection = new RTCPeerConnection(WEBRTC_STUN_CONFIG);
 		this.peerConnections.set(normalizedTarget, connection);
+		this.clearPeerDisconnectCleanup(normalizedTarget);
 		this.notifyPeerStateChange();
 		this.attachLocalTracks(connection);
 
@@ -267,47 +279,15 @@ export class WebRTCManager extends EventTarget {
 		};
 
 		connection.onconnectionstatechange = () => {
-			if (
-				connection.connectionState === 'failed' ||
-				connection.connectionState === 'closed' ||
-				connection.connectionState === 'disconnected'
-			) {
-				this.cleanupPeerConnection(normalizedTarget);
-				return;
-			}
-			this.notifyPeerStateChange();
+			this.handlePeerConnectionStateChange(normalizedTarget, connection);
 		};
 
 		connection.oniceconnectionstatechange = () => {
-			if (
-				connection.iceConnectionState === 'failed' ||
-				connection.iceConnectionState === 'closed' ||
-				connection.iceConnectionState === 'disconnected'
-			) {
-				this.cleanupPeerConnection(normalizedTarget);
-				return;
-			}
-			this.notifyPeerStateChange();
+			this.handlePeerConnectionStateChange(normalizedTarget, connection);
 		};
 
 		if (isInitiator) {
-			const offer = await connection.createOffer();
-			await connection.setLocalDescription(offer);
-			this.sendSignal({
-				type: 'webrtc_offer',
-				roomId: this.roomId,
-				targetUserId: normalizedTarget,
-				fromUserId: this.userId,
-				fromUserName: this.userName,
-				callType: this.currentCallType,
-				payload: {
-					offer: connection.localDescription,
-					targetUserId: normalizedTarget,
-					fromUserId: this.userId,
-					fromUserName: this.userName,
-					callType: this.currentCallType
-				}
-			});
+			await this.negotiateWithPeer(normalizedTarget, connection);
 		}
 
 		return connection;
@@ -456,12 +436,17 @@ export class WebRTCManager extends EventTarget {
 			}
 
 			const offerConnection = await this.createPeerConnection(fromUserId, false);
+			const canAcceptOffer = await this.prepareForRemoteOffer(fromUserId, offerConnection);
+			if (!canAcceptOffer) {
+				return;
+			}
 			await offerConnection.setRemoteDescription(
 				new RTCSessionDescription({
 					type: sdpType as RTCSdpType,
 					sdp
 				})
 			);
+			await this.flushPendingIceCandidates(fromUserId, offerConnection);
 			const answer = await offerConnection.createAnswer();
 			await offerConnection.setLocalDescription(answer);
 			this.sendSignal({
@@ -502,6 +487,7 @@ export class WebRTCManager extends EventTarget {
 					sdp
 				})
 			);
+			await this.flushPendingIceCandidates(fromUserId, answerConnection);
 			return;
 		}
 
@@ -517,17 +503,15 @@ export class WebRTCManager extends EventTarget {
 			const connection =
 				this.peerConnections.get(fromUserId) ??
 				(await this.createPeerConnection(fromUserId, false));
-			await connection.addIceCandidate(
-				new RTCIceCandidate({
-					candidate: candidateValue,
-					sdpMid: toStringValue(candidatePayload.sdpMid) || null,
-					sdpMLineIndex:
-						typeof candidatePayload.sdpMLineIndex === 'number'
-							? candidatePayload.sdpMLineIndex
-							: null,
-					usernameFragment: toStringValue(candidatePayload.usernameFragment) || null
-				})
-			);
+			await this.addIceCandidateWhenReady(fromUserId, connection, {
+				candidate: candidateValue,
+				sdpMid: toStringValue(candidatePayload.sdpMid) || null,
+				sdpMLineIndex:
+					typeof candidatePayload.sdpMLineIndex === 'number'
+						? candidatePayload.sdpMLineIndex
+						: null,
+				usernameFragment: toStringValue(candidatePayload.usernameFragment) || null
+			});
 		}
 	}
 
@@ -585,6 +569,11 @@ export class WebRTCManager extends EventTarget {
 		this.stopLocalStreamTracks();
 		this.localStream = null;
 		this.currentCallType = 'audio';
+		for (const targetUserId of this.peerDisconnectTimers.keys()) {
+			this.clearPeerDisconnectCleanup(targetUserId);
+		}
+		this.pendingIceCandidates.clear();
+		this.makingOfferPeers.clear();
 		return durationSeconds;
 	}
 
@@ -602,6 +591,9 @@ export class WebRTCManager extends EventTarget {
 			connection.close();
 		}
 		this.peerConnections.delete(targetUserId);
+		this.clearPeerDisconnectCleanup(targetUserId);
+		this.pendingIceCandidates.delete(targetUserId);
+		this.makingOfferPeers.delete(targetUserId);
 		if (this.remoteStreams.has(targetUserId)) {
 			this.remoteStreams.delete(targetUserId);
 			this.onRemoteStreamRemoved?.(targetUserId);
@@ -620,15 +612,13 @@ export class WebRTCManager extends EventTarget {
 		}
 		if (
 			connection.connectionState === 'failed' ||
-			connection.connectionState === 'closed' ||
-			connection.connectionState === 'disconnected'
+			connection.connectionState === 'closed'
 		) {
 			return false;
 		}
 		if (
 			connection.iceConnectionState === 'failed' ||
-			connection.iceConnectionState === 'closed' ||
-			connection.iceConnectionState === 'disconnected'
+			connection.iceConnectionState === 'closed'
 		) {
 			return false;
 		}
@@ -652,6 +642,21 @@ export class WebRTCManager extends EventTarget {
 		if (!this.localStream) {
 			return;
 		}
+		const activeTracks = this.localStream.getTracks();
+		const activeKinds = new Set(activeTracks.map((track) => track.kind));
+		for (const sender of connection.getSenders()) {
+			const senderTrack = sender.track;
+			if (!senderTrack || !activeKinds.has(senderTrack.kind)) {
+				continue;
+			}
+			const replacement = activeTracks.find((track) => track.kind === senderTrack.kind) ?? null;
+			if (!replacement || senderTrack.id === replacement.id) {
+				continue;
+			}
+			void sender.replaceTrack(replacement).catch(() => {
+				// Fallback to addTrack path below when replaceTrack is not supported.
+			});
+		}
 		for (const track of this.localStream.getTracks()) {
 			const hasSender = connection
 				.getSenders()
@@ -666,5 +671,170 @@ export class WebRTCManager extends EventTarget {
 		for (const connection of this.peerConnections.values()) {
 			this.attachLocalTracks(connection);
 		}
+	}
+
+	private isPeerConnectionReusable(connection: RTCPeerConnection | null) {
+		if (!connection) {
+			return false;
+		}
+		if (
+			connection.connectionState === 'closed' ||
+			connection.connectionState === 'failed' ||
+			connection.iceConnectionState === 'closed' ||
+			connection.iceConnectionState === 'failed'
+		) {
+			return false;
+		}
+		return true;
+	}
+
+	private isPolitePeer(targetUserId: string) {
+		return this.userId.localeCompare(targetUserId) > 0;
+	}
+
+	private async negotiateWithPeer(targetUserId: string, connection: RTCPeerConnection) {
+		if (!this.isPeerConnectionReusable(connection)) {
+			return;
+		}
+		this.makingOfferPeers.add(targetUserId);
+		try {
+			const offer = await connection.createOffer();
+			if (connection.signalingState !== 'stable') {
+				return;
+			}
+			await connection.setLocalDescription(offer);
+			this.sendSignal({
+				type: 'webrtc_offer',
+				roomId: this.roomId,
+				targetUserId,
+				fromUserId: this.userId,
+				fromUserName: this.userName,
+				callType: this.currentCallType,
+				payload: {
+					offer: connection.localDescription,
+					targetUserId,
+					fromUserId: this.userId,
+					fromUserName: this.userName,
+					callType: this.currentCallType
+				}
+			});
+		} finally {
+			this.makingOfferPeers.delete(targetUserId);
+		}
+	}
+
+	private async prepareForRemoteOffer(targetUserId: string, connection: RTCPeerConnection) {
+		const hasOfferCollision =
+			this.makingOfferPeers.has(targetUserId) || connection.signalingState !== 'stable';
+		if (!hasOfferCollision) {
+			return true;
+		}
+		if (!this.isPolitePeer(targetUserId)) {
+			return false;
+		}
+		try {
+			await connection.setLocalDescription({ type: 'rollback' });
+		} catch {
+			if (connection.signalingState !== 'stable') {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private enqueueIceCandidate(targetUserId: string, candidate: RTCIceCandidateInit) {
+		const existing = this.pendingIceCandidates.get(targetUserId) ?? [];
+		existing.push(candidate);
+		if (existing.length > ICE_CANDIDATE_BACKLOG_LIMIT) {
+			existing.splice(0, existing.length - ICE_CANDIDATE_BACKLOG_LIMIT);
+		}
+		this.pendingIceCandidates.set(targetUserId, existing);
+	}
+
+	private async addIceCandidateWhenReady(
+		targetUserId: string,
+		connection: RTCPeerConnection,
+		candidate: RTCIceCandidateInit
+	) {
+		if (!connection.remoteDescription) {
+			this.enqueueIceCandidate(targetUserId, candidate);
+			return;
+		}
+		try {
+			await connection.addIceCandidate(new RTCIceCandidate(candidate));
+		} catch {
+			// Ignore stale/invalid candidates from superseded negotiations.
+		}
+	}
+
+	private async flushPendingIceCandidates(targetUserId: string, connection: RTCPeerConnection) {
+		if (!connection.remoteDescription) {
+			return;
+		}
+		const queued = this.pendingIceCandidates.get(targetUserId);
+		if (!queued || queued.length === 0) {
+			return;
+		}
+		this.pendingIceCandidates.delete(targetUserId);
+		for (const candidate of queued) {
+			try {
+				await connection.addIceCandidate(new RTCIceCandidate(candidate));
+			} catch {
+				// Ignore stale/invalid candidates from superseded negotiations.
+			}
+		}
+	}
+
+	private handlePeerConnectionStateChange(
+		targetUserId: string,
+		connection: RTCPeerConnection
+	) {
+		if (
+			connection.connectionState === 'failed' ||
+			connection.connectionState === 'closed' ||
+			connection.iceConnectionState === 'failed' ||
+			connection.iceConnectionState === 'closed'
+		) {
+			this.cleanupPeerConnection(targetUserId);
+			return;
+		}
+		if (
+			connection.connectionState === 'disconnected' ||
+			connection.iceConnectionState === 'disconnected'
+		) {
+			this.schedulePeerDisconnectCleanup(targetUserId);
+		} else {
+			this.clearPeerDisconnectCleanup(targetUserId);
+		}
+		this.notifyPeerStateChange();
+	}
+
+	private clearPeerDisconnectCleanup(targetUserId: string) {
+		const timer = this.peerDisconnectTimers.get(targetUserId);
+		if (!timer) {
+			return;
+		}
+		clearTimeout(timer);
+		this.peerDisconnectTimers.delete(targetUserId);
+	}
+
+	private schedulePeerDisconnectCleanup(targetUserId: string) {
+		if (this.peerDisconnectTimers.has(targetUserId)) {
+			return;
+		}
+		const timer = setTimeout(() => {
+			this.peerDisconnectTimers.delete(targetUserId);
+			const connection = this.peerConnections.get(targetUserId);
+			if (!connection) {
+				return;
+			}
+			const stillDisconnected =
+				connection.connectionState === 'disconnected' ||
+				connection.iceConnectionState === 'disconnected';
+			if (stillDisconnected) {
+				this.cleanupPeerConnection(targetUserId);
+			}
+		}, PEER_DISCONNECT_GRACE_MS);
+		this.peerDisconnectTimers.set(targetUserId, timer);
 	}
 }

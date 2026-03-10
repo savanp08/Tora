@@ -28,10 +28,11 @@ const (
 
 const toraSystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
 RULES:
-1. Style: lazy + quirky, but subtle (max one short quirk line).
-2. Brevity: default to 1-3 short sentences; avoid long paragraphs.
-3. Accuracy: never invent facts; use room context; say when unsure.
-4. Formatting: no heavy markdown (**, *, #, ---). Use - or • for lists.`
+1. Tone: professional, friendly, and lightly witty. Use subtle sarcasm only when clearly playful and never at the user's expense.
+2. Respect: never sound dismissive, arrogant, judgmental, or condescending.
+3. Brevity: default to 1-4 short sentences; avoid long paragraphs unless asked for detail.
+4. Accuracy: never invent facts; use room context; say when unsure.
+5. Formatting: no heavy markdown (**, *, #, ---). Use - or • for lists.`
 
 var toraAuditSchemaState struct {
 	mu      sync.Mutex
@@ -138,24 +139,24 @@ func newToraBotMessage(roomID, content string) models.Message {
 
 func buildToraFailureResponse(err error) string {
 	if err == nil {
-		return "Tora got tangled in thoughts for a second. Please retry soon.\n• Error: retry later"
+		return "I hit a temporary issue. Please retry in a moment.\n• Error: retry later"
 	}
 	if errors.Is(err, ai.ErrAllAIProvidersExhausted) {
-		return "I hit my provider limits and my circuits need a breather. Please try again shortly.\n• Error: limits reached, retry later"
+		return "I am currently rate-limited by the AI provider. Please try again shortly.\n• Error: limits reached, retry later"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return "I stared into the void a bit too long. Try me again in a moment.\n• Error: request timed out, retry later"
+		return "The request timed out before I could finish. Please retry.\n• Error: request timed out, retry later"
 	}
 	if errors.Is(err, context.Canceled) {
-		return "The signal dropped mid-thought. Please send that again.\n• Error: request canceled, retry later"
+		return "The request was canceled before completion. Please send it again.\n• Error: request canceled, retry later"
 	}
 	var statusErr *ai.HTTPStatusError
 	if errors.As(err, &statusErr) {
 		if statusErr.StatusCode() == http.StatusTooManyRequests || statusErr.StatusCode() == http.StatusServiceUnavailable {
-			return "I’m currently rate limited, so my brain is in queue mode. Please retry in a bit.\n• Error: limits reached, retry later"
+			return "I am currently rate-limited by the AI provider. Please retry in a bit.\n• Error: limits reached, retry later"
 		}
 	}
-	return "Tora is hallucinating a little and dropped the thread. Please retry later.\n• Error: temporary AI issue, retry later"
+	return "I could not complete that request right now. Please retry shortly.\n• Error: temporary AI issue, retry later"
 }
 
 func (h *Hub) beginToraTyping(roomID string) func() {

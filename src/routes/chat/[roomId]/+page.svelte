@@ -6895,6 +6895,7 @@
 										<ProjectWorkspace
 											{roomId}
 											canEdit={isMember && !isRoomExpired}
+											onlineMembers={currentOnlineMembers}
 											on:close={() => deactivateWorkspaceModule('tasks')}
 										/>
 									{/if}

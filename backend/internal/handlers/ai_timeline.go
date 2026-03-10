@@ -5,21 +5,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-chi/chi/v5"
+	"github.com/gocql/gocql"
+	"github.com/savanp08/converse/internal/ai"
 	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-	"github.com/go-chi/chi/v5"
-	"github.com/gocql/gocql"
-	"github.com/savanp08/converse/internal/ai"
 )
 
-const aiBlueprintSystemPrompt = "You are an Expert Project Architect. Given a prompt, output strict JSON with 'project_name', 'tech_stack' (array), 'target_audience', 'estimated_cost', 'roles_needed', and 'sprints' (array of objects with 'name', 'duration_days'). DO NOT generate tasks."
+const aiBlueprintSystemPrompt = "You are an Expert Project Architect. Return ONLY valid JSON with keys: 'assistant_reply' and 'timeline'. 'assistant_reply' must be a short plain-language update in a professional, friendly, lightly witty tone (never dismissive or arrogant). 'timeline' must include 'project_name', 'tech_stack' (array), 'target_audience', 'estimated_cost', 'roles_needed', and 'sprints' (array of objects with 'name', 'duration_days'). DO NOT generate tasks in this step."
 
-const aiTaskFillSystemPrompt = "You are an Expert Agile Manager. Given a project blueprint and a Sprint name, generate strict JSON containing an array of 'tasks'. Each task needs 'title', 'duration_unit' (hours/days), 'duration_value' (number), 'status', and 'type'. Keep it realistic."
+const aiTaskFillSystemPrompt = "You are an Expert Agile Manager. Given a project blueprint and a Sprint name, generate strict JSON containing an array of 'tasks'. Each task needs 'title', 'duration_unit' (hours/days), 'duration_value' (number), 'status', 'type', and 'budget' (numeric task budget allocation). Keep it realistic."
 
-const aiTimelineEditSystemPrompt = "You are an Expert Project Program Manager. You receive a current project JSON and an edit prompt. Return strict JSON with keys: 'project_name', 'tech_stack', 'target_audience', 'estimated_cost', 'roles_needed', and 'sprints'. Each sprint must include 'name', 'duration_days', and 'tasks'. Each task must include 'title', 'duration_unit', 'duration_value', 'status', and 'type'."
+const aiTimelineEditSystemPrompt = "You are an Expert Project Program Manager. You receive a current project JSON and an edit prompt. Return ONLY valid JSON with keys: 'assistant_reply' and 'timeline'. 'assistant_reply' must summarize what changed in user-friendly language with a professional, friendly, lightly witty tone (never dismissive or arrogant). 'timeline' must include 'project_name', 'tech_stack', 'target_audience', 'estimated_cost', 'roles_needed', and 'sprints'. Each sprint must include 'name', 'duration_days', and 'tasks'. Each task must include 'title', 'duration_unit', 'duration_value', 'status', 'type', and 'budget' (numeric task budget allocation)."
 
 type aiTimelineGenerateRequest struct {
 	Prompt   string `json:"prompt"`
@@ -35,6 +35,7 @@ type aiTimelineEditRequest struct {
 }
 
 type aiTimelineGenerateResponse struct {
+	AssistantReply string             `json:"assistant_reply,omitempty"`
 	ProjectName    string             `json:"project_name"`
 	TechStack      []string           `json:"tech_stack,omitempty"`
 	TargetAudience string             `json:"target_audience,omitempty"`
@@ -48,6 +49,7 @@ type aiTimelineGenerateResponse struct {
 }
 
 type aiTimelineProject struct {
+	AssistantReply string             `json:"assistant_reply,omitempty"`
 	ProjectName    string             `json:"project_name"`
 	TechStack      []string           `json:"tech_stack,omitempty"`
 	TargetAudience string             `json:"target_audience,omitempty"`
@@ -74,6 +76,7 @@ type aiTimelineTask struct {
 	Title         string  `json:"title"`
 	Status        string  `json:"status"`
 	Type          string  `json:"type"`
+	Budget        float64 `json:"budget,omitempty"`
 	DurationUnit  string  `json:"duration_unit,omitempty"`
 	DurationValue float64 `json:"duration_value,omitempty"`
 	EffortScore   int     `json:"effort_score,omitempty"`
@@ -210,6 +213,7 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(aiTimelineGenerateResponse{
+		AssistantReply: generated.AssistantReply,
 		ProjectName:    generated.ProjectName,
 		TechStack:      generated.TechStack,
 		TargetAudience: generated.TargetAudience,
@@ -359,6 +363,7 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(aiTimelineGenerateResponse{
+		AssistantReply: edited.AssistantReply,
 		ProjectName:    edited.ProjectName,
 		TechStack:      edited.TechStack,
 		TargetAudience: edited.TargetAudience,
@@ -446,40 +451,190 @@ func generateTasksForSprint(
 }
 
 func parseAISprintTasks(raw string) ([]aiTimelineTask, error) {
-	content := extractJSONObject(raw)
-	if strings.TrimSpace(content) == "" {
+	candidates := extractJSONObjectsCandidates(raw)
+	if len(candidates) == 0 {
 		return nil, fmt.Errorf("ai sprint task response did not contain JSON")
 	}
 
-	var parsed struct {
-		Tasks []aiTimelineTask `json:"tasks"`
+	var lastErr error
+	for _, content := range candidates {
+		var parsed struct {
+			Tasks []aiTimelineTask `json:"tasks"`
+		}
+		if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+			lastErr = err
+			continue
+		}
+		normalizedTasks := normalizeAITimelineTasks(parsed.Tasks)
+		if len(normalizedTasks) == 0 {
+			lastErr = fmt.Errorf("ai sprint task generation returned no valid tasks")
+			continue
+		}
+		return normalizedTasks, nil
 	}
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		return nil, err
+	if lastErr != nil {
+		return nil, lastErr
 	}
-	normalizedTasks := normalizeAITimelineTasks(parsed.Tasks)
-	if len(normalizedTasks) == 0 {
-		return nil, fmt.Errorf("ai sprint task generation returned no valid tasks")
-	}
-	return normalizedTasks, nil
+	return nil, fmt.Errorf("ai sprint task response did not contain parsable tasks JSON")
 }
 
 func parseAITimelineProject(raw string) (aiTimelineProject, error) {
-	content := extractJSONObject(raw)
-	if strings.TrimSpace(content) == "" {
+	candidates := extractJSONObjectsCandidates(raw)
+	if len(candidates) == 0 {
 		return aiTimelineProject{}, fmt.Errorf("ai timeline response did not contain JSON")
 	}
 
-	var parsed aiTimelineProject
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	var lastErr error
+	for _, content := range candidates {
+		parsed, err := parseAITimelineProjectCandidate(content)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		normalized := normalizeAITimelineProject(parsed)
+		if len(normalized.Sprints) == 0 {
+			lastErr = fmt.Errorf("ai timeline returned no valid sprints")
+			continue
+		}
+		return normalized, nil
+	}
+	if lastErr != nil {
+		return aiTimelineProject{}, lastErr
+	}
+	return aiTimelineProject{}, fmt.Errorf("ai timeline response did not contain parsable project JSON")
+}
+
+func parseAITimelineProjectCandidate(content string) (aiTimelineProject, error) {
+	// Backward-compatible direct schema:
+	// { project_name, ..., sprints: [...] }
+	var direct aiTimelineProject
+	if err := json.Unmarshal([]byte(content), &direct); err == nil && len(direct.Sprints) > 0 {
+		return direct, nil
+	}
+
+	// Preferred schema:
+	// { assistant_reply: "...", timeline: { ...project... } }
+	var envelope struct {
+		AssistantReply  string          `json:"assistant_reply"`
+		Timeline        json.RawMessage `json:"timeline"`
+		Project         json.RawMessage `json:"project"`
+		ProjectTimeline json.RawMessage `json:"project_timeline"`
+	}
+	if err := json.Unmarshal([]byte(content), &envelope); err != nil {
 		return aiTimelineProject{}, err
 	}
 
-	normalized := normalizeAITimelineProject(parsed)
-	if len(normalized.Sprints) == 0 {
-		return aiTimelineProject{}, fmt.Errorf("ai timeline returned no valid sprints")
+	nestedPayload := pickFirstNonEmptyJSONRaw(
+		envelope.Timeline,
+		envelope.ProjectTimeline,
+		envelope.Project,
+	)
+	if len(nestedPayload) == 0 {
+		return aiTimelineProject{}, fmt.Errorf("missing 'timeline' object in AI response")
 	}
-	return normalized, nil
+
+	var nested aiTimelineProject
+	if err := json.Unmarshal(nestedPayload, &nested); err != nil {
+		return aiTimelineProject{}, err
+	}
+	if strings.TrimSpace(envelope.AssistantReply) != "" {
+		nested.AssistantReply = strings.TrimSpace(envelope.AssistantReply)
+	}
+	return nested, nil
+}
+
+func pickFirstNonEmptyJSONRaw(values ...json.RawMessage) json.RawMessage {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(string(value))
+		if trimmed == "" || trimmed == "null" {
+			continue
+		}
+		return value
+	}
+	return nil
+}
+
+func trimAIResponseCodeFence(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if !strings.HasPrefix(trimmed, "```") {
+		return trimmed
+	}
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```JSON")
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	if endFence := strings.LastIndex(trimmed, "```"); endFence >= 0 {
+		trimmed = trimmed[:endFence]
+	}
+	return strings.TrimSpace(trimmed)
+}
+
+func extractJSONObjectsCandidates(raw string) []string {
+	text := trimAIResponseCodeFence(raw)
+	if text == "" {
+		return nil
+	}
+
+	if strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}") && json.Valid([]byte(text)) {
+		return []string{text}
+	}
+
+	candidates := make([]string, 0, 2)
+	start := -1
+	depth := 0
+	inString := false
+	escaped := false
+
+	for idx := 0; idx < len(text); idx++ {
+		char := text[idx]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if char == '\\' {
+				escaped = true
+				continue
+			}
+			if char == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		if char == '"' {
+			inString = true
+			continue
+		}
+		if char == '{' {
+			if depth == 0 {
+				start = idx
+			}
+			depth++
+			continue
+		}
+		if char == '}' && depth > 0 {
+			depth--
+			if depth == 0 && start >= 0 {
+				candidate := strings.TrimSpace(text[start : idx+1])
+				if candidate != "" {
+					candidates = append(candidates, candidate)
+				}
+				start = -1
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		trimmed := strings.TrimSpace(text)
+		if trimmed != "" {
+			return []string{trimmed}
+		}
+	}
+	return candidates
 }
 
 func normalizeTimelineStringSlice(values []string, fallback []string) []string {
@@ -528,6 +683,16 @@ func normalizeTimelineDurationValue(value float64, unit string) float64 {
 	return value
 }
 
+func normalizeTimelineBudgetValue(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0
+	}
+	if value > 1_000_000_000 {
+		return 1_000_000_000
+	}
+	return value
+}
+
 func estimateEffortScoreFromDuration(unit string, value float64) int {
 	hours := value
 	if unit == "days" {
@@ -572,6 +737,7 @@ func normalizeAITimelineTasks(tasks []aiTimelineTask) []aiTimelineTask {
 		if taskType == "" {
 			taskType = "general"
 		}
+		budget := normalizeTimelineBudgetValue(task.Budget)
 		durationUnit := normalizeTimelineDurationUnit(task.DurationUnit)
 		durationValue := normalizeTimelineDurationValue(task.DurationValue, durationUnit)
 		effort := task.EffortScore
@@ -583,6 +749,7 @@ func normalizeAITimelineTasks(tasks []aiTimelineTask) []aiTimelineTask {
 			Title:         title,
 			Status:        status,
 			Type:          taskType,
+			Budget:        budget,
 			DurationUnit:  durationUnit,
 			DurationValue: durationValue,
 			EffortScore:   effort,
@@ -608,6 +775,7 @@ func remainingSprintNames(sprints []aiTimelineSprint, startIndex int) []string {
 }
 
 func normalizeAITimelineProject(input aiTimelineProject) aiTimelineProject {
+	assistantReply := truncateRunes(strings.TrimSpace(input.AssistantReply), 2000)
 	projectName := truncateRunes(strings.TrimSpace(input.ProjectName), 180)
 	if projectName == "" {
 		projectName = "AI Project Timeline"
@@ -660,6 +828,7 @@ func normalizeAITimelineProject(input aiTimelineProject) aiTimelineProject {
 	}
 
 	return aiTimelineProject{
+		AssistantReply: assistantReply,
 		ProjectName:    projectName,
 		TechStack:      normalizedTechStack,
 		TargetAudience: targetAudience,
@@ -680,6 +849,18 @@ func formatDurationValue(value float64) string {
 		return strconv.FormatInt(int64(value), 10)
 	}
 	return strconv.FormatFloat(value, 'f', 1, 64)
+}
+
+func formatBudgetValue(value float64) string {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return "0"
+	}
+	formatted := strconv.FormatFloat(value, 'f', 2, 64)
+	formatted = strings.TrimRight(strings.TrimRight(formatted, "0"), ".")
+	if formatted == "" {
+		return "0"
+	}
+	return formatted
 }
 
 func normalizeTimelineDate(raw string, fallback time.Time) time.Time {
@@ -732,9 +913,15 @@ func (h *RoomHandler) persistAITimelineTasks(
 			}
 
 			description := truncateRunes(strings.TrimSpace(task.Description), 3600)
-			metadataParts := make([]string, 0, 3)
+			metadataParts := make([]string, 0, 5)
 			if task.Type != "" {
 				metadataParts = append(metadataParts, fmt.Sprintf("Type: %s", strings.TrimSpace(task.Type)))
+			}
+			if task.Budget > 0 {
+				metadataParts = append(
+					metadataParts,
+					fmt.Sprintf("Budget: $%s", formatBudgetValue(task.Budget)),
+				)
 			}
 			if task.DurationUnit != "" && task.DurationValue > 0 {
 				metadataParts = append(

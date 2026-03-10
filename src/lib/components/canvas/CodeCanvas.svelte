@@ -71,7 +71,7 @@
 		reject: ((reason?: unknown) => void) | null;
 	};
 
-	type CanvasSidebarView = 'explorer' | 'search';
+	type CanvasSidebarView = 'explorer' | 'search' | 'canvas_ai';
 	type MobileCanvasPane = 'explorer' | 'editor';
 	type CanvasSocketPayload = string | ArrayBufferLike | Blob | ArrayBufferView;
 	type CanvasDebugWebSocket = WebSocket & {
@@ -83,6 +83,39 @@
 		snippet: string;
 		message: string;
 		fileName: string;
+	};
+
+	type CanvasAIChatRole = 'user' | 'assistant';
+
+	type CanvasAIChangeAction = 'replace' | 'create' | 'delete';
+
+	type CanvasAIChangeDraft = {
+		filePath: string;
+		action: CanvasAIChangeAction;
+		summary: string;
+		locationHint: string;
+		updatedCode: string;
+	};
+
+	type CanvasAIProposedChange = CanvasAIChangeDraft & {
+		id: string;
+		previousCode: string;
+		diffText: string;
+		applyState: 'pending' | 'applied' | 'failed';
+		applyError: string;
+	};
+
+	type CanvasAIChatMessage = {
+		id: string;
+		role: CanvasAIChatRole;
+		text: string;
+		changes?: CanvasAIProposedChange[];
+		timestamp: number;
+	};
+
+	type CanvasAIParsedResponse = {
+		assistantReply: string;
+		changes: CanvasAIChangeDraft[];
 	};
 
 	type TerminalPanelTab = 'out' | 'in';
@@ -134,10 +167,46 @@
 	const PROMPT_CANCELLED_ERROR = 'canvas-prompt-cancelled';
 	const CANVAS_CLIENT_LOG_PREFIX = '[canvas-client]';
 	const CANVAS_AI_DEVICE_ID_STORAGE_KEY = 'canvasAiDeviceId';
-	const CANVAS_AI_SYSTEM_PROMPT = `You are an in-editor coding assistant.
-Return ONLY the final code for the target file.
-Do not include markdown fences, explanations, notes, or extra text.
-If the user asks for edits, apply them to the existing code and return the full updated file content.`;
+	const CANVAS_AI_SYSTEM_PROMPT = `You are an in-editor coding assistant for a collaborative canvas IDE.
+Return ONLY valid JSON with this exact shape:
+{
+  "assistant_reply": "short conversational response for the user",
+  "changes": [
+    {
+      "file_path": "relative/path/from/project/root.ext",
+      "action": "replace | create | delete",
+      "summary": "what changed in one sentence",
+      "location_hint": "function/class/section affected",
+      "updated_code": "full updated file content for replace/create; empty string for delete"
+    }
+  ]
+}
+Rules:
+- assistant_reply: concise, plain text, no markdown.
+- changes: include every file modification needed.
+- file_path must match workspace relative paths exactly.
+- action:
+  - replace: file exists and updated_code must be full final file content
+  - create: file does not exist and updated_code must be full file content
+  - delete: remove file and keep updated_code empty
+- location_hint is required and should identify where the change applies.
+- Never omit assistant_reply or changes.
+- Return raw JSON only, no markdown fences, no extra text.`;
+	const CANVAS_AI_CHAT_HISTORY_LIMIT = 20;
+	const CANVAS_AI_CONTEXT_MESSAGES = 8;
+	const CANVAS_AI_TEXT_PREVIEW_LIMIT = 420;
+	const CANVAS_AI_MAX_INPUT_TOKENS = 10000;
+	const CANVAS_AI_CHARS_PER_TOKEN = 4;
+	const CANVAS_AI_MAX_PROMPT_CHARS = CANVAS_AI_MAX_INPUT_TOKENS * CANVAS_AI_CHARS_PER_TOKEN;
+	const CANVAS_AI_PROMPT_RESERVED_CHARS = 9000;
+	const CANVAS_AI_CONTEXT_MAX_CHARS = Math.max(4000, CANVAS_AI_MAX_PROMPT_CHARS - CANVAS_AI_PROMPT_RESERVED_CHARS);
+	const CANVAS_AI_MAX_CONVERSATION_CONTEXT_CHARS = 4000;
+	const CANVAS_AI_MAX_INSTRUCTION_CHARS = 3200;
+	const CANVAS_AI_MIN_SECTION_CHARS = 160;
+	const CANVAS_AI_MAX_CONTEXT_FILES = 40;
+	const CANVAS_AI_MAX_CHARS_PER_FILE = 12000;
+	const CANVAS_AI_DIFF_CONTEXT_LINES = 3;
+	const CANVAS_AI_DIFF_MAX_LINES = 320;
 	const EXPLORER_LONG_PRESS_DELAY_MS = 520;
 	const EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
@@ -293,7 +362,12 @@ If the user asks for edits, apply them to the existing code and return the full 
 	let canvasAIError = '';
 	let isCanvasAIGenerating = false;
 	let canvasAIPromptElement: HTMLTextAreaElement | null = null;
+	let canvasAISidebarPromptElement: HTMLTextAreaElement | null = null;
 	let canvasAIAbortController: AbortController | null = null;
+	let canvasAIThreadElement: HTMLDivElement | null = null;
+	let canvasAISidebarThreadElement: HTMLDivElement | null = null;
+	let canvasAIChatMessages: CanvasAIChatMessage[] = [];
+	let canvasAILastSuggestedMessageId = '';
 	let canSendSnippetFromSelection = false;
 	let showSelectionSnippetAction = false;
 	let selectionSnippetActionTop = 0;
@@ -900,15 +974,22 @@ If the user asks for edits, apply them to the existing code and return the full 
 
 	function setActiveSidebarView(view: CanvasSidebarView) {
 		activeSidebarView = view;
-		if (view !== 'search') {
+		if (view === 'search') {
+			if (sidebarSearchQuery.trim()) {
+				updateSidebarSearchResults();
+			}
+			void tick().then(() => {
+				searchInputElement?.focus();
+			});
 			return;
 		}
-		if (sidebarSearchQuery.trim()) {
-			updateSidebarSearchResults();
+		if (view === 'canvas_ai') {
+			void tick().then(() => {
+				resizeCanvasAIPromptInput(canvasAISidebarPromptElement);
+				canvasAISidebarPromptElement?.focus();
+				scrollCanvasAIThreadToBottom();
+			});
 		}
-		void tick().then(() => {
-			searchInputElement?.focus();
-		});
 	}
 
 	function buildSidebarSearchPattern(rawQuery: string) {
@@ -3167,6 +3248,531 @@ If the user asks for edits, apply them to the existing code and return the full 
 		return normalized.trim();
 	}
 
+	function toCanvasAIString(value: unknown) {
+		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function toCanvasAICodeString(value: unknown) {
+		return typeof value === 'string' ? value.replace(/\r\n/g, '\n') : '';
+	}
+
+	function toCanvasAIRecord(value: unknown): Record<string, unknown> | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		return value as Record<string, unknown>;
+	}
+
+	function toCanvasAIArray(value: unknown) {
+		return Array.isArray(value) ? value : [];
+	}
+
+	function normalizeCanvasAIFilePath(rawPath: string) {
+		const normalizedInput = String(rawPath || '').trim().replace(/\\/g, '/');
+		if (!normalizedInput) {
+			return '';
+		}
+		let relative = normalizedInput.replace(/^\/+/, '').replace(/^\.\/+/, '');
+		if (relative.toLowerCase().startsWith('project/')) {
+			relative = relative.slice('project/'.length);
+		}
+		const segments = relative.split('/').filter(Boolean);
+		const resolvedSegments: string[] = [];
+		for (const segment of segments) {
+			if (segment === '.') {
+				continue;
+			}
+			if (segment === '..') {
+				resolvedSegments.pop();
+				continue;
+			}
+			resolvedSegments.push(segment);
+		}
+		return normalizeProjectName(resolvedSegments.join('/'));
+	}
+
+	function parseCanvasAIChangeAction(value: unknown, fallback: CanvasAIChangeAction = 'replace') {
+		const normalized = toCanvasAIString(value).toLowerCase();
+		if (normalized === 'replace' || normalized === 'create' || normalized === 'delete') {
+			return normalized;
+		}
+		return fallback;
+	}
+
+	function approximateCanvasAITokenCount(value: string) {
+		if (!value) {
+			return 0;
+		}
+		return Math.max(1, Math.ceil(value.length / CANVAS_AI_CHARS_PER_TOKEN));
+	}
+
+	function createCanvasAIMessageID() {
+		if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+			return crypto.randomUUID();
+		}
+		return `canvas-ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	}
+
+	function createCanvasAIChangeID(filePath: string) {
+		const slug = normalizeProjectName(filePath).replace(/[^a-zA-Z0-9/_-]/g, '_') || 'file';
+		return `${createCanvasAIMessageID()}-${slug}`;
+	}
+
+	function appendCanvasAIMessage(
+		role: CanvasAIChatRole,
+		text: string,
+		changes?: CanvasAIProposedChange[]
+	) {
+		const normalizedText = String(text || '').trim();
+		const normalizedChanges =
+			Array.isArray(changes) && changes.length > 0
+				? changes.map((change) => ({
+						...change
+					}))
+				: undefined;
+		const nextMessage: CanvasAIChatMessage = {
+			id: createCanvasAIMessageID(),
+			role,
+			text: normalizedText,
+			changes: normalizedChanges,
+			timestamp: Date.now()
+		};
+		canvasAIChatMessages = [...canvasAIChatMessages, nextMessage].slice(-CANVAS_AI_CHAT_HISTORY_LIMIT);
+		scrollCanvasAIThreadToBottom();
+		return nextMessage.id;
+	}
+
+	function updateCanvasAIMessageById(
+		messageId: string,
+		updater: (message: CanvasAIChatMessage) => CanvasAIChatMessage
+	) {
+		let updated = false;
+		canvasAIChatMessages = canvasAIChatMessages.map((message) => {
+			if (message.id !== messageId) {
+				return message;
+			}
+			updated = true;
+			return updater(message);
+		});
+		return updated;
+	}
+
+	function getCanvasAIPendingChangeCount(message: CanvasAIChatMessage | null) {
+		if (!message?.changes || message.changes.length === 0) {
+			return 0;
+		}
+		return message.changes.filter((change) => change.applyState === 'pending').length;
+	}
+
+	function resolveCanvasAILastSuggestedMessage() {
+		if (!canvasAILastSuggestedMessageId) {
+			return null;
+		}
+		return canvasAIChatMessages.find((message) => message.id === canvasAILastSuggestedMessageId) ?? null;
+	}
+
+	function getCanvasAILastPendingChangeCount() {
+		return getCanvasAIPendingChangeCount(resolveCanvasAILastSuggestedMessage());
+	}
+
+	function scrollCanvasAIThreadToBottom() {
+		void tick().then(() => {
+			const targetThread =
+				(showCanvasAIPrompt ? canvasAIThreadElement : null) ||
+				(activeSidebarView === 'canvas_ai' ? canvasAISidebarThreadElement : null) ||
+				canvasAIThreadElement ||
+				canvasAISidebarThreadElement;
+			if (!targetThread) {
+				return;
+			}
+			targetThread.scrollTop = targetThread.scrollHeight;
+		});
+	}
+
+	function truncateCanvasAIText(value: string, maxLength: number) {
+		if (value.length <= maxLength) {
+			return value;
+		}
+		return `${value.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+	}
+
+	function buildCanvasAIConversationContext() {
+		if (canvasAIChatMessages.length === 0) {
+			return 'No prior conversation context.';
+		}
+		const recentMessages = canvasAIChatMessages.slice(-CANVAS_AI_CONTEXT_MESSAGES);
+		return recentMessages
+			.map((message, index) => {
+				const roleLabel = message.role === 'assistant' ? 'Assistant' : 'User';
+				const text = truncateCanvasAIText(message.text || '(no message)', CANVAS_AI_TEXT_PREVIEW_LIMIT);
+				if (!message.changes || message.changes.length === 0) {
+					return `${index + 1}. ${roleLabel}: ${text}`;
+				}
+				const previewItems = message.changes.slice(0, 4).map((change) => {
+					const summary = truncateCanvasAIText(change.summary || 'Updated file', 70);
+					const location = truncateCanvasAIText(change.locationHint || 'file-level', 48);
+					return `- ${change.action.toUpperCase()} ${change.filePath} @ ${location}: ${summary}`;
+				});
+				const overflowCount = Math.max(0, message.changes.length - previewItems.length);
+				const overflowLabel = overflowCount > 0 ? `\n- ...and ${overflowCount} more file change(s)` : '';
+				return `${index + 1}. ${roleLabel}: ${text}
+Proposed changes:
+${previewItems.join('\n')}${overflowLabel}`;
+			})
+			.join('\n\n');
+	}
+
+	async function resolveCanvasAIFileContent(relativePath: string) {
+		const normalizedPath = normalizeCanvasAIFilePath(relativePath);
+		if (!normalizedPath) {
+			return '';
+		}
+		if (normalizedPath === normalizeProjectName(currentFile) && editor?.getModel?.()) {
+			return String(editor.getModel().getValue() || '');
+		}
+		const yText = ydoc?.getText?.(yTextKeyForFile(normalizedPath));
+		if (yText && (yFileTree?.has?.(normalizedPath) || fileTree.some((entry) => entry.relativePath === normalizedPath))) {
+			return String(yText.toString() || '');
+		}
+		try {
+			return String(await readProjectFileContent(normalizedPath));
+		} catch {
+			return '';
+		}
+	}
+
+	async function resolveCanvasAIExistingContent(relativePath: string) {
+		const normalizedPath = normalizeCanvasAIFilePath(relativePath);
+		if (!normalizedPath) {
+			return { exists: false, content: '' };
+		}
+		const targetPath = toProjectPath(normalizedPath);
+		const exists = await pathExists(targetPath);
+		if (!exists) {
+			return { exists: false, content: '' };
+		}
+		const content = await resolveCanvasAIFileContent(normalizedPath);
+		return { exists: true, content };
+	}
+
+	async function buildCanvasAIWorkspaceContext(targetFilePath: string) {
+		const allFilePaths = fileTree
+			.filter((entry) => !entry.isDir)
+			.map((entry) => normalizeCanvasAIFilePath(entry.relativePath || entry.name))
+			.filter(Boolean);
+		const prioritized = Array.from(
+			new Set([
+				normalizeCanvasAIFilePath(targetFilePath),
+				normalizeCanvasAIFilePath(currentFile),
+				...openTabs.map((path) => normalizeCanvasAIFilePath(path)),
+				...dirtyFiles.map((path) => normalizeCanvasAIFilePath(path)),
+				...allFilePaths
+			].filter(Boolean))
+		);
+		const contextBlocks: string[] = [];
+		let remainingChars = CANVAS_AI_CONTEXT_MAX_CHARS;
+		let truncatedFiles = 0;
+		let includedFiles = 0;
+		for (const filePath of prioritized.slice(0, CANVAS_AI_MAX_CONTEXT_FILES)) {
+			if (remainingChars <= 280) {
+				break;
+			}
+			const language = getLanguageFromExtension(filePath) || 'plaintext';
+			const source = await resolveCanvasAIFileContent(filePath);
+			const maxContentChars = Math.max(0, Math.min(CANVAS_AI_MAX_CHARS_PER_FILE, remainingChars - 220));
+			if (maxContentChars <= 0) {
+				break;
+			}
+			let nextContent = source;
+			let wasTruncated = false;
+			if (nextContent.length > maxContentChars) {
+				nextContent = nextContent.slice(0, maxContentChars);
+				wasTruncated = true;
+			}
+			if (wasTruncated) {
+				truncatedFiles += 1;
+			}
+			const fileBlock = [
+				`FILE: ${filePath}`,
+				`LANGUAGE: ${language}`,
+				wasTruncated ? 'NOTE: content truncated to fit model context window.' : '',
+				'<<<FILE_CONTENT',
+				nextContent,
+				'FILE_CONTENT'
+			]
+				.filter(Boolean)
+				.join('\n');
+			if (fileBlock.length > remainingChars && includedFiles > 0) {
+				break;
+			}
+			contextBlocks.push(fileBlock);
+			remainingChars -= fileBlock.length + 2;
+			includedFiles += 1;
+		}
+		return {
+			contextText:
+				contextBlocks.length > 0 ? contextBlocks.join('\n\n') : 'No workspace files are currently available.',
+			includedFiles,
+			totalFiles: allFilePaths.length,
+			truncatedFiles,
+			omittedFiles: Math.max(0, allFilePaths.length - includedFiles)
+		};
+	}
+
+	function trimCanvasAIResponseCodeFence(rawText: string) {
+		let normalized = String(rawText || '').replace(/\r\n/g, '\n').trim();
+		if (!normalized) {
+			return '';
+		}
+		if (!normalized.startsWith('```')) {
+			return normalized;
+		}
+		normalized = normalized.replace(/^```[a-zA-Z0-9_+-]*\n?/, '');
+		normalized = normalized.replace(/\n?```$/, '');
+		return normalized.trim();
+	}
+
+	function extractCanvasAIJSONCandidates(rawText: string) {
+		const normalized = trimCanvasAIResponseCodeFence(rawText);
+		if (!normalized) {
+			return [] as string[];
+		}
+		if (normalized.startsWith('{') && normalized.endsWith('}')) {
+			return [normalized];
+		}
+
+		const candidates: string[] = [];
+		let depth = 0;
+		let startIndex = -1;
+		let inString = false;
+		let escaped = false;
+
+		for (let index = 0; index < normalized.length; index += 1) {
+			const char = normalized[index];
+			if (inString) {
+				if (escaped) {
+					escaped = false;
+					continue;
+				}
+				if (char === '\\') {
+					escaped = true;
+					continue;
+				}
+				if (char === '"') {
+					inString = false;
+				}
+				continue;
+			}
+			if (char === '"') {
+				inString = true;
+				continue;
+			}
+			if (char === '{') {
+				if (depth === 0) {
+					startIndex = index;
+				}
+				depth += 1;
+				continue;
+			}
+			if (char === '}' && depth > 0) {
+				depth -= 1;
+				if (depth === 0 && startIndex >= 0) {
+					candidates.push(normalized.slice(startIndex, index + 1).trim());
+					startIndex = -1;
+				}
+			}
+		}
+
+		return candidates.length > 0 ? candidates : [normalized];
+	}
+
+	function parseCanvasAIChangeDraft(
+		source: Record<string, unknown>,
+		fallbackFilePath: string
+	): CanvasAIChangeDraft | null {
+		const filePath = normalizeCanvasAIFilePath(
+			toCanvasAIString(
+				source.file_path ??
+					source.filePath ??
+					source.path ??
+					source.target_file ??
+					source.targetFile ??
+					source.file ??
+					fallbackFilePath
+			)
+		);
+		if (!filePath) {
+			return null;
+		}
+		const action = parseCanvasAIChangeAction(source.action, 'replace');
+		const summary =
+			toCanvasAIString(source.summary ?? source.reason ?? source.description) || 'Updated file content';
+		const locationHint =
+			toCanvasAIString(source.location_hint ?? source.locationHint ?? source.location ?? source.scope) ||
+			'file-level update';
+		const updatedCode = stripCodeFences(
+			toCanvasAICodeString(
+				source.updated_code ??
+					source.updatedCode ??
+					source.content ??
+					source.code ??
+					source.new_content ??
+					source.newContent ??
+					source.replacement
+			)
+		);
+		if (action !== 'delete' && !updatedCode.trim()) {
+			return null;
+		}
+		return {
+			filePath,
+			action,
+			summary,
+			locationHint,
+			updatedCode: action === 'delete' ? '' : updatedCode
+		};
+	}
+
+	function parseCanvasAIResponseObject(
+		payload: Record<string, unknown>,
+		fallbackFilePath: string
+	): CanvasAIParsedResponse | null {
+		const nested =
+			toCanvasAIRecord(payload.timeline) ||
+			toCanvasAIRecord(payload.result) ||
+			toCanvasAIRecord(payload.payload) ||
+			toCanvasAIRecord(payload.data) ||
+			payload;
+		const assistantReply = toCanvasAIString(
+			nested.assistant_reply ??
+				nested.assistantReply ??
+				nested.reply ??
+				nested.explanation ??
+				nested.message
+		);
+		const rawChanges = toCanvasAIArray(
+			nested.changes ??
+				nested.edits ??
+				nested.patches ??
+				nested.file_changes ??
+				nested.fileChanges
+		);
+		const changes: CanvasAIChangeDraft[] = [];
+		for (const candidate of rawChanges) {
+			const changeRecord = toCanvasAIRecord(candidate);
+			if (!changeRecord) {
+				continue;
+			}
+			const parsedChange = parseCanvasAIChangeDraft(changeRecord, fallbackFilePath);
+			if (!parsedChange) {
+				continue;
+			}
+			changes.push(parsedChange);
+		}
+		const code = stripCodeFences(
+			toCanvasAICodeString(
+				nested.code ??
+					nested.file_content ??
+					nested.fileContent ??
+					nested.updated_code ??
+					nested.updatedCode ??
+					nested.content
+			)
+		);
+		if (changes.length === 0 && code.trim()) {
+			const normalizedFallbackPath = normalizeCanvasAIFilePath(fallbackFilePath);
+			if (!normalizedFallbackPath) {
+				return null;
+			}
+			changes.push({
+				filePath: normalizedFallbackPath,
+				action: 'replace',
+				summary: 'Updated file content',
+				locationHint: 'file-level update',
+				updatedCode: code
+			});
+		}
+		if (changes.length === 0) {
+			return null;
+		}
+		return {
+			assistantReply: assistantReply || 'I prepared a set of file updates for your workspace.',
+			changes
+		};
+	}
+
+	function parseCanvasAIResponseFromText(
+		rawText: string,
+		fallbackFilePath: string
+	): CanvasAIParsedResponse {
+		const normalized = String(rawText || '').trim();
+		if (!normalized) {
+			throw new Error('AI returned an empty response.');
+		}
+
+		const jsonCandidates = extractCanvasAIJSONCandidates(normalized);
+		for (const candidate of jsonCandidates) {
+			try {
+				const parsed = JSON.parse(candidate);
+				const parsedRecord = toCanvasAIRecord(parsed);
+				if (!parsedRecord) {
+					continue;
+				}
+				const structured = parseCanvasAIResponseObject(parsedRecord, fallbackFilePath);
+				if (structured && structured.changes.length > 0) {
+					return structured;
+				}
+			} catch {
+				// Ignore malformed candidate; continue to other fallbacks.
+			}
+		}
+
+		const codeFenceMatch = normalized.match(/```[a-zA-Z0-9_+-]*\n?[\s\S]*?```/);
+		if (codeFenceMatch) {
+			const fencedCode = stripCodeFences(codeFenceMatch[0] || '');
+			if (fencedCode) {
+				const conversationalText = normalized.replace(codeFenceMatch[0], '').trim();
+				const normalizedFallbackPath = normalizeCanvasAIFilePath(fallbackFilePath);
+				if (!normalizedFallbackPath) {
+					throw new Error('AI response did not include file paths for changes.');
+				}
+				return {
+					assistantReply: conversationalText || 'I prepared an updated version of your active file.',
+					changes: [
+						{
+							filePath: normalizedFallbackPath,
+							action: 'replace',
+							summary: 'Updated file content',
+							locationHint: 'file-level update',
+							updatedCode: fencedCode
+						}
+					]
+				};
+			}
+		}
+
+		const fallbackCode = stripCodeFences(normalized);
+		if (!fallbackCode) {
+			throw new Error('AI response could not be parsed into code.');
+		}
+		const normalizedFallbackPath = normalizeCanvasAIFilePath(fallbackFilePath);
+		if (!normalizedFallbackPath) {
+			throw new Error('AI response did not include file paths for changes.');
+		}
+		return {
+			assistantReply: 'I prepared an updated version of your active file.',
+			changes: [
+				{
+					filePath: normalizedFallbackPath,
+					action: 'replace',
+					summary: 'Updated file content',
+					locationHint: 'file-level update',
+					updatedCode: fallbackCode
+				}
+			]
+		};
+	}
+
 	function openCanvasAIPromptPanel() {
 		if (!currentFileEntry()) {
 			fileExplorerError = 'Open a file before using AI.';
@@ -3177,6 +3783,7 @@ If the user asks for edits, apply them to the existing code and return the full 
 		void tick().then(() => {
 			resizeCanvasAIPromptInput();
 			canvasAIPromptElement?.focus();
+			scrollCanvasAIThreadToBottom();
 		});
 	}
 
@@ -3187,44 +3794,100 @@ If the user asks for edits, apply them to the existing code and return the full 
 		showCanvasAIPrompt = false;
 		canvasAIError = '';
 		isCanvasAIGenerating = false;
+		canvasAIPrompt = '';
 		canvasAIAbortController = null;
 	}
 
-	function buildCanvasAICodePrompt(
+	async function buildCanvasAICodePrompt(
 		instruction: string,
 		targetFilePath: string,
-		language: string,
-		currentContent: string
+		language: string
 	) {
-		return `${CANVAS_AI_SYSTEM_PROMPT}
+		const normalizedInstruction = truncateCanvasAIText(
+			String(instruction || '').trim(),
+			CANVAS_AI_MAX_INSTRUCTION_CHARS
+		);
+		const workspaceContext = await buildCanvasAIWorkspaceContext(targetFilePath);
+		const baseContextSummary = `Included ${workspaceContext.includedFiles}/${workspaceContext.totalFiles} files from workspace context.` +
+			` Omitted: ${workspaceContext.omittedFiles}. Truncated: ${workspaceContext.truncatedFiles}.`;
+		let contextSummary = baseContextSummary;
+		let workspaceContextText = workspaceContext.contextText;
+		let conversationContext = truncateCanvasAIText(
+			buildCanvasAIConversationContext(),
+			CANVAS_AI_MAX_CONVERSATION_CONTEXT_CHARS
+		);
+		const localNow = new Date();
+		const buildPrompt = () => `${CANVAS_AI_SYSTEM_PROMPT}
 
 Target file path: ${targetFilePath}
 Target language: ${language}
+Client local time (ISO): ${localNow.toISOString()}
+Context budget: ~${CANVAS_AI_MAX_INPUT_TOKENS} tokens maximum input.
+${contextSummary}
 
-Current file content:
-<<<FILE_CONTENT
-${currentContent}
-FILE_CONTENT
+Workspace files context:
+${workspaceContextText}
 
-User instruction:
-${instruction}
+Recent conversation context:
+${conversationContext}
 
-Return only the final code for this file.`;
+Latest user instruction:
+${normalizedInstruction}
+
+Return only JSON with keys "assistant_reply" and "changes".`;
+
+		let prompt = buildPrompt();
+		if (prompt.length > CANVAS_AI_MAX_PROMPT_CHARS) {
+			const overflow = prompt.length - CANVAS_AI_MAX_PROMPT_CHARS;
+			const nextMaxWorkspaceChars = Math.max(
+				CANVAS_AI_MIN_SECTION_CHARS,
+				workspaceContextText.length - overflow - 48
+			);
+			if (nextMaxWorkspaceChars < workspaceContextText.length) {
+				workspaceContextText = truncateCanvasAIText(workspaceContextText, nextMaxWorkspaceChars);
+				contextSummary = `${baseContextSummary} Workspace context trimmed to respect model budget.`;
+				prompt = buildPrompt();
+			}
+		}
+		if (prompt.length > CANVAS_AI_MAX_PROMPT_CHARS) {
+			const overflow = prompt.length - CANVAS_AI_MAX_PROMPT_CHARS;
+			const nextMaxConversationChars = Math.max(
+				CANVAS_AI_MIN_SECTION_CHARS,
+				conversationContext.length - overflow - 48
+			);
+			if (nextMaxConversationChars < conversationContext.length) {
+				conversationContext = truncateCanvasAIText(conversationContext, nextMaxConversationChars);
+				prompt = buildPrompt();
+			}
+		}
+		if (prompt.length > CANVAS_AI_MAX_PROMPT_CHARS) {
+			prompt = prompt.slice(0, CANVAS_AI_MAX_PROMPT_CHARS).trimEnd();
+		}
+
+		return {
+			prompt,
+			estimatedTokens: approximateCanvasAITokenCount(prompt)
+		};
 	}
 
-	async function requestCanvasAICode(
+	async function requestCanvasAIResponse(
 		instruction: string,
 		target: ProjectFileEntry,
-		currentContent: string,
 		language: string,
 		signal: AbortSignal
-	) {
-		const prompt = buildCanvasAICodePrompt(
+	): Promise<CanvasAIParsedResponse> {
+		const targetFilePath = normalizeCanvasAIFilePath(target.relativePath || target.name);
+		const { prompt, estimatedTokens } = await buildCanvasAICodePrompt(
 			instruction,
-			target.relativePath || target.name,
-			language,
-			currentContent
+			targetFilePath,
+			language
 		);
+		if (estimatedTokens > CANVAS_AI_MAX_INPUT_TOKENS) {
+			canvasClientLog('canvas-ai-context-over-budget', {
+				estimatedTokens,
+				maxTokens: CANVAS_AI_MAX_INPUT_TOKENS
+			});
+		}
 		const headers: Record<string, string> = {
 			'Content-Type': 'application/json',
 			'X-User-Id': currentUser?.id || '',
@@ -3257,20 +3920,262 @@ Return only the final code for this file.`;
 			throw new Error(details || `AI request failed (${response.status})`);
 		}
 
+		const structuredFromPayload = parseCanvasAIResponseObject(payload, targetFilePath);
+		if (structuredFromPayload?.changes.length) {
+			return structuredFromPayload;
+		}
+
 		const aiText =
 			typeof payload.response === 'string'
 				? payload.response
 				: typeof payload.message === 'string'
 					? payload.message
 					: '';
-		const code = stripCodeFences(aiText);
-		if (!code) {
-			throw new Error('AI returned an empty code response.');
-		}
-		return code;
+		return parseCanvasAIResponseFromText(aiText, targetFilePath);
 	}
 
-	async function applyAIToCurrentFile() {
+	function splitCanvasAIContentIntoLines(content: string) {
+		return String(content ?? '').replace(/\r\n/g, '\n').split('\n');
+	}
+
+	function buildCanvasAIUnifiedDiff(filePath: string, previousCode: string, updatedCode: string) {
+		const oldLines = splitCanvasAIContentIntoLines(previousCode);
+		const newLines = splitCanvasAIContentIntoLines(updatedCode);
+		if (previousCode === updatedCode) {
+			return `--- a/${filePath}\n+++ b/${filePath}\n@@ no textual change @@`;
+		}
+		let prefix = 0;
+		while (
+			prefix < oldLines.length &&
+			prefix < newLines.length &&
+			oldLines[prefix] === newLines[prefix]
+		) {
+			prefix += 1;
+		}
+		let oldSuffix = oldLines.length - 1;
+		let newSuffix = newLines.length - 1;
+		while (oldSuffix >= prefix && newSuffix >= prefix && oldLines[oldSuffix] === newLines[newSuffix]) {
+			oldSuffix -= 1;
+			newSuffix -= 1;
+		}
+		const oldStart = Math.max(0, prefix - CANVAS_AI_DIFF_CONTEXT_LINES);
+		const newStart = Math.max(0, prefix - CANVAS_AI_DIFF_CONTEXT_LINES);
+		const oldEnd = Math.min(oldLines.length, oldSuffix + 1 + CANVAS_AI_DIFF_CONTEXT_LINES);
+		const newEnd = Math.min(newLines.length, newSuffix + 1 + CANVAS_AI_DIFF_CONTEXT_LINES);
+		const oldCount = Math.max(0, oldEnd - oldStart);
+		const newCount = Math.max(0, newEnd - newStart);
+		const diffLines = [
+			`--- a/${filePath}`,
+			`+++ b/${filePath}`,
+			`@@ -${oldStart + 1},${oldCount} +${newStart + 1},${newCount} @@`
+		];
+		for (let index = oldStart; index < prefix; index += 1) {
+			diffLines.push(` ${oldLines[index] ?? ''}`);
+		}
+		for (let index = prefix; index <= oldSuffix; index += 1) {
+			diffLines.push(`-${oldLines[index] ?? ''}`);
+		}
+		for (let index = prefix; index <= newSuffix; index += 1) {
+			diffLines.push(`+${newLines[index] ?? ''}`);
+		}
+		for (let index = oldSuffix + 1; index < oldEnd; index += 1) {
+			diffLines.push(` ${oldLines[index] ?? ''}`);
+		}
+		if (diffLines.length > CANVAS_AI_DIFF_MAX_LINES) {
+			const headLines = Math.max(0, CANVAS_AI_DIFF_MAX_LINES - 2);
+			return `${diffLines.slice(0, headLines).join('\n')}\n... diff truncated ...\n`;
+		}
+		return diffLines.join('\n');
+	}
+
+	async function buildCanvasAIProposedChanges(changes: CanvasAIChangeDraft[]) {
+		const latestByPath = new Map<string, CanvasAIChangeDraft>();
+		for (const change of changes) {
+			const normalizedPath = normalizeCanvasAIFilePath(change.filePath);
+			if (!normalizedPath) {
+				continue;
+			}
+			if (latestByPath.has(normalizedPath)) {
+				latestByPath.delete(normalizedPath);
+			}
+			latestByPath.set(normalizedPath, {
+				...change,
+				filePath: normalizedPath
+			});
+		}
+		const proposedChanges: CanvasAIProposedChange[] = [];
+		for (const draft of latestByPath.values()) {
+			const existing = await resolveCanvasAIExistingContent(draft.filePath);
+			let action = draft.action;
+			if (action === 'create' && existing.exists) {
+				action = 'replace';
+			}
+			if (action === 'replace' && !existing.exists) {
+				action = 'create';
+			}
+			const updatedCode = action === 'delete' ? '' : draft.updatedCode;
+			if (action !== 'delete' && !updatedCode.trim()) {
+				continue;
+			}
+			const diffText = buildCanvasAIUnifiedDiff(
+				draft.filePath,
+				existing.content,
+				action === 'delete' ? '' : updatedCode
+			);
+			proposedChanges.push({
+				id: createCanvasAIChangeID(draft.filePath),
+				filePath: draft.filePath,
+				action,
+				summary: draft.summary,
+				locationHint: draft.locationHint,
+				updatedCode,
+				previousCode: existing.content,
+				diffText,
+				applyState: 'pending',
+				applyError: ''
+			});
+		}
+		return proposedChanges;
+	}
+
+	async function applyCanvasAIChangeToWorkspace(change: CanvasAIProposedChange) {
+		const normalizedPath = normalizeCanvasAIFilePath(change.filePath);
+		if (!normalizedPath) {
+			throw new Error('Change is missing a valid file path.');
+		}
+		await ensureProjectDirectory();
+		const filePath = toProjectPath(normalizedPath);
+		if (change.action === 'delete') {
+			if (await pathExists(filePath)) {
+				const stat = await getActiveFS().promises.stat(filePath);
+				const isDirectory = typeof stat.isDirectory === 'function' ? stat.isDirectory() : false;
+				if (isDirectory) {
+					throw new Error(`Refusing to delete directory via AI change: ${normalizedPath}`);
+				}
+				await getActiveFS().promises.unlink(filePath);
+			}
+			removeSharedEntries([normalizedPath], { clearYText: true });
+			openTabs = openTabs.filter((tab) => tab !== normalizedPath);
+			return;
+		}
+		const parentDir = splitPath(filePath).dir;
+		await ensureDirectoryPathExists(parentDir);
+		await getActiveFS().promises.writeFile(filePath, change.updatedCode);
+		await upsertSharedEntries([
+			{
+				relativePath: normalizedPath,
+				isDir: false,
+				content: change.updatedCode
+			}
+		]);
+	}
+
+	async function finalizeCanvasAIWorkspaceChange() {
+		await refreshFileTree();
+		await syncOpenTabsWithFileTree();
+		scheduleCanvasSnapshotSave();
+	}
+
+	async function applyCanvasAIChange(messageId: string, changeId: string) {
+		const message = canvasAIChatMessages.find((entry) => entry.id === messageId);
+		const change = message?.changes?.find((entry) => entry.id === changeId);
+		if (!message || !change) {
+			canvasAIError = 'Unable to locate this AI change.';
+			return;
+		}
+		if (change.applyState === 'applied') {
+			return;
+		}
+		if (
+			showReadOnlyWarning &&
+			normalizeCanvasAIFilePath(change.filePath) === normalizeCanvasAIFilePath(currentFile)
+		) {
+			canvasAIError = 'Current file is read-only. Wait for editor slots to free up before applying.';
+			return;
+		}
+		canvasAIError = '';
+		try {
+			await applyCanvasAIChangeToWorkspace(change);
+			await finalizeCanvasAIWorkspaceChange();
+			updateCanvasAIMessageById(messageId, (entry) => ({
+				...entry,
+				changes: (entry.changes ?? []).map((candidate) =>
+					candidate.id === changeId
+						? { ...candidate, applyState: 'applied', applyError: '' }
+						: candidate
+				)
+			}));
+			writeTerminalLine(`\x1b[35m> Applied AI change for ${change.filePath}.\x1b[0m`);
+		} catch (error) {
+			const messageText = error instanceof Error ? error.message : 'Failed to apply AI change.';
+			updateCanvasAIMessageById(messageId, (entry) => ({
+				...entry,
+				changes: (entry.changes ?? []).map((candidate) =>
+					candidate.id === changeId
+						? { ...candidate, applyState: 'failed', applyError: messageText }
+						: candidate
+				)
+			}));
+			canvasAIError = messageText;
+		}
+	}
+
+	async function applyAllCanvasAIChanges(messageId: string) {
+		const message = canvasAIChatMessages.find((entry) => entry.id === messageId);
+		const pendingChanges = (message?.changes ?? []).filter((entry) => entry.applyState === 'pending');
+		if (!message || pendingChanges.length === 0) {
+			canvasAIError = 'No pending AI changes to apply.';
+			return;
+		}
+		canvasAIError = '';
+		const succeededIds = new Set<string>();
+		const failedById = new Map<string, string>();
+		for (const change of pendingChanges) {
+			if (
+				showReadOnlyWarning &&
+				normalizeCanvasAIFilePath(change.filePath) === normalizeCanvasAIFilePath(currentFile)
+			) {
+				failedById.set(change.id, 'Current file is read-only.');
+				continue;
+			}
+			try {
+				await applyCanvasAIChangeToWorkspace(change);
+				succeededIds.add(change.id);
+			} catch (error) {
+				failedById.set(
+					change.id,
+					error instanceof Error ? error.message : 'Failed to apply this change.'
+				);
+			}
+		}
+		if (succeededIds.size > 0) {
+			await finalizeCanvasAIWorkspaceChange();
+		}
+		updateCanvasAIMessageById(messageId, (entry) => ({
+			...entry,
+			changes: (entry.changes ?? []).map((candidate) => {
+				if (succeededIds.has(candidate.id)) {
+					return { ...candidate, applyState: 'applied', applyError: '' };
+				}
+				const failure = failedById.get(candidate.id);
+				if (failure) {
+					return { ...candidate, applyState: 'failed', applyError: failure };
+				}
+				return candidate;
+			})
+		}));
+		if (failedById.size > 0) {
+			canvasAIError =
+				succeededIds.size > 0
+					? `Applied ${succeededIds.size} change(s). ${failedById.size} failed.`
+					: `Unable to apply ${failedById.size} change(s).`;
+		}
+		if (succeededIds.size > 0) {
+			writeTerminalLine(`\x1b[35m> Applied ${succeededIds.size} AI change(s).\x1b[0m`);
+		}
+	}
+
+	async function sendCanvasAIMessage() {
 		if (isCanvasAIGenerating) {
 			return;
 		}
@@ -3284,17 +4189,13 @@ Return only the final code for this file.`;
 			canvasAIError = 'Open a file before using AI.';
 			return;
 		}
-		if (showReadOnlyWarning) {
-			canvasAIError = 'This file is currently read-only. Try again when fewer editors are active.';
-			return;
-		}
 
-		const model = editor?.getModel?.();
-		if (!model) {
+		if (!editor?.getModel?.()) {
 			canvasAIError = 'Editor is not ready yet.';
 			return;
 		}
 
+		appendCanvasAIMessage('user', instruction);
 		isCanvasAIGenerating = true;
 		canvasAIError = '';
 		fileExplorerError = '';
@@ -3302,20 +4203,31 @@ Return only the final code for this file.`;
 		canvasAIAbortController = new AbortController();
 
 		try {
-			const source = target.relativePath === currentFile ? String(model.getValue() || '') : '';
 			const language = resolveExecutionLanguageForEntry(target);
-			const generatedCode = await requestCanvasAICode(
+			const aiResponse = await requestCanvasAIResponse(
 				instruction,
 				target,
-				source,
 				language,
 				canvasAIAbortController.signal
 			);
-			model.setValue(generatedCode);
-			scheduleCurrentFilePersistToFS();
-			scheduleCanvasSnapshotSave();
-			writeTerminalLine('\x1b[35m> AI updated the file.\x1b[0m');
-			showCanvasAIPrompt = false;
+			const proposedChanges = await buildCanvasAIProposedChanges(aiResponse.changes);
+			const assistantMessageId = appendCanvasAIMessage(
+				'assistant',
+				aiResponse.assistantReply,
+				proposedChanges
+			);
+			if (proposedChanges.length > 0) {
+				canvasAILastSuggestedMessageId = assistantMessageId;
+			}
+			canvasAIPrompt = '';
+			resizeCanvasAIPromptInput();
+			if (proposedChanges.length > 0) {
+				writeTerminalLine(
+					`\x1b[35m> AI prepared ${proposedChanges.length} change(s). Review diffs and accept as needed.\x1b[0m`
+				);
+			} else {
+				writeTerminalLine('\x1b[35m> AI replied without code changes.\x1b[0m');
+			}
 		} catch (error) {
 			const isAbortError =
 				typeof error === 'object' &&
@@ -3339,11 +4251,25 @@ Return only the final code for this file.`;
 		return Number.isFinite(parsed) ? parsed : 0;
 	}
 
-	function resizeCanvasAIPromptInput() {
-		if (!canvasAIPromptElement || typeof window === 'undefined') {
+	function resolveCanvasAIPromptTarget(target?: HTMLTextAreaElement | null) {
+		if (target) {
+			return target;
+		}
+		if (showCanvasAIPrompt && canvasAIPromptElement) {
+			return canvasAIPromptElement;
+		}
+		if (activeSidebarView === 'canvas_ai' && canvasAISidebarPromptElement) {
+			return canvasAISidebarPromptElement;
+		}
+		return canvasAIPromptElement || canvasAISidebarPromptElement;
+	}
+
+	function resizeCanvasAIPromptInput(target?: HTMLTextAreaElement | null) {
+		const promptElement = resolveCanvasAIPromptTarget(target);
+		if (!promptElement || typeof window === 'undefined') {
 			return;
 		}
-		const styles = window.getComputedStyle(canvasAIPromptElement);
+		const styles = window.getComputedStyle(promptElement);
 		const lineHeight = parseCanvasAIPromptPixel(styles.lineHeight) || 18;
 		const verticalPadding =
 			parseCanvasAIPromptPixel(styles.paddingTop) + parseCanvasAIPromptPixel(styles.paddingBottom);
@@ -3351,15 +4277,15 @@ Return only the final code for this file.`;
 			parseCanvasAIPromptPixel(styles.borderTopWidth) + parseCanvasAIPromptPixel(styles.borderBottomWidth);
 		const minHeight = lineHeight + verticalPadding + verticalBorder;
 		const maxHeight = lineHeight * 2 + verticalPadding + verticalBorder;
-		canvasAIPromptElement.style.height = 'auto';
-		const nextHeight = Math.max(minHeight, Math.min(canvasAIPromptElement.scrollHeight, maxHeight));
-		canvasAIPromptElement.style.height = `${nextHeight}px`;
-		canvasAIPromptElement.style.overflowY =
-			canvasAIPromptElement.scrollHeight > maxHeight ? 'auto' : 'hidden';
+		promptElement.style.height = 'auto';
+		const nextHeight = Math.max(minHeight, Math.min(promptElement.scrollHeight, maxHeight));
+		promptElement.style.height = `${nextHeight}px`;
+		promptElement.style.overflowY = promptElement.scrollHeight > maxHeight ? 'auto' : 'hidden';
 	}
 
-	function handleCanvasAIPromptInput() {
-		resizeCanvasAIPromptInput();
+	function handleCanvasAIPromptInput(event?: Event) {
+		const target = event?.currentTarget;
+		resizeCanvasAIPromptInput(target instanceof HTMLTextAreaElement ? target : null);
 		if (canvasAIError) {
 			canvasAIError = '';
 		}
@@ -3373,7 +4299,7 @@ Return only the final code for this file.`;
 		}
 		if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
 			event.preventDefault();
-			void applyAIToCurrentFile();
+			void sendCanvasAIMessage();
 		}
 	}
 
@@ -3570,7 +4496,13 @@ Return only the final code for this file.`;
 		if (!normalized) {
 			return;
 		}
+		if (isCompactCanvasLayout) {
+			closeCanvasAIPromptPanel();
+			closeEditorFindWidget();
+			showEditorPane();
+		}
 		if (normalized === currentFile) {
+			ensureTabOpen(normalized);
 			const model = editor?.getModel?.();
 			if (model && monacoApi) {
 				monacoApi.editor.setModelLanguage(model, getLanguageFromExtension(normalized));
@@ -3584,11 +4516,6 @@ Return only the final code for this file.`;
 			}
 			showExplorerPane();
 			return;
-		}
-		if (isCompactCanvasLayout) {
-			closeCanvasAIPromptPanel();
-			closeEditorFindWidget();
-			showEditorPane();
 		}
 		ensureTabOpen(normalized);
 		expandedDirectories = ensureExpandedDirectoriesForPath(normalized);
@@ -4110,7 +5037,7 @@ Return only the final code for this file.`;
 			if (isAIPromptShortcut) {
 				event.preventDefault();
 				if (showCanvasAIPrompt) {
-					void applyAIToCurrentFile();
+					void sendCanvasAIMessage();
 					return;
 				}
 				openCanvasAIPromptPanel();
@@ -4605,6 +5532,19 @@ Return only the final code for this file.`;
 					<path d="m16 16 4 4" />
 				</svg>
 			</button>
+			<button
+				type="button"
+				class="activity-button"
+				class:active={activeSidebarView === 'canvas_ai'}
+				aria-label="Canvas AI"
+				title="Canvas AI"
+				on:click={() => setActiveSidebarView('canvas_ai')}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M12 3.4 13.9 8 18.6 10 13.9 12 12 16.6 10.1 12 5.4 10 10.1 8Z" />
+					<path d="M18.5 4.8 19.2 6.5 21 7.2 19.2 8 18.5 9.7 17.8 8 16 7.2 17.8 6.5Z" />
+				</svg>
+			</button>
 		</nav>
 		<aside
 			class="canvas-sidebar"
@@ -4815,7 +5755,7 @@ Return only the final code for this file.`;
 						{/each}
 					{/if}
 				</div>
-			{:else}
+			{:else if activeSidebarView === 'search'}
 				<div class="sidebar-panel-header">
 					<span>Search & Replace</span>
 					<button
@@ -4962,8 +5902,137 @@ Return only the final code for this file.`;
 						{/each}
 					{/if}
 				</div>
+			{:else}
+				<div class="canvas-ai-sidebar">
+					<div class="canvas-ai-panel-header">
+						<div class="canvas-ai-panel-head-main">
+							<span>Canvas AI</span>
+							{#if currentFile}
+								<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
+							{/if}
+						</div>
+					</div>
+					<div class="canvas-ai-thread" bind:this={canvasAISidebarThreadElement}>
+						{#if canvasAIChatMessages.length === 0}
+							<div class="canvas-ai-empty">
+								<p>Chat with AI about the currently selected file.</p>
+								<p>AI proposes file-level diffs that you can accept one-by-one or all at once.</p>
+							</div>
+						{:else}
+							{#each canvasAIChatMessages as message (message.id)}
+								<article class="canvas-ai-message" class:user={message.role === 'user'}>
+									<header class="canvas-ai-message-header">
+										<strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
+										<time>
+											{new Date(message.timestamp).toLocaleTimeString([], {
+												hour: '2-digit',
+												minute: '2-digit'
+											})}
+										</time>
+									</header>
+									<p class="canvas-ai-message-text">{message.text}</p>
+									{#if message.changes && message.changes.length > 0}
+										<div class="canvas-ai-change-list">
+											<div class="canvas-ai-change-list-header">
+												<span>{message.changes.length} proposed file change(s)</span>
+												<button
+													type="button"
+													class="canvas-ai-action secondary"
+													on:click={() => void applyAllCanvasAIChanges(message.id)}
+													disabled={isCanvasAIGenerating || getCanvasAIPendingChangeCount(message) === 0}
+												>
+													Accept All
+												</button>
+											</div>
+											{#each message.changes as change (change.id)}
+												<section
+													class="canvas-ai-code-block"
+													class:is-applied={change.applyState === 'applied'}
+													class:is-failed={change.applyState === 'failed'}
+												>
+													<div class="canvas-ai-change-headline">
+														<div class="canvas-ai-change-meta">
+															<strong class="canvas-ai-change-file">{change.filePath}</strong>
+															<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
+														</div>
+														<span class="canvas-ai-change-location">{change.locationHint}</span>
+													</div>
+													<p class="canvas-ai-change-summary">{change.summary}</p>
+													<pre class="canvas-ai-code">{change.diffText}</pre>
+													{#if change.applyError}
+														<div class="canvas-ai-change-error">{change.applyError}</div>
+													{/if}
+													<div class="canvas-ai-code-actions">
+														<button
+															type="button"
+															class="canvas-ai-action primary"
+															on:click={() => void applyCanvasAIChange(message.id, change.id)}
+															disabled={isCanvasAIGenerating || change.applyState === 'applied'}
+														>
+															{change.applyState === 'applied' ? 'Applied' : 'Accept'}
+														</button>
+													</div>
+												</section>
+											{/each}
+										</div>
+									{/if}
+								</article>
+							{/each}
+						{/if}
+					</div>
+					{#if canvasAIError}
+						<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
+					{/if}
+					<textarea
+						bind:this={canvasAISidebarPromptElement}
+						bind:value={canvasAIPrompt}
+						rows="2"
+						class="canvas-ai-input"
+						placeholder={currentFile
+							? 'Ask AI what to change in this file...'
+							: 'Open a file from Explorer to start code-aware AI chat...'}
+						on:input={handleCanvasAIPromptInput}
+						on:keydown={handleCanvasAIPromptKeydown}
+						disabled={isCanvasAIGenerating || !currentFile}
+					></textarea>
+					<div class="canvas-ai-actions">
+						<button
+							type="button"
+							class="canvas-ai-action secondary"
+							on:click={() => {
+								canvasAIPrompt = '';
+								canvasAIError = '';
+								resizeCanvasAIPromptInput(canvasAISidebarPromptElement);
+							}}
+							disabled={isCanvasAIGenerating || (!canvasAIPrompt.trim() && !canvasAIError)}
+						>
+							Clear
+						</button>
+						<button
+							type="button"
+							class="canvas-ai-action secondary"
+							on:click={() => {
+								const latest = resolveCanvasAILastSuggestedMessage();
+								if (latest) {
+									void applyAllCanvasAIChanges(latest.id);
+								}
+							}}
+							disabled={isCanvasAIGenerating || getCanvasAILastPendingChangeCount() === 0}
+						>
+							Accept Latest
+						</button>
+						<button
+							type="button"
+							class="canvas-ai-action primary"
+							on:click={() => void sendCanvasAIMessage()}
+							disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFile}
+						>
+							{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
+						</button>
+					</div>
+				</div>
 			{/if}
-			{#if fileExplorerError}
+			{#if fileExplorerError && activeSidebarView !== 'canvas_ai'}
 				<div class="file-error" role="status" aria-live="polite">{fileExplorerError}</div>
 			{/if}
 		</aside>
@@ -5055,61 +6124,137 @@ Return only the final code for this file.`;
 					on:dragend|capture={handleEditorCodeDragEnd}
 				>
 					<div class="code-canvas" bind:this={editorContainer}></div>
-					<button
-						type="button"
-						class="canvas-ai-trigger"
-						title="Ask AI for this file (Cmd/Ctrl+I)"
-						aria-label="Ask AI for this file"
-						on:click={openCanvasAIPromptPanel}
-						disabled={!currentFile || isCanvasAIGenerating}
-					>
-						<svg viewBox="0 0 24 24" aria-hidden="true">
-							<path d="M12 2.75 14.5 8.2l5.95.8-4.4 4.15 1.16 5.85L12 16.3l-5.21 2.7 1.16-5.85L3.55 9l5.95-.8Z"></path>
-						</svg>
-					</button>
 					{#if showCanvasAIPrompt}
-						<div class="canvas-ai-panel" role="dialog" aria-label="AI code prompt">
-							<div class="canvas-ai-panel-header">
-								<span>AI in Editor</span>
-								<button
-									type="button"
-									class="canvas-ai-close"
-									on:click={closeCanvasAIPromptPanel}
-									aria-label="Close AI prompt"
-								>
-									×
-								</button>
-							</div>
-							<textarea
-								bind:this={canvasAIPromptElement}
-								bind:value={canvasAIPrompt}
-								rows="1"
-								class="canvas-ai-input"
-								placeholder="Describe what code you want in this file..."
-								on:input={handleCanvasAIPromptInput}
-								on:keydown={handleCanvasAIPromptKeydown}
-								disabled={isCanvasAIGenerating}
-							></textarea>
-							{#if canvasAIError}
-								<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
-							{/if}
-							<div class="canvas-ai-actions">
-								<button
-									type="button"
-									class="canvas-ai-action secondary"
-									on:click={closeCanvasAIPromptPanel}
+						<div class="canvas-ai-overlay" role="presentation">
+							<div class="canvas-ai-panel" role="dialog" aria-modal="true" aria-label="AI code prompt">
+								<div class="canvas-ai-panel-header">
+									<div class="canvas-ai-panel-head-main">
+										<span>AI in Editor</span>
+										{#if currentFile}
+											<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
+										{/if}
+									</div>
+									<button
+										type="button"
+										class="canvas-ai-close"
+										on:click={closeCanvasAIPromptPanel}
+										aria-label="Close AI prompt"
+									>
+										×
+									</button>
+								</div>
+								<div class="canvas-ai-thread" bind:this={canvasAIThreadElement}>
+									{#if canvasAIChatMessages.length === 0}
+										<div class="canvas-ai-empty">
+											<p>Chat with AI about this file. Ask for refactors, fixes, or new features.</p>
+											<p>AI responses include structured file diffs you can accept individually.</p>
+										</div>
+									{:else}
+										{#each canvasAIChatMessages as message (message.id)}
+											<article class="canvas-ai-message" class:user={message.role === 'user'}>
+												<header class="canvas-ai-message-header">
+													<strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
+													<time>
+														{new Date(message.timestamp).toLocaleTimeString([], {
+															hour: '2-digit',
+															minute: '2-digit'
+														})}
+													</time>
+												</header>
+												<p class="canvas-ai-message-text">{message.text}</p>
+												{#if message.changes && message.changes.length > 0}
+													<div class="canvas-ai-change-list">
+														<div class="canvas-ai-change-list-header">
+															<span>{message.changes.length} proposed file change(s)</span>
+															<button
+																type="button"
+																class="canvas-ai-action secondary"
+																on:click={() => void applyAllCanvasAIChanges(message.id)}
+																disabled={isCanvasAIGenerating || getCanvasAIPendingChangeCount(message) === 0}
+															>
+																Accept All
+															</button>
+														</div>
+														{#each message.changes as change (change.id)}
+															<section
+																class="canvas-ai-code-block"
+																class:is-applied={change.applyState === 'applied'}
+																class:is-failed={change.applyState === 'failed'}
+															>
+																<div class="canvas-ai-change-headline">
+																	<div class="canvas-ai-change-meta">
+																		<strong class="canvas-ai-change-file">{change.filePath}</strong>
+																		<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
+																	</div>
+																	<span class="canvas-ai-change-location">{change.locationHint}</span>
+																</div>
+																<p class="canvas-ai-change-summary">{change.summary}</p>
+																<pre class="canvas-ai-code">{change.diffText}</pre>
+																{#if change.applyError}
+																	<div class="canvas-ai-change-error">{change.applyError}</div>
+																{/if}
+																<div class="canvas-ai-code-actions">
+																	<button
+																		type="button"
+																		class="canvas-ai-action primary"
+																		on:click={() => void applyCanvasAIChange(message.id, change.id)}
+																		disabled={isCanvasAIGenerating || change.applyState === 'applied'}
+																	>
+																		{change.applyState === 'applied' ? 'Applied' : 'Accept'}
+																	</button>
+																</div>
+															</section>
+														{/each}
+													</div>
+												{/if}
+											</article>
+										{/each}
+									{/if}
+								</div>
+								{#if canvasAIError}
+									<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
+								{/if}
+								<textarea
+									bind:this={canvasAIPromptElement}
+									bind:value={canvasAIPrompt}
+									rows="2"
+									class="canvas-ai-input"
+									placeholder="Ask AI what to change in this file..."
+									on:input={handleCanvasAIPromptInput}
+									on:keydown={handleCanvasAIPromptKeydown}
 									disabled={isCanvasAIGenerating}
-								>
-									Cancel
-								</button>
-								<button
-									type="button"
-									class="canvas-ai-action primary"
-									on:click={() => void applyAIToCurrentFile()}
-									disabled={isCanvasAIGenerating || !canvasAIPrompt.trim()}
-								>
-									{isCanvasAIGenerating ? 'Generating...' : 'Apply to File'}
-								</button>
+								></textarea>
+								<div class="canvas-ai-actions">
+									<button
+										type="button"
+										class="canvas-ai-action secondary"
+										on:click={closeCanvasAIPromptPanel}
+										disabled={isCanvasAIGenerating}
+									>
+										Cancel
+									</button>
+									<button
+										type="button"
+										class="canvas-ai-action secondary"
+										on:click={() => {
+											const latest = resolveCanvasAILastSuggestedMessage();
+											if (latest) {
+												void applyAllCanvasAIChanges(latest.id);
+											}
+										}}
+										disabled={isCanvasAIGenerating || getCanvasAILastPendingChangeCount() === 0}
+									>
+										Accept Latest
+									</button>
+									<button
+										type="button"
+										class="canvas-ai-action primary"
+										on:click={() => void sendCanvasAIMessage()}
+										disabled={isCanvasAIGenerating || !canvasAIPrompt.trim()}
+									>
+										{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
+									</button>
+								</div>
 							</div>
 						</div>
 					{/if}
@@ -5510,6 +6655,76 @@ Return only the final code for this file.`;
 			border-color 0.14s ease,
 			box-shadow 0.14s ease,
 			background 0.14s ease;
+	}
+
+	.canvas-ai-sidebar {
+		flex: 1;
+		min-height: 0;
+		display: grid;
+		grid-template-rows: auto minmax(0, 1fr) auto auto;
+		gap: 0.45rem;
+		padding: 0.1rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-panel-header {
+		font-size: 0.75rem;
+		padding: 0.18rem 0.18rem 0.12rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-file-pill {
+		max-width: 10.5rem;
+		font-size: 0.6rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-thread {
+		gap: 0.38rem;
+		padding-right: 0.05rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-empty p {
+		font-size: 0.68rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-message {
+		padding: 0.45rem 0.5rem;
+		gap: 0.24rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-message-header strong {
+		font-size: 0.6rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-message-header time {
+		font-size: 0.58rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-message-text {
+		font-size: 0.71rem;
+		line-height: 1.4;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-code {
+		max-height: 150px;
+		font-size: 0.66rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-input {
+		font-size: 0.74rem;
+		padding: 0.42rem 0.5rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-error {
+		font-size: 0.67rem;
+		padding: 0.3rem 0.42rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-actions {
+		gap: 0.34rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-action {
+		font-size: 0.66rem;
+		padding: 0.34rem 0.56rem;
 	}
 
 	.canvas-sidebar.drag-over {
@@ -6402,66 +7617,29 @@ Return only the final code for this file.`;
 		stroke-linejoin: round;
 	}
 
-	.canvas-ai-trigger {
-		position: absolute;
-		top: 0.7rem;
-		right: 0.75rem;
-		z-index: 8;
-		width: 1.95rem;
-		height: 1.95rem;
-		border: 1px solid rgba(168, 203, 255, 0.46);
-		background: linear-gradient(160deg, rgba(82, 130, 212, 0.45), rgba(25, 48, 89, 0.56));
-		color: #f3f8ff;
-		border-radius: 0.65rem;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 0;
-		cursor: pointer;
-		backdrop-filter: blur(10px) saturate(130%);
-		-webkit-backdrop-filter: blur(10px) saturate(130%);
-		box-shadow:
-			0 12px 26px rgba(0, 0, 0, 0.36),
-			inset 0 1px 0 rgba(255, 255, 255, 0.25);
-	}
-
-	.canvas-ai-trigger:hover:not(:disabled) {
-		border-color: rgba(182, 216, 255, 0.82);
-		background: linear-gradient(160deg, rgba(101, 150, 232, 0.52), rgba(36, 62, 108, 0.64));
-	}
-
-	.canvas-ai-trigger:disabled {
-		opacity: 0.52;
-		cursor: not-allowed;
-	}
-
-	.canvas-ai-trigger svg {
-		width: 0.95rem;
-		height: 0.95rem;
-		fill: currentColor;
+	.canvas-ai-overlay {
+		position: fixed;
+		inset: 0;
+		z-index: 10040;
+		background: rgba(5, 10, 18, 0.72);
+		backdrop-filter: blur(7px) saturate(120%);
+		-webkit-backdrop-filter: blur(7px) saturate(120%);
 	}
 
 	.canvas-ai-panel {
-		position: absolute;
-		top: 3.05rem;
-		right: 0.75rem;
-		z-index: 9;
-		width: min(22.5rem, calc(100% - 1.5rem));
-		
-		padding: 0.58rem;
-		border-radius: 0.62rem;
-		border: 1px solid rgba(112, 133, 166, 0.6);
-		background: linear-gradient(180deg, rgba(27, 37, 52, 0.97) 0%, rgba(20, 28, 40, 0.97) 100%);
-		box-shadow:
-			0 18px 30px rgba(0, 0, 0, 0.42),
-			inset 0 1px 0 rgba(255, 255, 255, 0.04);
-		display: flex;
-		flex-direction: column;
-		gap: 0.44rem;
-		overflow-y: auto;
-		overscroll-behavior: contain;
-		backdrop-filter: blur(9px) saturate(110%);
-		-webkit-backdrop-filter: blur(9px) saturate(110%);
+		position: fixed;
+		inset: 0;
+		z-index: 10041;
+		display: grid;
+		grid-template-rows: auto minmax(0, 1fr) auto auto;
+		gap: 0.68rem;
+		padding:
+			max(0.9rem, env(safe-area-inset-top))
+			max(1rem, env(safe-area-inset-right))
+			max(0.9rem, env(safe-area-inset-bottom))
+			max(1rem, env(safe-area-inset-left));
+		background: linear-gradient(180deg, rgba(14, 20, 31, 0.99) 0%, rgba(10, 15, 24, 0.99) 100%);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 	}
 
 	.canvas-ai-panel-header {
@@ -6469,19 +7647,42 @@ Return only the final code for this file.`;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
-		color: #d7e2f5;
-		font-size: 0.72rem;
+		color: #e2ebfb;
+		font-size: 0.9rem;
 		font-weight: 600;
 		letter-spacing: 0.01em;
+	}
+
+	.canvas-ai-panel-head-main {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		min-width: 0;
+	}
+
+	.canvas-ai-file-pill {
+		display: inline-flex;
+		align-items: center;
+		max-width: min(38rem, 70vw);
+		padding: 0.2rem 0.55rem;
+		border-radius: 999px;
+		border: 1px solid rgba(126, 160, 212, 0.55);
+		background: rgba(40, 57, 84, 0.74);
+		color: #d8e9ff;
+		font-size: 0.7rem;
+		font-weight: 600;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.canvas-ai-close {
 		border: 1px solid rgba(101, 121, 151, 0.56);
 		background: rgba(27, 37, 53, 0.9);
 		color: #d6e5fd;
-		border-radius: 0.34rem;
-		width: 1.3rem;
-		height: 1.3rem;
+		border-radius: 0.44rem;
+		width: 1.8rem;
+		height: 1.8rem;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -6496,16 +7697,194 @@ Return only the final code for this file.`;
 		background: rgba(43, 58, 82, 0.94);
 	}
 
+	.canvas-ai-thread {
+		min-height: 0;
+		overflow-y: auto;
+		display: grid;
+		align-content: start;
+		gap: 0.55rem;
+		padding-right: 0.2rem;
+		overscroll-behavior: contain;
+	}
+
+	.canvas-ai-empty {
+		border: 1px dashed rgba(109, 133, 168, 0.58);
+		border-radius: 0.56rem;
+		background: rgba(24, 34, 49, 0.68);
+		padding: 0.62rem 0.68rem;
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.canvas-ai-empty p {
+		margin: 0;
+		font-size: 0.82rem;
+		line-height: 1.4;
+		color: rgba(197, 214, 238, 0.9);
+	}
+
+	.canvas-ai-message {
+		border: 1px solid rgba(98, 122, 160, 0.62);
+		border-radius: 0.66rem;
+		background: rgba(22, 31, 44, 0.9);
+		padding: 0.62rem 0.72rem;
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.canvas-ai-message.user {
+		border-color: rgba(106, 154, 220, 0.72);
+		background: rgba(41, 60, 90, 0.72);
+	}
+
+	.canvas-ai-message-header {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.canvas-ai-message-header strong {
+		font-size: 0.74rem;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: rgba(188, 208, 239, 0.92);
+	}
+
+	.canvas-ai-message-header time {
+		font-size: 0.68rem;
+		color: rgba(165, 183, 212, 0.8);
+	}
+
+	.canvas-ai-message-text {
+		margin: 0;
+		font-size: 0.88rem;
+		line-height: 1.5;
+		color: #e4eefc;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.canvas-ai-code-block {
+		border: 1px solid rgba(86, 109, 145, 0.64);
+		border-radius: 0.5rem;
+		background: rgba(13, 19, 30, 0.94);
+		display: grid;
+		gap: 0.42rem;
+		padding: 0.48rem;
+	}
+
+	.canvas-ai-code-block.is-applied {
+		border-color: rgba(82, 162, 118, 0.78);
+		background: rgba(13, 33, 25, 0.9);
+	}
+
+	.canvas-ai-code-block.is-failed {
+		border-color: rgba(188, 94, 94, 0.78);
+		background: rgba(40, 17, 20, 0.9);
+	}
+
+	.canvas-ai-change-list {
+		display: grid;
+		gap: 0.5rem;
+	}
+
+	.canvas-ai-change-list-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem;
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: rgba(198, 213, 237, 0.9);
+	}
+
+	.canvas-ai-change-headline {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.canvas-ai-change-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		min-width: 0;
+	}
+
+	.canvas-ai-change-file {
+		font-size: 0.74rem;
+		color: #e7f1ff;
+		word-break: break-word;
+	}
+
+	.canvas-ai-change-chip {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.08rem 0.34rem;
+		border-radius: 999px;
+		border: 1px solid rgba(109, 142, 191, 0.62);
+		background: rgba(36, 56, 86, 0.88);
+		color: #d7e8ff;
+		font-size: 0.6rem;
+		letter-spacing: 0.03em;
+	}
+
+	.canvas-ai-change-location {
+		font-size: 0.66rem;
+		color: rgba(183, 201, 227, 0.9);
+	}
+
+	.canvas-ai-change-summary {
+		margin: 0;
+		font-size: 0.76rem;
+		line-height: 1.4;
+		color: rgba(218, 231, 250, 0.95);
+	}
+
+	.canvas-ai-change-error {
+		font-size: 0.7rem;
+		color: #ffd1d1;
+		background: rgba(143, 43, 43, 0.42);
+		border: 1px solid rgba(203, 113, 113, 0.52);
+		border-radius: 0.34rem;
+		padding: 0.28rem 0.4rem;
+	}
+
+	.canvas-ai-code {
+		margin: 0;
+		max-height: min(40vh, 360px);
+		overflow: auto;
+		font-size: 0.8rem;
+		line-height: 1.42;
+		color: #dbe9ff;
+		font-family:
+			'SFMono-Regular',
+			Consolas,
+			'Liberation Mono',
+			Menlo,
+			monospace;
+		white-space: pre;
+	}
+
+	.canvas-ai-code-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
 	.canvas-ai-input {
 		width: 100%;
 		min-height: 0;
 		border: 1px solid rgba(113, 134, 168, 0.56);
 		background: rgba(22, 31, 44, 0.92);
 		color: #eaf2ff;
-		border-radius: 0.42rem;
-		padding: 0.44rem 0.56rem;
-		font-size: 0.74rem;
-		line-height: 1.33;
+		border-radius: 0.62rem;
+		padding: 0.62rem 0.74rem;
+		font-size: 0.9rem;
+		line-height: 1.42;
 		resize: none;
 		overflow-y: hidden;
 		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
@@ -6522,28 +7901,29 @@ Return only the final code for this file.`;
 	}
 
 	.canvas-ai-error {
-		font-size: 0.71rem;
+		font-size: 0.82rem;
 		font-weight: 500;
 		color: #ffd7d7;
 		background: rgba(132, 33, 33, 0.44);
 		border: 1px solid rgba(227, 134, 134, 0.52);
-		border-radius: 0.44rem;
-		padding: 0.36rem 0.5rem;
+		border-radius: 0.52rem;
+		padding: 0.42rem 0.58rem;
 	}
 
 	.canvas-ai-actions {
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
-		gap: 0.36rem;
+		gap: 0.5rem;
 		padding-top: 0.08rem;
+		flex-wrap: wrap;
 	}
 
 	.canvas-ai-action {
 		border: 1px solid rgba(104, 126, 157, 0.62);
-		border-radius: 0.34rem;
-		padding: 0.28rem 0.58rem;
-		font-size: 0.68rem;
+		border-radius: 0.45rem;
+		padding: 0.5rem 0.86rem;
+		font-size: 0.8rem;
 		font-weight: 600;
 		cursor: pointer;
 		line-height: 1.16;
@@ -6575,9 +7955,39 @@ Return only the final code for this file.`;
 		cursor: not-allowed;
 	}
 
-	@media (max-height: 760px) {
+	@media (max-width: 900px) {
 		.canvas-ai-panel {
-			max-height: min(calc(100% - 3.3rem), calc(100dvh - 6.4rem));
+			padding:
+				max(0.72rem, env(safe-area-inset-top))
+				max(0.72rem, env(safe-area-inset-right))
+				max(0.72rem, env(safe-area-inset-bottom))
+				max(0.72rem, env(safe-area-inset-left));
+			gap: 0.56rem;
+		}
+
+		.canvas-ai-panel-header {
+			font-size: 0.82rem;
+		}
+
+		.canvas-ai-file-pill {
+			font-size: 0.66rem;
+		}
+
+		.canvas-ai-message {
+			padding: 0.56rem 0.62rem;
+		}
+
+		.canvas-ai-message-text {
+			font-size: 0.8rem;
+		}
+
+		.canvas-ai-input {
+			font-size: 0.82rem;
+		}
+
+		.canvas-ai-action {
+			font-size: 0.74rem;
+			padding: 0.42rem 0.72rem;
 		}
 	}
 

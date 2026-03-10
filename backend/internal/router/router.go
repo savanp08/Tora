@@ -37,9 +37,25 @@ func New(
 	r.Use(middleware.Recoverer)
 
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:5173", "https://tora.monokenos.com", "http://192.168.1.165:5173"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-User-Id", "X-Username"},
+		AllowedOrigins: []string{
+			"http://localhost:*",
+			"http://127.0.0.1:*",
+			"https://tora.monokenos.com",
+			"http://192.168.1.165:5173",
+		},
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{
+			"Accept",
+			"Authorization",
+			"Content-Type",
+			"X-CSRF-Token",
+			"X-User-Id",
+			"X-User-Name",
+			"X-Username",
+			"X-Device-Id",
+			"X-Device-ID",
+			"X-Room-Id",
+		},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -155,6 +171,8 @@ func New(
 		r.With(authJWTContextMiddleware()).Post("/rooms/direct", roomHandler.CreateDirectRoom)
 		r.Post("/rooms/{roomId}/tasks", roomHandler.CreateRoomTask)
 		r.Delete("/rooms/{roomId}/tasks", roomHandler.DeleteRoomTasks)
+		r.Delete("/rooms/{roomId}/tasks/{taskId}", roomHandler.DeleteRoomTask)
+		r.Put("/rooms/{roomId}/tasks/{taskId}", roomHandler.UpdateRoomTask)
 		r.Put("/rooms/{roomId}/tasks/{taskId}/status", roomHandler.UpdateRoomTaskStatus)
 
 		r.Post("/rooms", roomHandler.CreateRoom)
