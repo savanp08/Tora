@@ -26,7 +26,7 @@
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
   <a href="https://redis.io/"><img src="https://img.shields.io/badge/Redis-7.x-dc382d?logo=redis&logoColor=white" alt="Redis"></a>
   <a href="https://www.scylladb.com/"><img src="https://img.shields.io/badge/ScyllaDB-supported-6cd4ff" alt="ScyllaDB"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg" alt="License: AGPL v3"></a>
 </p>
 
 <p align="center">
@@ -40,11 +40,28 @@
 
 Tora is a real-time collaboration workspace where conversation, code, and visual thinking happen together. Designed to be the simplest way to connect with others securely and efficiently, it is:
 
-- Fully open source (licensed under [MIT](./LICENSE))
-- Session-based: rooms are ephemeral by design, with no long-term message history stored on a server
-- Real-time: messages, drawings, code edits, and presence updates propagate instantly between participants
-- AI-assisted: mention `@ToraAI` to bring an assistant into the conversation with room context
-- Full-stack in one place: chat, shared code editor, whiteboard, AI assistant, and call tools all live in the same room
+- Fully open source
+- Session-based 
+     - rooms are ephemeral by design, with no long-term message history stored on a server
+- Collaborative Tools
+     - Built in code-canvas powered by monaco editor and piston, drawboard for freedraw and embeddings, taskboard to plan and manage your project, dashbaord for priority notices and notes
+- Real-time: 
+     - Messages, drawings, code edits, and presence updates propagate instantly between participants
+- complete chat experience
+     - Supports Media, files, voice messages, replies, typing indicators,emojis, reactions, typing indictaors, GIFs,   stickers, memes and more
+- AI-assisted: 
+      - Mention `@ToraAI` to bring an assistant into the conversation with room context
+- AI-Powered Assistance
+      - Auto Code Completion — Get real-time, context-aware code suggestions directly in the Monaco-powered Code Canvas, specialized for the project you're currently building.
+
+      - Contextual Dialogue — Mention @ToraAI in chat to interact with an assistant that has full visibility of your room's conversation history and active code boards.
+
+      - Project Assistance - Leverage ToraAI to generate, edit and manage your project
+
+      - Private AI Mode — Request assistance or explanations that are visible only to you, allowing for private debugging or learning without interrupting the group flow.
+     
+- A one stop solution for small teams
+      - chat, shared code editor, whiteboard, AI assistant, and call tools all live in the same room
 - [Self-hostable](#deployment)
 
 Tora uses [SvelteKit](https://kit.svelte.dev/). Collaborative editing and live synchronization are powered by [Yjs](https://yjs.dev/). Code execution is powered by [Piston](https://github.com/engineer-man/piston), [Pyodide](https://pyodide.org/), and WebContainers for in-browser Node.js execution.
@@ -73,9 +90,25 @@ To collaborate privately, create a dedicated room and share that URL over your p
 - OAuth login (GitHub) with JWT session management
 - Prometheus metrics endpoint for self-hosted deployments
 
+## Encryptions
+
+- WebRTC End-to-End Encryption — All real-time audio and video streams are end-to-end encrypted natively via WebRTC protocols, ensuring media remains private between participants and never reaches the server unencrypted.
+
+- Transport Layer Security (TLS) — All data in transit, including real-time WebSocket signals for chat and drawings, is protected via Secure WebSockets (WSS) and HTTPS orchestrated through Caddy.
+
+- JWT Integrity (HS256) — User sessions are secured using JSON Web Tokens (JWT) signed with the HMAC SHA-256 algorithm, utilizing a server-side secret to prevent token tampering.
+
+- Timing-Attack Resistance — The authentication system employs timing-safe comparisons for cryptographic signatures to prevent attackers from guessing keys based on processing latency.
+
+- Base64 Content Encoding — Code Canvas files and workspace attachments are Base64 encoded during transport to ensure binary data integrity across the Go API and frontend stores.
+
+- Infrastructure Privacy — Tora’s ephemeral architecture ensures that sensitive session data is primarily held in-memory (Redis) and is designed to be wiped upon session expiry, minimizing the long-term data footprint.
+
+** Note: Turn on E2E setting during Room Creation if you want to trade cloud stoarge for privacy. (New joinees will not be able to see previous messages in E2E setting)
+
 ## Boards
 
-Tora's workspace is built around four boards. Each one is shared live, and everyone in the room sees the same state in real time.
+Tora's workspace is built around four boards. Each one is shared live, and everyone in the room sees the same state in real time. The app supports split views for multiple boards for convinience.
 
 ### Code Canvas
 
@@ -254,4 +287,4 @@ Pull requests are welcome. For significant changes, open an issue first to discu
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](./LICENSE).
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](./LICENSE).
