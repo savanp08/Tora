@@ -123,6 +123,7 @@
 	let mentionPickerEl: HTMLDivElement | null = null;
 	let composerTextareaEl: HTMLTextAreaElement | null = null;
 	let composerHighlightEl: HTMLDivElement | null = null;
+	let mediaPickerFocusCleanup: (() => void) | null = null;
 	let normalizedDraftMessage = '';
 	let draftMessageBytes = 0;
 	let composerMentionSegments: ComposerTextSegment[] = [];
@@ -326,6 +327,34 @@
 		}
 		composerHighlightEl.scrollTop = composerTextareaEl.scrollTop;
 		composerHighlightEl.scrollLeft = composerTextareaEl.scrollLeft;
+	}
+
+	function focusComposerInput() {
+		requestAnimationFrame(() => {
+			if (!composerTextareaEl || composerDisabled) {
+				return;
+			}
+			composerTextareaEl.focus();
+			const cursor = draftMessage.length;
+			composerTextareaEl.setSelectionRange(cursor, cursor);
+			syncComposerHighlightScroll();
+		});
+	}
+
+	function scheduleComposerFocusAfterPickerClose() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		mediaPickerFocusCleanup?.();
+		const onWindowFocus = () => {
+			mediaPickerFocusCleanup = null;
+			focusComposerInput();
+		};
+		window.addEventListener('focus', onWindowFocus, { once: true });
+		mediaPickerFocusCleanup = () => {
+			window.removeEventListener('focus', onWindowFocus);
+			mediaPickerFocusCleanup = null;
+		};
 	}
 
 	function parsePixel(value: string) {
@@ -533,6 +562,7 @@
 		closeMediaPicker();
 		closeMentionPicker();
 		clearBeaconDraft();
+		mediaPickerFocusCleanup?.();
 		if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
 			mediaRecorder.stop();
 		}
@@ -714,9 +744,11 @@
 		taskDraftOpen = false;
 		taskAddInputOpen = false;
 		if (type === 'media') {
+			scheduleComposerFocusAfterPickerClose();
 			mediaInput?.click();
 			return;
 		}
+		scheduleComposerFocusAfterPickerClose();
 		fileInput?.click();
 	}
 
@@ -1216,6 +1248,7 @@
 		memeError = '';
 		closeMediaPicker();
 		dispatch('attach', { file: null, type: 'media' });
+		focusComposerInput();
 	}
 
 	function sendMediaAssetAttachment() {
@@ -1233,6 +1266,7 @@
 		attachedMediaAsset = null;
 		attachedMessageType = null;
 		dispatch('attach', { file: null, type: 'media' });
+		focusComposerInput();
 	}
 
 	function clearAttachmentPreview() {
@@ -1254,10 +1288,12 @@
 			return;
 		}
 		closeMediaPicker();
+		mediaPickerFocusCleanup?.();
 		const target = event.currentTarget as HTMLInputElement;
 		const selected = target.files?.[0] ?? null;
 		target.value = '';
 		if (!selected) {
+			focusComposerInput();
 			return;
 		}
 
@@ -1269,6 +1305,7 @@
 		attachedPickerType = pickerType;
 		setAttachmentPreview(selected, messageType);
 		dispatch('attach', { file: selected, type: pickerType });
+		focusComposerInput();
 	}
 
 	async function sendAttachment() {
@@ -1297,6 +1334,7 @@
 			dispatch('attach', { file: attachedFile, type: attachedPickerType, error: message });
 		} finally {
 			isProcessingAttachment = false;
+			focusComposerInput();
 		}
 	}
 
@@ -1307,6 +1345,7 @@
 		attachedMessageType = null;
 		attachError = '';
 		dispatch('removeAttachment');
+		focusComposerInput();
 	}
 
 	function cancelReply() {

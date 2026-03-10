@@ -246,24 +246,35 @@ export function buildExecutionPayload(
 ): RemoteExecutionRequest {
 	const normalizedLanguage = (language || '').trim().toLowerCase();
 	const normalizedMainFile = (activeFile || '').trim() || defaultSourceFilename(normalizedLanguage);
+	const slashIndex = normalizedMainFile.lastIndexOf('/');
+	const mainFileDir = slashIndex > 0 ? normalizedMainFile.slice(0, slashIndex) : '';
 	const normalizedWorkspaceFiles = (workspaceFiles || [])
-		.map((file) => ({
-			name: (file?.name || '').trim(),
-			content: String(file?.content ?? '')
-		}))
+		.map((file) => {
+			let name = (file?.name || '').trim();
+			if (mainFileDir && name.startsWith(`${mainFileDir}/`)) {
+				name = name.slice(mainFileDir.length + 1);
+			}
+			return {
+				name,
+				content: String(file?.content ?? '')
+			};
+		})
 		.filter((file) => file.name.length > 0);
+	const finalMainFile = mainFileDir
+		? normalizedMainFile.slice(mainFileDir.length + 1)
+		: normalizedMainFile;
 
 	const workspaceWithMain = ensureMainFileFirst(
-		normalizedWorkspaceFiles.some((file) => file.name === normalizedMainFile)
+		normalizedWorkspaceFiles.some((file) => file.name === finalMainFile)
 			? normalizedWorkspaceFiles
-			: [{ name: normalizedMainFile, content: '' }, ...normalizedWorkspaceFiles],
-		normalizedMainFile
+			: [{ name: finalMainFile, content: '' }, ...normalizedWorkspaceFiles],
+		finalMainFile
 	);
 
 	return {
 		language: normalizedLanguage,
 		stdin: String(stdin ?? ''),
-		main_file: normalizedMainFile,
+		main_file: finalMainFile,
 		files: workspaceWithMain.map((file) => ({
 			name: file.name,
 			content: encodeCodeAsBase64(file.content)

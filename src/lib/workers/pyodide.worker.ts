@@ -286,7 +286,31 @@ async function runWorkspace(pyodide: PyodideRuntime, payload: PyodideExecuteMess
 		writeSupportFilesToMemFS(pyodide, session.files, mainFile);
 		await invalidateImportCaches(pyodide);
 
-		await pyodide.runPythonAsync(mainEntry.content);
+		const executeScript = `
+import os
+import sys
+
+os.chdir('/home/pyodide')
+
+main_file = ${JSON.stringify(mainFile)}
+main_dir = os.path.dirname(main_file)
+abs_main_file = os.path.abspath(main_file)
+
+if main_dir and os.path.exists(main_dir):
+    os.chdir(main_dir)
+
+if '/home/pyodide' not in sys.path:
+    sys.path.insert(0, '/home/pyodide')
+if main_dir and os.path.abspath(main_dir) not in sys.path:
+    sys.path.insert(0, os.path.abspath(main_dir))
+
+with open(abs_main_file, 'r', encoding='utf-8') as _f:
+    _code = _f.read()
+
+_globals = {'__name__': '__main__', '__file__': abs_main_file, '__builtins__': __builtins__}
+exec(compile(_code, abs_main_file, 'exec'), _globals)
+`;
+		await pyodide.runPythonAsync(executeScript);
 		const buffers = readBuffers(pyodide);
 		emitBufferedOutput(payload.id, buffers);
 		emit({
@@ -316,6 +340,11 @@ async function runWorkspace(pyodide: PyodideRuntime, payload: PyodideExecuteMess
 			stderr
 		});
 	} finally {
+		try {
+			pyodide.runPython('import os; os.chdir("/home/pyodide")');
+		} catch {
+			// Ignore CWD reset errors; workspace cleanup still proceeds.
+		}
 		cleanupWorkspace(pyodide, session.mounted);
 		workspaceSessionById.delete(payload.id);
 		executionInProgress = false;
