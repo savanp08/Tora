@@ -4,6 +4,7 @@
 	import TaskBoard from '$lib/components/workspace/TaskBoard.svelte';
 	import ToraAIPanel from '$lib/components/workspace/ToraAIPanel.svelte';
 	import TimelineBoard from '$lib/components/workspace/TimelineBoard.svelte';
+	import TableBoard from './TableBoard.svelte';
 	import { currentUser } from '$lib/store';
 	import {
 		activeProjectTab,
@@ -35,6 +36,7 @@
 		{ key: 'tasks', label: 'Tasks', icon: 'M8 7h11M8 12h11M8 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01' },
 		{ key: 'progress', label: 'Progress', icon: 'M5 18.5h14M7.5 16V9.5M12 16V6.5M16.5 16v-4.2' },
 		{ key: 'visualizations', label: 'Visuals', icon: 'M5 17.5V12l3.8-3.8 3 3L17.5 5l1.5 1.5M19.5 19.5h-15v-15' },
+		{ key: 'table', label: 'Table', icon: 'M5 17.5V12l3.8-3.8 3 3L17.5 5l1.5 1.5M19.5 19.5h-15v-15' },
 		{ key: 'tora_ai', label: 'Tora AI', icon: 'M12 4.2 13.7 8l3.8 1.5-3.8 1.5L12 14.8 10.3 11 6.5 9.5 10.3 8 12 4.2Z' }
 	];
 

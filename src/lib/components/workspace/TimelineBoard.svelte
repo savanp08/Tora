@@ -1,41 +1,49 @@
 <script lang="ts">
-	import type { Sprint, TimelineTask, TimelineTaskStatus } from '$lib/types/timeline';
-	import { projectTimeline } from '$lib/stores/timeline';
+    import type { Sprint, TimelineTask, TimelineTaskStatus } from '$lib/types/timeline';
+    import { projectTimeline } from '$lib/stores/timeline';
 
-	const KANBAN_COLUMNS: Array<{ key: TimelineTaskStatus; label: string }> = [
-		{ key: 'todo', label: 'To Do' },
-		{ key: 'in_progress', label: 'In Progress' },
-		{ key: 'done', label: 'Done' }
-	];
+    const KANBAN_COLUMNS: Array<{ key: TimelineTaskStatus; label: string }> = [
+        { key: 'todo', label: 'To Do' },
+        { key: 'in_progress', label: 'In Progress' },
+        { key: 'done', label: 'Done' }
+    ];
 
-	let selectedSprintID = '';
+    let selectedSprintID = '';
 
-	$: sprints = $projectTimeline?.sprints ?? [];
-	$: if (sprints.length > 0 && !sprints.some((sprint) => sprint.id === selectedSprintID)) {
-		selectedSprintID = sprints[0].id;
-	}
-	$: selectedSprint = sprints.find((sprint) => sprint.id === selectedSprintID) ?? null;
-	$: progressPercent = $projectTimeline ? Math.max(0, Math.min(100, $projectTimeline.total_progress)) : 0;
+    $: sprints = $projectTimeline?.sprints ?? [];
 
-	function selectSprint(sprint: Sprint) {
-		selectedSprintID = sprint.id;
-	}
+    // 1. Robust Initialization
+    $: if (sprints.length > 0 && !selectedSprintID) {
+        selectedSprintID = sprints[0].id;
+    }
 
-	function tasksForStatus(status: TimelineTaskStatus) {
-		if (!selectedSprint) {
-			return [] as TimelineTask[];
-		}
-		return selectedSprint.tasks.filter((task) => task.status === status);
-	}
+    // 2. Flexible Finder (Checks ID and Name as fallback)
+    $: selectedSprint = sprints.find((s) => 
+        s.id === selectedSprintID || s.name === selectedSprintID
+    ) ?? null;
 
-	function sprintProgress(sprint: Sprint) {
-		const total = sprint.tasks.length;
-		if (total === 0) {
-			return 0;
-		}
-		const completed = sprint.tasks.filter((task) => task.status === 'done').length;
-		return Math.round((completed / total) * 100);
-	}
+    $: progressPercent = $projectTimeline ? Math.max(0, Math.min(100, $projectTimeline.total_progress)) : 0;
+
+    function selectSprint(sprint: Sprint) {
+        // Prefer ID, fallback to name
+        selectedSprintID = sprint.id || sprint.name;
+    }
+
+    // 3. Status Mapper (Fixes 'not_started' -> 'todo')
+    function tasksForStatus(status: TimelineTaskStatus) {
+        if (!selectedSprint) return [];
+        
+        return selectedSprint.tasks.filter((task) => {
+            const normalizedStatus = task.status === 'not_started' ? 'todo' : task.status;
+            return normalizedStatus === status;
+        });
+    }
+
+    function sprintProgress(sprint: Sprint) {
+        if (!sprint.tasks.length) return 0;
+        const completed = sprint.tasks.filter((t) => t.status === 'done' || t.status === 'completed').length;
+        return Math.round((completed / sprint.tasks.length) * 100);
+    }
 </script>
 
 <section class="timeline-board" aria-label="Project timeline board">

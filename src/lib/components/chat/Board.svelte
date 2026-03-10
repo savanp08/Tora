@@ -6299,7 +6299,7 @@
 			gap: 0.3rem;
 			padding: 0.42rem;
 			padding-right: 2.5rem;
-			width: 88vw;
+			width: 80vw;
 		}
 
 		.toolbar-open-hint {

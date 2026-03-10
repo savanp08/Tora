@@ -657,6 +657,8 @@ export async function generateAITimeline(roomId: string, prompt: string) {
 		}
 
 		const payload = (await response.json().catch(() => null)) as unknown;
+		console.log('AI Timeline Payload:', payload);
+		
 		const normalized = applyTimelinePayload(payload);
 		return normalized;
 	} catch (error) {
