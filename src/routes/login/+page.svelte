@@ -725,11 +725,14 @@
 		overflow: hidden;
 	}
 
+	.login-shell :global(.mrb-host),
 	.login-shell :global(.monochrome-room-background) {
-		opacity: 0;
-		transition: opacity 0.2s ease;
+		opacity: 0.72;
+		transition: opacity 0.3s ease;
 	}
 
+	:global(:root[data-theme='dark']) .login-shell :global(.mrb-host),
+	:global(.theme-dark) .login-shell :global(.mrb-host),
 	:global(:root[data-theme='dark']) .login-shell :global(.monochrome-room-background),
 	:global(.theme-dark) .login-shell :global(.monochrome-room-background) {
 		opacity: 1;

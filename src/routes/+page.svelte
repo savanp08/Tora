@@ -59,7 +59,7 @@
 	let subtleInputError = '';
 	let canCreate = false;
 	let canJoinExisting = false;
-	let loginBackgroundSeed = 'tora-login';
+
 	let isReviveDragActive = false;
 	let isRevivingRoom = false;
 	let reviveDragDepth = 0;
@@ -369,11 +369,12 @@
 		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
 	$: canJoinExisting =
 		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
-	$: loginBackgroundSeed = normalizedRoomCode || normalizedRoomName || 'tora-login';
+	// Fixed once at load — never changes as the user types
+	const backgroundSeed = 'tora-' + new Date().toISOString().slice(0, 10);
 </script>
 
 	<div class="container">
-		<MonochromeRoomBackground seed={loginBackgroundSeed} />
+		<MonochromeRoomBackground seed={backgroundSeed} />
 		{#if isReviveDragActive}
 			<div class="revive-dropzone-overlay" aria-live="polite" role="status">
 				<div class="revive-dropzone-panel">
@@ -622,11 +623,15 @@
 		overflow-x: hidden;
 	}
 
+	/* Background art — visible in both themes, opacity driven by theme */
+	.container :global(.mrb-host),
 	.container :global(.monochrome-room-background) {
-		opacity: 0;
-		transition: opacity 0.2s ease;
+		opacity: 0.72;
+		transition: opacity 0.3s ease;
 	}
 
+	:global(:root[data-theme='dark']) .container :global(.mrb-host),
+	:global(.theme-dark) .container :global(.mrb-host),
 	:global(:root[data-theme='dark']) .container :global(.monochrome-room-background),
 	:global(.theme-dark) .container :global(.monochrome-room-background) {
 		opacity: 1;
@@ -695,19 +700,19 @@
 	}
 
 	.logo {
-		font-size: 1.5rem;
+		font-size: 2.4rem;
 		color: var(--text-primary);
 		display: flex;
 		align-items: center;
-		gap: 0.55rem;
-		font-weight: 700;
-		letter-spacing: 0.01em;
+		gap: 0.7rem;
+		font-weight: 800;
+		letter-spacing: -0.01em;
 	}
 
 	.logo-mark-wrap {
 		position: relative;
-		width: 34px;
-		height: 34px;
+		width: 56px;
+		height: 56px;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -716,7 +721,7 @@
 	.logo-mark {
 		width: 100%;
 		height: 100%;
-		filter: drop-shadow(0 7px 14px rgba(56, 189, 248, 0.24));
+		filter: drop-shadow(0 8px 20px rgba(56, 189, 248, 0.32));
 	}
 
 	main {

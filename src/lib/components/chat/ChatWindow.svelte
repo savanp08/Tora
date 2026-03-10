@@ -2,6 +2,7 @@
 	import { afterUpdate, createEventDispatcher, onDestroy, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
 	import TaskCard from '$lib/components/chat/TaskCard.svelte';
+	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
 	import type { ChatMessage, MessageActionMode } from '$lib/types/chat';
 	import { normalizeIdentifier } from '$lib/utils/chat/core';
@@ -90,7 +91,24 @@
 	const MESSAGE_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const MESSAGE_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
 	const MESSAGE_NATIVE_CONTEXT_SUPPRESSION_MS = 1400;
-	const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥'];
+	const QUICK_REACTIONS = [
+		'👍',
+		'❤️',
+		'😂',
+		'🔥',
+		'👏',
+		'🎉',
+		'🙏',
+		'✅',
+		'👀',
+		'🤔',
+		'😮',
+		'😢',
+		'😡',
+		'🚀',
+		'🙌',
+		'💯'
+	];
 	const EMOJI_TOKEN_PATTERN =
 		/(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*)/gu;
 	const MENTION_TOKEN_PATTERN = /(^|[^A-Za-z0-9_])(@[A-Za-z0-9_.-]{1,32})/g;
@@ -1658,6 +1676,7 @@
 <div
 	class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode ? 'theme-dark' : ''}"
 >
+	<MonochromeRoomBackground seed={roomId || 'chat-room'} />
 	<div class="messages" bind:this={viewport} on:scroll={onMessagesScroll}>
 		<div class="top-sentinel" bind:this={topSentinel} aria-hidden="true"></div>
 		{#if isLoadingOlder}
@@ -2375,10 +2394,25 @@
 		flex-direction: column;
 		overflow: hidden;
 		position: relative;
+		isolation: isolate;
+	}
+
+	/* Light theme: pure black-on-white art — no filter, just a heavy white scrim
+	   via the overlay so strokes are whisper-faint */
+	.messages-shell :global(.mrb-overlay) {
+		background: rgba(242, 244, 250, 0.82);
+	}
+
+	/* Dark theme: heavy dark scrim to dim the light strokes */
+	.messages-shell.theme-dark :global(.mrb-canvas) {
+		filter: brightness(0.9);
+	}
+	.messages-shell.theme-dark :global(.mrb-overlay) {
+		background: rgba(10, 12, 20, 0.6);
 	}
 
 	.messages-shell.theme-dark {
-		background: linear-gradient(180deg, #0c1423 0%, #0a1220 100%);
+		background: transparent;
 	}
 
 	.messages {
@@ -2400,7 +2434,9 @@
 		overflow-x: hidden;
 		width: 100%;
 		box-sizing: border-box;
-		background: linear-gradient(180deg, #edf2f8 0%, #e4eaf2 100%);
+		background: transparent;
+		position: relative;
+		z-index: 1;
 		scrollbar-width: none;
 		-ms-overflow-style: none;
 	}
@@ -2412,7 +2448,7 @@
 	}
 
 	.messages-shell.theme-dark .messages {
-		background: linear-gradient(180deg, #0f192c 0%, #0b1525 100%);
+		background: transparent;
 	}
 
 	.top-sentinel {
@@ -3494,13 +3530,13 @@
 	}
 
 	.reaction-trigger {
-		--reaction-stack-size: 1.04rem;
+		--reaction-stack-size: 1.22rem;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 1.72rem;
-		height: 1.42rem;
-		padding: 0 0.38rem;
+		min-width: 2rem;
+		height: 1.74rem;
+		padding: 0 0.46rem;
 		border: 1px solid #cad4e3;
 		background: #f0f4fa;
 		color: #33455f;
@@ -3517,14 +3553,14 @@
 	}
 
 	.reaction-trigger.empty {
-		font-size: 0.88rem;
+		font-size: 1.02rem;
 		line-height: 1;
 	}
 
 	.reaction-trigger.has-reactions {
 		min-width: 0;
-		padding-inline: 0.18rem 0.3rem;
-		gap: 0.16rem;
+		padding-inline: 0.22rem 0.36rem;
+		gap: 0.22rem;
 		opacity: 1;
 		pointer-events: auto;
 		transform: translateY(0) scale(1);
@@ -3570,19 +3606,20 @@
 		align-items: center;
 		justify-content: center;
 		box-sizing: border-box;
-		font-size: 0.76rem;
+		font-size: 0.92rem;
 		line-height: 1;
 	}
 
 	.reaction-trigger-icon {
+		font-size: 1.06rem;
 		line-height: 1;
 	}
 
 	.reaction-trigger-count {
-		font-size: 0.65rem;
+		font-size: 0.76rem;
 		font-weight: 700;
 		line-height: 1;
-		min-width: 0.7rem;
+		min-width: 0.86rem;
 		text-align: center;
 		color: inherit;
 	}
@@ -3592,10 +3629,10 @@
 		bottom: calc(100% + 0.4rem);
 		left: 0;
 		display: grid;
-		gap: 0.34rem;
-		min-width: 8rem;
-		max-width: 11.5rem;
-		padding: 0.34rem;
+		gap: 0.4rem;
+		min-width: 9.5rem;
+		max-width: 15rem;
+		padding: 0.44rem;
 		border-radius: 0.62rem;
 		border: 1px solid #cbd6e7;
 		background: rgba(249, 252, 255, 0.97);
@@ -3614,7 +3651,7 @@
 	.reaction-popover-list {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.24rem;
+		gap: 0.3rem;
 	}
 
 	.reaction-popover-quick-btn,
@@ -3623,11 +3660,11 @@
 		background: #f6f8fc;
 		color: #2c3d58;
 		border-radius: 999px;
-		padding: 0.08rem 0.34rem;
-		font-size: 0.72rem;
+		padding: 0.14rem 0.44rem;
+		font-size: 0.8rem;
 		display: inline-flex;
 		align-items: center;
-		gap: 0.18rem;
+		gap: 0.22rem;
 		cursor: pointer;
 		transition:
 			background 120ms ease,
@@ -3635,9 +3672,9 @@
 	}
 
 	.reaction-popover-quick-btn {
-		font-size: 0.86rem;
+		font-size: 1.06rem;
 		line-height: 1.2;
-		padding: 0.04rem 0.28rem;
+		padding: 0.08rem 0.34rem;
 	}
 
 	.reaction-popover-quick-btn:hover,
@@ -3652,13 +3689,14 @@
 	}
 
 	.reaction-popover-emoji {
-		font-size: 0.95rem;
+		font-size: 1.08rem;
 		line-height: 1;
 	}
 
 	.reaction-popover-count {
 		font-weight: 600;
-		min-width: 0.7rem;
+		font-size: 0.78rem;
+		min-width: 0.8rem;
 		text-align: center;
 	}
 
@@ -3889,11 +3927,11 @@
 	}
 
 	.messages-shell.theme-dark {
-		background: linear-gradient(180deg, #070707 0%, #0d0d0e 100%);
+		background: transparent;
 	}
 
 	.messages-shell.theme-dark .messages {
-		background: linear-gradient(180deg, #0a0a0b 0%, #101011 100%);
+		background: transparent;
 	}
 
 	.messages-shell.theme-dark .day-stamp {

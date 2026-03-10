@@ -14,6 +14,7 @@
 	import type { ProjectTimeline } from '$lib/types/timeline';
 
 	export let roomId = '';
+	export let aiEnabled = true;
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
@@ -64,6 +65,10 @@
 	let aiPartialWarning = '';
 	let aiMissingSprints: string[] = [];
 	let aiAssistantReply = '';
+
+	$: if (!aiEnabled && mode === 'ai') {
+		mode = 'selection';
+	}
 
 	const TEMPLATE_KEY_MAP: Record<string, string> = {
 		agile_sprint_planner: 'software_agile',
@@ -140,6 +145,10 @@
 		aiPartialWarning = '';
 		aiMissingSprints = [];
 		aiAssistantReply = '';
+		if (!aiEnabled) {
+			localError = 'AI assistant is disabled for this room.';
+			return;
+		}
 		if (!normalizedRoomID) {
 			localError = 'Room id is required before generating a workspace.';
 			return;
@@ -219,7 +228,7 @@
 				<p>Choose your setup path for this room.</p>
 			</header>
 
-			<div class="selection-actions">
+			<div class="selection-actions" class:single-option={!aiEnabled}>
 				<button type="button" class="selection-btn manual" on:click={() => (mode = 'manual')}>
 					<span class="selection-icon" aria-hidden="true">
 						<svg viewBox="0 0 24 24">
@@ -235,21 +244,26 @@
 					</span>
 				</button>
 
-				<button type="button" class="selection-btn ai" on:click={() => (mode = 'ai')}>
-					<span class="selection-icon" aria-hidden="true">
-						<svg viewBox="0 0 24 24">
-							<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"></path>
-							<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"></path>
-						</svg>
-					</span>
-					<span class="selection-copy">
-						<strong>Let Tora AI do it</strong>
-						<small>Describe your project and auto-generate structure.</small>
-					</span>
-				</button>
+				{#if aiEnabled}
+					<button type="button" class="selection-btn ai" on:click={() => (mode = 'ai')}>
+						<span class="selection-icon" aria-hidden="true">
+							<svg viewBox="0 0 24 24">
+								<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"></path>
+								<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"></path>
+							</svg>
+						</span>
+						<span class="selection-copy">
+							<strong>Let Tora AI do it</strong>
+							<small>Describe your project and auto-generate structure.</small>
+						</span>
+					</button>
+				{/if}
 			</div>
+			{#if !aiEnabled}
+				<p class="ai-disabled-note">AI assistant is disabled for this room.</p>
+			{/if}
 		</div>
-	{:else if mode === 'ai'}
+	{:else if mode === 'ai' && aiEnabled}
 		<div class="wizard-shell ai-wizard">
 			<header class="wizard-head ai-head">
 				<button type="button" class="back-btn" on:click={goBackToSelection}>Back</button>
@@ -458,6 +472,17 @@
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 0.95rem;
+	}
+
+	.selection-actions.single-option {
+		grid-template-columns: minmax(0, 1fr);
+		max-width: 460px;
+	}
+
+	.ai-disabled-note {
+		margin: 0;
+		font-size: 0.82rem;
+		color: var(--po-muted);
 	}
 
 	.selection-btn {

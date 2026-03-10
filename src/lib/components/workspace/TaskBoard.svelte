@@ -32,10 +32,11 @@
 	] as const;
 
 	type ColumnKey = (typeof STATUS_OPTIONS)[number]['value'];
-	type BoardView = 'table' | 'kanban';
+	type BoardView = 'table' | 'kanban' | 'support';
 	type EditableField = 'title' | 'description' | 'assigneeId' | 'sprintName' | 'budget' | 'spent';
 	type EditableCellKey = EditableField | 'status';
 	type TaskSource = 'personal' | 'room';
+	type SupportPriority = 'critical' | 'high' | 'medium' | 'low';
 	type DisplayTask = {
 		id: string;
 		roomId: string;
@@ -128,6 +129,14 @@
 		tasks: DisplayTask[];
 	};
 
+	type SupportTicketCard = {
+		task: DisplayTask;
+		priority: SupportPriority;
+		concernedIds: string[];
+		linkedTaskIds: string[];
+		details: string;
+	};
+
 	const STATUS_ORDER: Record<ColumnKey, number> = {
 		in_progress: 0,
 		todo: 1,
@@ -135,9 +144,16 @@
 	};
 	const BOARD_VIEW_OPTIONS: Array<{ value: BoardView; label: string }> = [
 		{ value: 'table', label: 'Table' },
-		{ value: 'kanban', label: 'Kanban' }
+		{ value: 'kanban', label: 'Kanban' },
+		{ value: 'support', label: 'Support' }
 	];
 	const KANBAN_COLUMN_ORDER: ColumnKey[] = ['todo', 'in_progress', 'done'];
+	const SUPPORT_PRIORITY_OPTIONS: Array<{ value: SupportPriority; label: string }> = [
+		{ value: 'critical', label: 'Critical' },
+		{ value: 'high', label: 'High' },
+		{ value: 'medium', label: 'Medium' },
+		{ value: 'low', label: 'Low' }
+	];
 	const sprintNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 	let contextTasks: DisplayTask[] = [];
@@ -165,6 +181,13 @@
 	let sprintAddKey = '';
 	let sprintAddContent = '';
 	let sprintAddCreating = false;
+
+	let supportTicketTitle = '';
+	let supportTicketDetails = '';
+	let supportTicketPriority: SupportPriority = 'medium';
+	let selectedSupportTaskIds: string[] = [];
+	let selectedConcernedMemberIds: string[] = [];
+	let supportTicketCreating = false;
 
 	// Per-sprint edit mode (checkboxes + add/delete actions only shown when editing)
 	let sprintEditKeys = new Set<string>();
@@ -256,6 +279,36 @@
 			.filter((task) => resolveColumn(task.status) === columnKey)
 			.sort(compareTasksForGrid)
 	}));
+	$: onlineConcernedOptions = ownerOptions.filter((option) => option.isOnline);
+	$: supportSourceTasks = boardTasks.filter((task) => !isSupportTicket(task));
+	$: supportTickets = boardTasks.filter((task) => isSupportTicket(task));
+	$: supportCurrentSprintName = resolveSupportCurrentSprintName(supportSourceTasks);
+	$: supportCurrentSprintKey = sprintGroupKey(supportCurrentSprintName);
+	$: supportSourceTasksForSprint = supportSourceTasks.filter(
+		(task) => sprintGroupKey(task.sprintName) === supportCurrentSprintKey
+	);
+	$: supportTicketCards = supportTickets
+		.filter((task) => sprintGroupKey(task.sprintName) === supportCurrentSprintKey)
+		.map((task) => buildSupportTicketCard(task))
+		.sort((left, right) => supportPriorityRank(left.priority) - supportPriorityRank(right.priority) || right.task.updatedAt - left.task.updatedAt);
+	$: {
+		const validTaskIds = new Set(supportSourceTasksForSprint.map((task) => task.id));
+		const nextSelectedTaskIds = selectedSupportTaskIds.filter((taskId) => validTaskIds.has(taskId));
+		if (nextSelectedTaskIds.length !== selectedSupportTaskIds.length) {
+			selectedSupportTaskIds = nextSelectedTaskIds;
+		}
+	}
+	$: {
+		const validConcernedIds = new Set(
+			onlineConcernedOptions.map((option) => normalizeMemberId(option.id))
+		);
+		const nextConcernedIds = selectedConcernedMemberIds.filter((memberId) =>
+			validConcernedIds.has(normalizeMemberId(memberId))
+		);
+		if (nextConcernedIds.length !== selectedConcernedMemberIds.length) {
+			selectedConcernedMemberIds = nextConcernedIds;
+		}
+	}
 
 	function normalizeMemberId(value: string) {
 		return normalizeIdentifier(value).toLowerCase();
@@ -519,6 +572,93 @@
 		const metadata = parseDescriptionMetadata(description);
 		const found = metadata.entries.find((entry) => entry.key === normalizedKey);
 		return found?.value.trim() || '';
+	}
+
+	function sprintGroupKey(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return 'backlog';
+		}
+		return trimmed.toLowerCase();
+	}
+
+	function readSupportMetadataValue(task: DisplayTask, keys: string[]) {
+		for (const key of keys) {
+			const value = readDescriptionMetadataValue(task.description, key).trim();
+			if (value) {
+				return value;
+			}
+		}
+		return '';
+	}
+
+	function parseSupportPriority(value: string): SupportPriority {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === 'critical') return 'critical';
+		if (normalized === 'high') return 'high';
+		if (normalized === 'low') return 'low';
+		return 'medium';
+	}
+
+	function supportPriorityRank(value: SupportPriority): number {
+		if (value === 'critical') return 0;
+		if (value === 'high') return 1;
+		if (value === 'medium') return 2;
+		return 3;
+	}
+
+	function supportPriorityLabel(value: SupportPriority): string {
+		if (value === 'critical') return 'Critical';
+		if (value === 'high') return 'High';
+		if (value === 'low') return 'Low';
+		return 'Medium';
+	}
+
+	function splitMetadataList(value: string) {
+		return value
+			.split(/[;,]/)
+			.map((entry) => entry.trim())
+			.filter(Boolean);
+	}
+
+	function isSupportTicket(task: DisplayTask) {
+		const ticketType = readSupportMetadataValue(task, ['ticket', 'type']).toLowerCase();
+		if (ticketType === 'support' || ticketType === 'support_ticket' || ticketType === 'support ticket') {
+			return true;
+		}
+		return task.title.trim().toLowerCase().startsWith('support:');
+	}
+
+	function resolveSupportCurrentSprintName(tasks: DisplayTask[]) {
+		const activeSprintTask = tasks.find(
+			(task) => resolveColumn(task.status) === 'in_progress' && sprintGroupKey(task.sprintName) !== 'backlog'
+		);
+		if (activeSprintTask) {
+			return activeSprintTask.sprintName.trim() || 'Backlog';
+		}
+		const recentSprintTask = [...tasks]
+			.sort((left, right) => right.updatedAt - left.updatedAt)
+			.find((task) => sprintGroupKey(task.sprintName) !== 'backlog');
+		if (recentSprintTask) {
+			return recentSprintTask.sprintName.trim() || 'Backlog';
+		}
+		return 'Backlog';
+	}
+
+	function buildSupportTicketCard(task: DisplayTask): SupportTicketCard {
+		const priority = parseSupportPriority(readSupportMetadataValue(task, ['priority']));
+		const concernedIds = splitMetadataList(readSupportMetadataValue(task, ['concerned', 'concerned users']));
+		const linkedTaskIds = splitMetadataList(
+			readSupportMetadataValue(task, ['linked tasks', 'linked_tasks', 'linked task ids'])
+		);
+		const details = parseDescriptionMetadata(task.description).base || 'No details provided';
+		return {
+			task,
+			priority,
+			concernedIds,
+			linkedTaskIds,
+			details
+		};
 	}
 
 	function upsertDescriptionMetadataValue(
@@ -1411,14 +1551,40 @@
 		return `${parts[0][0] ?? ''}${parts[1][0] ?? ''}`.toUpperCase();
 	}
 
-	function ownerHue(task: DisplayTask) {
-		const seed = ownerLabel(task);
+	function hueFromSeed(seed: string) {
 		let hash = 0;
 		for (let index = 0; index < seed.length; index += 1) {
 			hash = (hash << 5) - hash + seed.charCodeAt(index);
 			hash |= 0;
 		}
 		return Math.abs(hash) % 360;
+	}
+
+	function ownerHue(task: DisplayTask) {
+		return hueFromSeed(ownerLabel(task));
+	}
+
+	function concernedMemberLabel(memberId: string) {
+		const ownerOption = getOwnerOptionById(memberId);
+		if (ownerOption?.label) {
+			return ownerOption.label;
+		}
+		const trimmed = memberId.trim();
+		if (!trimmed) {
+			return 'Unassigned';
+		}
+		if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(trimmed)) {
+			return `User ${trimmed.slice(0, 8)}`;
+		}
+		return trimmed.replace(/_/g, ' ');
+	}
+
+	function supportLinkedTaskTitle(linkedTaskId: string) {
+		const linkedTask = boardTasks.find((task) => task.id === linkedTaskId);
+		if (linkedTask?.title?.trim()) {
+			return linkedTask.title.trim();
+		}
+		return linkedTaskId.slice(0, 8);
 	}
 
 	function formatCellTime(value: number) {
@@ -1478,6 +1644,114 @@
 			newTaskInput?.focus();
 			newTaskInput?.setSelectionRange(newTaskContent.length, newTaskContent.length);
 		});
+	}
+
+	function toggleSupportTask(taskId: string) {
+		if (!canEdit) {
+			return;
+		}
+		selectedSupportTaskIds = selectedSupportTaskIds.includes(taskId)
+			? selectedSupportTaskIds.filter((value) => value !== taskId)
+			: [...selectedSupportTaskIds, taskId];
+	}
+
+	function toggleConcernedMember(memberId: string) {
+		if (!canEdit) {
+			return;
+		}
+		selectedConcernedMemberIds = selectedConcernedMemberIds.includes(memberId)
+			? selectedConcernedMemberIds.filter((value) => value !== memberId)
+			: [...selectedConcernedMemberIds, memberId];
+	}
+
+	function resetSupportComposer() {
+		supportTicketTitle = '';
+		supportTicketDetails = '';
+		supportTicketPriority = 'medium';
+		selectedSupportTaskIds = [];
+		selectedConcernedMemberIds = [];
+	}
+
+	async function createSupportTicket() {
+		if (supportTicketCreating || !canEdit) {
+			return;
+		}
+		const normalizedTitle = supportTicketTitle.trim();
+		if (!normalizedTitle) {
+			setBoardError('Support ticket title is required');
+			return;
+		}
+		if (selectedSupportTaskIds.length === 0) {
+			setBoardError('Select at least one task for the support ticket');
+			return;
+		}
+		const targetRoomId = normalizeRoomIDValue(
+			contextAware ? ($activeContext.type === 'room' ? $activeContext.id : '') : normalizedRoomId
+		);
+		if (!targetRoomId) {
+			setBoardError('Invalid room id');
+			return;
+		}
+
+		const linkedTaskIds = [...selectedSupportTaskIds];
+		const linkedTaskTitleList = linkedTaskIds.map((linkedTaskId) => supportLinkedTaskTitle(linkedTaskId));
+		const concernedMemberIds = [...selectedConcernedMemberIds];
+		const descriptionBody = supportTicketDetails.trim();
+		const metadataSegments = [
+			'Ticket: Support',
+			`Priority: ${supportPriorityLabel(supportTicketPriority)}`,
+			`Linked Tasks: ${linkedTaskIds.join(', ')}`,
+			`Linked Task Titles: ${linkedTaskTitleList.join(' / ')}`
+		];
+		if (concernedMemberIds.length > 0) {
+			metadataSegments.push(`Concerned: ${concernedMemberIds.join(', ')}`);
+		}
+		const description = `${descriptionBody || 'Support ticket'}\n\n[${metadataSegments.join(' | ')}]`;
+		const requestTitle = normalizedTitle.toLowerCase().startsWith('support:')
+			? normalizedTitle
+			: `Support: ${normalizedTitle}`;
+		const sprintName = supportCurrentSprintName === 'Backlog' ? '' : supportCurrentSprintName;
+
+		supportTicketCreating = true;
+		clearBoardError();
+		try {
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomId)}/tasks`,
+				{
+					method: 'POST',
+					headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+					credentials: 'include',
+					body: JSON.stringify({
+						title: requestTitle,
+						description,
+						sprint_name: sprintName,
+						status: 'todo'
+					})
+				}
+			);
+			if (!response.ok) {
+				throw new Error(await parseErrorMessage(response));
+			}
+			const createdPayload = await response.json().catch(() => null);
+			if (contextAware) {
+				const createdTask = normalizeRoomTask(createdPayload);
+				if (!createdTask) {
+					throw new Error('Invalid support ticket response');
+				}
+				contextTasks = [createdTask, ...contextTasks];
+			} else {
+				const createdTask = upsertTaskStoreEntry(createdPayload, targetRoomId);
+				if (!createdTask) {
+					throw new Error('Invalid support ticket response');
+				}
+				sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, createdTask));
+			}
+			resetSupportComposer();
+		} catch (error) {
+			setBoardError(error instanceof Error ? error.message : 'Failed to create support ticket');
+		} finally {
+			supportTicketCreating = false;
+		}
 	}
 
 	// ── Multi-select helpers ──────────────────────────────────────────
@@ -1624,8 +1898,31 @@
 		</div>
 	</header>
 
+	<form
+		class="new-task-form"
+		on:submit|preventDefault={() => {
+			if (contextAware) {
+				void handleCreateTask(newTaskContent);
+				return;
+			}
+			void handleCreateRoomTask(newTaskContent);
+		}}
+	>
+		<input
+			bind:this={newTaskInput}
+			type="text"
+			bind:value={newTaskContent}
+			placeholder="Add a task..."
+			autocomplete="off"
+			disabled={creatingTask}
+		/>
+		<button type="submit" disabled={creatingTask || !newTaskContent.trim() || !canEdit}>
+			{creatingTask ? 'Adding...' : 'Add task'}
+		</button>
+	</form>
 
 
+t
 	{#if quickEditVisible && editingTask && editingField}
 		<section class="quick-edit-panel" aria-label="Task quick editor">
 			<div class="quick-edit-head">
@@ -1700,9 +1997,177 @@
 				<div class="board-state error">Unable to load tasks: {boardError}</div>
 			{:else if !hasAnyTasks}
 				<div class="board-state">No tasks yet. Add one to start planning.</div>
-			{:else}
-				{#if boardView === 'kanban'}
-					<div class="kanban-board" role="list" aria-label="Kanban task board">
+				{:else}
+					{#if boardView === 'support'}
+						<div class="support-view" aria-label="Support ticket board">
+							<section class="support-composer">
+								<header class="support-composer-head">
+									<div>
+										<h3>Support Tickets</h3>
+										<p>Current sprint: {supportCurrentSprintName}</p>
+									</div>
+									<span>{supportTicketCards.length} tickets</span>
+								</header>
+
+								<div class="support-form-grid">
+									<label class="support-field">
+										<span>Ticket title</span>
+										<input
+											type="text"
+											bind:value={supportTicketTitle}
+											placeholder="Payment failure on checkout"
+											disabled={!canEdit || supportTicketCreating}
+										/>
+									</label>
+									<label class="support-field">
+										<span>Priority</span>
+										<select bind:value={supportTicketPriority} disabled={!canEdit || supportTicketCreating}>
+											{#each SUPPORT_PRIORITY_OPTIONS as priorityOption (priorityOption.value)}
+												<option value={priorityOption.value}>{priorityOption.label}</option>
+											{/each}
+										</select>
+									</label>
+									<label class="support-field support-field-wide">
+										<span>Details</span>
+										<textarea
+											bind:value={supportTicketDetails}
+											placeholder="Add context for support engineers"
+											maxlength="1200"
+											disabled={!canEdit || supportTicketCreating}
+										></textarea>
+									</label>
+								</div>
+
+								<div class="support-pickers">
+									<div class="support-picker">
+										<div class="support-picker-head">
+											<h4>Choose task(s)</h4>
+											<span>{selectedSupportTaskIds.length} selected</span>
+										</div>
+										{#if supportSourceTasksForSprint.length === 0}
+											<div class="support-empty-inline">No tasks in {supportCurrentSprintName}.</div>
+										{:else}
+											<div class="support-task-list">
+												{#each supportSourceTasksForSprint as sourceTask (sourceTask.id)}
+													<label class="support-check-row">
+														<input
+															type="checkbox"
+															checked={selectedSupportTaskIds.includes(sourceTask.id)}
+															on:change={() => toggleSupportTask(sourceTask.id)}
+															disabled={!canEdit || supportTicketCreating}
+														/>
+														<span>{sourceTask.title}</span>
+													</label>
+												{/each}
+											</div>
+										{/if}
+									</div>
+
+									<div class="support-picker">
+										<div class="support-picker-head">
+											<h4>Concerned (online)</h4>
+											<span>{selectedConcernedMemberIds.length} selected</span>
+										</div>
+										{#if onlineConcernedOptions.length === 0}
+											<div class="support-empty-inline">No online members right now.</div>
+										{:else}
+											<div class="support-member-grid">
+												{#each onlineConcernedOptions as memberOption (memberOption.id)}
+													<button
+														type="button"
+														class="support-member-option"
+														class:is-selected={selectedConcernedMemberIds.includes(memberOption.id)}
+														on:click={() => toggleConcernedMember(memberOption.id)}
+														disabled={!canEdit || supportTicketCreating}
+													>
+														<span
+															class="owner-avatar"
+															style={`--owner-hue:${hueFromSeed(memberOption.label)};`}
+														>
+															{initials(memberOption.label)}
+														</span>
+														<span>{memberOption.label}</span>
+													</button>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								</div>
+
+								<div class="support-composer-actions">
+									<button
+										type="button"
+										class="support-create-btn"
+										on:click={() => void createSupportTicket()}
+										disabled={!canEdit || supportTicketCreating || !supportTicketTitle.trim() || selectedSupportTaskIds.length === 0}
+									>
+										{supportTicketCreating ? 'Creating...' : 'Create support ticket'}
+									</button>
+									<button
+										type="button"
+										class="support-clear-btn"
+										on:click={resetSupportComposer}
+										disabled={!canEdit || supportTicketCreating}
+									>
+										Clear
+									</button>
+								</div>
+							</section>
+
+							<section class="support-ticket-board">
+								<header class="support-ticket-head">
+									<h3>Tickets in {supportCurrentSprintName}</h3>
+									<span>{supportTicketCards.length}</span>
+								</header>
+								{#if supportTicketCards.length === 0}
+									<div class="support-empty">No support tickets yet for this sprint.</div>
+								{:else}
+									<div class="support-card-grid">
+										{#each supportTicketCards as supportCard (supportCard.task.id)}
+											<article class="support-ticket-card">
+												<div class="support-ticket-top">
+													<span class={`support-priority priority-${supportCard.priority}`}>
+														{supportPriorityLabel(supportCard.priority)}
+													</span>
+													<time>{formatCellTime(supportCard.task.updatedAt)}</time>
+												</div>
+												<h4>{supportCard.task.title}</h4>
+												<p>{supportCard.details}</p>
+												<div class="support-linked-meta">
+													{supportCard.linkedTaskIds.length} linked task{supportCard.linkedTaskIds.length === 1 ? '' : 's'}
+												</div>
+												<div class="support-card-footer">
+													<div class="support-avatar-stack" aria-label="Concerned members">
+														{#if supportCard.concernedIds.length === 0}
+															<span class="support-avatar support-avatar-empty">--</span>
+														{:else}
+															{#each supportCard.concernedIds.slice(0, 4) as concernedMemberId, memberIndex (concernedMemberId)}
+																{@const concernedMemberName = concernedMemberLabel(concernedMemberId)}
+																<span
+																	class="support-avatar"
+																	style={`--owner-hue:${hueFromSeed(concernedMemberName)}; --avatar-index:${memberIndex};`}
+																	title={concernedMemberName}
+																>
+																	{initials(concernedMemberName)}
+																</span>
+															{/each}
+															{#if supportCard.concernedIds.length > 4}
+																<span class="support-avatar support-avatar-more" style="--avatar-index:4;">
+																	+{supportCard.concernedIds.length - 4}
+																</span>
+															{/if}
+														{/if}
+													</div>
+													<span class="support-sprint-chip">{supportCard.task.sprintName.trim() || 'Backlog'}</span>
+												</div>
+											</article>
+										{/each}
+									</div>
+								{/if}
+							</section>
+						</div>
+					{:else if boardView === 'kanban'}
+						<div class="kanban-board" role="list" aria-label="Kanban task board">
 						{#each kanbanColumns as column (column.key)}
 							<section class="kanban-column" role="listitem" aria-label={`${column.label} lane`}>
 								<header class="kanban-column-head">
@@ -2325,12 +2790,13 @@
 		display: grid;
 	}
 
-	.board-content-slot > .sprint-groups,
-	.board-content-slot > .kanban-board,
-	.board-content-slot > .board-state {
-		min-height: 0;
-		height: 100%;
-	}
+		.board-content-slot > .sprint-groups,
+		.board-content-slot > .kanban-board,
+		.board-content-slot > .support-view,
+		.board-content-slot > .board-state {
+			min-height: 0;
+			height: 100%;
+		}
 
 	.quick-edit-head strong {
 		font-size: 0.8rem;
@@ -2570,17 +3036,413 @@
 		color: var(--tb-cell-text);
 	}
 
-	.kanban-card-footer {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
-		font-size: 0.71rem;
-		color: var(--tb-cell-muted);
-	}
+		.kanban-card-footer {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 0.5rem;
+			font-size: 0.71rem;
+			color: var(--tb-cell-muted);
+		}
 
-	.sprint-groups {
-		min-height: 0;
+		.support-view {
+			height: 100%;
+			min-height: 0;
+			display: grid;
+			grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.05fr);
+			gap: 0.85rem;
+			overflow: hidden;
+		}
+
+		.support-composer,
+		.support-ticket-board {
+			min-height: 0;
+			display: grid;
+			align-content: start;
+			gap: 0.65rem;
+			border: 1px solid var(--tb-grid-border);
+			border-radius: 14px;
+			background: var(--tb-panel-bg);
+			padding: 0.72rem;
+		}
+
+		.support-composer {
+			overflow: auto;
+		}
+
+		.support-ticket-board {
+			overflow: hidden;
+		}
+
+		.support-composer-head,
+		.support-ticket-head {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 0.6rem;
+		}
+
+		.support-composer-head h3,
+		.support-ticket-head h3 {
+			margin: 0;
+			font-size: 0.9rem;
+			color: var(--tb-cell-text);
+		}
+
+		.support-composer-head p {
+			margin: 0.12rem 0 0;
+			font-size: 0.74rem;
+			color: var(--tb-cell-muted);
+		}
+
+		.support-composer-head span,
+		.support-ticket-head span {
+			height: 1.45rem;
+			padding: 0 0.56rem;
+			border-radius: 999px;
+			border: 1px solid var(--tb-grid-col-border);
+			background: color-mix(in srgb, var(--tb-btn-bg) 74%, transparent);
+			display: inline-grid;
+			place-items: center;
+			font-size: 0.72rem;
+			font-weight: 700;
+			color: var(--tb-cell-muted);
+			font-variant-numeric: tabular-nums;
+		}
+
+		.support-form-grid {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) 142px;
+			gap: 0.55rem;
+		}
+
+		.support-field {
+			display: grid;
+			gap: 0.3rem;
+		}
+
+		.support-field-wide {
+			grid-column: 1 / -1;
+		}
+
+		.support-field span {
+			font-size: 0.69rem;
+			font-weight: 700;
+			text-transform: uppercase;
+			letter-spacing: 0.06em;
+			color: var(--tb-cell-muted);
+		}
+
+		.support-field input,
+		.support-field select,
+		.support-field textarea {
+			width: 100%;
+			border: 1px solid var(--tb-input-border);
+			background: var(--tb-input-bg);
+			color: var(--tb-input-text);
+			border-radius: 9px;
+			padding: 0.48rem 0.58rem;
+			font-size: 0.8rem;
+		}
+
+		.support-field textarea {
+			min-height: 4.8rem;
+			resize: vertical;
+		}
+
+		.support-field input:focus-visible,
+		.support-field select:focus-visible,
+		.support-field textarea:focus-visible {
+			outline: none;
+			box-shadow: 0 0 0 3px var(--tb-editor-ring);
+		}
+
+		.support-pickers {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr);
+			gap: 0.6rem;
+		}
+
+		.support-picker {
+			border: 1px solid var(--tb-grid-col-border);
+			border-radius: 11px;
+			padding: 0.55rem;
+			display: grid;
+			gap: 0.45rem;
+			background: color-mix(in srgb, var(--tb-grid-bg) 86%, transparent);
+		}
+
+		.support-picker-head {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 0.5rem;
+		}
+
+		.support-picker-head h4 {
+			margin: 0;
+			font-size: 0.78rem;
+			color: var(--tb-cell-text);
+		}
+
+		.support-picker-head span {
+			font-size: 0.68rem;
+			color: var(--tb-cell-muted);
+			font-weight: 700;
+		}
+
+		.support-task-list {
+			display: grid;
+			gap: 0.34rem;
+			max-height: 180px;
+			overflow: auto;
+			padding-right: 0.1rem;
+		}
+
+		.support-check-row {
+			display: flex;
+			align-items: center;
+			gap: 0.42rem;
+			padding: 0.34rem 0.42rem;
+			border-radius: 8px;
+			border: 1px solid transparent;
+			background: transparent;
+			color: var(--tb-cell-text);
+			font-size: 0.76rem;
+		}
+
+		.support-check-row:hover {
+			background: color-mix(in srgb, var(--tb-btn-bg) 56%, transparent);
+			border-color: var(--tb-grid-col-border);
+		}
+
+		.support-check-row input[type='checkbox'] {
+			width: 14px;
+			height: 14px;
+			cursor: pointer;
+		}
+
+		.support-member-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+			gap: 0.34rem;
+		}
+
+		.support-member-option {
+			border: 1px solid var(--tb-grid-col-border);
+			background: var(--tb-grid-bg);
+			color: var(--tb-cell-text);
+			border-radius: 9px;
+			padding: 0.36rem 0.44rem;
+			display: flex;
+			align-items: center;
+			gap: 0.36rem;
+			font-size: 0.72rem;
+			cursor: pointer;
+			transition: border-color 0.16s ease, background 0.16s ease;
+		}
+
+		.support-member-option:hover {
+			border-color: var(--tb-grid-head-bg);
+		}
+
+		.support-member-option.is-selected {
+			border-color: color-mix(in srgb, var(--tb-grid-head-bg) 48%, transparent);
+			background: color-mix(in srgb, var(--tb-btn-bg) 65%, transparent);
+		}
+
+		.support-empty-inline {
+			border: 1px dashed var(--tb-grid-col-border);
+			border-radius: 8px;
+			padding: 0.5rem;
+			font-size: 0.73rem;
+			color: var(--tb-cell-muted);
+		}
+
+		.support-composer-actions {
+			display: flex;
+			align-items: center;
+			gap: 0.45rem;
+			justify-content: flex-end;
+		}
+
+		.support-create-btn,
+		.support-clear-btn {
+			height: 2rem;
+			border-radius: 9px;
+			border: 1px solid var(--tb-btn-border);
+			background: var(--tb-btn-bg);
+			color: var(--tb-btn-text);
+			font-size: 0.78rem;
+			font-weight: 700;
+			padding: 0 0.74rem;
+			cursor: pointer;
+		}
+
+		.support-create-btn {
+			background: color-mix(in srgb, var(--tb-btn-bg) 66%, #ffffff 34%);
+		}
+
+		.support-create-btn:disabled,
+		.support-clear-btn:disabled {
+			opacity: 0.55;
+			cursor: not-allowed;
+		}
+
+		.support-card-grid {
+			min-height: 0;
+			overflow: auto;
+			display: grid;
+			grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+			gap: 0.6rem;
+			padding-right: 0.12rem;
+		}
+
+		.support-ticket-card {
+			display: grid;
+			grid-template-rows: auto auto 1fr auto auto;
+			gap: 0.42rem;
+			border: 1px solid var(--tb-grid-col-border);
+			border-radius: 12px;
+			background: var(--tb-grid-bg);
+			padding: 0.58rem;
+			aspect-ratio: 1 / 1;
+			min-height: 170px;
+		}
+
+		.support-ticket-top {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 0.4rem;
+		}
+
+		.support-priority {
+			height: 1.32rem;
+			padding: 0 0.44rem;
+			border-radius: 999px;
+			display: inline-grid;
+			place-items: center;
+			font-size: 0.62rem;
+			font-weight: 800;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+		}
+
+		.priority-critical {
+			background: rgba(181, 35, 56, 0.16);
+			color: #b52338;
+		}
+
+		.priority-high {
+			background: rgba(194, 110, 24, 0.18);
+			color: #b96618;
+		}
+
+		.priority-medium {
+			background: rgba(46, 97, 178, 0.16);
+			color: #2e61b2;
+		}
+
+		.priority-low {
+			background: rgba(23, 132, 88, 0.16);
+			color: #178458;
+		}
+
+		.support-ticket-top time {
+			font-size: 0.66rem;
+			color: var(--tb-cell-muted);
+		}
+
+		.support-ticket-card h4 {
+			margin: 0;
+			font-size: 0.81rem;
+			line-height: 1.28;
+			color: var(--tb-cell-text);
+			overflow: hidden;
+			display: -webkit-box;
+			line-clamp: 2;
+			-webkit-line-clamp: 2;
+			-webkit-box-orient: vertical;
+		}
+
+		.support-ticket-card p {
+			margin: 0;
+			font-size: 0.72rem;
+			line-height: 1.35;
+			color: var(--tb-cell-muted);
+			overflow: hidden;
+			display: -webkit-box;
+			line-clamp: 4;
+			-webkit-line-clamp: 4;
+			-webkit-box-orient: vertical;
+		}
+
+		.support-linked-meta {
+			font-size: 0.67rem;
+			color: var(--tb-cell-muted);
+		}
+
+		.support-card-footer {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 0.38rem;
+		}
+
+		.support-avatar-stack {
+			display: inline-flex;
+			align-items: center;
+			padding-left: 0.08rem;
+		}
+
+		.support-avatar {
+			width: 1.3rem;
+			height: 1.3rem;
+			border-radius: 999px;
+			border: 2px solid var(--tb-grid-bg);
+			background: hsl(var(--owner-hue) 62% 47%);
+			color: var(--tb-avatar-text);
+			display: inline-grid;
+			place-items: center;
+			font-size: 0.53rem;
+			font-weight: 800;
+			margin-left: calc(-0.34rem + (var(--avatar-index, 0) * 0rem));
+			text-transform: uppercase;
+		}
+
+		.support-avatar-stack .support-avatar:first-child {
+			margin-left: 0;
+		}
+
+		.support-avatar-more {
+			background: var(--tb-btn-bg);
+			color: var(--tb-btn-text);
+		}
+
+		.support-avatar-empty {
+			margin-left: 0;
+			background: var(--tb-btn-bg);
+			color: var(--tb-btn-text);
+		}
+
+		.support-sprint-chip {
+			font-size: 0.62rem;
+			font-weight: 700;
+			color: var(--tb-cell-muted);
+		}
+
+		.support-empty {
+			border: 1px dashed var(--tb-grid-col-border);
+			border-radius: 10px;
+			padding: 0.72rem;
+			font-size: 0.78rem;
+			color: var(--tb-cell-muted);
+			text-align: center;
+		}
+
+		.sprint-groups {
+			min-height: 0;
 		overflow: auto;
 		display: grid;
 		align-content: start;
@@ -3140,11 +4002,11 @@
 		box-shadow: 0 0 0 3px var(--tb-editor-ring);
 	}
 
-	@media (max-width: 920px) {
-		.task-board {
-			padding: 0.72rem;
-			gap: 0.65rem;
-		}
+		@media (max-width: 920px) {
+			.task-board {
+				padding: 0.72rem;
+				gap: 0.65rem;
+			}
 
 		.board-header {
 			flex-direction: column;
@@ -3160,12 +4022,34 @@
 			justify-content: flex-start;
 		}
 
-		.kanban-board {
-			grid-template-columns: repeat(3, minmax(250px, 1fr));
-		}
+			.kanban-board {
+				grid-template-columns: repeat(3, minmax(250px, 1fr));
+			}
 
-		.task-grid {
-			min-width: 980px;
+			.support-view {
+				grid-template-columns: minmax(0, 1fr);
+				overflow: auto;
+			}
+
+			.support-composer,
+			.support-ticket-board {
+				overflow: visible;
+			}
+
+			.support-form-grid {
+				grid-template-columns: minmax(0, 1fr);
+			}
+
+			.support-member-grid {
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+			}
+
+			.support-card-grid {
+				grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+			}
+
+			.task-grid {
+				min-width: 980px;
+			}
 		}
-	}
 </style>

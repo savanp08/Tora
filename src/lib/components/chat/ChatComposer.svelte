@@ -2015,7 +2015,7 @@
 			<span class="attachment-progress-bar"></span>
 		</div>
 	{/if}
-	<div class="composer-row" class:typing-active={hasComposerInput}>
+	<div class="composer-row" class:typing-active={hasComposerInput} class:no-ai={!aiEnabled}>
 		<input
 			bind:this={mediaInput}
 			type="file"
@@ -3009,6 +3009,11 @@
 
 	.composer-row.typing-active {
 		grid-template-columns: 2.2rem 0 2.2rem minmax(0, 1fr) 2.2rem;
+	}
+
+	.composer-row.no-ai,
+	.composer-row.no-ai.typing-active {
+		grid-template-columns: 2.2rem 2.2rem minmax(0, 1fr) 2.2rem;
 	}
 
 	.composer[data-mode='dark'] .composer-row {

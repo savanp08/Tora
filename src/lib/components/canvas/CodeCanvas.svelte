@@ -14,6 +14,7 @@
 	export let roomId: string;
 	export let currentUser: { id: string; name: string; color: string };
 	export let isEphemeralRoom = true;
+	export let aiEnabled = true;
 
 	type ProjectFileEntry = {
 		path: string;
@@ -973,6 +974,10 @@ Rules:
 	}
 
 	function setActiveSidebarView(view: CanvasSidebarView) {
+		if (!aiEnabled && view === 'canvas_ai') {
+			activeSidebarView = 'explorer';
+			return;
+		}
 		activeSidebarView = view;
 		if (view === 'search') {
 			if (sidebarSearchQuery.trim()) {
@@ -3774,6 +3779,10 @@ ${previewItems.join('\n')}${overflowLabel}`;
 	}
 
 	function openCanvasAIPromptPanel() {
+		if (!aiEnabled) {
+			fileExplorerError = 'AI assistant is disabled for this room.';
+			return;
+		}
 		if (!currentFileEntry()) {
 			fileExplorerError = 'Open a file before using AI.';
 			return;
@@ -4176,6 +4185,10 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	async function sendCanvasAIMessage() {
+		if (!aiEnabled) {
+			canvasAIError = 'AI assistant is disabled for this room.';
+			return;
+		}
 		if (isCanvasAIGenerating) {
 			return;
 		}
@@ -4998,6 +5011,15 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		updateSidebarSearchResults();
 	}
 
+	$: if (!aiEnabled) {
+		if (activeSidebarView === 'canvas_ai') {
+			activeSidebarView = 'explorer';
+		}
+		if (showCanvasAIPrompt) {
+			closeCanvasAIPromptPanel();
+		}
+	}
+
 	$: if (canvasEditorBodyElement && !terminalPanelCollapsed) {
 		const { min, max } = getTerminalResizeBounds();
 		const clampedHeight = Math.max(min, Math.min(max, terminalHeight));
@@ -5034,7 +5056,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				setActiveSidebarView('search');
 				return;
 			}
-			if (isAIPromptShortcut) {
+			if (isAIPromptShortcut && aiEnabled) {
 				event.preventDefault();
 				if (showCanvasAIPrompt) {
 					void sendCanvasAIMessage();
@@ -5532,19 +5554,21 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 					<path d="m16 16 4 4" />
 				</svg>
 			</button>
-			<button
-				type="button"
-				class="activity-button"
-				class:active={activeSidebarView === 'canvas_ai'}
-				aria-label="Canvas AI"
-				title="Canvas AI"
-				on:click={() => setActiveSidebarView('canvas_ai')}
-			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M12 3.4 13.9 8 18.6 10 13.9 12 12 16.6 10.1 12 5.4 10 10.1 8Z" />
-					<path d="M18.5 4.8 19.2 6.5 21 7.2 19.2 8 18.5 9.7 17.8 8 16 7.2 17.8 6.5Z" />
-				</svg>
-			</button>
+			{#if aiEnabled}
+				<button
+					type="button"
+					class="activity-button"
+					class:active={activeSidebarView === 'canvas_ai'}
+					aria-label="Canvas AI"
+					title="Canvas AI"
+					on:click={() => setActiveSidebarView('canvas_ai')}
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M12 3.4 13.9 8 18.6 10 13.9 12 12 16.6 10.1 12 5.4 10 10.1 8Z" />
+						<path d="M18.5 4.8 19.2 6.5 21 7.2 19.2 8 18.5 9.7 17.8 8 16 7.2 17.8 6.5Z" />
+					</svg>
+				</button>
+			{/if}
 		</nav>
 		<aside
 			class="canvas-sidebar"
@@ -5902,7 +5926,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						{/each}
 					{/if}
 				</div>
-			{:else}
+			{:else if aiEnabled}
 				<div class="canvas-ai-sidebar">
 					<div class="canvas-ai-panel-header">
 						<div class="canvas-ai-panel-head-main">
@@ -6124,7 +6148,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 					on:dragend|capture={handleEditorCodeDragEnd}
 				>
 					<div class="code-canvas" bind:this={editorContainer}></div>
-					{#if showCanvasAIPrompt}
+					{#if aiEnabled && showCanvasAIPrompt}
 						<div class="canvas-ai-overlay" role="presentation">
 							<div class="canvas-ai-panel" role="dialog" aria-modal="true" aria-label="AI code prompt">
 								<div class="canvas-ai-panel-header">

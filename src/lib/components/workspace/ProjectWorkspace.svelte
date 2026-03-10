@@ -27,6 +27,7 @@
 
 	export let roomId = '';
 	export let canEdit = true;
+	export let aiEnabled = true;
 	export let onlineMembers: OnlineMember[] = [];
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
@@ -79,6 +80,12 @@
 
 	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: normalizedWorkspaceRoomID = normalizeRoomIDValue(roomId);
+	$: visibleWorkspaceTabs = aiEnabled
+		? WORKSPACE_TABS
+		: WORKSPACE_TABS.filter((tab) => tab.key !== 'tora_ai');
+	$: if (!aiEnabled && $activeProjectTab === 'tora_ai') {
+		activeProjectTab.set('overview');
+	}
 	$: if (normalizedWorkspaceRoomID !== lastWorkspaceRoomID) {
 		lastWorkspaceRoomID = normalizedWorkspaceRoomID;
 		activeProjectTab.set('overview');
@@ -184,7 +191,7 @@
 
 	<div class="workspace-frame">
 		<nav class="activity-bar" aria-label="Workspace navigation">
-			{#each WORKSPACE_TABS as tab (tab.key)}
+			{#each visibleWorkspaceTabs as tab (tab.key)}
 				<button
 					type="button"
 					class="act-btn"
@@ -232,7 +239,7 @@
 						<p>Loading workspace…</p>
 					</div>
 				{:else if $isProjectNew || !$projectTimeline}
-					<ProjectOnboarding {roomId} />
+					<ProjectOnboarding {roomId} {aiEnabled} />
 				{:else if $activeProjectTab === 'overview'}
 					<TimelineBoard />
 				{:else if $activeProjectTab === 'tasks'}
@@ -241,9 +248,11 @@
 					<ProgressGanttTab {onlineMembers} />
 				{:else if $activeProjectTab === 'table'}
 					<TableBoard />
-				{:else}
+				{:else if aiEnabled && $activeProjectTab === 'tora_ai'}
 					<!-- tora_ai -->
 					<ToraAIPanel {roomId} contextKey="taskboard" />
+				{:else}
+					<TimelineBoard />
 				{/if}
 			</main>
 		</div>

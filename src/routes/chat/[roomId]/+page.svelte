@@ -6375,8 +6375,8 @@
 					parentRoomId: roomId,
 					originMessageId: message.id,
 					roomPassword: breakRoomAccessPassword,
-					aiEnabled: sessionPreferences.aiEnabled,
-					e2eEnabled: sessionPreferences.e2eEnabled,
+					aiEnabled: activeRoomFeatures.aiEnabled,
+					e2eEnabled: activeRoomFeatures.e2eEnabled,
 					userId: normalizeIdentifier(currentUserId),
 					username: currentUsername
 				})
@@ -6410,8 +6410,8 @@
 					Boolean(breakRoomAccessPassword)
 			);
 			const breakFeatureFlags = parseRoomFeatureFlags(data as Record<string, unknown>, {
-				aiEnabled: sessionPreferences.aiEnabled,
-				e2eEnabled: sessionPreferences.e2eEnabled
+				aiEnabled: activeRoomFeatures.aiEnabled,
+				e2eEnabled: activeRoomFeatures.e2eEnabled
 			});
 
 			messagesByRoom = {
@@ -6895,6 +6895,7 @@
 										<ProjectWorkspace
 											{roomId}
 											canEdit={isMember && !isRoomExpired}
+											aiEnabled={activeRoomAllowsAI}
 											onlineMembers={currentOnlineMembers}
 											on:close={() => deactivateWorkspaceModule('tasks')}
 										/>
@@ -7040,6 +7041,7 @@
 						{roomId}
 						currentUser={canvasUser}
 						isEphemeralRoom={isActiveRoomEphemeral}
+						aiEnabled={activeRoomAllowsAI}
 						on:sendSnippet={onCanvasSnippetSend}
 					/>
 				</div>
@@ -7071,14 +7073,16 @@
 	/>
 {/if}
 
-<PrivateAiChat
-	open={showPrivateAiChat}
-	isDarkMode={$isDarkMode}
-	{roomId}
-	{currentUserId}
-	{currentUsername}
-	on:close={closePrivateAiChat}
-/>
+{#if activeRoomAllowsAI}
+	<PrivateAiChat
+		open={showPrivateAiChat}
+		isDarkMode={$isDarkMode}
+		{roomId}
+		{currentUserId}
+		{currentUsername}
+		on:close={closePrivateAiChat}
+	/>
+{/if}
 
 <DiscussionModal
 	open={isDiscussionOpen}

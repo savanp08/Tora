@@ -868,6 +868,9 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": featureResolveErr.Error()})
 		return
 	}
+	if !parentFeatures.AIEnabled && breakRoomFeatures.AIEnabled {
+		breakRoomFeatures = normalizeRoomFeatureFlags(false, breakRoomFeatures.E2EEnabled)
+	}
 
 	rootRoomID, err := h.resolveRootRoomID(ctx, parentRoomID)
 	if err != nil {
