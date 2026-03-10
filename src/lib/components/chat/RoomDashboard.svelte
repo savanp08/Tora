@@ -582,6 +582,7 @@
 				class="dashboard-close-btn"
 				aria-label="Close dashboard"
 				title="Close dashboard"
+				
 				on:click={() => dispatch('close')}
 			>
 				<span aria-hidden="true">×</span>
@@ -1069,6 +1070,8 @@
 		width: 2rem;
 		height: 2rem;
 		padding: 0;
+		color:red;
+		
 		font-size: 1.08rem;
 		justify-content: center;
 		display: inline-flex;

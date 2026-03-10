@@ -6,12 +6,41 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = fileURLToPath(new URL('.', import.meta.url));
 const crossOriginIsolationHeaders = {
-	'Cross-Origin-Embedder-Policy': 'require-corp',
+	'Cross-Origin-Embedder-Policy': 'credentialless',
 	'Cross-Origin-Opener-Policy': 'same-origin'
 } as const;
+type HeaderMiddlewareServer = {
+	middlewares: {
+		use: (
+			fn: (
+				_: unknown,
+				res: { setHeader: (name: string, value: string) => void },
+				next: () => void
+			) => void
+		) => void;
+	};
+};
+const crossOriginIsolationPlugin = {
+	name: 'cross-origin-isolation-plugin',
+	configureServer(server: HeaderMiddlewareServer) {
+		server.middlewares.use((_, res, next) => {
+			res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+			res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+			next();
+		});
+	},
+	configurePreviewServer(server: HeaderMiddlewareServer) {
+		server.middlewares.use((_, res, next) => {
+			res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+			res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+			next();
+		});
+	}
+};
 
 export default defineConfig({
 	plugins: [
+		crossOriginIsolationPlugin,
 		tailwindcss(),
 		sveltekit()
 	],

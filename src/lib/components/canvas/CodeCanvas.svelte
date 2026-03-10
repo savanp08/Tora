@@ -4489,8 +4489,15 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		if (!normalized) {
 			return;
 		}
+		let modelValue = '';
+		try {
+			// Snapshot synchronously so async work below cannot race with model disposal.
+			modelValue = model.getValue();
+		} catch {
+			return;
+		}
 		await ensureProjectDirectory();
-		await getActiveFS().promises.writeFile(`/project/${normalized}`, model.getValue());
+		await getActiveFS().promises.writeFile(`/project/${normalized}`, modelValue);
 		if (options?.clearDirty) {
 			clearFileDirty(normalized);
 		}

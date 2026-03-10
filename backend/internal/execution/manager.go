@@ -85,6 +85,7 @@ type ExecutionRequest struct {
 	Language           string          `json:"language"`
 	Version            string          `json:"version,omitempty"`
 	Files              []ExecutionFile `json:"files"`
+	MainFile           string          `json:"-"`
 	Stdin              string          `json:"stdin,omitempty"`
 	Args               []string        `json:"args,omitempty"`
 	CompileTimeout     int             `json:"compile_timeout,omitempty"`
@@ -363,6 +364,12 @@ func normalizePistonRequest(request ExecutionRequest) (ExecutionRequest, error) 
 
 	request.Language = runtimeSpec.Language
 	request.Version = runtimeSpec.Version
+	request.MainFile = strings.TrimSpace(request.MainFile)
+	if isCompiledRuntime(request.Language) && request.MainFile != "" {
+		// Keep support files (e.g. in.txt, data.json) available for runtime while ensuring
+		// the declared entry file remains first for compilers that default to files[0].
+		request.Files = mainFileFirst(request.Files, request.MainFile)
+	}
 	request.RunTimeout = defaultRunTimeoutMs
 	request.CompileTimeout = defaultCompileTimeoutMs
 	request.MemoryLimit = defaultMemoryLimitBytes
@@ -371,6 +378,33 @@ func normalizePistonRequest(request ExecutionRequest) (ExecutionRequest, error) 
 	request.MaxProcessCount = defaultMaxProcessCount
 	request.MaxOpenFiles = defaultMaxOpenFiles
 	return request, nil
+}
+
+func isCompiledRuntime(language string) bool {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "cpp", "c", "java":
+		return true
+	default:
+		return false
+	}
+}
+
+func mainFileFirst(files []ExecutionFile, mainFile string) []ExecutionFile {
+	mainIndex := -1
+	for index := range files {
+		if files[index].Name == mainFile {
+			mainIndex = index
+			break
+		}
+	}
+	if mainIndex <= 0 {
+		return files
+	}
+	reordered := make([]ExecutionFile, 0, len(files))
+	reordered = append(reordered, files[mainIndex])
+	reordered = append(reordered, files[:mainIndex]...)
+	reordered = append(reordered, files[mainIndex+1:]...)
+	return reordered
 }
 
 func resolvePistonRuntime(frontendLanguage string) (pistonRuntimeSpec, error) {

@@ -133,6 +133,7 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 
 	executionRequest := execution.ExecutionRequest{
 		Language: req.Language,
+		MainFile: req.MainFile,
 		Stdin:    req.Stdin,
 		Files:    decodedFiles,
 	}
