@@ -88,6 +88,7 @@ export function buildTaskSocketPayload(
 	const normalizedRoomId = normalizeRoomIDValue(roomId || task.roomId);
 	const createdAt = toISOStringOrNow(task.createdAt);
 	const updatedAt = toISOStringOrNow(task.updatedAt);
+	const statusChangedAt = toISOStringOrNow(task.statusChangedAt ?? task.updatedAt);
 	const normalizedStatus = toStringValue(task.status).trim().toLowerCase().replace(/\s+/g, '_');
 
 	return {
@@ -100,6 +101,9 @@ export function buildTaskSocketPayload(
 			description: task.description,
 			status: normalizedStatus,
 			assignee_id: task.assigneeId,
+			status_actor_id: task.statusActorId,
+			status_actor_name: task.statusActorName,
+			status_changed_at: statusChangedAt,
 			created_at: createdAt,
 			updated_at: updatedAt
 		},
@@ -112,6 +116,12 @@ export function buildTaskSocketPayload(
 			status: normalizedStatus as TaskStatus,
 			assigneeId: task.assigneeId,
 			assignee_id: task.assigneeId,
+			statusActorId: task.statusActorId,
+			status_actor_id: task.statusActorId,
+			statusActorName: task.statusActorName,
+			status_actor_name: task.statusActorName,
+			statusChangedAt: statusChangedAt,
+			status_changed_at: statusChangedAt,
 			createdAt,
 			created_at: createdAt,
 			updatedAt,

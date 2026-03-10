@@ -1,7 +1,7 @@
 import { APP_LIMITS } from '$lib/config/limits';
 
 const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 const VIDEO_LIMIT_BYTES = APP_LIMITS.media.maxVideoBytes;
 
 export type MediaMessageType = 'image' | 'video' | 'file' | 'audio';

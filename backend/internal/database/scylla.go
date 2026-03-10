@@ -347,17 +347,20 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS %s (
-				room_id uuid,
-				id uuid,
-				title text,
-				description text,
-				status text,
-				sprint_name text,
-				assignee_id uuid,
-				created_at timestamp,
-				updated_at timestamp,
-				PRIMARY KEY ((room_id), id)
-			) WITH CLUSTERING ORDER BY (id ASC)`,
+					room_id uuid,
+					id uuid,
+					title text,
+					description text,
+					status text,
+					sprint_name text,
+					assignee_id uuid,
+					status_actor_id text,
+					status_actor_name text,
+					status_changed_at timestamp,
+					created_at timestamp,
+					updated_at timestamp,
+					PRIMARY KEY ((room_id), id)
+				) WITH CLUSTERING ORDER BY (id ASC)`,
 			tasksTable,
 		),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (assignee_id)`, tasksTable),
@@ -408,6 +411,9 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 
 	alterTasksQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD sprint_name text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_id text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_name text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD status_changed_at timestamp`, tasksTable),
 	}
 	for _, alterQuery := range alterTasksQueries {
 		err := session.Query(alterQuery).Exec()

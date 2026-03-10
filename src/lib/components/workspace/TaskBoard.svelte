@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { currentUser } from '$lib/store';
 	import { activeContext } from '$lib/stores/jiraContext';
+	import { addBoardActivity } from '$lib/stores/boardActivity';
+	import { applyTimelineTaskStatusUpdate } from '$lib/stores/timeline';
 	import {
 		moveTaskOptimistic,
 		taskStore,
@@ -18,7 +20,7 @@
 	export let contextAware = false;
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 
 	const COLUMNS = [
 		{ key: 'todo', label: 'To Do' },
@@ -58,6 +60,22 @@
 		updated_at?: unknown;
 	};
 
+	type RoomTaskStatusUpdateResponse = {
+		status?: unknown;
+		status_actor_id?: unknown;
+		status_actor_name?: unknown;
+		status_changed_at?: unknown;
+		updated_at?: unknown;
+	};
+
+	type StatusUpdateMetadata = {
+		status: ColumnKey;
+		statusActorId: string;
+		statusActorName: string;
+		statusChangedAt: number;
+		updatedAt: number;
+	};
+
 	let draggedTaskId = '';
 	let activeDropColumn: ColumnKey | '' = '';
 	let contextDraggedTaskId = '';
@@ -72,18 +90,19 @@
 	let roomBoardError = '';
 
 	$: sessionUserID = ($currentUser?.id || '').trim();
+	$: sessionUsername = ($currentUser?.username || '').trim();
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: todoTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'todo');
 	$: inProgressTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'in_progress');
 	$: doneTasks = $taskStore.filter((task) => resolveColumn(task.status) === 'done');
 	$: hasAnyTasks = $taskStore.length > 0;
 	$: contextTodoTasks = contextTasks.filter((task) => resolveColumn(task.status) === 'todo');
-	$: contextInProgressTasks = contextTasks.filter((task) => resolveColumn(task.status) === 'in_progress');
+	$: contextInProgressTasks = contextTasks.filter(
+		(task) => resolveColumn(task.status) === 'in_progress'
+	);
 	$: contextDoneTasks = contextTasks.filter((task) => resolveColumn(task.status) === 'done');
 	$: hasAnyContextTasks = contextTasks.length > 0;
-	$: boardTitle = contextAware
-		? $activeContext.name.trim() || 'Workspace Tasks'
-		: 'Room Tasks';
+	$: boardTitle = contextAware ? $activeContext.name.trim() || 'Workspace Tasks' : 'Room Tasks';
 	$: contextKey = `${$activeContext.type}:${$activeContext.id}`;
 	$: if (contextAware && contextKey !== lastContextKey) {
 		lastContextKey = contextKey;
@@ -92,12 +111,47 @@
 
 	function withSessionUserHeaders(headers: Record<string, string> = {}) {
 		if (!sessionUserID) {
-			return headers;
+			if (!sessionUsername) {
+				return headers;
+			}
+			return {
+				...headers,
+				'X-User-Name': sessionUsername
+			};
 		}
 		return {
 			...headers,
-			'X-User-Id': sessionUserID
+			'X-User-Id': sessionUserID,
+			'X-User-Name': sessionUsername
 		};
+	}
+
+	function parseStatusUpdateMetadata(
+		payload: unknown,
+		fallbackStatus: ColumnKey
+	): StatusUpdateMetadata {
+		const source =
+			payload && typeof payload === 'object' && !Array.isArray(payload)
+				? (payload as RoomTaskStatusUpdateResponse)
+				: null;
+		const statusValue = resolveColumn(toStringValue(source?.status) || fallbackStatus);
+		const statusActorId = toStringValue(source?.status_actor_id);
+		const statusActorName = toStringValue(source?.status_actor_name);
+		const statusChangedAt = parseTimestamp(source?.status_changed_at);
+		const updatedAt = parseTimestamp(source?.updated_at) || statusChangedAt;
+		return {
+			status: statusValue,
+			statusActorId,
+			statusActorName,
+			statusChangedAt,
+			updatedAt
+		};
+	}
+
+	function statusLabel(column: ColumnKey) {
+		if (column === 'in_progress') return 'In Progress';
+		if (column === 'done') return 'Done';
+		return 'To Do';
 	}
 
 	function resolveColumn(statusValue: string): ColumnKey {
@@ -193,11 +247,9 @@
 	}
 
 	async function parseErrorMessage(response: Response) {
-		const payload = (await response.json().catch(() => null)) as
-			| {
-					error?: string;
-			  }
-			| null;
+		const payload = (await response.json().catch(() => null)) as {
+			error?: string;
+		} | null;
 		return payload?.error?.trim() || `HTTP ${response.status}`;
 	}
 
@@ -268,14 +320,17 @@
 
 	async function persistContextTaskStatus(taskID: string, columnKey: ColumnKey) {
 		if ($activeContext.type === 'personal') {
-			const response = await fetch(`${API_BASE}/api/personal/items/${encodeURIComponent(taskID)}/status`, {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				credentials: 'include',
-				body: JSON.stringify({
-					status: formatContextStatusForPersonal(columnKey)
-				})
-			});
+			const response = await fetch(
+				`${API_BASE}/api/personal/items/${encodeURIComponent(taskID)}/status`,
+				{
+					method: 'PUT',
+					headers: { 'Content-Type': 'application/json' },
+					credentials: 'include',
+					body: JSON.stringify({
+						status: formatContextStatusForPersonal(columnKey)
+					})
+				}
+			);
 			if (!response.ok) {
 				throw new Error(await parseErrorMessage(response));
 			}
@@ -318,7 +373,10 @@
 			task.id === taskID
 				? {
 						...task,
-						status: $activeContext.type === 'personal' ? formatContextStatusForPersonal(columnKey) : columnKey,
+						status:
+							$activeContext.type === 'personal'
+								? formatContextStatusForPersonal(columnKey)
+								: columnKey,
 						updatedAt: Date.now()
 					}
 				: task
@@ -508,6 +566,8 @@
 		if (!response.ok) {
 			throw new Error(await parseErrorMessage(response));
 		}
+		const payload = (await response.json().catch(() => null)) as unknown;
+		return parseStatusUpdateMetadata(payload, status);
 	}
 
 	async function moveTaskToColumn(taskId: string, targetColumn: ColumnKey) {
@@ -534,8 +594,31 @@
 
 		roomBoardError = '';
 		try {
-			await persistRoomTaskStatus(taskId, targetRoomId, targetColumn);
-			sendSocketPayload(buildTaskSocketPayload('task_move', targetRoomId, updatedTask));
+			const updateMeta = await persistRoomTaskStatus(taskId, targetRoomId, targetColumn);
+			const nextTask = {
+				...updatedTask,
+				status: updateMeta.status,
+				statusActorId: updateMeta.statusActorId || sessionUserID || undefined,
+				statusActorName: updateMeta.statusActorName || sessionUsername || undefined,
+				statusChangedAt: updateMeta.statusChangedAt || Date.now(),
+				updatedAt: updateMeta.updatedAt || Date.now()
+			};
+			upsertTaskStoreEntry(nextTask, targetRoomId);
+			applyTimelineTaskStatusUpdate(taskId, updateMeta.status, {
+				statusActorId: nextTask.statusActorId,
+				statusActorName: nextTask.statusActorName,
+				statusChangedAt: nextTask.statusChangedAt
+			});
+			addBoardActivity({
+				type: targetColumn === 'done' ? 'task_completed' : 'task_moved',
+				title:
+					targetColumn === 'done'
+						? `Completed ${existingTask.title}`
+						: `Moved ${existingTask.title}`,
+				subtitle: `${statusLabel(previousColumn)} → ${statusLabel(targetColumn)}`,
+				actor: nextTask.statusActorName || nextTask.statusActorId || 'Unknown'
+			});
+			sendSocketPayload(buildTaskSocketPayload('task_move', targetRoomId, nextTask));
 		} catch (error) {
 			moveTaskOptimistic(taskId, previousColumn);
 			roomBoardError = error instanceof Error ? error.message : 'Failed to move task';
@@ -572,12 +655,15 @@
 		creatingTask = true;
 		roomBoardError = '';
 		try {
-			const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomID)}/tasks`, {
-				method: 'POST',
-				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
-				credentials: 'include',
-				body: JSON.stringify({ content })
-			});
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomID)}/tasks`,
+				{
+					method: 'POST',
+					headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+					credentials: 'include',
+					body: JSON.stringify({ content })
+				}
+			);
 			if (!response.ok) {
 				throw new Error(await parseErrorMessage(response));
 			}
@@ -759,149 +845,160 @@
 
 <style>
 	:global(:root) {
-		--workspace-taskboard-bg: rgba(255, 255, 255, 0.02);
-		--workspace-taskboard-header-bg: rgba(255, 255, 255, 0.6);
-		--workspace-taskboard-header-border: rgba(174, 198, 232, 0.5);
-		--workspace-taskboard-header-text: rgba(24, 42, 73, 0.94);
-		--workspace-taskboard-count-text: rgba(63, 82, 116, 0.88);
-		--workspace-taskboard-count-bg: rgba(226, 237, 252, 0.88);
-		--workspace-taskboard-count-border: rgba(143, 171, 216, 0.58);
-		--workspace-taskboard-form-bg: rgba(255, 255, 255, 0.58);
-		--workspace-taskboard-form-border: rgba(173, 196, 232, 0.5);
-		--workspace-taskboard-input-border: rgba(137, 167, 217, 0.5);
-		--workspace-taskboard-input-bg: rgba(255, 255, 255, 0.72);
-		--workspace-taskboard-input-text: #12223f;
-		--workspace-taskboard-input-placeholder: rgba(77, 100, 139, 0.6);
-		--workspace-taskboard-btn-border: rgba(101, 133, 191, 0.36);
-		--workspace-taskboard-btn-bg: rgba(255, 255, 255, 0.78);
-		--workspace-taskboard-btn-text: #122647;
-		--workspace-taskboard-state-text: rgba(61, 80, 113, 0.78);
-		--workspace-taskboard-state-border: rgba(152, 178, 220, 0.42);
-		--workspace-taskboard-state-bg: rgba(255, 255, 255, 0.46);
-		--workspace-taskboard-error-text: #9d2b41;
-		--workspace-taskboard-column-border: rgba(169, 191, 227, 0.5);
-		--workspace-taskboard-column-bg: rgba(255, 255, 255, 0.48);
-		--workspace-taskboard-drop-border: rgba(92, 142, 221, 0.66);
-		--workspace-taskboard-drop-bg: rgba(159, 197, 253, 0.28);
-		--workspace-taskboard-column-divider: rgba(162, 186, 226, 0.5);
-		--workspace-taskboard-column-title: rgba(27, 45, 77, 0.9);
-		--workspace-taskboard-column-count-text: rgba(67, 86, 118, 0.88);
-		--workspace-taskboard-column-count-bg: rgba(226, 237, 252, 0.92);
-		--workspace-taskboard-empty-border: rgba(143, 171, 216, 0.5);
-		--workspace-taskboard-empty-text: rgba(66, 86, 120, 0.76);
-		--workspace-taskboard-item-border: rgba(163, 186, 223, 0.54);
-		--workspace-taskboard-item-bg: rgba(255, 255, 255, 0.6);
-		--workspace-taskboard-item-text: #142443;
-		--workspace-taskboard-item-hover-bg: rgba(236, 245, 255, 0.88);
-		--workspace-taskboard-item-hover-border: rgba(111, 144, 205, 0.56);
-		--workspace-taskboard-description: rgba(70, 90, 124, 0.86);
-		--workspace-taskboard-meta: rgba(80, 99, 131, 0.8);
+		--workspace-taskboard-bg: #eef4fb;
+		--workspace-taskboard-header-bg: #ffffff;
+		--workspace-taskboard-header-border: #cfdbef;
+		--workspace-taskboard-header-text: #122645;
+		--workspace-taskboard-count-text: #21426f;
+		--workspace-taskboard-count-bg: #e9f1ff;
+		--workspace-taskboard-count-border: #b9cdec;
+		--workspace-taskboard-form-bg: #ffffff;
+		--workspace-taskboard-form-border: #cfdbef;
+		--workspace-taskboard-input-border: #bcd0ec;
+		--workspace-taskboard-input-bg: #ffffff;
+		--workspace-taskboard-input-text: #122647;
+		--workspace-taskboard-input-placeholder: #6b83aa;
+		--workspace-taskboard-btn-border: #9fb8df;
+		--workspace-taskboard-btn-bg: #eaf2ff;
+		--workspace-taskboard-btn-text: #153664;
+		--workspace-taskboard-state-text: #4f6487;
+		--workspace-taskboard-state-border: #c8d8f0;
+		--workspace-taskboard-state-bg: #f6f9ff;
+		--workspace-taskboard-error-text: #b42318;
+		--workspace-taskboard-column-border: #ccdaef;
+		--workspace-taskboard-column-bg: #f9fbff;
+		--workspace-taskboard-drop-border: #4f83d9;
+		--workspace-taskboard-drop-bg: #e7f0ff;
+		--workspace-taskboard-column-divider: #d2def2;
+		--workspace-taskboard-column-title: #1a3157;
+		--workspace-taskboard-column-count-text: #224372;
+		--workspace-taskboard-column-count-bg: #e9f1ff;
+		--workspace-taskboard-empty-border: #b8cce8;
+		--workspace-taskboard-empty-text: #55709a;
+		--workspace-taskboard-item-border: #cad8ee;
+		--workspace-taskboard-item-bg: #ffffff;
+		--workspace-taskboard-item-text: #142b4c;
+		--workspace-taskboard-item-hover-bg: #f3f8ff;
+		--workspace-taskboard-item-hover-border: #9ebce6;
+		--workspace-taskboard-description: #3f5780;
+		--workspace-taskboard-meta: #5d7398;
 	}
 
 	:global(:root[data-theme='dark']),
 	:global(.theme-dark) {
-		--workspace-taskboard-bg: #0d0d12;
-		--workspace-taskboard-header-bg: rgba(255, 255, 255, 0.03);
-		--workspace-taskboard-header-border: rgba(255, 255, 255, 0.09);
-		--workspace-taskboard-header-text: rgba(242, 245, 255, 0.95);
-		--workspace-taskboard-count-text: rgba(198, 206, 226, 0.9);
-		--workspace-taskboard-count-bg: rgba(255, 255, 255, 0.06);
-		--workspace-taskboard-count-border: rgba(255, 255, 255, 0.1);
-		--workspace-taskboard-form-bg: rgba(255, 255, 255, 0.03);
-		--workspace-taskboard-form-border: rgba(255, 255, 255, 0.09);
-		--workspace-taskboard-input-border: rgba(255, 255, 255, 0.13);
-		--workspace-taskboard-input-bg: rgba(255, 255, 255, 0.03);
-		--workspace-taskboard-input-text: #eef3ff;
-		--workspace-taskboard-input-placeholder: rgba(206, 214, 236, 0.62);
-		--workspace-taskboard-btn-border: rgba(255, 255, 255, 0.2);
-		--workspace-taskboard-btn-bg: rgba(255, 255, 255, 0.08);
-		--workspace-taskboard-btn-text: #f2f6ff;
-		--workspace-taskboard-state-text: rgba(236, 240, 255, 0.78);
-		--workspace-taskboard-state-border: rgba(255, 255, 255, 0.05);
-		--workspace-taskboard-state-bg: rgba(255, 255, 255, 0.02);
-		--workspace-taskboard-error-text: rgba(255, 150, 150, 0.92);
-		--workspace-taskboard-column-border: rgba(255, 255, 255, 0.05);
-		--workspace-taskboard-column-bg: rgba(255, 255, 255, 0.02);
-		--workspace-taskboard-drop-border: rgba(120, 179, 255, 0.6);
-		--workspace-taskboard-drop-bg: rgba(120, 179, 255, 0.08);
-		--workspace-taskboard-column-divider: rgba(255, 255, 255, 0.05);
-		--workspace-taskboard-column-title: rgba(240, 244, 255, 0.9);
-		--workspace-taskboard-column-count-text: rgba(194, 201, 225, 0.85);
-		--workspace-taskboard-column-count-bg: rgba(255, 255, 255, 0.05);
-		--workspace-taskboard-empty-border: rgba(255, 255, 255, 0.09);
-		--workspace-taskboard-empty-text: rgba(210, 216, 236, 0.62);
-		--workspace-taskboard-item-border: rgba(255, 255, 255, 0.07);
-		--workspace-taskboard-item-bg: rgba(255, 255, 255, 0.03);
-		--workspace-taskboard-item-text: #f6f8ff;
-		--workspace-taskboard-item-hover-bg: rgba(255, 255, 255, 0.06);
-		--workspace-taskboard-item-hover-border: rgba(255, 255, 255, 0.15);
-		--workspace-taskboard-description: rgba(215, 222, 247, 0.87);
-		--workspace-taskboard-meta: rgba(190, 197, 220, 0.82);
+		--workspace-taskboard-bg: #171717;
+		--workspace-taskboard-header-bg: #1e1e21;
+		--workspace-taskboard-header-border: #343438;
+		--workspace-taskboard-header-text: #f1f1f4;
+		--workspace-taskboard-count-text: #d7d7de;
+		--workspace-taskboard-count-bg: #29292d;
+		--workspace-taskboard-count-border: #414147;
+		--workspace-taskboard-form-bg: #1e1e21;
+		--workspace-taskboard-form-border: #343438;
+		--workspace-taskboard-input-border: #434349;
+		--workspace-taskboard-input-bg: #1a1a1e;
+		--workspace-taskboard-input-text: #f1f1f4;
+		--workspace-taskboard-input-placeholder: #92929b;
+		--workspace-taskboard-btn-border: #4b4b52;
+		--workspace-taskboard-btn-bg: #2b2b31;
+		--workspace-taskboard-btn-text: #ededf3;
+		--workspace-taskboard-state-text: #c7c7cf;
+		--workspace-taskboard-state-border: #37373d;
+		--workspace-taskboard-state-bg: #1b1b1e;
+		--workspace-taskboard-error-text: #ffb4b4;
+		--workspace-taskboard-column-border: #33333a;
+		--workspace-taskboard-column-bg: #1c1c20;
+		--workspace-taskboard-drop-border: #5b5b63;
+		--workspace-taskboard-drop-bg: #26262d;
+		--workspace-taskboard-column-divider: #383840;
+		--workspace-taskboard-column-title: #e5e5eb;
+		--workspace-taskboard-column-count-text: #dadae2;
+		--workspace-taskboard-column-count-bg: #2c2c33;
+		--workspace-taskboard-empty-border: #4f4f57;
+		--workspace-taskboard-empty-text: #b0b0b8;
+		--workspace-taskboard-item-border: #3d3d43;
+		--workspace-taskboard-item-bg: #222226;
+		--workspace-taskboard-item-text: #f5f5f8;
+		--workspace-taskboard-item-hover-bg: #2b2b30;
+		--workspace-taskboard-item-hover-border: #57575d;
+		--workspace-taskboard-description: #c7c7cf;
+		--workspace-taskboard-meta: #a2a2ab;
 	}
 
 	.task-board {
 		height: 100%;
 		width: 100%;
 		min-height: 0;
-		padding: 1rem;
+		padding: 1.25rem;
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--workspace-taskboard-bg) 90%, #ffffff) 0%,
+			var(--workspace-taskboard-bg) 100%
+		);
+	}
+
+	:global(:root[data-theme='dark']) .task-board,
+	:global(.theme-dark) .task-board {
 		background: var(--workspace-taskboard-bg);
 	}
 
 	.context-aware-board,
 	.room-board {
+		height: 100%;
+		min-height: 0;
 		display: grid;
-		grid-template-rows: auto auto 1fr;
-		gap: 0.8rem;
+		grid-template-rows: auto auto minmax(0, 1fr);
+		gap: 1rem;
 	}
 
 	.board-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.6rem;
-		padding: 0.7rem 0.9rem;
-		border-radius: 14px;
+		gap: 0.65rem;
+		padding: 0.95rem 1.1rem;
+		border-radius: 16px;
 		background: var(--workspace-taskboard-header-bg);
 		border: 1px solid var(--workspace-taskboard-header-border);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
 	}
 
 	.board-header h2 {
 		margin: 0;
-		font-size: 0.92rem;
-		letter-spacing: 0.03em;
+		font-size: 1.1rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
 		color: var(--workspace-taskboard-header-text);
 	}
 
 	.board-header span {
-		font-size: 0.75rem;
+		font-size: 0.84rem;
+		font-weight: 600;
 		color: var(--workspace-taskboard-count-text);
 		border-radius: 999px;
-		padding: 0.18rem 0.55rem;
+		padding: 0.24rem 0.64rem;
 		background: var(--workspace-taskboard-count-bg);
 		border: 1px solid var(--workspace-taskboard-count-border);
 	}
 
 	.new-task-form {
 		display: flex;
-		gap: 0.55rem;
-		padding: 0.75rem;
-		border-radius: 14px;
+		align-items: center;
+		gap: 0.65rem;
+		padding: 0.85rem;
+		border-radius: 16px;
 		background: var(--workspace-taskboard-form-bg);
 		border: 1px solid var(--workspace-taskboard-form-border);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
 	}
 
 	.new-task-form input {
 		flex: 1;
 		min-width: 0;
-		border-radius: 10px;
+		border-radius: 12px;
 		border: 1px solid var(--workspace-taskboard-input-border);
 		background: var(--workspace-taskboard-input-bg);
 		color: var(--workspace-taskboard-input-text);
-		padding: 0.56rem 0.7rem;
+		padding: 0.68rem 0.84rem;
+		font-size: 0.93rem;
 	}
 
 	.new-task-form input::placeholder {
@@ -909,13 +1006,30 @@
 	}
 
 	.new-task-form button {
-		border-radius: 10px;
+		border-radius: 12px;
 		border: 1px solid var(--workspace-taskboard-btn-border);
 		background: var(--workspace-taskboard-btn-bg);
 		color: var(--workspace-taskboard-btn-text);
-		padding: 0.56rem 0.86rem;
-		font-size: 0.8rem;
+		padding: 0.68rem 0.96rem;
+		font-size: 0.85rem;
+		font-weight: 600;
 		cursor: pointer;
+		transition:
+			border-color 0.2s ease,
+			background 0.2s ease;
+	}
+
+	.new-task-form button:hover:not(:disabled) {
+		border-color: color-mix(
+			in srgb,
+			var(--workspace-taskboard-btn-border) 70%,
+			var(--workspace-taskboard-item-text)
+		);
+		background: color-mix(
+			in srgb,
+			var(--workspace-taskboard-btn-bg) 82%,
+			var(--workspace-taskboard-item-bg)
+		);
 	}
 
 	.new-task-form button:disabled {
@@ -925,13 +1039,16 @@
 
 	.board-state {
 		height: 100%;
-		min-height: 240px;
+		min-height: 260px;
 		display: grid;
 		place-items: center;
+		text-align: center;
+		padding: 1rem;
 		color: var(--workspace-taskboard-state-text);
 		border: 1px solid var(--workspace-taskboard-state-border);
 		background: var(--workspace-taskboard-state-bg);
 		border-radius: 18px;
+		font-size: 0.95rem;
 	}
 
 	.board-state.error {
@@ -940,21 +1057,19 @@
 
 	.task-grid {
 		height: 100%;
+		min-height: 0;
 		display: grid;
 		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 0.9rem;
-		min-height: 0;
+		gap: 1rem;
 	}
 
 	.task-column {
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
-		border-radius: 16px;
+		border-radius: 18px;
 		border: 1px solid var(--workspace-taskboard-column-border);
 		background: var(--workspace-taskboard-column-bg);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
 		transition:
 			border-color 0.2s ease,
 			background 0.2s ease;
@@ -969,53 +1084,56 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 0.85rem 0.95rem;
+		padding: 0.9rem 1rem;
 		border-bottom: 1px solid var(--workspace-taskboard-column-divider);
 	}
 
 	.task-column-header h3 {
 		margin: 0;
-		font-size: 0.86rem;
-		letter-spacing: 0.04em;
+		font-size: 0.8rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
 		color: var(--workspace-taskboard-column-title);
 	}
 
 	.task-column-header span {
-		font-size: 0.8rem;
+		font-size: 0.81rem;
+		font-weight: 600;
 		color: var(--workspace-taskboard-column-count-text);
 		background: var(--workspace-taskboard-column-count-bg);
 		border-radius: 999px;
-		padding: 0.2rem 0.55rem;
+		padding: 0.22rem 0.62rem;
 	}
 
 	.task-column-body {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
-		padding: 0.8rem;
+		padding: 0.9rem;
 		display: flex;
 		flex-direction: column;
-		gap: 0.65rem;
+		gap: 0.78rem;
+		scrollbar-width: thin;
 	}
 
 	.task-column-empty {
 		margin: 0;
-		padding: 0.9rem;
+		padding: 1rem;
 		border-radius: 12px;
 		border: 1px dashed var(--workspace-taskboard-empty-border);
 		color: var(--workspace-taskboard-empty-text);
-		font-size: 0.84rem;
+		font-size: 0.9rem;
 		text-align: center;
 	}
 
 	.task-item {
-		border-radius: 13px;
+		border-radius: 14px;
 		border: 1px solid var(--workspace-taskboard-item-border);
 		background: var(--workspace-taskboard-item-bg);
-		padding: 0.75rem 0.8rem;
+		padding: 0.9rem 0.94rem;
 		display: grid;
-		gap: 0.45rem;
+		gap: 0.52rem;
 		color: var(--workspace-taskboard-item-text);
 		cursor: grab;
 		transition:
@@ -1035,14 +1153,14 @@
 	}
 
 	.task-item-title {
-		font-size: 0.96rem;
-		font-weight: 600;
-		line-height: 1.32;
+		font-size: 1rem;
+		font-weight: 650;
+		line-height: 1.42;
 	}
 
 	.task-item-description {
-		font-size: 0.86rem;
-		line-height: 1.42;
+		font-size: 0.92rem;
+		line-height: 1.45;
 		color: var(--workspace-taskboard-description);
 		white-space: pre-wrap;
 		word-break: break-word;
@@ -1051,18 +1169,44 @@
 	.task-item-meta {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.4rem 0.65rem;
-		font-size: 0.72rem;
+		gap: 0.42rem 0.68rem;
+		font-size: 0.78rem;
 		color: var(--workspace-taskboard-meta);
 	}
 
-	@media (max-width: 980px) {
+	@media (max-width: 1180px) {
 		.task-grid {
-			grid-template-columns: 1fr;
+			display: flex;
+			overflow-x: auto;
+			overflow-y: hidden;
+			padding-bottom: 0.25rem;
 		}
 
+		.task-column {
+			flex: 0 0 min(360px, calc(100vw - 8.5rem));
+		}
+	}
+
+	@media (max-width: 760px) {
 		.task-board {
-			padding: 0.75rem;
+			padding: 0.85rem;
+		}
+
+		.context-aware-board,
+		.room-board {
+			gap: 0.75rem;
+		}
+
+		.board-header h2 {
+			font-size: 0.98rem;
+		}
+
+		.task-column {
+			flex-basis: calc(100vw - 2.1rem);
+		}
+
+		.new-task-form {
+			padding: 0.72rem;
 		}
 	}
 </style>

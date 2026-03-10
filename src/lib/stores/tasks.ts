@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 import { normalizeRoomIDValue, parseOptionalTimestamp, toStringValue } from '$lib/utils/chat/core';
 
-const DEFAULT_API_BASE = 'http://localhost:8080';
+const DEFAULT_API_BASE = 'http://127.0.0.1:8080';
 
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | string;
 
@@ -12,6 +12,9 @@ export type Task = {
 	description: string;
 	status: TaskStatus;
 	assigneeId: string;
+	statusActorId?: string;
+	statusActorName?: string;
+	statusChangedAt?: number;
 	createdAt: number;
 	updatedAt: number;
 };
@@ -44,7 +47,9 @@ export function normalizeTaskStatus(value: unknown): TaskStatus {
 }
 
 function normalizeTaskId(value: unknown) {
-	return toStringValue(value).trim().replace(/[^a-zA-Z0-9_-]/g, '');
+	return toStringValue(value)
+		.trim()
+		.replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -89,6 +94,10 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 	const description = toStringValue(source.description).trim();
 	const status = normalizeTaskStatus(source.status);
 	const assigneeId = toStringValue(source.assigneeId ?? source.assignee_id).trim();
+	const statusActorId = toStringValue(source.statusActorId ?? source.status_actor_id).trim();
+	const statusActorName = toStringValue(source.statusActorName ?? source.status_actor_name).trim();
+	const statusChangedAt =
+		parseOptionalTimestamp(source.statusChangedAt ?? source.status_changed_at) || 0;
 	const now = Date.now();
 	const createdAt = parseOptionalTimestamp(source.createdAt ?? source.created_at) || now;
 	const updatedAt = parseOptionalTimestamp(source.updatedAt ?? source.updated_at) || createdAt;
@@ -100,6 +109,9 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 		description,
 		status,
 		assigneeId,
+		statusActorId: statusActorId || undefined,
+		statusActorName: statusActorName || undefined,
+		statusChangedAt: statusChangedAt > 0 ? statusChangedAt : undefined,
 		createdAt,
 		updatedAt
 	};

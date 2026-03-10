@@ -11,7 +11,7 @@ export type GlobalSocketEvent = {
 };
 
 const MAX_QUEUED_MESSAGES = APP_LIMITS.ws.maxQueuedMessages;
-const DEFAULT_API_BASE = 'http://localhost:8080';
+const DEFAULT_API_BASE = 'http://127.0.0.1:8080';
 
 export const socketState = writable<GlobalSocketState>('idle');
 export const globalMessages = writable<GlobalSocketEvent | null>(null);

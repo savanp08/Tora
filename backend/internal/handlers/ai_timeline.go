@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
 	"github.com/savanp08/converse/internal/ai"

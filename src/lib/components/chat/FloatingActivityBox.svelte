@@ -6,11 +6,13 @@
 	export let activeModules: WorkspaceModule[] = ['dashboard'];
 	export let selectedModule: WorkspaceModule | null = null;
 	export let addableModules: WorkspaceModule[] = [];
+	export let isDarkMode = false;
 
 	const dispatch = createEventDispatcher<{
 		selectModule: { module: WorkspaceModule };
 		addModule: { module: WorkspaceModule };
 		limitReached: { message: string };
+		toggleTheme: void;
 	}>();
 
 	const SMALL_BOX_SIZE = 56;
@@ -20,7 +22,7 @@
 	const LARGE_PANEL_SIZE = 350;
 	const LARGE_PANEL_BREAKPOINT = 600;
 	const VIEWPORT_MARGIN = 12;
-	const DESKTOP_DEFAULT_TOP_OFFSET_PX = 80;
+	const DESKTOP_DEFAULT_TOP_OFFSET_PX = 104;
 	const DRAG_THRESHOLD_PX = 8;
 
 	let shellEl: HTMLDivElement | null = null;
@@ -123,10 +125,7 @@
 			return;
 		}
 		positionX = maxPositionX();
-		positionY = Math.max(
-			VIEWPORT_MARGIN,
-			Math.min(maxPositionY(), DESKTOP_DEFAULT_TOP_OFFSET_PX)
-		);
+		positionY = Math.max(VIEWPORT_MARGIN, Math.min(maxPositionY(), DESKTOP_DEFAULT_TOP_OFFSET_PX));
 	}
 
 	function onShellPointerDown(event: PointerEvent) {
@@ -289,7 +288,6 @@
 	>
 		<img class="main-logo" src={toraLogo} alt="" aria-hidden="true" />
 	</button>
-
 </div>
 
 {#if expanded}
@@ -308,16 +306,36 @@
 	>
 		<header class="activity-panel-head">
 			<h4>Boards</h4>
-			<button
-				type="button"
-				class="activity-panel-close"
-				on:click={closeExpanded}
-				aria-label="Close module switcher"
-			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<path d="m6 6 12 12M18 6 6 18"></path>
-				</svg>
-			</button>
+			<div class="activity-panel-head-actions">
+				<button
+					type="button"
+					class="activity-panel-theme"
+					on:click={() => dispatch('toggleTheme')}
+					title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+					aria-label={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						{#if isDarkMode}
+							<path
+								d="M12 3v2.2M12 18.8V21M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M3 12h2.2M18.8 12H21M4.9 19.1l1.6-1.6M17.5 6.5l1.6-1.6"
+							></path>
+							<circle cx="12" cy="12" r="4"></circle>
+						{:else}
+							<path d="M20.3 14.8A8.4 8.4 0 1 1 9.2 3.7a6.8 6.8 0 1 0 11.1 11.1Z"></path>
+						{/if}
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="activity-panel-close"
+					on:click={closeExpanded}
+					aria-label="Close module switcher"
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="m6 6 12 12M18 6 6 18"></path>
+					</svg>
+				</button>
+			</div>
 		</header>
 		<div class="activity-panel-body">
 			<div class="activity-box-menu">
@@ -377,7 +395,7 @@
 
 <style>
 	.activity-box-shell {
-		display:none;
+		display: none;
 		--activity-box-size: 64px;
 		--activity-icon-size: clamp(1.05rem, calc(var(--activity-box-size) * 0.34), 1.45rem);
 		--activity-shell-text: #132742;
@@ -408,13 +426,13 @@
 		cursor: grabbing;
 	}
 
-		.activity-box-main {
-			position: relative;
-			overflow: hidden;
-			width: var(--activity-box-size);
-			height: var(--activity-box-size);
-			border-radius: clamp(18px, calc(var(--activity-box-size) * 0.3), 24px);
-			border: 1px solid var(--activity-shell-border);
+	.activity-box-main {
+		position: relative;
+		overflow: hidden;
+		width: var(--activity-box-size);
+		height: var(--activity-box-size);
+		border-radius: clamp(18px, calc(var(--activity-box-size) * 0.3), 24px);
+		border: 1px solid var(--activity-shell-border);
 		background:
 			radial-gradient(circle at 22% 14%, rgba(255, 255, 255, 0.34), transparent 48%),
 			linear-gradient(
@@ -576,6 +594,12 @@
 		justify-content: space-between;
 	}
 
+	.activity-panel-head-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.42rem;
+	}
+
 	.activity-panel-head h4 {
 		margin: 0;
 		font-size: 0.9rem;
@@ -601,12 +625,35 @@
 			border-color 180ms ease;
 	}
 
+	.activity-panel-theme {
+		width: 34px;
+		height: 34px;
+		border-radius: 11px;
+		border: 1px solid var(--panel-button-border);
+		background: var(--panel-button-bg);
+		color: var(--panel-text);
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		padding: 0;
+		transition:
+			background 180ms ease,
+			border-color 180ms ease;
+	}
+
 	.activity-panel-close:hover {
 		background: var(--panel-button-hover);
 		border-color: var(--panel-active-border);
 	}
 
+	.activity-panel-theme:hover {
+		background: var(--panel-button-hover);
+		border-color: var(--panel-active-border);
+	}
+
 	.activity-panel-close svg,
+	.activity-panel-theme svg,
 	.activity-action svg,
 	.module-add-option svg {
 		width: 1.02rem;
@@ -661,21 +708,13 @@
 	}
 
 	.add-action {
-		background: linear-gradient(
-			145deg,
-			rgba(184, 242, 230, 0.26),
-			rgba(149, 229, 213, 0.16)
-		);
+		background: linear-gradient(145deg, rgba(184, 242, 230, 0.26), rgba(149, 229, 213, 0.16));
 		border-color: rgba(103, 194, 170, 0.48);
 	}
 
 	:global(:root[data-theme='dark']) .add-action,
 	:global(.theme-dark) .add-action {
-		background: linear-gradient(
-			145deg,
-			rgba(27, 101, 92, 0.38),
-			rgba(20, 74, 74, 0.3)
-		);
+		background: linear-gradient(145deg, rgba(27, 101, 92, 0.38), rgba(20, 74, 74, 0.3));
 		border-color: rgba(130, 221, 195, 0.42);
 	}
 
@@ -732,32 +771,32 @@
 		}
 	}
 
-		@media (max-width: 600px) {
-			.activity-panel {
-				padding: 0.75rem;
-				border-radius: 24px;
-			}
+	@media (max-width: 600px) {
+		.activity-panel {
+			padding: 0.75rem;
+			border-radius: 24px;
+		}
+	}
+
+	@media (min-width: 601px) {
+		:global(:root[data-theme='dark']) .activity-box-main,
+		:global(.theme-dark) .activity-box-main {
+			background: var(--activity-shell-glass);
 		}
 
-		@media (min-width: 601px) {
-			:global(:root[data-theme='dark']) .activity-box-main,
-			:global(.theme-dark) .activity-box-main {
-				background: var(--activity-shell-glass);
-			}
-
-			:global(:root[data-theme='dark']) .activity-box-main::before,
-			:global(.theme-dark) .activity-box-main::before {
-				background: none;
-			}
-
-			:global(:root[data-theme='dark']) .activity-panel,
-			:global(.theme-dark) .activity-panel {
-				background: var(--panel-glass);
-			}
-
-			:global(:root[data-theme='dark']) .add-action,
-			:global(.theme-dark) .add-action {
-				background: var(--panel-button-bg);
-			}
+		:global(:root[data-theme='dark']) .activity-box-main::before,
+		:global(.theme-dark) .activity-box-main::before {
+			background: none;
 		}
-	</style>
+
+		:global(:root[data-theme='dark']) .activity-panel,
+		:global(.theme-dark) .activity-panel {
+			background: var(--panel-glass);
+		}
+
+		:global(:root[data-theme='dark']) .add-action,
+		:global(.theme-dark) .add-action {
+			background: var(--panel-button-bg);
+		}
+	}
+</style>

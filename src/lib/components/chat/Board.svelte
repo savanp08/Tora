@@ -20,7 +20,7 @@
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const BOARD_WIDTH = 3840;
 	const BOARD_HEIGHT = 2560;
 	const MIN_ZOOM = 0.04;

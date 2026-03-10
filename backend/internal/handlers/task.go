@@ -16,15 +16,18 @@ import (
 )
 
 type TaskRecordResponse struct {
-	ID          string    `json:"id"`
-	RoomID      string    `json:"room_id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	Status      string    `json:"status"`
-	SprintName  string    `json:"sprint_name,omitempty"`
-	AssigneeID  string    `json:"assignee_id,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID              string     `json:"id"`
+	RoomID          string     `json:"room_id"`
+	Title           string     `json:"title"`
+	Description     string     `json:"description"`
+	Status          string     `json:"status"`
+	SprintName      string     `json:"sprint_name,omitempty"`
+	AssigneeID      string     `json:"assignee_id,omitempty"`
+	StatusActorID   string     `json:"status_actor_id,omitempty"`
+	StatusActorName string     `json:"status_actor_name,omitempty"`
+	StatusChangedAt *time.Time `json:"status_changed_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type TaskCreateRequest struct {
@@ -51,6 +54,29 @@ func resolveTaskRequesterID(r *http.Request) string {
 			r.Header.Get("X-User-Id"),
 		),
 	)
+}
+
+func resolveTaskRequesterName(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return strings.TrimSpace(
+		firstNonEmpty(
+			r.URL.Query().Get("username"),
+			r.URL.Query().Get("userName"),
+			r.URL.Query().Get("user_name"),
+			r.Header.Get("X-User-Name"),
+			r.Header.Get("X-Username"),
+		),
+	)
+}
+
+func nullableTrimmedText(value string) interface{} {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return trimmed
 }
 
 func resolveTaskRequesterMemberID(r *http.Request) string {
@@ -107,6 +133,9 @@ func (h *RoomHandler) ensureTaskSchema() {
 		status text,
 		sprint_name text,
 		assignee_id uuid,
+		status_actor_id text,
+		status_actor_name text,
+		status_changed_at timestamp,
 		created_at timestamp,
 		updated_at timestamp,
 		PRIMARY KEY ((room_id), id)
@@ -123,6 +152,9 @@ func (h *RoomHandler) ensureTaskSchema() {
 
 	alterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD sprint_name text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_id text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_name text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD status_changed_at timestamp`, tasksTable),
 	}
 	for _, alterQuery := range alterQueries {
 		if err := h.scylla.Session.Query(alterQuery).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
@@ -147,35 +179,56 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, title, description, status, sprint_name, assignee_id, created_at, updated_at FROM %s WHERE room_id = ?`,
+		`SELECT id, title, description, status, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at FROM %s WHERE room_id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	iter := h.scylla.Session.Query(query, roomUUID).WithContext(r.Context()).Iter()
 
 	tasks := make([]TaskRecordResponse, 0, 64)
 	var (
-		taskID      gocql.UUID
-		title       string
-		description string
-		status      string
-		sprintName  string
-		assigneeID  *gocql.UUID
-		createdAt   time.Time
-		updatedAt   time.Time
+		taskID          gocql.UUID
+		title           string
+		description     string
+		status          string
+		sprintName      string
+		assigneeID      *gocql.UUID
+		statusActorID   string
+		statusActorName string
+		statusChangedAt *time.Time
+		createdAt       time.Time
+		updatedAt       time.Time
 	)
-	for iter.Scan(&taskID, &title, &description, &status, &sprintName, &assigneeID, &createdAt, &updatedAt) {
+	for iter.Scan(
+		&taskID,
+		&title,
+		&description,
+		&status,
+		&sprintName,
+		&assigneeID,
+		&statusActorID,
+		&statusActorName,
+		&statusChangedAt,
+		&createdAt,
+		&updatedAt,
+	) {
 		task := TaskRecordResponse{
-			ID:          strings.TrimSpace(taskID.String()),
-			RoomID:      normalizedRoomID,
-			Title:       strings.TrimSpace(title),
-			Description: strings.TrimSpace(description),
-			Status:      normalizeTaskStatusValue(status),
-			SprintName:  strings.TrimSpace(sprintName),
-			CreatedAt:   createdAt.UTC(),
-			UpdatedAt:   updatedAt.UTC(),
+			ID:              strings.TrimSpace(taskID.String()),
+			RoomID:          normalizedRoomID,
+			Title:           strings.TrimSpace(title),
+			Description:     strings.TrimSpace(description),
+			Status:          normalizeTaskStatusValue(status),
+			SprintName:      strings.TrimSpace(sprintName),
+			StatusActorID:   strings.TrimSpace(statusActorID),
+			StatusActorName: strings.TrimSpace(statusActorName),
+			CreatedAt:       createdAt.UTC(),
+			UpdatedAt:       updatedAt.UTC(),
 		}
 		if assigneeID != nil {
 			task.AssigneeID = strings.TrimSpace(assigneeID.String())
+		}
+		if statusChangedAt != nil && !statusChangedAt.IsZero() {
+			statusChangedAtUTC := statusChangedAt.UTC()
+			task.StatusChangedAt = &statusChangedAtUTC
 		}
 		tasks = append(tasks, task)
 	}
@@ -265,9 +318,11 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 
 	assigneeID := resolveTaskRequesterAssigneeUUID(r)
+	statusActorID := strings.TrimSpace(resolveTaskRequesterID(r))
+	statusActorName := resolveTaskRequesterName(r)
 
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		h.scylla.Table("tasks"),
 	)
 	if err := h.scylla.Session.Query(
@@ -279,6 +334,9 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		status,
 		sprintName,
 		assigneeID,
+		nullableTrimmedText(statusActorID),
+		nullableTrimmedText(statusActorName),
+		now,
 		now,
 		now,
 	).WithContext(r.Context()).Exec(); err != nil {
@@ -288,14 +346,17 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := TaskRecordResponse{
-		ID:          strings.TrimSpace(taskUUID.String()),
-		RoomID:      normalizedRoomID,
-		Title:       title,
-		Description: description,
-		Status:      status,
-		SprintName:  sprintName,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:              strings.TrimSpace(taskUUID.String()),
+		RoomID:          normalizedRoomID,
+		Title:           title,
+		Description:     description,
+		Status:          status,
+		SprintName:      sprintName,
+		StatusActorID:   statusActorID,
+		StatusActorName: statusActorName,
+		StatusChangedAt: &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	if assigneeID != nil {
 		response.AssigneeID = strings.TrimSpace(assigneeID.String())
@@ -355,8 +416,22 @@ func (h *RoomHandler) UpdateRoomTaskStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	now := time.Now().UTC()
-	query := fmt.Sprintf(`UPDATE %s SET status = ?, updated_at = ? WHERE room_id = ? AND id = ?`, h.scylla.Table("tasks"))
-	if err := h.scylla.Session.Query(query, status, now, roomUUID, taskID).WithContext(r.Context()).Exec(); err != nil {
+	statusActorID := strings.TrimSpace(resolveTaskRequesterID(r))
+	statusActorName := resolveTaskRequesterName(r)
+	query := fmt.Sprintf(
+		`UPDATE %s SET status = ?, updated_at = ?, status_actor_id = ?, status_actor_name = ?, status_changed_at = ? WHERE room_id = ? AND id = ?`,
+		h.scylla.Table("tasks"),
+	)
+	if err := h.scylla.Session.Query(
+		query,
+		status,
+		now,
+		nullableTrimmedText(statusActorID),
+		nullableTrimmedText(statusActorName),
+		now,
+		roomUUID,
+		taskID,
+	).WithContext(r.Context()).Exec(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update room task status"})
 		return
@@ -364,7 +439,18 @@ func (h *RoomHandler) UpdateRoomTaskStatus(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+	response := map[string]interface{}{
+		"status":            status,
+		"updated_at":        now,
+		"status_changed_at": now,
+	}
+	if statusActorID != "" {
+		response["status_actor_id"] = statusActorID
+	}
+	if statusActorName != "" {
+		response["status_actor_name"] = statusActorName
+	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (h *RoomHandler) DeleteRoomTasks(w http.ResponseWriter, r *http.Request) {

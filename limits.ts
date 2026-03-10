@@ -374,7 +374,7 @@ export const LIMITS: AppLimits = {
 		// Persistent board storage cap.
 		maxStorageBytes: 10485760,
 		// Ephemeral board storage cap.
-		ephemeralMaxStorageBytes: 1048576,
+		ephemeralMaxStorageBytes: 1048576, // ~1MB
 		// Avoid toast spam for draw memory limit warnings.
 		drawLimitToastCooldownMs: 2500,
 		// Board undo/redo history cap.
@@ -396,7 +396,7 @@ export const LIMITS: AppLimits = {
 		// Max open editors/files at once.
 		maxFileEditors: 3,
 		// Yjs document cap for code canvas.
-		memoryLimitBytes: 2097152,
+		memoryLimitBytes: 2097152, // ~2MB
 		// Avoid alert spam when cap is hit.
 		yDocLimitAlertCooldownMs: 2500
 	},
@@ -550,7 +550,7 @@ export const LIMITS: AppLimits = {
 	},
 	users: {
 		// Max members inside one room.
-		maxRoomMembers: 1200
+		maxRoomMembers: 100
 	}
 } as const;
 

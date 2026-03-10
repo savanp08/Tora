@@ -2,6 +2,7 @@ package config
 
 import (
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -64,7 +65,7 @@ func LoadConfig() *Config {
 
 	return &Config{
 		Port:                   getEnv("PORT", "8080"),
-		RedisAddr:              getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisAddr:              normalizeRedisAddr(getEnv("REDIS_ADDR", "127.0.0.1:6379")),
 		RedisPass:              getEnv("REDIS_PASS", ""),
 		AppSecretKey:           appSecretKey,
 		TrustedProxies:         parseCSVEnvOptional("TRUSTED_PROXIES"),
@@ -87,6 +88,28 @@ func LoadConfig() *Config {
 		MaxDailyWsConnections:  getInt64Env("MAX_DAILY_WS_CONNECTIONS", 15000),
 		MaxDailyFilesUploaded:  getInt64Env("MAX_DAILY_FILES_UPLOADED", 3000),
 	}
+}
+
+func normalizeRedisAddr(raw string) string {
+	normalized := strings.TrimSpace(raw)
+	if normalized == "" {
+		return "127.0.0.1:6379"
+	}
+
+	host, port, err := net.SplitHostPort(normalized)
+	if err == nil {
+		if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+			return net.JoinHostPort("127.0.0.1", strings.TrimSpace(port))
+		}
+		return normalized
+	}
+
+	// Handle values without an explicit port.
+	if strings.EqualFold(normalized, "localhost") {
+		return "127.0.0.1:6379"
+	}
+
+	return normalized
 }
 
 func requireAppSecretKey() string {

@@ -124,7 +124,7 @@
 	const DEFAULT_PROJECT_FILE_NAME = 'ToraEditorInput.txt';
 	const DEFAULT_PROJECT_FILE_CONTENT = '';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const textEncoder = new TextEncoder();
 	const textDecoder = new TextDecoder();
 	const QUERY_AWARENESS_MESSAGE_TYPE = 3;

@@ -30,7 +30,7 @@
 	import { setSessionToken } from '$lib/utils/sessionToken';
 	import { onMount, tick } from 'svelte';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const CLIENT_LOG_PREFIX = '[home-client]';
 	const ROOM_CODE_DIGITS = APP_LIMITS.room.codeDigits;
 	const ROOM_NAME_MAX_LENGTH = APP_LIMITS.room.nameMaxLength;

@@ -16,13 +16,17 @@
 	export let roomId = '';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 
 	type OnboardingMode = 'selection' | 'manual' | 'ai';
 	type ManualTemplateCard = {
 		key: string;
 		label: string;
 		description: string;
+	};
+	type PromptStarter = {
+		label: string;
+		prompt: string;
 	};
 
 	const MANUAL_TEMPLATE_CARDS: ManualTemplateCard[] = [
@@ -67,6 +71,28 @@
 		time_critical: 'time_critical',
 		blank_board: 'blank_board'
 	};
+	const AI_PROMPT_STARTERS: PromptStarter[] = [
+		{
+			label: 'Product launch',
+			prompt:
+				'Build a product launch workspace for 3 sprints with Design, Frontend, Backend, QA, and GTM owners. Include weekly milestones, dependency tasks, and sprint budgets.'
+		},
+		{
+			label: 'Client delivery',
+			prompt:
+				'Create a 6-week client delivery workspace with discovery, implementation, review, and handoff phases. Add priorities, assignees, and due dates for each phase.'
+		},
+		{
+			label: 'Bug stabilization',
+			prompt:
+				'Generate a stabilization sprint focused on bug triage, fixes, regression testing, and release prep. Prioritize critical bugs first and include QA checkpoints.'
+		},
+		{
+			label: 'Hiring pipeline',
+			prompt:
+				'Create a hiring operations workspace for engineering roles with sourcing, screening, interviews, offer, and onboarding tracks. Assign owners and weekly targets.'
+		}
+	];
 
 	function createBlankTimeline(): ProjectTimeline {
 		const today = new Date();
@@ -99,6 +125,10 @@
 		}
 		isProjectNew.set(false);
 		activeProjectTab.set('overview');
+	}
+
+	function applyPromptStarter(prompt: string) {
+		aiPrompt = prompt;
 	}
 
 	async function generateWorkspace() {
@@ -215,25 +245,50 @@
 			</div>
 		</div>
 	{:else if mode === 'ai'}
-		<div class="wizard-shell">
-			<header class="wizard-head">
+		<div class="wizard-shell ai-wizard">
+			<header class="wizard-head ai-head">
 				<button type="button" class="back-btn" on:click={goBackToSelection}>Back</button>
-				<h3>Tora AI Workspace Generator</h3>
+				<div class="ai-head-copy">
+					<span class="ai-badge">Tora AI</span>
+					<h3>Workspace Generator</h3>
+					<p>
+						Describe scope, timeline, owners, and constraints. Tora will generate a structured sprint plan.
+					</p>
+				</div>
 			</header>
 
-			<label class="field">
-				<span>Project description</span>
-				<textarea
-					bind:value={aiPrompt}
-					placeholder="Example: Build a multi-team launch plan for a mobile app with 3 sprints and clear ownership."
-					rows="7"
-				></textarea>
-			</label>
+			<section class="ai-composer-card" aria-label="AI project brief composer">
+				<label class="field ai-field">
+					<div class="field-head">
+						<span>Project brief</span>
+						<small>{aiPrompt.trim().length} chars</small>
+					</div>
+					<textarea
+						class="ai-textarea"
+						bind:value={aiPrompt}
+						placeholder="Example: Build a multi-team launch plan for a mobile app with 3 sprints, clear ownership, budgets, and key dependencies."
+						rows="8"
+					></textarea>
+				</label>
 
-			<div class="wizard-actions">
+				<div class="prompt-starters" aria-label="Prompt starters">
+					{#each AI_PROMPT_STARTERS as starter (starter.label)}
+						<button
+							type="button"
+							class="starter-chip"
+							on:click={() => applyPromptStarter(starter.prompt)}
+						>
+							{starter.label}
+						</button>
+					{/each}
+				</div>
+			</section>
+
+			<div class="wizard-actions ai-actions">
+				<p class="ai-hint">Tip: include sprint count, budget cap, owners, and fixed deadlines.</p>
 				<button
 					type="button"
-					class="primary-btn"
+					class="primary-btn generate-btn"
 					on:click={() => {
 						void generateWorkspace();
 					}}
@@ -242,6 +297,16 @@
 					{$timelineLoading ? 'Generating...' : 'Generate Workspace'}
 				</button>
 			</div>
+
+			<!-- keep legacy field class for spacing parity -->
+			<label class="field ai-field-sr">
+				<span>Project description</span>
+				<textarea
+					bind:value={aiPrompt}
+					placeholder="Example: Build a multi-team launch plan for a mobile app with 3 sprints and clear ownership."
+					rows="7"
+				></textarea>
+			</label>
 
 			{#if aiPartialWarning}
 				<div class="partial-warning-banner">
@@ -286,35 +351,92 @@
 </section>
 
 <style>
+	:global(:root) {
+		--po-bg: #edf3fb;
+		--po-text: #13284a;
+		--po-muted: #5b739a;
+		--po-surface: #ffffff;
+		--po-surface-soft: #f8fbff;
+		--po-border: #cfdcf0;
+		--po-border-strong: #abc2e8;
+		--po-accent: #2563eb;
+		--po-accent-soft: rgba(37, 99, 235, 0.1);
+		--po-danger: #b42318;
+		--po-danger-soft: rgba(180, 35, 24, 0.1);
+		--po-warning: #b54708;
+		--po-warning-soft: rgba(181, 71, 8, 0.12);
+		--po-ai-shell-bg:
+			radial-gradient(circle at 8% -18%, rgba(37, 99, 235, 0.12), transparent 44%),
+			radial-gradient(circle at 92% 0%, rgba(50, 175, 255, 0.1), transparent 34%),
+			var(--po-surface);
+		--po-ai-shell-border: color-mix(in srgb, var(--po-accent) 28%, var(--po-border));
+		--po-ai-shell-shadow: 0 18px 38px rgba(19, 40, 74, 0.16);
+		--po-ai-field-bg: color-mix(in srgb, var(--po-surface) 76%, #f2f7ff);
+		--po-ai-field-border: color-mix(in srgb, var(--po-accent) 22%, var(--po-border));
+		--po-ai-field-focus: color-mix(in srgb, var(--po-accent) 68%, white);
+		--po-ai-chip-bg: color-mix(in srgb, var(--po-accent-soft) 72%, var(--po-surface));
+		--po-ai-chip-border: color-mix(in srgb, var(--po-accent) 30%, var(--po-border));
+		--po-ai-chip-text: #1f4e98;
+		--po-ai-chip-hover-bg: color-mix(in srgb, var(--po-accent-soft) 95%, var(--po-surface));
+		--po-ai-hint: #4f6f9f;
+	}
+
+	:global(:root[data-theme='dark']),
+	:global(.theme-dark) {
+		--po-bg: #101113;
+		--po-text: #edf0f6;
+		--po-muted: #a7adbc;
+		--po-surface: #181a1f;
+		--po-surface-soft: #21242b;
+		--po-border: #353944;
+		--po-border-strong: #535b6a;
+		--po-accent: #b4becf;
+		--po-accent-soft: rgba(180, 190, 207, 0.18);
+		--po-danger: #ffb4b4;
+		--po-danger-soft: rgba(248, 113, 113, 0.18);
+		--po-warning: #ffd89b;
+		--po-warning-soft: rgba(251, 191, 36, 0.18);
+		--po-ai-shell-bg:
+			radial-gradient(circle at 12% -14%, rgba(210, 220, 235, 0.12), transparent 40%),
+			radial-gradient(circle at 86% -8%, rgba(180, 190, 207, 0.08), transparent 38%),
+			var(--po-surface);
+		--po-ai-shell-border: color-mix(in srgb, var(--po-accent) 34%, var(--po-border));
+		--po-ai-shell-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+		--po-ai-field-bg: #13161c;
+		--po-ai-field-border: color-mix(in srgb, var(--po-accent) 30%, var(--po-border));
+		--po-ai-field-focus: color-mix(in srgb, var(--po-accent) 64%, white);
+		--po-ai-chip-bg: color-mix(in srgb, var(--po-accent-soft) 78%, var(--po-surface));
+		--po-ai-chip-border: color-mix(in srgb, var(--po-accent) 34%, var(--po-border));
+		--po-ai-chip-text: #d9dfeb;
+		--po-ai-chip-hover-bg: color-mix(in srgb, var(--po-accent-soft) 100%, var(--po-surface));
+		--po-ai-hint: #b8becc;
+	}
+
 	.project-onboarding {
 		height: 100%;
 		min-height: 0;
 		display: grid;
 		grid-template-rows: 1fr auto;
-		gap: 0.85rem;
+		gap: 0.9rem;
 		padding: 1rem;
-		background:
-			radial-gradient(circle at 12% -10%, rgba(255, 255, 255, 0.08), transparent 34%),
-			#0d0d12;
-		color: #f2f6ff;
+		background: var(--po-bg);
+		color: var(--po-text);
 	}
 
 	.selection-shell,
 	.wizard-shell {
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		border: 1px solid var(--po-border);
 		border-radius: 18px;
-		background: rgba(255, 255, 255, 0.03);
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
-		box-shadow: 0 22px 46px rgba(0, 0, 0, 0.36);
+		background: var(--po-surface);
+		box-shadow: 0 14px 30px rgba(17, 34, 66, 0.12);
 	}
 
 	.selection-shell {
 		display: grid;
 		align-content: center;
 		justify-items: center;
-		gap: 1.2rem;
-		padding: 1.6rem;
+		gap: 1.25rem;
+		padding: 1.7rem;
 	}
 
 	.selection-header {
@@ -323,13 +445,13 @@
 
 	.selection-header h2 {
 		margin: 0;
-		font-size: 1.24rem;
+		font-size: 1.3rem;
 	}
 
 	.selection-header p {
-		margin: 0.42rem 0 0;
-		color: rgba(213, 221, 242, 0.76);
-		font-size: 0.9rem;
+		margin: 0.44rem 0 0;
+		color: var(--po-muted);
+		font-size: 0.95rem;
 	}
 
 	.selection-actions {
@@ -340,71 +462,77 @@
 	}
 
 	.selection-btn {
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		background: rgba(255, 255, 255, 0.04);
+		border: 1px solid var(--po-border);
+		background: var(--po-surface);
 		border-radius: 16px;
-		padding: 1.1rem;
+		padding: 1.15rem;
 		display: grid;
 		grid-template-columns: auto 1fr;
-		gap: 0.78rem;
+		gap: 0.8rem;
 		align-items: center;
 		text-align: left;
 		cursor: pointer;
-		color: #f3f6ff;
+		color: var(--po-text);
 		transition:
-			transform 0.18s ease,
-			background 0.18s ease,
-			border-color 0.18s ease;
+			transform 0.16s ease,
+			background 0.16s ease,
+			border-color 0.16s ease;
 	}
 
 	.selection-btn:hover {
 		transform: translateY(-2px);
-		border-color: rgba(169, 203, 255, 0.72);
-		background: rgba(255, 255, 255, 0.1);
+		border-color: var(--po-border-strong);
+		background: color-mix(in srgb, var(--po-accent-soft) 55%, var(--po-surface));
 	}
 
 	.selection-icon {
-		width: 2.5rem;
-		height: 2.5rem;
+		width: 2.6rem;
+		height: 2.6rem;
 		border-radius: 12px;
 		display: grid;
 		place-items: center;
-		background: rgba(255, 255, 255, 0.08);
-		border: 1px solid rgba(255, 255, 255, 0.15);
+		background: var(--po-accent-soft);
+		border: 1px solid color-mix(in srgb, var(--po-accent) 35%, var(--po-border));
 	}
 
 	.selection-icon svg {
-		width: 1.2rem;
-		height: 1.2rem;
+		width: 1.25rem;
+		height: 1.25rem;
 		stroke: currentColor;
-		stroke-width: 1.7;
+		stroke-width: 1.8;
 		fill: none;
 		stroke-linecap: round;
 		stroke-linejoin: round;
 	}
 
 	.selection-btn.ai .selection-icon svg {
-		stroke: #b7cdfc;
+		stroke: var(--po-accent);
 	}
 
 	.selection-copy strong {
 		display: block;
-		font-size: 0.95rem;
+		font-size: 1rem;
 	}
 
 	.selection-copy small {
 		display: block;
-		margin-top: 0.24rem;
-		color: rgba(205, 214, 236, 0.75);
-		font-size: 0.78rem;
-		line-height: 1.34;
+		margin-top: 0.28rem;
+		color: var(--po-muted);
+		font-size: 0.82rem;
+		line-height: 1.42;
 	}
 
 	.wizard-shell {
 		display: grid;
-		gap: 0.95rem;
+		gap: 1rem;
 		align-content: start;
 		padding: 1rem;
+	}
+
+	.ai-wizard {
+		border-color: var(--po-ai-shell-border);
+		background: var(--po-ai-shell-bg);
+		box-shadow: var(--po-ai-shell-shadow);
 	}
 
 	.wizard-head {
@@ -415,24 +543,25 @@
 
 	.wizard-head h3 {
 		margin: 0;
-		font-size: 0.96rem;
+		font-size: 1rem;
 	}
 
 	.back-btn,
 	.primary-btn {
 		border-radius: 10px;
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		background: rgba(255, 255, 255, 0.06);
-		color: #f2f7ff;
-		padding: 0.5rem 0.76rem;
-		font-size: 0.79rem;
+		border: 1px solid var(--po-border);
+		background: var(--po-surface);
+		color: var(--po-text);
+		padding: 0.52rem 0.8rem;
+		font-size: 0.82rem;
+		font-weight: 600;
 		cursor: pointer;
 	}
 
 	.back-btn:hover,
 	.primary-btn:hover:not(:disabled) {
-		border-color: rgba(173, 203, 255, 0.66);
-		background: rgba(255, 255, 255, 0.12);
+		border-color: var(--po-border-strong);
+		background: color-mix(in srgb, var(--po-accent-soft) 45%, var(--po-surface));
 	}
 
 	.primary-btn:disabled {
@@ -440,31 +569,142 @@
 		cursor: not-allowed;
 	}
 
+	.ai-head {
+		align-items: flex-start;
+	}
+
+	.ai-head-copy {
+		display: grid;
+		gap: 0.28rem;
+	}
+
+	.ai-badge {
+		width: fit-content;
+		border-radius: 999px;
+		padding: 0.24rem 0.56rem;
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--po-ai-chip-text);
+		background: var(--po-ai-chip-bg);
+		border: 1px solid var(--po-ai-chip-border);
+	}
+
+	.ai-head h3 {
+		margin: 0;
+		font-size: 1.08rem;
+	}
+
+	.ai-head p {
+		margin: 0;
+		font-size: 0.82rem;
+		line-height: 1.45;
+		color: var(--po-muted);
+		max-width: 640px;
+	}
+
 	.field {
 		display: grid;
-		gap: 0.38rem;
+		gap: 0.4rem;
+	}
+
+	.field-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.65rem;
 	}
 
 	.field span {
-		font-size: 0.72rem;
+		font-size: 0.74rem;
 		font-weight: 700;
-		letter-spacing: 0.05em;
+		letter-spacing: 0.06em;
 		text-transform: uppercase;
-		color: rgba(188, 199, 224, 0.82);
+		color: var(--po-muted);
 	}
 
 	.field textarea {
 		width: 100%;
 		border-radius: 12px;
-		border: 1px solid rgba(255, 255, 255, 0.16);
-		background: rgba(255, 255, 255, 0.04);
-		color: #f3f7ff;
-		padding: 0.72rem 0.8rem;
+		border: 1px solid var(--po-border);
+		background: var(--po-surface);
+		color: var(--po-text);
+		padding: 0.78rem 0.84rem;
+		font-size: 0.92rem;
+		line-height: 1.45;
 		resize: vertical;
 	}
 
 	.field textarea::placeholder {
-		color: rgba(191, 200, 223, 0.64);
+		color: var(--po-muted);
+	}
+
+	.ai-composer-card {
+		border: 1px solid color-mix(in srgb, var(--po-ai-field-border) 78%, var(--po-border));
+		border-radius: 16px;
+		background: color-mix(in srgb, var(--po-surface) 68%, transparent);
+		padding: 0.95rem;
+		display: grid;
+		gap: 0.72rem;
+	}
+
+	.ai-field {
+		gap: 0.52rem;
+	}
+
+	.ai-field .field-head small {
+		font-size: 0.72rem;
+		color: var(--po-muted);
+	}
+
+	.ai-textarea {
+		min-height: 190px;
+		max-height: 340px;
+		border-radius: 14px;
+		border: 1px solid var(--po-ai-field-border);
+		background: var(--po-ai-field-bg);
+		box-shadow:
+			inset 0 1px 0 color-mix(in srgb, white 20%, transparent),
+			0 0 0 rgba(0, 0, 0, 0);
+		padding: 0.95rem 1rem;
+		font-size: 0.93rem;
+		line-height: 1.5;
+	}
+
+	.ai-textarea:focus {
+		outline: none;
+		border-color: var(--po-ai-field-focus);
+		box-shadow:
+			0 0 0 3px color-mix(in srgb, var(--po-accent-soft) 78%, transparent),
+			inset 0 1px 0 color-mix(in srgb, white 22%, transparent);
+	}
+
+	.prompt-starters {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.46rem;
+	}
+
+	.starter-chip {
+		border: 1px solid var(--po-ai-chip-border);
+		background: var(--po-ai-chip-bg);
+		color: var(--po-ai-chip-text);
+		border-radius: 999px;
+		padding: 0.34rem 0.62rem;
+		font-size: 0.74rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			border-color 0.14s ease,
+			background 0.14s ease,
+			transform 0.14s ease;
+	}
+
+	.starter-chip:hover {
+		background: var(--po-ai-chip-hover-bg);
+		border-color: color-mix(in srgb, var(--po-accent) 56%, var(--po-border));
+		transform: translateY(-1px);
 	}
 
 	.wizard-actions {
@@ -472,19 +712,55 @@
 		justify-content: flex-end;
 	}
 
+	.ai-actions {
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.8rem;
+		flex-wrap: wrap;
+	}
+
+	.ai-hint {
+		margin: 0;
+		font-size: 0.77rem;
+		color: var(--po-ai-hint);
+	}
+
+	.generate-btn {
+		border-color: color-mix(in srgb, var(--po-accent) 42%, var(--po-border));
+		background: linear-gradient(
+			145deg,
+			color-mix(in srgb, var(--po-accent-soft) 88%, var(--po-surface)),
+			color-mix(in srgb, var(--po-accent-soft) 54%, var(--po-surface))
+		);
+		padding: 0.6rem 1.02rem;
+		font-size: 0.84rem;
+	}
+
+	.generate-btn:hover:not(:disabled) {
+		background: linear-gradient(
+			145deg,
+			color-mix(in srgb, var(--po-accent-soft) 100%, var(--po-surface)),
+			color-mix(in srgb, var(--po-accent-soft) 64%, var(--po-surface))
+		);
+	}
+
+	.ai-field-sr {
+		display: none;
+	}
+
 	.template-grid {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 0.72rem;
+		gap: 0.78rem;
 	}
 
 	.template-card {
-		border: 1px solid rgba(255, 255, 255, 0.14);
+		border: 1px solid var(--po-border);
 		border-radius: 14px;
-		background: rgba(255, 255, 255, 0.04);
-		color: #f2f7ff;
+		background: var(--po-surface);
+		color: var(--po-text);
 		text-align: left;
-		padding: 0.8rem;
+		padding: 0.9rem;
 		cursor: pointer;
 		transition:
 			border-color 0.16s ease,
@@ -494,71 +770,89 @@
 
 	.template-card strong {
 		display: block;
-		font-size: 0.87rem;
+		font-size: 0.93rem;
 	}
 
 	.template-card p {
-		margin: 0.35rem 0 0;
-		font-size: 0.76rem;
-		line-height: 1.36;
-		color: rgba(205, 214, 236, 0.76);
+		margin: 0.38rem 0 0;
+		font-size: 0.82rem;
+		line-height: 1.38;
+		color: var(--po-muted);
 	}
 
 	.template-card:hover:not(:disabled) {
 		transform: translateY(-1px);
-		border-color: rgba(174, 205, 255, 0.62);
-		background: rgba(255, 255, 255, 0.1);
+		border-color: var(--po-border-strong);
+		background: color-mix(in srgb, var(--po-accent-soft) 45%, var(--po-surface));
 	}
 
 	.error-banner {
 		border-radius: 12px;
-		border: 1px solid rgba(248, 113, 113, 0.36);
-		background: rgba(220, 38, 38, 0.16);
-		color: #ffd7de;
-		padding: 0.58rem 0.72rem;
-		font-size: 0.8rem;
+		border: 1px solid color-mix(in srgb, var(--po-danger) 45%, var(--po-border));
+		background: var(--po-danger-soft);
+		color: var(--po-danger);
+		padding: 0.62rem 0.76rem;
+		font-size: 0.84rem;
+		font-weight: 600;
 	}
 
 	.partial-warning-banner {
 		border-radius: 12px;
-		border: 1px solid rgba(245, 158, 11, 0.55);
-		background: rgba(245, 158, 11, 0.15);
-		color: #fde7c0;
-		padding: 0.7rem 0.78rem;
+		border: 1px solid color-mix(in srgb, var(--po-warning) 45%, var(--po-border));
+		background: var(--po-warning-soft);
+		color: var(--po-warning);
+		padding: 0.75rem 0.8rem;
 		display: grid;
-		gap: 0.5rem;
+		gap: 0.52rem;
 	}
 
 	.partial-warning-banner strong {
-		font-size: 0.82rem;
+		font-size: 0.85rem;
 	}
 
 	.partial-warning-banner p {
 		margin: 0;
-		font-size: 0.76rem;
-		color: rgba(254, 233, 187, 0.92);
+		font-size: 0.8rem;
+		color: color-mix(in srgb, var(--po-warning) 80%, var(--po-text));
 	}
 
 	.warning-cta-btn {
 		width: fit-content;
 		border-radius: 10px;
-		border: 1px solid rgba(245, 158, 11, 0.66);
-		background: rgba(251, 191, 36, 0.18);
-		color: #fff3d8;
-		padding: 0.45rem 0.72rem;
-		font-size: 0.76rem;
+		border: 1px solid color-mix(in srgb, var(--po-warning) 45%, var(--po-border));
+		background: color-mix(in srgb, var(--po-warning-soft) 75%, var(--po-surface));
+		color: var(--po-warning);
+		padding: 0.48rem 0.76rem;
+		font-size: 0.78rem;
+		font-weight: 600;
 		cursor: pointer;
 	}
 
 	.warning-cta-btn:hover {
-		border-color: rgba(251, 191, 36, 0.82);
-		background: rgba(251, 191, 36, 0.26);
+		border-color: color-mix(in srgb, var(--po-warning) 70%, var(--po-border));
 	}
 
 	@media (max-width: 900px) {
 		.selection-actions,
 		.template-grid {
 			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.ai-head {
+			gap: 0.64rem;
+		}
+
+		.ai-head h3 {
+			font-size: 1rem;
+		}
+
+		.ai-actions {
+			align-items: stretch;
+		}
+
+		.generate-btn {
+			width: 100%;
+			justify-content: center;
 		}
 	}
 </style>

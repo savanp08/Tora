@@ -18,7 +18,7 @@
 	export let formatDateTime: (timestamp: number) => string = (timestamp) =>
 		new Date(timestamp).toLocaleString();
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 
 	const dispatch = createEventDispatcher<{
 		close: void;

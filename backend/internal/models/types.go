@@ -68,15 +68,18 @@ type PersonalItem struct {
 }
 
 type Task struct {
-	RoomID      gocql.UUID  `json:"room_id"`
-	ID          gocql.UUID  `json:"id"`
-	Title       string      `json:"title"`
-	Description string      `json:"description"`
-	Status      string      `json:"status"`
-	SprintName  string      `json:"sprint_name,omitempty"`
-	AssigneeID  *gocql.UUID `json:"assignee_id,omitempty"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	RoomID          gocql.UUID  `json:"room_id"`
+	ID              gocql.UUID  `json:"id"`
+	Title           string      `json:"title"`
+	Description     string      `json:"description"`
+	Status          string      `json:"status"`
+	SprintName      string      `json:"sprint_name,omitempty"`
+	AssigneeID      *gocql.UUID `json:"assignee_id,omitempty"`
+	StatusActorID   string      `json:"status_actor_id,omitempty"`
+	StatusActorName string      `json:"status_actor_name,omitempty"`
+	StatusChangedAt *time.Time  `json:"status_changed_at,omitempty"`
+	CreatedAt       time.Time   `json:"created_at"`
+	UpdatedAt       time.Time   `json:"updated_at"`
 }
 
 type BoardElement struct {

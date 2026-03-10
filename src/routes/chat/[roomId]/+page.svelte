@@ -84,10 +84,7 @@
 		stringifyTaskMessagePayload,
 		toggleTaskItem
 	} from '$lib/utils/chat/task';
-	import {
-		formatBeaconTimestamp,
-		parseBeaconMessagePayload
-	} from '$lib/utils/chat/beacon';
+	import { formatBeaconTimestamp, parseBeaconMessagePayload } from '$lib/utils/chat/beacon';
 	import {
 		buildDiscussionCommentMap,
 		discussionCommentsEndpoint,
@@ -173,7 +170,7 @@
 
 	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://localhost:8080';
+	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
 	const TYPING_PING_INTERVAL_MS = 3000;
 	const TYPING_STOP_DELAY_MS = 5000;
@@ -290,7 +287,9 @@
 		const kindValue = toStringValue(record.kind).toLowerCase();
 		const kind = kindValue === 'task' || kindValue === 'note' ? kindValue : 'message';
 		const beaconData =
-			record.beaconData && typeof record.beaconData === 'object' && !Array.isArray(record.beaconData)
+			record.beaconData &&
+			typeof record.beaconData === 'object' &&
+			!Array.isArray(record.beaconData)
 				? { ...(record.beaconData as Record<string, unknown>) }
 				: null;
 		if (!roomId || !messageId || !id) {
@@ -367,8 +366,9 @@
 			return beaconPayload.beaconAt;
 		}
 		const directCandidate =
-			parseOptionalTimestamp(source.beaconAt ?? source.beacon_at ?? source.scheduledAt ?? source.scheduled_at) ||
-			parseOptionalTimestamp(source.deadline ?? source.dueAt ?? source.due_at);
+			parseOptionalTimestamp(
+				source.beaconAt ?? source.beacon_at ?? source.scheduledAt ?? source.scheduled_at
+			) || parseOptionalTimestamp(source.deadline ?? source.dueAt ?? source.due_at);
 		if (directCandidate > 0) {
 			return directCandidate;
 		}
@@ -1082,7 +1082,9 @@
 
 	function onGlobalQuickAction(event: Event) {
 		const customEvent = event as CustomEvent<{ action?: unknown }>;
-		const action = toStringValue(customEvent.detail?.action).trim().toLowerCase() as GlobalQuickAction;
+		const action = toStringValue(customEvent.detail?.action)
+			.trim()
+			.toLowerCase() as GlobalQuickAction;
 		if (!action) {
 			return;
 		}
@@ -3930,7 +3932,10 @@
 		const isBeaconMessage = payloadType === 'beacon' && payloadContent !== '';
 		const isTaskMessage = payloadType === 'task' && payloadContent !== '';
 		const isMediaMessage =
-			payloadType !== '' && payloadType !== 'task' && payloadType !== 'beacon' && payloadContent !== '';
+			payloadType !== '' &&
+			payloadType !== 'task' &&
+			payloadType !== 'beacon' &&
+			payloadContent !== '';
 		if (!text && !isMediaMessage && !isTaskMessage && !isBeaconMessage) {
 			return;
 		}
@@ -3993,7 +3998,8 @@
 				pending: true
 			};
 		} else if (isBeaconMessage && beaconPayload) {
-			const beaconLabel = beaconPayload.beaconLabel || formatBeaconTimestamp(beaconPayload.beaconAt);
+			const beaconLabel =
+				beaconPayload.beaconLabel || formatBeaconTimestamp(beaconPayload.beaconAt);
 			outgoing = {
 				id: createMessageId(roomId),
 				roomId,
@@ -4485,8 +4491,7 @@
 		const contentText = beaconPayload ? beaconPayload.text : (message.content || '').trim();
 		const normalizedNote = note.trim() || (beaconPayload ? beaconPayload.text : '');
 		const beaconLabel =
-			(beaconPayload?.beaconLabel || '').trim() ||
-			(beaconAt ? formatDateTime(beaconAt) : '');
+			(beaconPayload?.beaconLabel || '').trim() || (beaconAt ? formatDateTime(beaconAt) : '');
 		return {
 			id: createMessageId(normalizedRoomID),
 			roomId: normalizedRoomID,
@@ -5486,8 +5491,7 @@
 	}
 
 	function toggleDiscussionSelectionMode() {
-		const nextMode: MessageActionMode =
-			messageActionMode === 'discussion' ? 'none' : 'discussion';
+		const nextMode: MessageActionMode = messageActionMode === 'discussion' ? 'none' : 'discussion';
 		setMessageActionMode(nextMode);
 	}
 
@@ -5587,9 +5591,7 @@
 			const response = await fetch(
 				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/pins/navigate?before=${encodeURIComponent(String(latestCursor))}`
 			);
-			const body = (await response
-				.json()
-				.catch(() => ({}))) as Record<string, unknown>;
+			const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
 			if (!response.ok) {
 				throw new Error(toStringValue(body.error) || 'Failed to load latest discussion');
 			}
@@ -6156,7 +6158,7 @@
 						? 'Deleted messages cannot be used for discussions'
 						: action === 'pin'
 							? 'Deleted messages cannot be pinned to dashboard'
-					: 'Deleted messages cannot be selected'
+							: 'Deleted messages cannot be selected'
 			);
 			return;
 		}
@@ -6231,9 +6233,7 @@
 		updateRoomDashboardItemNote(event.detail.itemId, event.detail.note);
 	}
 
-	async function onDashboardAddItemRequest(
-		event: CustomEvent<DashboardAddItemRequestDetail>
-	) {
+	async function onDashboardAddItemRequest(event: CustomEvent<DashboardAddItemRequestDetail>) {
 		if (!canAddDashboardItem()) {
 			return;
 		}
@@ -6277,10 +6277,9 @@
 		roomDashboardOrganizePreview = preview;
 
 		const updatesById = new Map(
-			flattenRoomDashboardOrganizePreview(preview).map((entry) => [
-				normalizeMessageID(entry.id),
-				entry
-			] as const)
+			flattenRoomDashboardOrganizePreview(preview).map(
+				(entry) => [normalizeMessageID(entry.id), entry] as const
+			)
 		);
 		if (updatesById.size === 0) {
 			showErrorToast('AI organize returned no dashboard updates.');
@@ -6548,12 +6547,12 @@
 					{isActiveRoomAdmin}
 					{isMobileView}
 					isDarkMode={$isDarkMode}
-						{messageActionMode}
-						{showRoomSearch}
-						isDashboardView={isDashboardActive}
-						isBoardView={isDrawBoardActive}
-						isTaskBoardView={isTaskBoardActive}
-						{isCanvasOpen}
+					{messageActionMode}
+					{showRoomSearch}
+					isDashboardView={isDashboardActive}
+					isBoardView={isDrawBoardActive}
+					isTaskBoardView={isTaskBoardActive}
+					{isCanvasOpen}
 					hasMinimizedCall={activeCall && isCallMinimized}
 					minimizedCallLabel={callDurationLabel}
 					minimizedCallType={callType}
@@ -6561,12 +6560,12 @@
 					on:showMobileList={showMobileRoomList}
 					on:openRoomDetails={openRoomDetails}
 					on:startAudioCall={() => void startOutgoingCall('audio')}
-						on:startVideoCall={() => void startOutgoingCall('video')}
-						on:restoreMinimizedCall={restoreMinimizedCall}
-						on:toggleDashboardView={toggleDashboardView}
-						on:toggleBoardView={toggleBoardView}
-						on:toggleTaskBoardView={toggleTaskBoardView}
-						on:toggleCanvas={toggleCanvas}
+					on:startVideoCall={() => void startOutgoingCall('video')}
+					on:restoreMinimizedCall={restoreMinimizedCall}
+					on:toggleDashboardView={toggleDashboardView}
+					on:toggleBoardView={toggleBoardView}
+					on:toggleTaskBoardView={toggleTaskBoardView}
+					on:toggleCanvas={toggleCanvas}
 					on:toggleRoomSearch={toggleRoomSearch}
 					on:renameRoom={() => void renameRoom(roomId)}
 					on:toggleBreakSelectionMode={toggleBreakSelectionMode}
@@ -6884,7 +6883,7 @@
 											{roomId}
 											items={roomDashboardItems}
 											isDarkMode={$isDarkMode}
-											currentUserId={currentUserId}
+											{currentUserId}
 											organizePreview={roomDashboardOrganizePreview}
 											on:close={() => deactivateWorkspaceModule('dashboard')}
 											on:editNote={onDashboardItemNoteEdit}
@@ -6893,7 +6892,11 @@
 											on:aiOrganizeError={onDashboardOrganizeError}
 										/>
 									{:else}
-										<ProjectWorkspace {roomId} canEdit={isMember && !isRoomExpired} />
+										<ProjectWorkspace
+											{roomId}
+											canEdit={isMember && !isRoomExpired}
+											on:close={() => deactivateWorkspaceModule('tasks')}
+										/>
 									{/if}
 								</section>
 							{/each}
@@ -6922,12 +6925,12 @@
 							hasMoreOlder={hasMoreOlderHistory}
 							on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
 							on:joinBreakRoom={onJoinBreakRoom}
-								on:joinRoom={() => void joinCurrentRoom()}
-								on:messageSelect={onMessageSelected}
-								on:openDiscussion={onDiscussionOpen}
-								on:reply={onReplyRequest}
-								on:toggleReaction={onMessageReactionToggle}
-								on:messageContextAction={onMessageContextAction}
+							on:joinRoom={() => void joinCurrentRoom()}
+							on:messageSelect={onMessageSelected}
+							on:openDiscussion={onDiscussionOpen}
+							on:reply={onReplyRequest}
+							on:toggleReaction={onMessageReactionToggle}
+							on:messageContextAction={onMessageContextAction}
 							on:editSelected={onSelectedMessageEdit}
 							on:deleteSelected={onSelectedMessageDelete}
 							on:requestOlder={onRequestOlderHistory}
@@ -6954,15 +6957,15 @@
 					</div>
 				{/if}
 				{#if isMember && !isDrawBoardActive && !isDashboardActive && !isTaskBoardActive}
-						<ChatComposer
-							bind:draftMessage
-							bind:attachedFile
-							{roomId}
-							disabled={isRoomExpired}
-							isEphemeralRoom={isActiveRoomEphemeral}
-							{activeReply}
-							isDarkMode={$isDarkMode}
-							{currentUsername}
+					<ChatComposer
+						bind:draftMessage
+						bind:attachedFile
+						{roomId}
+						disabled={isRoomExpired}
+						isEphemeralRoom={isActiveRoomEphemeral}
+						{activeReply}
+						isDarkMode={$isDarkMode}
+						{currentUsername}
 						aiEnabled={activeRoomAllowsAI}
 						mentionCandidates={currentOnlineMembers.map((member) => member.name)}
 						messageLimit={MESSAGE_TEXT_MAX_BYTES}
@@ -7059,9 +7062,11 @@
 		activeModules={activeWorkspaceModules}
 		selectedModule={selectedWorkspaceModule}
 		addableModules={addableWorkspaceModules}
+		isDarkMode={$isDarkMode}
 		on:selectModule={onWorkspaceModuleSelect}
 		on:addModule={onWorkspaceModuleAdd}
 		on:limitReached={onWorkspaceModuleLimit}
+		on:toggleTheme={toggleThemePreference}
 	/>
 {/if}
 
