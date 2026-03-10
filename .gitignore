@@ -8,7 +8,7 @@ node_modules
 /.svelte-kit
 /build
 /Users
-/projects
+/.claude
 
 # OS
 .DS_Store
