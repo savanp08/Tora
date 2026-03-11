@@ -492,34 +492,36 @@ func buildCPPDataInjector(dataFiles []ExecutionFile) (string, error) {
 		parentDir := strings.TrimSpace(pathDir(filePath))
 
 		builder.WriteString(fmt.Sprintf("    // Restore %s\n", filePath))
+		builder.WriteString("    {\n")
 		builder.WriteString(
-			fmt.Sprintf("    const unsigned char %s[] = {%s};\n", arrayName, arrayLiteral),
+			fmt.Sprintf("      const unsigned char %s[] = {%s};\n", arrayName, arrayLiteral),
 		)
 		builder.WriteString(
-			fmt.Sprintf("    const std::size_t %s_len = %d;\n", arrayName, declaredLength),
+			fmt.Sprintf("      const std::size_t %s_len = %d;\n", arrayName, declaredLength),
 		)
 		if parentDir != "" && parentDir != "." {
 			builder.WriteString(
 				fmt.Sprintf(
-					"    std::filesystem::create_directories(\"%s\");\n",
+					"      std::filesystem::create_directories(\"%s\");\n",
 					escapeCPPString(parentDir),
 				),
 			)
 		}
 		builder.WriteString(
 			fmt.Sprintf(
-				"    std::ofstream out(\"%s\", std::ios::binary);\n",
+				"      std::ofstream out(\"%s\", std::ios::binary);\n",
 				escapeCPPString(filePath),
 			),
 		)
-		builder.WriteString("    if (out) {\n")
+		builder.WriteString("      if (out) {\n")
 		builder.WriteString(
 			fmt.Sprintf(
-				"      out.write(reinterpret_cast<const char*>(%s), static_cast<std::streamsize>(%s_len));\n",
+				"        out.write(reinterpret_cast<const char*>(%s), static_cast<std::streamsize>(%s_len));\n",
 				arrayName,
 				arrayName,
 			),
 		)
+		builder.WriteString("      }\n")
 		builder.WriteString("    }\n\n")
 	}
 
