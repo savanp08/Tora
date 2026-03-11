@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -27,6 +28,7 @@ const (
 	defaultMemoryLimitBytes  = 209715200
 	defaultMaxProcessCount   = 64
 	defaultMaxOpenFiles      = 64
+	maxLoggedResponseBytes   = 64 * 1024
 	queueBusyErrorMessage    = "execution queue is full"
 	shutdownErrorMessage     = "execution service is shutting down"
 	timeoutErrorMessage      = "execution timed out"
@@ -287,6 +289,16 @@ func (m *ExecutionManager) executeAgainstPiston(
 	if err != nil {
 		return ExecutionResponse{}, err
 	}
+	log.Printf(
+		"[execution] sending request to piston endpoint=%q language=%q version=%q main_file=%q file_count=%d order=%s\n[execution] workspace prepared for piston:\n%s",
+		m.pistonEndpoint,
+		secureRequest.Language,
+		secureRequest.Version,
+		secureRequest.MainFile,
+		len(secureRequest.Files),
+		joinQuoted(executionFileNames(secureRequest.Files)),
+		renderExecutionFilesForLog(secureRequest.Files),
+	)
 
 	payload, err := json.Marshal(secureRequest)
 	if err != nil {
@@ -335,6 +347,11 @@ func (m *ExecutionManager) executeAgainstPiston(
 			Err:        readErr,
 		}
 	}
+	log.Printf(
+		"[execution] piston response status=%d body=%s",
+		httpResponse.StatusCode,
+		truncateForLog(string(responseBody), maxLoggedResponseBytes),
+	)
 
 	response := ExecutionResponse{
 		StatusCode: httpResponse.StatusCode,
@@ -455,4 +472,46 @@ func HTTPStatus(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func executionFileNames(files []ExecutionFile) []string {
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, strings.TrimSpace(file.Name))
+	}
+	return names
+}
+
+func renderExecutionFilesForLog(files []ExecutionFile) string {
+	if len(files) == 0 {
+		return "(empty workspace)"
+	}
+	lines := make([]string, 0, len(files)+1)
+	lines = append(lines, "workspace/")
+	for index, file := range files {
+		name := strings.TrimSpace(file.Name)
+		if name == "" {
+			name = "(unnamed)"
+		}
+		lines = append(lines, fmt.Sprintf("  %d. %s", index, name))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func truncateForLog(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return fmt.Sprintf("%s...[truncated %d bytes]", value[:limit], len(value)-limit)
+}
+
+func joinQuoted(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, fmt.Sprintf("%q", value))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }

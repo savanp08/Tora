@@ -4,7 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"path"
+	"sort"
 	"strings"
 
 	"github.com/savanp08/converse/internal/execution"
@@ -87,10 +91,39 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rawFileNames := make([]string, 0, len(req.Files))
+	for _, file := range req.Files {
+		rawFileNames = append(rawFileNames, strings.TrimSpace(file.Name))
+	}
+	log.Printf(
+		"[execution] received request language=%q main_file=%q files=%d raw_names=%s",
+		req.Language,
+		req.MainFile,
+		len(req.Files),
+		joinQuoted(rawFileNames),
+	)
+
+	normalizedMainFile, mainFileErr := normalizeExecutionWorkspacePath(req.MainFile)
+	if mainFileErr != nil {
+		recordExecutionStatus(req.Language, "error")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": mainFileErr.Error()})
+		return
+	}
+	req.MainFile = normalizedMainFile
+
 	decodedFiles := make([]execution.ExecutionFile, 0, len(req.Files))
 	mainFileIndex := -1
 	for _, file := range req.Files {
-		fileName := strings.TrimSpace(file.Name)
+		fileName, fileNameErr := normalizeExecutionWorkspacePath(file.Name)
+		if fileNameErr != nil {
+			recordExecutionStatus(req.Language, "error")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": fileNameErr.Error()})
+			return
+		}
 		if fileName == "" {
 			recordExecutionStatus(req.Language, "error")
 			w.Header().Set("Content-Type", "application/json")
@@ -125,11 +158,16 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if mainFileIndex > 0 {
-		mainFile := decodedFiles[mainFileIndex]
-		copy(decodedFiles[1:mainFileIndex+1], decodedFiles[0:mainFileIndex])
-		decodedFiles[0] = mainFile
+	organizedFiles, organizedMainFile, organizeErr := organizeFilesForMainFile(decodedFiles, req.MainFile)
+	if organizeErr != nil {
+		recordExecutionStatus(req.Language, "error")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": organizeErr.Error()})
+		return
 	}
+	decodedFiles = organizedFiles
+	req.MainFile = organizedMainFile
 
 	executionRequest := execution.ExecutionRequest{
 		Language: req.Language,
@@ -137,6 +175,13 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		Stdin:    req.Stdin,
 		Files:    decodedFiles,
 	}
+	log.Printf(
+		"[execution] organized request language=%q main_file=%q order=%s\n[execution] workspace tree before piston:\n%s",
+		executionRequest.Language,
+		executionRequest.MainFile,
+		joinQuoted(fileNames(executionRequest.Files)),
+		renderFileTree(executionRequest.Files),
+	)
 
 	response, err := DefaultExecutionManager.Execute(r.Context(), executionRequest)
 	if err != nil {
@@ -182,6 +227,119 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+func normalizeExecutionWorkspacePath(raw string) (string, error) {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	for strings.HasPrefix(trimmed, "./") {
+		trimmed = strings.TrimPrefix(trimmed, "./")
+	}
+	trimmed = strings.TrimLeft(trimmed, "/")
+	if trimmed == "" {
+		return "", nil
+	}
+
+	cleaned := path.Clean(trimmed)
+	if cleaned == "." || cleaned == "" {
+		return "", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("invalid file path %q: parent directory traversal is not allowed", raw)
+	}
+	return cleaned, nil
+}
+
+func organizeFilesForMainFile(
+	files []execution.ExecutionFile,
+	mainFile string,
+) ([]execution.ExecutionFile, string, error) {
+	if len(files) == 0 {
+		return nil, mainFile, nil
+	}
+
+	organized := make([]execution.ExecutionFile, 0, len(files))
+	mainDir := path.Dir(mainFile)
+	if mainDir == "." {
+		mainDir = ""
+	}
+	rebasedMainFile := mainFile
+	if mainDir != "" {
+		rebasedMainFile = strings.TrimPrefix(mainFile, mainDir+"/")
+	}
+
+	seenNames := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		nextName := file.Name
+		if mainDir != "" && strings.HasPrefix(nextName, mainDir+"/") {
+			nextName = strings.TrimPrefix(nextName, mainDir+"/")
+		}
+		if strings.TrimSpace(nextName) == "" {
+			return nil, "", errors.New("file path cannot be empty after path normalization")
+		}
+		if _, exists := seenNames[nextName]; exists {
+			return nil, "", fmt.Errorf(
+				"duplicate file path %q after organizing workspace relative to main_file %q",
+				nextName,
+				mainFile,
+			)
+		}
+		seenNames[nextName] = struct{}{}
+		organized = append(organized, execution.ExecutionFile{
+			Name:    nextName,
+			Content: file.Content,
+		})
+	}
+
+	mainFileIndex := -1
+	for index := range organized {
+		if organized[index].Name == rebasedMainFile {
+			mainFileIndex = index
+			break
+		}
+	}
+	if mainFileIndex < 0 {
+		return nil, "", errors.New("main_file could not be resolved after workspace organization")
+	}
+	if mainFileIndex > 0 {
+		mainEntry := organized[mainFileIndex]
+		copy(organized[1:mainFileIndex+1], organized[0:mainFileIndex])
+		organized[0] = mainEntry
+	}
+
+	return organized, rebasedMainFile, nil
+}
+
+func fileNames(files []execution.ExecutionFile) []string {
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, file.Name)
+	}
+	return names
+}
+
+func renderFileTree(files []execution.ExecutionFile) string {
+	if len(files) == 0 {
+		return "(empty workspace)"
+	}
+	names := fileNames(files)
+	sort.Strings(names)
+	lines := make([]string, 0, len(names)+1)
+	lines = append(lines, "workspace/")
+	for _, name := range names {
+		lines = append(lines, fmt.Sprintf("  - %s", name))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func joinQuoted(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, fmt.Sprintf("%q", value))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func parseExecutionResponse(body []byte) (codeExecutionResponse, error) {
