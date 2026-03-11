@@ -139,6 +139,7 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 	responseText, err := DefaultAIRouter.GenerateChatResponse(r.Context(), aiPrompt)
 	if err != nil {
 		if errors.Is(err, ai.ErrAllAIProvidersExhausted) {
+			println("AI response generation failed: all providers exhausted")
 			writeAIChatError(w, http.StatusServiceUnavailable, "All AI providers exhausted")
 			return
 		}

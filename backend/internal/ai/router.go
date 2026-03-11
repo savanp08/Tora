@@ -51,9 +51,13 @@ func (r *AIRouter) RouteRequest(
 	request func(context.Context, Summarizer) (any, error),
 ) (any, error) {
 	if request == nil {
+		// println("AIRouter: nil request provided")
+		println("nil req provided");
 		return nil, ErrAllAIProvidersExhausted
 	}
 	if r == nil || len(r.providers) == 0 {
+		// println("AIRouter: no providers provided")
+		println("no providers provided");
 		return nil, ErrAllAIProvidersExhausted
 	}
 
@@ -76,8 +80,10 @@ func (r *AIRouter) RouteRequest(
 	}
 
 	if lastErr != nil {
+		println("All AI providers exhausted. Last error: " + lastErr.Error())
 		return nil, ErrAllAIProvidersExhausted
 	}
+	println("All AI providers exhausted with no specific error.")
 	return nil, ErrAllAIProvidersExhausted
 }
 
@@ -94,6 +100,7 @@ func (r *AIRouter) GenerateRollingSummary(
 	}
 	summary, ok := result.([]byte)
 	if !ok {
+		println("AIRouter: unexpected result type from provider")
 		return nil, ErrAllAIProvidersExhausted
 	}
 	return summary, nil
@@ -108,6 +115,8 @@ func (r *AIRouter) GenerateChatResponse(ctx context.Context, prompt string) (str
 	}
 	response, ok := result.(string)
 	if !ok {
+		println("AIRouter: unexpected result type from provider")
+
 		return "", ErrAllAIProvidersExhausted
 	}
 	return response, nil
