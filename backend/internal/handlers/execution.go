@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"path"
-	"sort"
 	"strings"
 
 	"github.com/savanp08/converse/internal/execution"
@@ -97,18 +95,6 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rawFileNames := make([]string, 0, len(req.Files))
-	for _, file := range req.Files {
-		rawFileNames = append(rawFileNames, strings.TrimSpace(file.Name))
-	}
-	log.Printf(
-		"[execution] received request language=%q main_file=%q files=%d raw_names=%s",
-		req.Language,
-		req.MainFile,
-		len(req.Files),
-		joinQuoted(rawFileNames),
-	)
-
 	normalizedMainFile, mainFileErr := normalizeExecutionWorkspacePath(req.MainFile)
 	if mainFileErr != nil {
 		recordExecutionStatus(req.Language, "error")
@@ -181,13 +167,6 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		Stdin:    req.Stdin,
 		Files:    decodedFiles,
 	}
-	log.Printf(
-		"[execution] organized request language=%q main_file=%q order=%s\n[execution] workspace tree before piston:\n%s",
-		executionRequest.Language,
-		executionRequest.MainFile,
-		joinQuoted(fileNames(executionRequest.Files)),
-		renderFileTree(executionRequest.Files),
-	)
 
 	response, err := DefaultExecutionManager.Execute(r.Context(), executionRequest)
 	if err != nil {
@@ -313,39 +292,6 @@ func organizeFilesForMainFile(
 	}
 
 	return organized, rebasedMainFile, nil
-}
-
-func fileNames(files []execution.ExecutionFile) []string {
-	names := make([]string, 0, len(files))
-	for _, file := range files {
-		names = append(names, file.Name)
-	}
-	return names
-}
-
-func renderFileTree(files []execution.ExecutionFile) string {
-	if len(files) == 0 {
-		return "(empty workspace)"
-	}
-	names := fileNames(files)
-	sort.Strings(names)
-	lines := make([]string, 0, len(names)+1)
-	lines = append(lines, "workspace/")
-	for _, name := range names {
-		lines = append(lines, fmt.Sprintf("  - %s", name))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func joinQuoted(values []string) string {
-	if len(values) == 0 {
-		return "[]"
-	}
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, fmt.Sprintf("%q", value))
-	}
-	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func parseExecutionResponse(body []byte) (codeExecutionResponse, error) {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,7 +39,8 @@ for i = 1, keyCount do
   if maxAllowed > 0 then
     local current = tonumber(redis.call("GET", KEYS[i]) or "0")
     if current >= maxAllowed then
-      return {0, i, current}
+      local ttl = tonumber(redis.call("TTL", KEYS[i]) or "0")
+      return {0, i, current, ttl}
     end
   end
 end
@@ -56,7 +58,7 @@ for i = 1, keyCount do
   end
 end
 
-return {1, 0, 0}
+return {1, 0, 0, 0}
 `)
 
 	privateAILimitsMemoryState struct {
@@ -80,9 +82,13 @@ type privateAILimitCheck struct {
 }
 
 type privateAILimitExceededError struct {
-	Scope  string
-	Window string
-	Limit  int64
+	Scope      string
+	Window     string
+	Limit      int64
+	Current    int64
+	Identifier string
+	ResetAt    time.Time
+	ResetIn    time.Duration
 }
 
 func (e *privateAILimitExceededError) Error() string {
@@ -221,7 +227,7 @@ func enforcePrivateAILimitsViaRedis(
 		return err
 	}
 
-	allowed, blockedIndex := parsePrivateAILimitScriptResult(result)
+	allowed, blockedIndex, blockedCount, blockedTTLSeconds := parsePrivateAILimitScriptResult(result)
 	if allowed {
 		recordPrivateAILimitAllowed(checks)
 		return nil
@@ -229,10 +235,24 @@ func enforcePrivateAILimitsViaRedis(
 
 	blockedCheck := privateAILimitCheckByScriptIndex(checks, blockedIndex)
 	recordPrivateAILimitBlocked(blockedCheck.MetricTag)
+	resetIn := time.Duration(blockedTTLSeconds) * time.Second
+	if resetIn <= 0 {
+		resetIn = blockedCheck.Duration
+	}
+	if resetIn < 0 {
+		resetIn = 0
+	}
+	if blockedCount <= 0 {
+		blockedCount = blockedCheck.Limit
+	}
 	return &privateAILimitExceededError{
-		Scope:  blockedCheck.Scope,
-		Window: blockedCheck.Window,
-		Limit:  blockedCheck.Limit,
+		Scope:      blockedCheck.Scope,
+		Window:     blockedCheck.Window,
+		Limit:      blockedCheck.Limit,
+		Current:    blockedCount,
+		Identifier: blockedCheck.Value,
+		ResetIn:    resetIn,
+		ResetAt:    time.Now().UTC().Add(resetIn),
 	}
 }
 
@@ -262,10 +282,18 @@ func enforcePrivateAILimitsInMemory(checks []privateAILimitCheck) error {
 		}
 		if entry.Count >= check.Limit {
 			recordPrivateAILimitBlocked(check.MetricTag)
+			resetIn := time.Until(entry.ExpiresAt)
+			if resetIn < 0 {
+				resetIn = 0
+			}
 			return &privateAILimitExceededError{
-				Scope:  check.Scope,
-				Window: check.Window,
-				Limit:  check.Limit,
+				Scope:      check.Scope,
+				Window:     check.Window,
+				Limit:      check.Limit,
+				Current:    entry.Count,
+				Identifier: check.Value,
+				ResetIn:    resetIn,
+				ResetAt:    entry.ExpiresAt.UTC(),
 			}
 		}
 	}
@@ -288,14 +316,22 @@ func enforcePrivateAILimitsInMemory(checks []privateAILimitCheck) error {
 	return nil
 }
 
-func parsePrivateAILimitScriptResult(result any) (bool, int64) {
+func parsePrivateAILimitScriptResult(result any) (bool, int64, int64, int64) {
 	values, ok := result.([]any)
 	if !ok || len(values) < 2 {
-		return true, 0
+		return true, 0, 0, 0
 	}
 	decision := toInt64(values[0])
 	blockedIndex := toInt64(values[1])
-	return decision == 1, blockedIndex
+	blockedCount := int64(0)
+	ttlSeconds := int64(0)
+	if len(values) > 2 {
+		blockedCount = toInt64(values[2])
+	}
+	if len(values) > 3 {
+		ttlSeconds = toInt64(values[3])
+	}
+	return decision == 1, blockedIndex, blockedCount, ttlSeconds
 }
 
 func privateAILimitCheckByScriptIndex(checks []privateAILimitCheck, scriptIndex int64) privateAILimitCheck {
@@ -381,6 +417,53 @@ func normalizePrivateAILimitIP(raw string) string {
 		return ""
 	}
 	return normalized
+}
+
+func logPrivateAILimitExceeded(
+	endpoint string,
+	exceeded *privateAILimitExceededError,
+	userID string,
+	roomID string,
+	ipAddress string,
+	deviceID string,
+) {
+	if exceeded == nil {
+		return
+	}
+
+	resetIn := exceeded.ResetIn
+	if resetIn <= 0 && !exceeded.ResetAt.IsZero() {
+		resetIn = time.Until(exceeded.ResetAt)
+	}
+	if resetIn < 0 {
+		resetIn = 0
+	}
+
+	resetAt := ""
+	if !exceeded.ResetAt.IsZero() {
+		resetAt = exceeded.ResetAt.UTC().Format(time.RFC3339)
+	}
+
+	normalizedIP := netutil.NormalizeIP(ipAddress)
+	if normalizedIP == "" {
+		normalizedIP = strings.TrimSpace(ipAddress)
+	}
+
+	log.Printf(
+		"[ai-limit] blocked endpoint=%q scope=%q window=%q current=%d limit=%d reset_in=%s reset_at=%q scope_value=%q user_id=%q room_id=%q ip=%q device_id=%q",
+		strings.TrimSpace(endpoint),
+		strings.TrimSpace(exceeded.Scope),
+		strings.TrimSpace(exceeded.Window),
+		exceeded.Current,
+		exceeded.Limit,
+		resetIn.Round(time.Second).String(),
+		resetAt,
+		strings.TrimSpace(exceeded.Identifier),
+		normalizeIdentifier(userID),
+		normalizeRoomID(roomID),
+		normalizedIP,
+		normalizeDeviceIdentifier(deviceID),
+	)
 }
 
 func toInt64(value any) int64 {

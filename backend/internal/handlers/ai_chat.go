@@ -127,6 +127,7 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 	if limitErr := enforcePrivateAIRequestLimits(r.Context(), userID, roomID, ipAddress, deviceID); limitErr != nil {
 		var exceeded *privateAILimitExceededError
 		if errors.As(limitErr, &exceeded) {
+			logPrivateAILimitExceeded("private_ai_chat", exceeded, userID, roomID, ipAddress, deviceID)
 			writeAIChatError(w, http.StatusTooManyRequests, exceeded.PublicMessage())
 			return
 		}

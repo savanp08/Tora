@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
 	"github.com/savanp08/converse/internal/ai"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -171,6 +172,12 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 
 	for sprintIndex := range generated.Sprints {
 		if limitErr := enforcePrivateAIRequestLimits(r.Context(), userID, roomID, clientIP, deviceID); limitErr != nil {
+			var exceeded *privateAILimitExceededError
+			if errors.As(limitErr, &exceeded) {
+				logPrivateAILimitExceeded("ai_timeline_generate_sprint", exceeded, userID, roomID, clientIP, deviceID)
+			} else {
+				log.Printf("[ai-limit] timeline_generate_sprint limiter error user_id=%q room_id=%q err=%v", normalizeIdentifier(userID), normalizeRoomID(roomID), limitErr)
+			}
 			generated.IsPartial = true
 			generated.MissingSprints = append(generated.MissingSprints, remainingSprintNames(generated.Sprints, sprintIndex)...)
 			break
@@ -295,6 +302,7 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 	if limitErr := enforcePrivateAIRequestLimits(r.Context(), userID, roomID, clientIP, deviceID); limitErr != nil {
 		var exceeded *privateAILimitExceededError
 		if errors.As(limitErr, &exceeded) {
+			logPrivateAILimitExceeded("ai_timeline_edit", exceeded, userID, roomID, clientIP, deviceID)
 			writeAITimelineError(w, http.StatusTooManyRequests, exceeded.PublicMessage())
 			return
 		}

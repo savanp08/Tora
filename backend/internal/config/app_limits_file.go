@@ -215,7 +215,6 @@ var (
 	}
 
 	appLimitPatternCache sync.Map
-	appLimitsDefaultsLog sync.Once
 
 	appLimitsState struct {
 		mu           sync.Mutex
@@ -270,9 +269,6 @@ func resolveAppLimitsFilePath() string {
 func readAppLimitsFromFile(path string) AppLimits {
 	limits := defaultAppLimits
 	if strings.TrimSpace(path) == "" {
-		appLimitsDefaultsLog.Do(func() {
-			log.Printf("[limits] no limits.ts file found (set APP_LIMITS_FILE to override); using built-in defaults")
-		})
 		return limits
 	}
 
