@@ -3,6 +3,8 @@ import { APP_LIMITS } from '$lib/config/limits';
 const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 const VIDEO_LIMIT_BYTES = APP_LIMITS.media.maxVideoBytes;
+export const STORAGE_FULL_UPLOAD_MESSAGE =
+	'Server storage is temporarily full. Uploads will be available again once older rooms expire.';
 
 export type MediaMessageType = 'image' | 'video' | 'file' | 'audio';
 
@@ -54,6 +56,9 @@ export async function uploadToR2(
 		presignedData = (await presignedRes
 			.json()
 			.catch(() => ({}))) as Partial<PresignedUploadResponse> & Record<string, unknown>;
+		if (presignedRes.status === 507) {
+			throw new Error(STORAGE_FULL_UPLOAD_MESSAGE);
+		}
 		if (
 			!presignedRes.ok ||
 			!presignedData.uploadUrl ||
@@ -65,6 +70,9 @@ export async function uploadToR2(
 		}
 	} catch (error) {
 		presignedError = error instanceof Error ? error.message : 'Failed to request upload URL';
+		if (presignedError === STORAGE_FULL_UPLOAD_MESSAGE) {
+			throw new Error(STORAGE_FULL_UPLOAD_MESSAGE);
+		}
 	}
 
 	if (presignedData?.uploadUrl && presignedData.fileUrl && presignedData.fileId) {
@@ -160,6 +168,9 @@ async function uploadViaProxy(
 		.json()
 		.catch(() => ({}))) as Partial<PresignedUploadResponse> & Record<string, unknown>;
 	if (!res.ok || !data.fileUrl || !data.fileId) {
+		if (res.status === 507) {
+			throw new Error(STORAGE_FULL_UPLOAD_MESSAGE);
+		}
 		throw new Error(typeof data.error === 'string' ? data.error : 'Upload failed');
 	}
 

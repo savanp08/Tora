@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { tick } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
 	import type { OnlineMember } from '$lib/types/chat';
 	import { currentUser } from '$lib/store';
 	import { activeContext } from '$lib/stores/jiraContext';
@@ -24,6 +24,8 @@
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const STORAGE_FULL_UPLOAD_MESSAGE =
+		'Server storage is temporarily full. Uploads will be available again once older rooms expire.';
 
 	const STATUS_OPTIONS = [
 		{ value: 'todo', label: 'To Do' },
@@ -188,6 +190,8 @@
 	let selectedSupportTaskIds: string[] = [];
 	let selectedConcernedMemberIds: string[] = [];
 	let supportTicketCreating = false;
+	let boardToastMessage = '';
+	let boardToastTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Per-sprint edit mode (checkboxes + add/delete actions only shown when editing)
 	let sprintEditKeys = new Set<string>();
@@ -197,6 +201,13 @@
 	let deletingTaskIds: string[] = [];
 	let ownerOptions: OwnerOption[] = [];
 	let canCreateSprintTask = false;
+
+	onDestroy(() => {
+		if (boardToastTimer) {
+			clearTimeout(boardToastTimer);
+			boardToastTimer = null;
+		}
+	});
 
 	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: sessionUsername = ($currentUser?.username || '').trim();
@@ -772,11 +783,30 @@
 	}
 
 	async function parseErrorMessage(response: Response) {
+		if (response.status === 507) {
+			showBoardToast(STORAGE_FULL_UPLOAD_MESSAGE);
+			return STORAGE_FULL_UPLOAD_MESSAGE;
+		}
 		const payload = (await response.json().catch(() => null)) as {
 			error?: string;
 			message?: string;
 		} | null;
 		return payload?.error?.trim() || payload?.message?.trim() || `HTTP ${response.status}`;
+	}
+
+	function showBoardToast(message: string) {
+		const normalizedMessage = message.trim();
+		if (!normalizedMessage) {
+			return;
+		}
+		boardToastMessage = normalizedMessage;
+		if (boardToastTimer) {
+			clearTimeout(boardToastTimer);
+		}
+		boardToastTimer = setTimeout(() => {
+			boardToastMessage = '';
+			boardToastTimer = null;
+		}, 3500);
 	}
 
 	function clearBoardError() {
@@ -1873,6 +1903,9 @@
 <svelte:window on:click={onWindowClick} />
 
 <section class="task-board" aria-label="Task board">
+	{#if boardToastMessage}
+		<div class="board-toast" role="status" aria-live="polite">{boardToastMessage}</div>
+	{/if}
 	<header class="board-header">
 		<div class="header-main">
 			<h2>{boardTitle}</h2>
@@ -2636,6 +2669,16 @@ t
 		grid-template-rows: auto auto auto minmax(0, 1fr);
 		gap: 0.8rem;
 		background: var(--workspace-taskboard-bg);
+	}
+
+	.board-toast {
+		padding: 0.65rem 0.8rem;
+		border-radius: 12px;
+		border: 1px solid color-mix(in srgb, var(--tb-error-text) 45%, transparent);
+		background: color-mix(in srgb, var(--tb-error-text) 16%, transparent);
+		color: var(--tb-error-text);
+		font-size: 0.84rem;
+		font-weight: 600;
 	}
 
 	.board-header {

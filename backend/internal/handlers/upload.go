@@ -34,9 +34,10 @@ var (
 )
 
 const (
-	uploadScopeUser   = "user"
-	uploadScopeIP     = "ip"
-	uploadScopeDevice = "device"
+	uploadScopeUser      = "user"
+	uploadScopeIP        = "ip"
+	uploadScopeDevice    = "device"
+	r2StorageFullMessage = "Server storage is temporarily full. Uploads will be available again once older rooms expire."
 )
 
 type uploadRateLimitRule struct {
@@ -248,7 +249,20 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	uploadURL, fileURL, fileID, err := h.r2.GetPresignedPutURL(filename)
+	if err := h.enforceR2StorageCapacity(r.Context()); err != nil {
+		if errors.Is(err, storage.ErrR2StorageFull) {
+			writeR2StorageFullError(w)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Storage quota service unavailable",
+		})
+		return
+	}
+
+	normalizedRoomID := normalizeRoomID(req.RoomID)
+	uploadURL, fileURL, fileID, err := h.r2.GetPresignedPutURL(filename, normalizedRoomID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -265,10 +279,14 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 		FileID:    fileID,
 	})
 
-	normalizedRoomID := normalizeRoomID(req.RoomID)
 	if normalizedRoomID != "" {
 		objectKey := h.resolveObjectKeyFromFileURL(fileURL)
 		h.trackUploadedFile(r.Context(), normalizedRoomID, objectKey)
+	}
+	if req.FileSize > 0 {
+		if _, usageErr := storage.IncrementR2UsageBytes(r.Context(), h.redis, req.FileSize); usageErr != nil {
+			log.Printf("[upload] failed to increment r2 usage bytes err=%v", usageErr)
+		}
 	}
 
 	if h.tracker != nil {
@@ -321,6 +339,21 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	if err := h.enforceR2StorageCapacity(r.Context()); err != nil {
+		if errors.Is(err, storage.ErrR2StorageFull) {
+			writeR2StorageFullError(w)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Storage quota service unavailable",
+		})
+		return
+	}
+
+	roomIDFromQuery := normalizeRoomID(r.URL.Query().Get("roomId"))
+	alreadyCounted := strings.TrimSpace(r.URL.Query().Get("counted")) == "1"
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxMultipartBytes())
 	multipartReader, err := r.MultipartReader()
@@ -408,10 +441,25 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			uploadRoomID := normalizeRoomID(firstNonEmpty(roomIDFromQuery, roomIDFromForm))
+			if err := h.enforceR2StorageCapacity(r.Context()); err != nil {
+				_ = part.Close()
+				if errors.Is(err, storage.ErrR2StorageFull) {
+					writeR2StorageFullError(w)
+					return
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "Storage quota service unavailable",
+				})
+				return
+			}
+
 			var uploadErr error
 			fileURL, fileID, fileSize, uploadErr = h.r2.PutObject(
 				r.Context(),
 				filename,
+				uploadRoomID,
 				fileReader,
 				fileType,
 				maxUploadFileSize(),
@@ -460,7 +508,11 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 	monitor.TotalUploads.WithLabelValues("success").Inc()
 	monitor.UploadBytes.Observe(float64(fileSize))
 
-	alreadyCounted := strings.TrimSpace(r.URL.Query().Get("counted")) == "1"
+	if !alreadyCounted && fileSize > 0 {
+		if _, usageErr := storage.IncrementR2UsageBytes(r.Context(), h.redis, fileSize); usageErr != nil {
+			log.Printf("[upload] failed to increment r2 usage bytes err=%v", usageErr)
+		}
+	}
 	if h.tracker != nil && !alreadyCounted {
 		h.tracker.RecordUpload(fileSize)
 	}
@@ -769,6 +821,24 @@ func (h *UploadHandler) trackUploadedFile(ctx context.Context, roomID, objectKey
 	if err := h.redis.Client.Expire(ctx, filesKey, nextTTL).Err(); err != nil {
 		log.Printf("[upload] failed to set room file index ttl room=%s key=%s err=%v", normalizedRoomID, filesKey, err)
 	}
+}
+
+func (h *UploadHandler) enforceR2StorageCapacity(ctx context.Context) error {
+	if h == nil {
+		return fmt.Errorf("upload handler is not configured")
+	}
+	return storage.EnsureR2WriteAllowed(ctx, h.redis, storage.R2HardCapBytes)
+}
+
+func writeR2StorageFullError(w http.ResponseWriter) {
+	if w == nil {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInsufficientStorage)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": r2StorageFullMessage,
+	})
 }
 
 func enforceUploadActionRateLimits(

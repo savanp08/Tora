@@ -57,6 +57,7 @@ type ExpiryEmailQueue struct {
 
 type ExpiryEmailTaskHandler struct {
 	Scylla *database.ScyllaStore
+	Redis  *database.RedisStore
 	R2     *storage.R2Client
 	SMTP   SMTPSettings
 }
@@ -77,6 +78,7 @@ type RoomStateArchive struct {
 func NewExpiryEmailQueue(
 	redisAddr string,
 	redisPassword string,
+	redisStore *database.RedisStore,
 	scyllaStore *database.ScyllaStore,
 	r2Client *storage.R2Client,
 ) (*ExpiryEmailQueue, error) {
@@ -93,6 +95,7 @@ func NewExpiryEmailQueue(
 
 	handler := &ExpiryEmailTaskHandler{
 		Scylla: scyllaStore,
+		Redis:  redisStore,
 		R2:     r2Client,
 		SMTP:   LoadSMTPSettingsFromEnv(),
 	}
@@ -405,10 +408,13 @@ func (h *ExpiryEmailTaskHandler) uploadRoomStateArchive(
 	}
 
 	objectKey = fmt.Sprintf(
-		"exports/rooms/%s/state_%d.json",
+		"rooms/%s/exports/state_%d.json",
 		normalizedRoomID,
 		time.Now().UTC().Unix(),
 	)
+	if quotaErr := storage.EnsureR2WriteAllowed(ctx, h.Redis, storage.R2HardCapBytes); quotaErr != nil {
+		return "", "", fmt.Errorf("verify r2 storage quota: %w", quotaErr)
+	}
 	_, putErr := h.R2.Client.PutObject(
 		ctx,
 		h.R2.Bucket,
@@ -421,6 +427,9 @@ func (h *ExpiryEmailTaskHandler) uploadRoomStateArchive(
 	)
 	if putErr != nil {
 		return "", "", fmt.Errorf("put archive object: %w", putErr)
+	}
+	if _, usageErr := storage.IncrementR2UsageBytes(ctx, h.Redis, int64(len(archiveJSON))); usageErr != nil {
+		log.Printf("[expiry-email-worker] failed to increment r2 usage bytes err=%v", usageErr)
 	}
 
 	presignedURL, signErr := h.R2.Client.PresignedGetObject(

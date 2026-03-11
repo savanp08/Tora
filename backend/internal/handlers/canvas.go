@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -306,11 +307,23 @@ func (h *CanvasHub) flushSnapshotOnTeardown() {
 	}
 
 	writeCtx, writeCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+	if quotaErr := storage.EnsureR2WriteAllowed(writeCtx, redisStore, storage.R2HardCapBytes); quotaErr != nil {
+		writeCancel()
+		if errors.Is(quotaErr, storage.ErrR2StorageFull) {
+			log.Printf("Skipping final R2 snapshot save for room %s because storage hard cap was reached.", h.roomID)
+			return
+		}
+		log.Printf("Could not verify R2 storage quota during teardown for room %s: %v", h.roomID, quotaErr)
+		return
+	}
 	err = storage.SaveCanvasSnapshotToR2(writeCtx, r2Client.Client, r2Client.Bucket, h.roomID, redisSnapshot)
 	writeCancel()
 	if err != nil {
 		log.Printf("Could not save final snapshot to R2 for room %s: %v", h.roomID, err)
 		return
+	}
+	if _, usageErr := storage.IncrementR2UsageBytes(context.Background(), redisStore, int64(len(redisSnapshot))); usageErr != nil {
+		log.Printf("Could not increment R2 usage bytes after final snapshot save for room %s: %v", h.roomID, usageErr)
 	}
 
 	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
@@ -762,11 +775,23 @@ func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 		snapshotCopy := append([]byte(nil), snapshot...)
 		go func() {
 			r2Ctx, r2Cancel := context.WithTimeout(context.Background(), canvasSnapshotWriteTimeout)
+			if quotaErr := storage.EnsureR2WriteAllowed(r2Ctx, redisStore, storage.R2HardCapBytes); quotaErr != nil {
+				r2Cancel()
+				if errors.Is(quotaErr, storage.ErrR2StorageFull) {
+					log.Printf("[canvas] Rescue save skipped room=%s reason=storage_hard_cap", roomID)
+					return
+				}
+				log.Printf("[canvas] Rescue save quota check failed room=%s err=%v", roomID, quotaErr)
+				return
+			}
 			saveErr := storage.SaveCanvasSnapshotToR2(r2Ctx, r2Client.Client, r2Client.Bucket, roomID, snapshotCopy)
 			r2Cancel()
 			if saveErr != nil {
 				log.Printf("[canvas] Rescue save to R2 failed room=%s err=%v", roomID, saveErr)
 				return
+			}
+			if _, usageErr := storage.IncrementR2UsageBytes(context.Background(), redisStore, int64(len(snapshotCopy))); usageErr != nil {
+				log.Printf("[canvas] Failed to increment r2 usage bytes after rescue save room=%s err=%v", roomID, usageErr)
 			}
 
 			if redisStore != nil && redisStore.Client != nil {

@@ -59,14 +59,14 @@ func NewR2Client(cfg config.Config) (*R2Client, error) {
 	}, nil
 }
 
-func (r *R2Client) GetPresignedPutURL(filename string) (string, string, string, error) {
+func (r *R2Client) GetPresignedPutURL(filename string, roomID string) (string, string, string, error) {
 	if r == nil || r.Client == nil {
 		return "", "", "", fmt.Errorf("r2 client is not configured")
 	}
 
 	safeName := sanitizeFilename(filename)
 	fileID := uuid.NewString()
-	objectKey := fmt.Sprintf("%s_%s", fileID, safeName)
+	objectKey := buildUploadObjectKey(fileID, safeName, roomID)
 
 	uploadURL, err := r.Client.PresignedPutObject(context.Background(), r.Bucket, objectKey, presignedPutTTL)
 	if err != nil {
@@ -81,6 +81,7 @@ func (r *R2Client) GetPresignedPutURL(filename string) (string, string, string, 
 func (r *R2Client) PutObject(
 	ctx context.Context,
 	filename string,
+	roomID string,
 	reader io.Reader,
 	contentType string,
 	maxBytes int64,
@@ -100,7 +101,7 @@ func (r *R2Client) PutObject(
 
 	safeName := sanitizeFilename(filename)
 	fileID := uuid.NewString()
-	objectKey := fmt.Sprintf("%s_%s", fileID, safeName)
+	objectKey := buildUploadObjectKey(fileID, safeName, roomID)
 
 	opts := minio.PutObjectOptions{
 		ContentType: strings.TrimSpace(contentType),
@@ -132,6 +133,15 @@ func (r *R2Client) PutObject(
 	}
 
 	return r.buildViewURL(objectKey), fileID, uploadedBytes, nil
+}
+
+func buildUploadObjectKey(fileID, safeName, roomID string) string {
+	normalizedRoomID := normalizeObjectRoomID(roomID)
+	baseName := strings.TrimSpace(fmt.Sprintf("%s_%s", fileID, safeName))
+	if normalizedRoomID == "" {
+		return "uploads/" + baseName
+	}
+	return fmt.Sprintf("rooms/%s/uploads/%s", normalizedRoomID, baseName)
 }
 
 type maxBytesAbortReader struct {
@@ -289,8 +299,54 @@ func (r *R2Client) DeleteObjects(ctx context.Context, objectKeys []string) error
 	return firstErr
 }
 
+func (r *R2Client) SumObjectSizes(ctx context.Context, objectKeys []string) (int64, error) {
+	if r == nil || r.Client == nil {
+		return 0, fmt.Errorf("r2 client is not configured")
+	}
+	if len(objectKeys) == 0 {
+		return 0, nil
+	}
+
+	seen := make(map[string]struct{}, len(objectKeys))
+	var totalBytes int64
+	var firstErr error
+	for _, rawKey := range objectKeys {
+		key := strings.TrimPrefix(strings.TrimSpace(rawKey), "/")
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		info, err := r.Client.StatObject(ctx, r.Bucket, key, minio.StatObjectOptions{})
+		if err != nil {
+			if isR2ObjectNotFound(err) {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("stat object %s: %w", key, err)
+			}
+			continue
+		}
+		if info.Size > 0 {
+			totalBytes += info.Size
+		}
+	}
+	return totalBytes, firstErr
+}
+
 func canvasSnapshotObjectKey(roomID string) (string, error) {
-	normalizedRoomID := strings.TrimSpace(roomID)
+	normalizedRoomID := normalizeObjectRoomID(roomID)
+	if normalizedRoomID == "" {
+		return "", fmt.Errorf("room id is required")
+	}
+	return fmt.Sprintf("rooms/%s/canvas/snapshot.yjs", normalizedRoomID), nil
+}
+
+func canvasSnapshotLegacyObjectKey(roomID string) (string, error) {
+	normalizedRoomID := normalizeObjectRoomID(roomID)
 	if normalizedRoomID == "" {
 		return "", fmt.Errorf("room id is required")
 	}
@@ -355,33 +411,84 @@ func GetCanvasSnapshotFromR2(
 	if normalizedBucketName == "" {
 		return nil, fmt.Errorf("bucket name is required")
 	}
-	key, err := canvasSnapshotObjectKey(roomID)
-	if err != nil {
-		return nil, err
+	keys := make([]string, 0, 2)
+	if primaryKey, err := canvasSnapshotObjectKey(roomID); err == nil {
+		keys = append(keys, primaryKey)
+	}
+	if legacyKey, err := canvasSnapshotLegacyObjectKey(roomID); err == nil {
+		keys = append(keys, legacyKey)
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("room id is required")
 	}
 
-	object, err := s3Client.GetObject(ctx, normalizedBucketName, key, minio.GetObjectOptions{})
-	if err != nil {
-		if isR2ObjectNotFound(err) {
-			return nil, nil
+	for _, key := range keys {
+		object, err := s3Client.GetObject(ctx, normalizedBucketName, key, minio.GetObjectOptions{})
+		if err != nil {
+			if isR2ObjectNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("get canvas snapshot object: %w", err)
 		}
-		return nil, fmt.Errorf("get canvas snapshot object: %w", err)
-	}
-	defer object.Close()
 
-	if _, err := object.Stat(); err != nil {
-		if isR2ObjectNotFound(err) {
-			return nil, nil
+		statInfo, statErr := object.Stat()
+		if statErr != nil {
+			_ = object.Close()
+			if isR2ObjectNotFound(statErr) {
+				continue
+			}
+			return nil, fmt.Errorf("stat canvas snapshot object: %w", statErr)
 		}
-		return nil, fmt.Errorf("stat canvas snapshot object: %w", err)
+		if statInfo.Size <= 0 {
+			_ = object.Close()
+			continue
+		}
+
+		snapshot, readErr := io.ReadAll(object)
+		_ = object.Close()
+		if readErr != nil {
+			if isR2ObjectNotFound(readErr) {
+				continue
+			}
+			return nil, fmt.Errorf("read canvas snapshot object: %w", readErr)
+		}
+		return snapshot, nil
+	}
+	return nil, nil
+}
+
+func ExtractRoomIDFromObjectKey(objectKey string) string {
+	trimmed := strings.Trim(strings.TrimSpace(objectKey), "/")
+	if trimmed == "" {
+		return ""
 	}
 
-	snapshot, err := io.ReadAll(object)
-	if err != nil {
-		if isR2ObjectNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read canvas snapshot object: %w", err)
+	segments := strings.Split(trimmed, "/")
+	if len(segments) >= 3 && segments[0] == "rooms" {
+		return normalizeObjectRoomID(segments[1])
 	}
-	return snapshot, nil
+	if len(segments) == 2 && segments[0] == "canvas" {
+		return normalizeObjectRoomID(strings.TrimSuffix(segments[1], ".yjs"))
+	}
+	return ""
+}
+
+func normalizeObjectRoomID(raw string) string {
+	candidate := strings.ToLower(strings.TrimSpace(raw))
+	if candidate == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	for _, ch := range candidate {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			builder.WriteRune(ch)
+		case ch >= '0' && ch <= '9':
+			builder.WriteRune(ch)
+		case ch == '-' || ch == '_':
+			builder.WriteRune(ch)
+		}
+	}
+	return strings.Trim(builder.String(), "-_")
 }

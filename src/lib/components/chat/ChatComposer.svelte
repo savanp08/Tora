@@ -6,6 +6,7 @@
 	import {
 		compressMedia,
 		inferMediaMessageType,
+		STORAGE_FULL_UPLOAD_MESSAGE,
 		uploadToR2,
 		type MediaMessageType
 	} from '$lib/utils/media';
@@ -237,7 +238,14 @@
 		cancelReply: void;
 		typing: { value: string };
 		openPrivateAi: void;
+		toastError: { message: string };
 	}>();
+
+	function showStorageFullToastIfNeeded(message: string) {
+		if (message === STORAGE_FULL_UPLOAD_MESSAGE) {
+			dispatch('toastError', { message });
+		}
+	}
 
 	function closeMediaPicker(resetQuery = false) {
 		showMediaPicker = false;
@@ -1331,6 +1339,7 @@
 		} catch (error) {
 			const message = error instanceof Error ? error.message : 'Attachment failed';
 			attachError = message;
+			showStorageFullToastIfNeeded(message);
 			dispatch('attach', { file: attachedFile, type: attachedPickerType, error: message });
 		} finally {
 			isProcessingAttachment = false;
@@ -1480,6 +1489,9 @@
 		const rawFileURL = typeof data.fileUrl === 'string' ? data.fileUrl : '';
 		const uploadedURL = toAbsoluteUploadURL(rawFileURL);
 		if (!res.ok || !uploadedURL) {
+			if (res.status === 507) {
+				throw new Error(STORAGE_FULL_UPLOAD_MESSAGE);
+			}
 			throw new Error(
 				typeof data.error === 'string' ? data.error : `Voice upload failed (${res.status})`
 			);
@@ -1508,7 +1520,9 @@
 			});
 			draftMessage = '';
 		} catch (error) {
-			attachError = error instanceof Error ? error.message : 'Voice recording failed';
+			const message = error instanceof Error ? error.message : 'Voice recording failed';
+			attachError = message;
+			showStorageFullToastIfNeeded(message);
 		} finally {
 			audioChunks = [];
 			mediaRecorder = null;

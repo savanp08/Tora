@@ -6983,6 +6983,7 @@
 						on:attach={handleComposerAttach}
 						on:removeAttachment={handleComposerRemoveAttachment}
 						on:openPrivateAi={openPrivateAiChat}
+						on:toastError={(event) => showErrorToast(event.detail.message)}
 						on:cancelReply={clearReplyTarget}
 					/>
 				{/if}

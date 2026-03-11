@@ -147,11 +147,22 @@
 
 		turnstileWidgetID = hostWindow.turnstile.render(turnstileContainerElement, {
 			sitekey: TURNSTILE_SITE_KEY,
-			size: 'invisible',
+			execution: 'execute',
 			callback: (token: string) => {
 				const callbackWindow = getTurnstileHostWindow();
 				if (typeof callbackWindow.onTurnstileSuccess === 'function') {
 					callbackWindow.onTurnstileSuccess(token);
+				}
+			},
+			'error-callback': () => {
+				if (turnstileResolve) {
+					clearTurnstilePendingState();
+				}
+			},
+			'expired-callback': () => {
+				turnstileToken = '';
+				if (turnstileWidgetID) {
+					hostWindow.turnstile?.reset?.(turnstileWidgetID);
 				}
 			}
 		});
@@ -191,6 +202,7 @@
 				reject(new Error('Security verification timed out. Please retry.'));
 			}, TURNSTILE_VERIFY_TIMEOUT_MS);
 			try {
+				hostWindow.turnstile?.reset?.(turnstileWidgetID);
 				hostWindow.turnstile?.execute(turnstileWidgetID);
 			} catch (_error) {
 				clearTurnstilePendingState();
@@ -680,11 +692,8 @@
 
 				{#if TURNSTILE_SITE_KEY}
 					<div
-						class="cf-turnstile"
+						class="turnstile-widget-slot"
 						bind:this={turnstileContainerElement}
-						data-sitekey={TURNSTILE_SITE_KEY}
-						data-callback="onTurnstileSuccess"
-						data-size="invisible"
 						aria-hidden="true"
 					></div>
 				{/if}
@@ -898,7 +907,7 @@
 		gap: 12px;
 	}
 
-	.cf-turnstile {
+	.turnstile-widget-slot {
 		position: absolute;
 		width: 0;
 		height: 0;

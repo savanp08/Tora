@@ -84,8 +84,15 @@ func main() {
 	mainRouter := router.New(hub, redisStore, scyllaStore, r2Client, usageTracker)
 	mainRouter.Get("/metrics", promhttp.Handler().ServeHTTP)
 	go startRoomExpiryCleanupWorker(redisStore, scyllaStore, r2Client)
+	go workers.StartR2OrphanSweeper(context.Background(), redisStore, scyllaStore, r2Client)
 
-	expiryEmailQueue, queueErr := workers.NewExpiryEmailQueue(cfg.RedisAddr, cfg.RedisPass, scyllaStore, r2Client)
+	expiryEmailQueue, queueErr := workers.NewExpiryEmailQueue(
+		cfg.RedisAddr,
+		cfg.RedisPass,
+		redisStore,
+		scyllaStore,
+		r2Client,
+	)
 	if queueErr != nil {
 		log.Printf("⚠️  Warning: Could not initialize expiry email queue: %v", queueErr)
 	} else {
@@ -199,8 +206,18 @@ func cleanupExpiredRoom(
 
 	if r2Client != nil && len(objectKeys) > 0 {
 		deleteCtx, cancelDelete := context.WithTimeout(ctx, 45*time.Second)
+		deletedBytes, sizeErr := r2Client.SumObjectSizes(deleteCtx, objectKeys)
+		if sizeErr != nil {
+			log.Printf("[expiry-worker] r2 object size lookup failed files=%d err=%v", len(objectKeys), sizeErr)
+		}
 		if err := r2Client.DeleteObjects(deleteCtx, objectKeys); err != nil {
 			log.Printf("[expiry-worker] r2 cleanup failed files=%d err=%v", len(objectKeys), err)
+			cancelDelete()
+			return
+		} else if deletedBytes > 0 {
+			if _, usageErr := storage.DecrementR2UsageBytes(deleteCtx, redisStore, deletedBytes); usageErr != nil {
+				log.Printf("[expiry-worker] failed to decrement r2 usage bytes deleted_bytes=%d err=%v", deletedBytes, usageErr)
+			}
 		}
 		cancelDelete()
 	}
