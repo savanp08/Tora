@@ -29,8 +29,14 @@ type codeExecutionRequest struct {
 }
 
 type codeExecutionResponse struct {
-	Stdout string `json:"stdout"`
-	Stderr string `json:"stderr"`
+	Stdout string              `json:"stdout"`
+	Stderr string              `json:"stderr"`
+	Files  []codeExecutionFile `json:"files,omitempty"`
+}
+
+type codeExecutionFile struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
 type pistonExecuteEnvelope struct {
@@ -360,11 +366,85 @@ func parseExecutionResponse(body []byte) (codeExecutionResponse, error) {
 	if strings.TrimSpace(stderr) == "" {
 		stderr = envelope.Stderr
 	}
+	cleanStdout, extractedFiles := extractExecutionFilesFromStdout(stdout)
 
 	return codeExecutionResponse{
-		Stdout: stdout,
+		Stdout: cleanStdout,
 		Stderr: stderr,
+		Files:  extractedFiles,
 	}, nil
+}
+
+const (
+	toraFileStartMarkerPrefix = "===TORA_FILE_START:"
+	toraFileEndMarkerPrefix   = "===TORA_FILE_END:"
+	toraFileMarkerSuffix      = "==="
+)
+
+func extractExecutionFilesFromStdout(stdout string) (string, []codeExecutionFile) {
+	if strings.TrimSpace(stdout) == "" {
+		return stdout, nil
+	}
+
+	files := make([]codeExecutionFile, 0, 8)
+	var cleaned strings.Builder
+	searchOffset := 0
+
+	for {
+		startRelative := strings.Index(stdout[searchOffset:], toraFileStartMarkerPrefix)
+		if startRelative < 0 {
+			cleaned.WriteString(stdout[searchOffset:])
+			break
+		}
+
+		startIndex := searchOffset + startRelative
+		cleaned.WriteString(stdout[searchOffset:startIndex])
+
+		fileNameStart := startIndex + len(toraFileStartMarkerPrefix)
+		markerSuffixRelative := strings.Index(stdout[fileNameStart:], toraFileMarkerSuffix)
+		if markerSuffixRelative < 0 {
+			cleaned.WriteString(stdout[startIndex:])
+			break
+		}
+		fileNameEnd := fileNameStart + markerSuffixRelative
+		fileName := strings.TrimSpace(stdout[fileNameStart:fileNameEnd])
+		if fileName == "" {
+			cleaned.WriteString(stdout[startIndex:])
+			break
+		}
+
+		contentStart := fileNameEnd + len(toraFileMarkerSuffix)
+		if strings.HasPrefix(stdout[contentStart:], "\r\n") {
+			contentStart += 2
+		} else if strings.HasPrefix(stdout[contentStart:], "\n") {
+			contentStart += 1
+		}
+
+		endMarker := toraFileEndMarkerPrefix + fileName + toraFileMarkerSuffix
+		endRelative := strings.Index(stdout[contentStart:], endMarker)
+		if endRelative < 0 {
+			cleaned.WriteString(stdout[startIndex:])
+			break
+		}
+		contentEnd := contentStart + endRelative
+		fileContent := stdout[contentStart:contentEnd]
+		files = append(files, codeExecutionFile{
+			Name:    fileName,
+			Content: fileContent,
+		})
+
+		searchOffset = contentEnd + len(endMarker)
+		if strings.HasPrefix(stdout[searchOffset:], "\r\n") {
+			searchOffset += 2
+		} else if strings.HasPrefix(stdout[searchOffset:], "\n") {
+			searchOffset += 1
+		}
+	}
+
+	if len(files) == 0 {
+		return stdout, nil
+	}
+	return cleaned.String(), files
 }
 
 func parseExecutionErrorBody(body []byte) string {

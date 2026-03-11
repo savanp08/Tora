@@ -359,6 +359,28 @@ function shouldIncludeFileForLanguage(fileName: string, normalizedLanguage: stri
 	return true;
 }
 
+function parseRemoteExecutionArtifacts(payload: Record<string, unknown> | null) {
+	if (!payload || !Array.isArray(payload.files)) {
+		return [] as ExecutionArtifact[];
+	}
+	return payload.files
+		.map((entry) => {
+			if (!entry || typeof entry !== 'object') {
+				return null;
+			}
+			const file = entry as Record<string, unknown>;
+			const name = typeof file.name === 'string' ? file.name.trim() : '';
+			if (!name) {
+				return null;
+			}
+			return {
+				name,
+				content: typeof file.content === 'string' ? file.content : String(file.content ?? '')
+			} satisfies ExecutionArtifact;
+		})
+		.filter((file): file is ExecutionArtifact => Boolean(file));
+}
+
 function resolveExecutionWorkspace(
 	language: string,
 	code: string,
@@ -693,12 +715,20 @@ export async function executeCodeWithRouter(
 		const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
 		const stdout = typeof payload?.stdout === 'string' ? payload.stdout : '';
 		const stderr = typeof payload?.stderr === 'string' ? payload.stderr : '';
+		const artifacts = parseRemoteExecutionArtifacts(payload);
 		if (!response.ok) {
 			const errorMessage =
 				typeof payload?.error === 'string' && payload.error.trim()
 					? payload.error.trim()
 					: `Execution request failed (${response.status})`;
 			throw new Error(errorMessage);
+		}
+		if (artifacts.length > 0 && options?.onArtifacts) {
+			try {
+				options.onArtifacts(artifacts);
+			} catch {
+				// Ignore artifact callback errors and keep execution output flowing.
+			}
 		}
 		return {
 			output: stdout,
@@ -1165,6 +1195,7 @@ export class ExecutionManager {
 		const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
 		const stdout = typeof payload?.stdout === 'string' ? payload.stdout : '';
 		const stderr = typeof payload?.stderr === 'string' ? payload.stderr : '';
+		const artifacts = parseRemoteExecutionArtifacts(payload);
 		if (!response.ok) {
 			const serverMessage =
 				typeof payload?.error === 'string' && payload.error.trim()
@@ -1175,7 +1206,8 @@ export class ExecutionManager {
 
 		return {
 			stdout,
-			stderr
+			stderr,
+			artifacts
 		} satisfies RemoteExecutionPayload;
 	}
 
