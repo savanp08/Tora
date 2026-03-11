@@ -46,6 +46,10 @@
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const TURNSTILE_SITE_KEY_RAW = import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined;
 	const TURNSTILE_SITE_KEY = TURNSTILE_SITE_KEY_RAW?.trim() ?? '';
+	const TURNSTILE_DEBUG_RAW = import.meta.env.VITE_TURNSTILE_DEBUG as string | undefined;
+	const TURNSTILE_DEBUG =
+		import.meta.env.DEV ||
+		['1', 'true', 'yes', 'on'].includes((TURNSTILE_DEBUG_RAW ?? '').trim().toLowerCase());
 	const TURNSTILE_VERIFY_TIMEOUT_MS = 12000;
 	const TURNSTILE_POLL_INTERVAL_MS = 120;
 	const ROOM_CODE_DIGITS = APP_LIMITS.room.codeDigits;
@@ -85,6 +89,8 @@
 	let turnstileResolve: ((token: string) => void) | null = null;
 	let turnstileTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
+	type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
 	function persistSessionRoomPreferences() {
 		const normalized = writeSessionRoomPreferences({
 			aiEnabled,
@@ -113,7 +119,55 @@
 		persistSessionRoomPreferences();
 	}
 
-	function clientLog(_event: string, _payload?: unknown) {}
+	function normalizeErrorForLog(error: unknown) {
+		if (error instanceof Error) {
+			return {
+				name: error.name,
+				message: error.message,
+				stack: error.stack
+			};
+		}
+		return { message: String(error) };
+	}
+
+	function clientLog(event: string, payload?: unknown, level: ClientLogLevel = 'info') {
+		if (!event.startsWith('turnstile-')) {
+			return;
+		}
+		if ((level === 'debug' || level === 'info') && !TURNSTILE_DEBUG) {
+			return;
+		}
+		const message = `[Turnstile] ${event}`;
+		switch (level) {
+			case 'debug':
+				if (payload === undefined) {
+					console.debug(message);
+				} else {
+					console.debug(message, payload);
+				}
+				return;
+			case 'warn':
+				if (payload === undefined) {
+					console.warn(message);
+				} else {
+					console.warn(message, payload);
+				}
+				return;
+			case 'error':
+				if (payload === undefined) {
+					console.error(message);
+				} else {
+					console.error(message, payload);
+				}
+				return;
+			default:
+				if (payload === undefined) {
+					console.info(message);
+				} else {
+					console.info(message, payload);
+				}
+		}
+	}
 
 	function getTurnstileHostWindow() {
 		return window as TurnstileHostWindow;
@@ -125,6 +179,7 @@
 			turnstileTimeoutHandle = null;
 		}
 		turnstileResolve = null;
+		clientLog('turnstile-clear-pending-state', undefined, 'debug');
 	}
 
 	function resetTurnstile() {
@@ -132,79 +187,162 @@
 		clearTurnstilePendingState();
 		const hostWindow = getTurnstileHostWindow();
 		if (turnstileWidgetID && hostWindow.turnstile?.reset) {
-			hostWindow.turnstile.reset(turnstileWidgetID);
+			try {
+				hostWindow.turnstile.reset(turnstileWidgetID);
+				clientLog('turnstile-reset', { widgetId: turnstileWidgetID }, 'debug');
+			} catch (error) {
+				clientLog('turnstile-reset-error', { error: normalizeErrorForLog(error) }, 'error');
+			}
+		} else {
+			clientLog(
+				'turnstile-reset-skipped',
+				{
+					widgetExists: turnstileWidgetID !== '',
+					hasResetMethod: Boolean(hostWindow.turnstile?.reset)
+				},
+				'debug'
+			);
 		}
 	}
 
 	function initializeTurnstileWidget() {
 		if (turnstileWidgetID) {
+			clientLog('turnstile-render-skip-existing-widget', { widgetId: turnstileWidgetID }, 'debug');
 			return true;
 		}
 		const hostWindow = getTurnstileHostWindow();
 		if (!TURNSTILE_SITE_KEY || !turnstileContainerElement || !hostWindow.turnstile?.render) {
+			clientLog(
+				'turnstile-render-prereq-missing',
+				{
+					siteKeyConfigured: TURNSTILE_SITE_KEY !== '',
+					siteKeyLength: TURNSTILE_SITE_KEY.length,
+					containerReady: Boolean(turnstileContainerElement),
+					apiLoaded: Boolean(hostWindow.turnstile?.render)
+				},
+				'error'
+			);
 			return false;
 		}
 
-		turnstileWidgetID = hostWindow.turnstile.render(turnstileContainerElement, {
-			sitekey: TURNSTILE_SITE_KEY,
-			execution: 'execute',
-			callback: (token: string) => {
-				const callbackWindow = getTurnstileHostWindow();
-				if (typeof callbackWindow.onTurnstileSuccess === 'function') {
-					callbackWindow.onTurnstileSuccess(token);
+		try {
+			turnstileWidgetID = hostWindow.turnstile.render(turnstileContainerElement, {
+				sitekey: TURNSTILE_SITE_KEY,
+				execution: 'execute',
+				callback: (token: string) => {
+					clientLog('turnstile-callback-success', { tokenLength: token?.length ?? 0 }, 'debug');
+					const callbackWindow = getTurnstileHostWindow();
+					if (typeof callbackWindow.onTurnstileSuccess === 'function') {
+						callbackWindow.onTurnstileSuccess(token);
+					} else {
+						clientLog('turnstile-callback-missing-handler', undefined, 'warn');
+					}
+				},
+				'error-callback': (errorCode?: string) => {
+					clientLog(
+						'turnstile-error-callback',
+						{
+							errorCode: errorCode ?? 'unknown',
+							pendingRequest: Boolean(turnstileResolve)
+						},
+						'error'
+					);
+				},
+				'expired-callback': () => {
+					turnstileToken = '';
+					clientLog('turnstile-token-expired', { widgetId: turnstileWidgetID }, 'warn');
+					if (turnstileWidgetID) {
+						try {
+							hostWindow.turnstile?.reset?.(turnstileWidgetID);
+						} catch (error) {
+							clientLog(
+								'turnstile-reset-after-expiry-error',
+								{ error: normalizeErrorForLog(error) },
+								'error'
+							);
+						}
+					}
 				}
-			},
-			'error-callback': () => {
-				if (turnstileResolve) {
-					clearTurnstilePendingState();
-				}
-			},
-			'expired-callback': () => {
-				turnstileToken = '';
-				if (turnstileWidgetID) {
-					hostWindow.turnstile?.reset?.(turnstileWidgetID);
-				}
-			}
-		});
-		return turnstileWidgetID !== '';
+			});
+			clientLog(
+				'turnstile-rendered',
+				{
+					widgetId: turnstileWidgetID,
+					siteKeyLength: TURNSTILE_SITE_KEY.length
+				},
+				'info'
+			);
+			return turnstileWidgetID !== '';
+		} catch (error) {
+			clientLog('turnstile-render-error', { error: normalizeErrorForLog(error) }, 'error');
+			turnstileWidgetID = '';
+			return false;
+		}
 	}
 
 	async function waitForTurnstileAPI(timeoutMs = TURNSTILE_VERIFY_TIMEOUT_MS) {
 		if (getTurnstileHostWindow().turnstile?.render) {
+			clientLog('turnstile-api-ready-immediate', undefined, 'debug');
 			return true;
 		}
+		clientLog('turnstile-api-wait-start', { timeoutMs }, 'debug');
 		const start = Date.now();
 		while (Date.now() - start < timeoutMs) {
 			await new Promise((resolve) => setTimeout(resolve, TURNSTILE_POLL_INTERVAL_MS));
 			if (getTurnstileHostWindow().turnstile?.render) {
+				clientLog('turnstile-api-ready-after-wait', { waitedMs: Date.now() - start }, 'debug');
 				return true;
 			}
 		}
+		clientLog('turnstile-api-timeout', { timeoutMs }, 'error');
 		return false;
 	}
 
 	async function requestTurnstileToken() {
 		if (!TURNSTILE_SITE_KEY) {
+			clientLog(
+				'turnstile-missing-site-key',
+				{
+					environmentVariable: 'VITE_TURNSTILE_SITE_KEY',
+					siteKeyLength: TURNSTILE_SITE_KEY.length
+				},
+				'error'
+			);
 			throw new Error('Security verification is not configured');
 		}
 		const isReady = await waitForTurnstileAPI();
 		const hostWindow = getTurnstileHostWindow();
-		if (!isReady || !initializeTurnstileWidget() || !hostWindow.turnstile?.execute) {
+		const isWidgetReady = initializeTurnstileWidget();
+		if (!isReady || !isWidgetReady || !hostWindow.turnstile?.execute) {
+			clientLog(
+				'turnstile-unavailable',
+				{
+					isReady,
+					isWidgetReady,
+					hasExecute: Boolean(hostWindow.turnstile?.execute),
+					widgetId: turnstileWidgetID
+				},
+				'error'
+			);
 			throw new Error('Security verification is unavailable. Refresh and try again.');
 		}
 
 		turnstileToken = '';
 		clearTurnstilePendingState();
+		clientLog('turnstile-request-token-start', { widgetId: turnstileWidgetID }, 'debug');
 		return await new Promise<string>((resolve, reject) => {
 			turnstileResolve = resolve;
 			turnstileTimeoutHandle = setTimeout(() => {
+				clientLog('turnstile-timeout', { timeoutMs: TURNSTILE_VERIFY_TIMEOUT_MS }, 'error');
 				clearTurnstilePendingState();
 				reject(new Error('Security verification timed out. Please retry.'));
 			}, TURNSTILE_VERIFY_TIMEOUT_MS);
 			try {
 				hostWindow.turnstile?.reset?.(turnstileWidgetID);
 				hostWindow.turnstile?.execute(turnstileWidgetID);
-			} catch (_error) {
+				clientLog('turnstile-execute-called', { widgetId: turnstileWidgetID }, 'debug');
+			} catch (error) {
+				clientLog('turnstile-execute-error', { error: normalizeErrorForLog(error) }, 'error');
 				clearTurnstilePendingState();
 				reject(new Error('Failed to run security verification.'));
 			}
@@ -214,11 +352,22 @@
 	onMount(() => {
 		const hostWindow = getTurnstileHostWindow();
 		const previousTurnstileCallback = hostWindow.onTurnstileSuccess;
+		clientLog(
+			'turnstile-mount',
+			{
+				siteKeyConfigured: TURNSTILE_SITE_KEY !== '',
+				siteKeyLength: TURNSTILE_SITE_KEY.length
+			},
+			'info'
+		);
 		hostWindow.onTurnstileSuccess = (token: string) => {
 			turnstileToken = (token || '').trim();
+			clientLog('turnstile-token-received', { tokenLength: turnstileToken.length }, 'debug');
 			if (turnstileToken && turnstileResolve) {
 				turnstileResolve(turnstileToken);
 				clearTurnstilePendingState();
+			} else if (!turnstileToken) {
+				clientLog('turnstile-empty-token', undefined, 'warn');
 			}
 		};
 
@@ -243,7 +392,12 @@
 			clearTurnstilePendingState();
 			const cleanupWindow = getTurnstileHostWindow();
 			if (turnstileWidgetID && cleanupWindow.turnstile?.remove) {
-				cleanupWindow.turnstile.remove(turnstileWidgetID);
+				try {
+					cleanupWindow.turnstile.remove(turnstileWidgetID);
+					clientLog('turnstile-widget-removed', { widgetId: turnstileWidgetID }, 'debug');
+				} catch (error) {
+					clientLog('turnstile-remove-error', { error: normalizeErrorForLog(error) }, 'error');
+				}
 			}
 			turnstileWidgetID = '';
 			if (previousTurnstileCallback) {
