@@ -1,44 +1,3 @@
-# Tora
-
-<p align="center">
-  <img src="docs/logo.png" width="120" alt="Tora logo">
-</p>
-
-<p align="center">
-  <b>Real-time sessions for chat, code, whiteboarding, and calls.</b>
-</p>
-
-<p align="center">
-  A privacy-first collaboration workspace that keeps conversation, code, and context in one session.
-</p>
-
-<p align="center">
-  <img src="docs/media/hero-demo.gif" width="900" alt="Tora hero demo">
-</p>
-
-<p align="center">
-  <sub>Replace <code>docs/media/hero-demo.gif</code> with a 10-20 second product demo.</sub>
-</p>
-
-<p align="center">
-  <a href="https://kit.svelte.dev/"><img src="https://img.shields.io/badge/SvelteKit-5.x-ff3e00?logo=svelte&logoColor=white" alt="SvelteKit"></a>
-  <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white" alt="TypeScript"></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
-  <a href="https://redis.io/"><img src="https://img.shields.io/badge/Redis-7.x-dc382d?logo=redis&logoColor=white" alt="Redis"></a>
-  <a href="https://www.scylladb.com/"><img src="https://img.shields.io/badge/ScyllaDB-supported-6cd4ff" alt="ScyllaDB"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg" alt="License: AGPL v3"></a>
-</p>
-
-<p align="center">
-  <a href="#getting-started">Quick Start</a> •
-  <a href="#features">Features</a> •
-  <a href="#architecture">Architecture</a> •
-  <a href="#deployment">Deployment</a>
-</p>
-
----
-
-Tora is a real-time collaboration workspace where conversation, code, and visual thinking happen together. Designed to be the simplest way to connect with others securely and efficiently, it is:
 
 # Tora
 
@@ -82,21 +41,21 @@ Tora is a real-time collaboration workspace where conversation, code, and visual
 
 Tora is a real-time collaboration workspace where conversation, code, and visual thinking happen together. Designed to be the simplest way to connect with others securely and efficiently, it is:
 
-- Fully open source
-- Session-based
+- **Fully open source**
+- **Session-based**
   - rooms are ephemeral by design, with no long-term message history stored on a server
-- Collaborative Tools
+- **Collaborative Tools**
   - Built in code-canvas powered by monaco editor and piston, drawboard for freedraw and embeddings, taskboard to plan and manage your project, dashbaord for priority notices and notes
-- Real-time:
+- **Real-time:**
   - Messages, drawings, code edits, and presence updates propagate instantly between participants
-- complete chat experience
+- **Complete chat experience**
   - Supports Media, files, voice messages, replies, typing indicators,emojis, reactions, typing indictaors, GIFs, stickers, memes and more
-- AI-Powered Assistance
-  - Auto Code Completion — Get real-time, context-aware code suggestions directly in the Monaco-powered Code Canvas, specialized for the project you're currently building.
-  - Contextual Dialogue — Mention @ToraAI in chat to interact with an assistant that has full visibility of your room's conversation history and active code boards.
-  - Project Assistance - Leverage ToraAI to generate, edit and manage your project
-  - Private AI Mode — Request assistance or explanations that are visible only to you, allowing for private debugging or learning without interrupting the group flow.
-- A one stop solution for small teams
+- **AI-Powered Assistance**
+  - **Auto Code Completion** — Get real-time, context-aware code suggestions directly in the Monaco-powered Code Canvas, specialized for the project you're currently building.
+  - **Contextual Dialogue** — Mention @ToraAI in chat to interact with an assistant that has full visibility of your room's conversation history and active code boards.
+  - **Project Assistance** - Leverage ToraAI to generate, edit and manage your project
+  - **Private AI Mode** — Request assistance or explanations that are visible only to you, allowing for private debugging or learning without interrupting the group flow.
+- **A one stop solution for small teams**
   - chat, shared code editor, whiteboard, AI assistant, and call tools all live in the same room
 - [Self-hostable](#deployment)
 
@@ -112,30 +71,32 @@ To collaborate privately, create a dedicated room and share that URL over your p
 
 ## Features
 
-- Real-time chat with typing indicators, reply threading, and pinned messages
-- Shared code canvas with simultaneous editing and live execution output
-- Collaborative whiteboard with shapes, freehand drawing, and live cursors
-- WebRTC audio and video calls integrated into the workspace
+- **Real-time chat** with typing indicators, reply threading, and pinned messages
+- **Shared code canvas** with simultaneous editing and live execution output
+- **Collaborative whiteboard** with shapes, freehand drawing, and live cursors
+- **WebRTC audio and video calls** integrated into the workspace
 - `@ToraAI` assistant with rolling room context
-- Private AI mode with responses visible only to the requesting user
-- Session branching to spin up child rooms from active discussions
-- File uploads, image previews, and voice messages scoped to the room session
-- In-browser Python execution via Pyodide web worker
-- In-browser JavaScript/Node execution via WebContainers
-- Presence indicators, read receipts, and per-room AI on/off control
-- OAuth login (GitHub) with JWT session management
-- Prometheus metrics endpoint for self-hosted deployments
+- **Private AI mode** with responses visible only to the requesting user
+- **Session branching** to spin up child rooms from active discussions
+- **File uploads, image previews, and voice messages** scoped to the room session
+- **In-browser Python execution** via Pyodide web worker
+- **In-browser JavaScript/Node execution** via WebContainers
+- **Presence indicators, read receipts, and per-room AI on/off control**
+- **OAuth login (GitHub) with JWT session management**
+- **Prometheus metrics endpoint** for self-hosted deployments
 
 ## Encryptions
 
-- WebRTC End-to-End Encryption — All real-time audio and video streams are end-to-end encrypted natively via WebRTC protocols, ensuring media remains private between participants and never reaches the server unencrypted.
-- Transport Layer Security (TLS) — All data in transit, including real-time WebSocket signals for chat and drawings, is protected via Secure WebSockets (WSS) and HTTPS orchestrated through Caddy.
-- JWT Integrity (HS256) — User sessions are secured using JSON Web Tokens (JWT) signed with the HMAC SHA-256 algorithm, utilizing a server-side secret to prevent token tampering.
-- Timing-Attack Resistance — The authentication system employs timing-safe comparisons for cryptographic signatures to prevent attackers from guessing keys based on processing latency.
-- Base64 Content Encoding — Code Canvas files and workspace attachments are Base64 encoded during transport to ensure binary data integrity across the Go API and frontend stores.
-- Infrastructure Privacy — Tora’s ephemeral architecture ensures that sensitive session data is primarily held in-memory (Redis) and is designed to be wiped upon session expiry, minimizing the long-term data footprint.
+- **WebRTC End-to-End Encryption** — All real-time audio and video streams are end-to-end encrypted natively via WebRTC protocols, ensuring media remains private between participants and never reaches the server unencrypted.
+- **Server-side AES-GCM Encryption Before DB Write** — Chat/discussion content is encrypted on the Go backend using AES-GCM before being persisted to ScyllaDB/Redis.
+- **Versioned Ciphertext + Key Rotation** — Encrypted payloads are stored with a version prefix (for example `v1:<ciphertext>`) and support key rotation through `APP_SECRET_KEYS` and `APP_SECRET_KEY_VERSION`.
+- **Transport Layer Security (TLS)** — All data in transit, including real-time WebSocket signals for chat and drawings, is protected via Secure WebSockets (WSS) and HTTPS orchestrated through Caddy.
+- **JWT Integrity (HS256)** — User sessions are secured using JSON Web Tokens (JWT) signed with the HMAC SHA-256 algorithm, utilizing a server-side secret to prevent token tampering.
+- **Timing-Attack Resistance** — The authentication system employs timing-safe comparisons for cryptographic signatures to prevent attackers from guessing keys based on processing latency.
+- **Base64 Content Encoding** — Code Canvas files and workspace attachments are Base64 encoded during transport to ensure binary data integrity across the Go API and frontend stores.
+- **Infrastructure Privacy** — Tora’s ephemeral architecture ensures that sensitive session data is primarily held in-memory (Redis) and is designed to be wiped upon session expiry, minimizing the long-term data footprint.
 
-** Note: Turn on E2E setting during Room Creation if you want to trade cloud stoarge for privacy. (New joinees will not be able to see previous messages in E2E setting)
+**Note:** Turn on E2E setting during room creation if you want to trade cloud storage for privacy. (New joinees will not be able to see previous messages in E2E setting)
 
 ## Boards
 
@@ -206,9 +167,9 @@ Browser (SvelteKit + Yjs + Monaco + xterm.js)
 
 ### Stack
 
-- Frontend: SvelteKit, TypeScript, Tailwind CSS, Monaco Editor, Yjs, y-websocket, xterm.js, Pyodide, WebContainers
-- Backend: Go, chi, gorilla/websocket, go-redis, gocql (ScyllaDB), Prometheus, JWT auth, OAuth
-- Infrastructure: Docker Compose, Caddy (TLS), Prometheus, Cloudflare Workers (optional edge deployment via Wrangler)
+- **Frontend:** SvelteKit, TypeScript, Tailwind CSS, Monaco Editor, Yjs, y-websocket, xterm.js, Pyodide, WebContainers
+- **Backend:** Go, chi, gorilla/websocket, go-redis, gocql (ScyllaDB), Prometheus, JWT auth, OAuth
+- **Infrastructure:** Docker Compose, Caddy (TLS), Prometheus, Cloudflare Workers (optional edge deployment via Wrangler)
 
 ## Getting Started
 
@@ -398,35 +359,35 @@ To collaborate privately, create a dedicated room and share that URL over your p
 
 ## Features
 
-- Real-time chat with typing indicators, reply threading, and pinned messages
-- Shared code canvas with simultaneous editing and live execution output
-- Collaborative whiteboard with shapes, freehand drawing, and live cursors
-- WebRTC audio and video calls integrated into the workspace
+- **Real-time chat** with typing indicators, reply threading, and pinned messages
+- **Shared code canvas** with simultaneous editing and live execution output
+- **Collaborative whiteboard** with shapes, freehand drawing, and live cursors
+- **WebRTC audio and video calls** integrated into the workspace
 - `@ToraAI` assistant with rolling room context
-- Private AI mode with responses visible only to the requesting user
-- Session branching to spin up child rooms from active discussions
-- File uploads, image previews, and voice messages scoped to the room session
-- In-browser Python execution via Pyodide web worker
-- In-browser JavaScript/Node execution via WebContainers
-- Presence indicators, read receipts, and per-room AI on/off control
-- OAuth login (GitHub) with JWT session management
-- Prometheus metrics endpoint for self-hosted deployments
+- **Private AI mode** with responses visible only to the requesting user
+- **Session branching** to spin up child rooms from active discussions
+- **File uploads, image previews, and voice messages** scoped to the room session
+- **In-browser Python execution** via Pyodide web worker
+- **In-browser JavaScript/Node execution** via WebContainers
+- **Presence indicators, read receipts, and per-room AI on/off control**
+- **OAuth login (GitHub) with JWT session management**
+- **Prometheus metrics endpoint** for self-hosted deployments
 
 ## Encryptions
 
-- WebRTC End-to-End Encryption — All real-time audio and video streams are end-to-end encrypted natively via WebRTC protocols, ensuring media remains private between participants and never reaches the server unencrypted.
+- **WebRTC End-to-End Encryption** — All real-time audio and video streams are end-to-end encrypted natively via WebRTC protocols, ensuring media remains private between participants and never reaches the server unencrypted.
 
-- Transport Layer Security (TLS) — All data in transit, including real-time WebSocket signals for chat and drawings, is protected via Secure WebSockets (WSS) and HTTPS orchestrated through Caddy.
+- **Transport Layer Security (TLS)** — All data in transit, including real-time WebSocket signals for chat and drawings, is protected via Secure WebSockets (WSS) and HTTPS orchestrated through Caddy.
 
-- JWT Integrity (HS256) — User sessions are secured using JSON Web Tokens (JWT) signed with the HMAC SHA-256 algorithm, utilizing a server-side secret to prevent token tampering.
+- **JWT Integrity (HS256)** — User sessions are secured using JSON Web Tokens (JWT) signed with the HMAC SHA-256 algorithm, utilizing a server-side secret to prevent token tampering.
 
-- Timing-Attack Resistance — The authentication system employs timing-safe comparisons for cryptographic signatures to prevent attackers from guessing keys based on processing latency.
+- **Timing-Attack Resistance** — The authentication system employs timing-safe comparisons for cryptographic signatures to prevent attackers from guessing keys based on processing latency.
 
-- Base64 Content Encoding — Code Canvas files and workspace attachments are Base64 encoded during transport to ensure binary data integrity across the Go API and frontend stores.
+- **Base64 Content Encoding** — Code Canvas files and workspace attachments are Base64 encoded during transport to ensure binary data integrity across the Go API and frontend stores.
 
-- Infrastructure Privacy — Tora’s ephemeral architecture ensures that sensitive session data is primarily held in-memory (Redis) and is designed to be wiped upon session expiry, minimizing the long-term data footprint.
+- **Infrastructure Privacy** — Tora’s ephemeral architecture ensures that sensitive session data is primarily held in-memory (Redis) and is designed to be wiped upon session expiry, minimizing the long-term data footprint.
 
-** Note: Turn on E2E setting during Room Creation if you want to trade cloud stoarge for privacy. (New joinees will not be able to see previous messages in E2E setting)
+**Note:** Turn on E2E setting during room creation if you want to trade cloud storage for privacy. (New joinees will not be able to see previous messages in E2E setting)
 
 ## Boards
 
@@ -497,9 +458,9 @@ Browser (SvelteKit + Yjs + Monaco + xterm.js)
 
 ### Stack
 
-- Frontend: SvelteKit, TypeScript, Tailwind CSS, Monaco Editor, Yjs, y-websocket, xterm.js, Pyodide, WebContainers
-- Backend: Go, chi, gorilla/websocket, go-redis, gocql (ScyllaDB), Prometheus, JWT auth, OAuth
-- Infrastructure: Docker Compose, Caddy (TLS), Prometheus, Cloudflare Workers (optional edge deployment via Wrangler)
+- **Frontend:** SvelteKit, TypeScript, Tailwind CSS, Monaco Editor, Yjs, y-websocket, xterm.js, Pyodide, WebContainers
+- **Backend:** Go, chi, gorilla/websocket, go-redis, gocql (ScyllaDB), Prometheus, JWT auth, OAuth
+- **Infrastructure:** Docker Compose, Caddy (TLS), Prometheus, Cloudflare Workers (optional edge deployment via Wrangler)
 
 ## Getting Started
 
