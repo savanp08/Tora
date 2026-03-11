@@ -28,7 +28,7 @@ const (
 	defaultMemoryLimitBytes  = 209715200
 	defaultMaxProcessCount   = 64
 	defaultMaxOpenFiles      = 64
-	maxLoggedResponseBytes   = 64 * 1024
+	maxLoggedResponseBytes   = maxPistonResponseBytes
 	queueBusyErrorMessage    = "execution queue is full"
 	shutdownErrorMessage     = "execution service is shutting down"
 	timeoutErrorMessage      = "execution timed out"
