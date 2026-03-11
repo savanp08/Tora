@@ -24,8 +24,8 @@ const (
 	defaultQueueWaitTimeout  = 30 * time.Second
 	defaultRequestTimeout    = 10 * time.Second
 	maxPistonResponseBytes   = 4 * 1024 * 1024
-	defaultRunTimeoutMs      = 10000
-	defaultCompileTimeoutMs  = 10000
+	defaultRunTimeoutMs      = 2800
+	defaultCompileTimeoutMs  = 2800
 	defaultMemoryLimitBytes  = 209715200
 	defaultMaxProcessCount   = 64
 	defaultMaxOpenFiles      = 64

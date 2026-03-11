@@ -70,9 +70,14 @@
 	}
 
 	async function requestAIReply(prompt: string, deviceId: string) {
+		const normalizedUserID = (currentUserId || '').trim();
+		const effectiveUserID =
+			normalizedUserID && normalizedUserID.toLowerCase() !== 'guest'
+				? normalizedUserID
+				: `anon:${deviceId}`;
 		const headers: Record<string, string> = {
 			'Content-Type': 'application/json',
-			'X-User-Id': currentUserId || '',
+			'X-User-Id': effectiveUserID,
 			'X-Username': currentUsername || ''
 		};
 		const body = JSON.stringify({ prompt, deviceId, roomId });

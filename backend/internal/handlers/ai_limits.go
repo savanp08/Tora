@@ -153,9 +153,6 @@ func buildPrivateAILimitChecks(
 	loaded := config.LoadAppLimits().AI
 
 	normalizedUserID := normalizeIdentifier(userID)
-	if normalizedUserID == "" {
-		normalizedUserID = "unknown_user"
-	}
 
 	normalizedRoomID := normalizeRoomID(roomID)
 	if normalizedRoomID == "" {
@@ -173,7 +170,9 @@ func buildPrivateAILimitChecks(
 	}
 
 	checks := make([]privateAILimitCheck, 0, 16)
-	checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeUser, normalizedUserID, loaded.UserRequestLimits)...)
+	if normalizedUserID != "" && normalizedUserID != "guest" {
+		checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeUser, normalizedUserID, loaded.UserRequestLimits)...)
+	}
 	checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeRoom, normalizedRoomID, loaded.RoomRequestLimits)...)
 	checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeIP, normalizedIP, loaded.IPRequestLimits)...)
 	checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeDeviceID, normalizedDeviceID, loaded.DeviceRequestLimits)...)
