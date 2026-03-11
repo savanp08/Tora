@@ -3,6 +3,7 @@ package execution
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -382,6 +383,39 @@ func normalizePistonRequest(request ExecutionRequest) (ExecutionRequest, error) 
 	request.Language = runtimeSpec.Language
 	request.Version = runtimeSpec.Version
 	request.MainFile = strings.TrimSpace(request.MainFile)
+	if isCFamilyRuntime(request.Language) {
+		sourceFiles, dataFiles := splitCFamilyFiles(request.Files)
+		if len(sourceFiles) == 0 {
+			return ExecutionRequest{}, &ManagerError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "no C/C++ source files were provided",
+			}
+		}
+		if len(dataFiles) > 0 {
+			injectorSource, injectorErr := buildCPPDataInjector(dataFiles)
+			if injectorErr != nil {
+				return ExecutionRequest{}, &ManagerError{
+					StatusCode: http.StatusBadRequest,
+					Message:    "failed to build C/C++ data injector",
+					Err:        injectorErr,
+				}
+			}
+			encodedInjector := base64.StdEncoding.EncodeToString([]byte(injectorSource))
+			decodedInjector, decodeErr := base64.StdEncoding.DecodeString(encodedInjector)
+			if decodeErr != nil {
+				return ExecutionRequest{}, &ManagerError{
+					StatusCode: http.StatusBadRequest,
+					Message:    "failed to decode generated C/C++ injector",
+					Err:        decodeErr,
+				}
+			}
+			sourceFiles = append(sourceFiles, ExecutionFile{
+				Name:    "_tora_injector.cpp",
+				Content: string(decodedInjector),
+			})
+		}
+		request.Files = sourceFiles
+	}
 	if isCompiledRuntime(request.Language) && request.MainFile != "" {
 		// Keep support files (e.g. in.txt, data.json) available for runtime while ensuring
 		// the declared entry file remains first for compilers that default to files[0].
@@ -404,6 +438,124 @@ func isCompiledRuntime(language string) bool {
 	default:
 		return false
 	}
+}
+
+func isCFamilyRuntime(language string) bool {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "cpp", "c++", "c":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitCFamilyFiles(files []ExecutionFile) (sourceFiles []ExecutionFile, dataFiles []ExecutionFile) {
+	sourceFiles = make([]ExecutionFile, 0, len(files))
+	dataFiles = make([]ExecutionFile, 0, len(files))
+	for _, file := range files {
+		normalizedName := strings.TrimSpace(file.Name)
+		lowerName := strings.ToLower(normalizedName)
+		switch {
+		case strings.HasSuffix(lowerName, ".c"),
+			strings.HasSuffix(lowerName, ".cpp"),
+			strings.HasSuffix(lowerName, ".h"),
+			strings.HasSuffix(lowerName, ".hpp"):
+			sourceFiles = append(sourceFiles, file)
+		default:
+			dataFiles = append(dataFiles, file)
+		}
+	}
+	return sourceFiles, dataFiles
+}
+
+func buildCPPDataInjector(dataFiles []ExecutionFile) (string, error) {
+	var builder strings.Builder
+	builder.WriteString("#include <cstddef>\n")
+	builder.WriteString("#include <filesystem>\n")
+	builder.WriteString("#include <fstream>\n\n")
+	builder.WriteString("struct ToraDataInjector {\n")
+	builder.WriteString("  ToraDataInjector() {\n")
+
+	for index, file := range dataFiles {
+		decodedBytes, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(file.Content))
+		if decodeErr != nil {
+			decodedBytes = []byte(file.Content)
+		}
+		arrayLiteral := bytesToCPPArrayLiteral(decodedBytes)
+		declaredLength := len(decodedBytes)
+		if declaredLength == 0 {
+			declaredLength = 0
+		}
+
+		arrayName := fmt.Sprintf("tora_data_%d", index)
+		filePath := strings.TrimSpace(file.Name)
+		parentDir := strings.TrimSpace(pathDir(filePath))
+
+		builder.WriteString(fmt.Sprintf("    // Restore %s\n", filePath))
+		builder.WriteString(
+			fmt.Sprintf("    const unsigned char %s[] = {%s};\n", arrayName, arrayLiteral),
+		)
+		builder.WriteString(
+			fmt.Sprintf("    const std::size_t %s_len = %d;\n", arrayName, declaredLength),
+		)
+		if parentDir != "" && parentDir != "." {
+			builder.WriteString(
+				fmt.Sprintf(
+					"    std::filesystem::create_directories(\"%s\");\n",
+					escapeCPPString(parentDir),
+				),
+			)
+		}
+		builder.WriteString(
+			fmt.Sprintf(
+				"    std::ofstream out(\"%s\", std::ios::binary);\n",
+				escapeCPPString(filePath),
+			),
+		)
+		builder.WriteString("    if (out) {\n")
+		builder.WriteString(
+			fmt.Sprintf(
+				"      out.write(reinterpret_cast<const char*>(%s), static_cast<std::streamsize>(%s_len));\n",
+				arrayName,
+				arrayName,
+			),
+		)
+		builder.WriteString("    }\n\n")
+	}
+
+	builder.WriteString("  }\n")
+	builder.WriteString("};\n\n")
+	builder.WriteString("static ToraDataInjector tora_data_injector_instance;\n")
+	return builder.String(), nil
+}
+
+func bytesToCPPArrayLiteral(data []byte) string {
+	if len(data) == 0 {
+		return "0x00"
+	}
+	parts := make([]string, 0, len(data))
+	for _, b := range data {
+		parts = append(parts, fmt.Sprintf("0x%02x", b))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func pathDir(pathValue string) string {
+	normalized := strings.ReplaceAll(strings.TrimSpace(pathValue), "\\", "/")
+	if normalized == "" {
+		return ""
+	}
+	lastSlash := strings.LastIndex(normalized, "/")
+	if lastSlash <= 0 {
+		return ""
+	}
+	return normalized[:lastSlash]
+}
+
+func escapeCPPString(value string) string {
+	escaped := strings.ReplaceAll(value, "\\", "\\\\")
+	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+	return escaped
 }
 
 func mainFileFirst(files []ExecutionFile, mainFile string) []ExecutionFile {

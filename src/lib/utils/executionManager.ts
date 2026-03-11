@@ -324,6 +324,37 @@ function ensureMainFileFirst(files: ExecutionWorkspaceFile[], mainFile: string) 
 	return ordered;
 }
 
+function extensionOfFileName(name: string) {
+	const normalizedName = String(name || '').trim().toLowerCase();
+	const lastDotIndex = normalizedName.lastIndexOf('.');
+	if (lastDotIndex <= 0 || lastDotIndex === normalizedName.length - 1) {
+		return '';
+	}
+	return normalizedName.slice(lastDotIndex);
+}
+
+function shouldIncludeFileForLanguage(fileName: string, normalizedLanguage: string) {
+	const extension = extensionOfFileName(fileName);
+	if (!extension) {
+		return true;
+	}
+
+	const cFamilyLanguages = new Set(['cpp', 'c++', 'c']);
+	const jsFamilyLanguages = new Set(['javascript', 'js', 'node']);
+	const pythonFamilyLanguages = new Set(['python', 'py']);
+
+	if (cFamilyLanguages.has(normalizedLanguage)) {
+		return !new Set(['.js', '.ts', '.py', '.java', '.go']).has(extension);
+	}
+	if (jsFamilyLanguages.has(normalizedLanguage)) {
+		return !new Set(['.cpp', '.c', '.py', '.java', '.go']).has(extension);
+	}
+	if (pythonFamilyLanguages.has(normalizedLanguage)) {
+		return !new Set(['.cpp', '.c', '.js', '.ts', '.java', '.go']).has(extension);
+	}
+	return true;
+}
+
 function resolveExecutionWorkspace(
 	language: string,
 	code: string,
@@ -381,7 +412,10 @@ export function buildExecutionPayload(
 				content: String(file?.content ?? '')
 			};
 		})
-		.filter((file) => file.name.length > 0);
+		.filter(
+			(file) =>
+				file.name.length > 0 && shouldIncludeFileForLanguage(file.name, normalizedLanguage)
+		);
 	const finalMainFile = mainFileDir
 		? normalizedMainFile.slice(mainFileDir.length + 1)
 		: normalizedMainFile;
