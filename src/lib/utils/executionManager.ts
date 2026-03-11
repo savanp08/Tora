@@ -342,6 +342,7 @@ function shouldIncludeFileForLanguage(fileName: string, normalizedLanguage: stri
 	const cFamilyLanguages = new Set(['cpp', 'c++', 'c']);
 	const jsFamilyLanguages = new Set(['javascript', 'js', 'node']);
 	const pythonFamilyLanguages = new Set(['python', 'py']);
+	const javaLanguages = new Set(['java']);
 
 	if (cFamilyLanguages.has(normalizedLanguage)) {
 		return !new Set(['.js', '.ts', '.py', '.java', '.go']).has(extension);
@@ -351,6 +352,9 @@ function shouldIncludeFileForLanguage(fileName: string, normalizedLanguage: stri
 	}
 	if (pythonFamilyLanguages.has(normalizedLanguage)) {
 		return !new Set(['.cpp', '.c', '.js', '.ts', '.java', '.go']).has(extension);
+	}
+	if (javaLanguages.has(normalizedLanguage)) {
+		return !new Set(['.cpp', '.c', '.h', '.hpp', '.js', '.ts', '.py', '.go']).has(extension);
 	}
 	return true;
 }
