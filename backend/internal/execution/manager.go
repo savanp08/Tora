@@ -24,8 +24,8 @@ const (
 	defaultQueueWaitTimeout  = 30 * time.Second
 	defaultRequestTimeout    = 10 * time.Second
 	maxPistonResponseBytes   = 4 * 1024 * 1024
-	defaultRunTimeoutMs      = 2800
-	defaultCompileTimeoutMs  = 2800
+	defaultRunTimeoutMs      = 8000
+	defaultCompileTimeoutMs  = 10000
 	defaultMemoryLimitBytes  = 209715200
 	defaultMaxProcessCount   = 64
 	defaultMaxOpenFiles      = 64
@@ -471,34 +471,22 @@ func splitCFamilyFiles(files []ExecutionFile) (sourceFiles []ExecutionFile, data
 func buildCPPDataInjector(dataFiles []ExecutionFile) (string, error) {
 	var builder strings.Builder
 	builder.WriteString("#include <cstddef>\n")
-	builder.WriteString("#include <filesystem>\n")
-	builder.WriteString("#include <fstream>\n\n")
+	builder.WriteString("#include <cstdio>\n")
+	builder.WriteString("#include <filesystem>\n\n")
 	builder.WriteString("struct ToraDataInjector {\n")
 	builder.WriteString("  ToraDataInjector() {\n")
 
-	for index, file := range dataFiles {
+	for _, file := range dataFiles {
 		decodedBytes, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(file.Content))
 		if decodeErr != nil {
 			decodedBytes = []byte(file.Content)
 		}
-		arrayLiteral := bytesToCPPArrayLiteral(decodedBytes)
-		declaredLength := len(decodedBytes)
-		if declaredLength == 0 {
-			declaredLength = 0
-		}
 
-		arrayName := fmt.Sprintf("tora_data_%d", index)
 		filePath := strings.TrimSpace(file.Name)
 		parentDir := strings.TrimSpace(pathDir(filePath))
 
 		builder.WriteString(fmt.Sprintf("    // Restore %s\n", filePath))
 		builder.WriteString("    {\n")
-		builder.WriteString(
-			fmt.Sprintf("      const unsigned char %s[] = {%s};\n", arrayName, arrayLiteral),
-		)
-		builder.WriteString(
-			fmt.Sprintf("      const std::size_t %s_len = %d;\n", arrayName, declaredLength),
-		)
 		if parentDir != "" && parentDir != "." {
 			builder.WriteString(
 				fmt.Sprintf(
@@ -508,19 +496,21 @@ func buildCPPDataInjector(dataFiles []ExecutionFile) (string, error) {
 			)
 		}
 		builder.WriteString(
-			fmt.Sprintf(
-				"      std::ofstream out(\"%s\", std::ios::binary);\n",
-				escapeCPPString(filePath),
-			),
+			fmt.Sprintf("      FILE* f = fopen(\"%s\", \"wb\");\n", escapeCPPString(filePath)),
 		)
-		builder.WriteString("      if (out) {\n")
-		builder.WriteString(
-			fmt.Sprintf(
-				"        out.write(reinterpret_cast<const char*>(%s), static_cast<std::streamsize>(%s_len));\n",
-				arrayName,
-				arrayName,
-			),
-		)
+		builder.WriteString("      if (f) {\n")
+		if len(decodedBytes) > 0 {
+			builder.WriteString(
+				fmt.Sprintf(
+					"        static const unsigned char d[] = \"%s\";\n",
+					bytesToCPPHexEscaped(decodedBytes),
+				),
+			)
+			builder.WriteString(
+				fmt.Sprintf("        fwrite(d, 1, %d, f);\n", len(decodedBytes)),
+			)
+		}
+		builder.WriteString("        fclose(f);\n")
 		builder.WriteString("      }\n")
 		builder.WriteString("    }\n\n")
 	}
@@ -531,6 +521,17 @@ func buildCPPDataInjector(dataFiles []ExecutionFile) (string, error) {
 	return builder.String(), nil
 }
 
+// bytesToCPPHexEscaped encodes bytes as C string hex escapes (\xNN).
+// A single string literal compiles orders of magnitude faster than
+// a comma-separated array of thousands of integer literals.
+func bytesToCPPHexEscaped(data []byte) string {
+	var b strings.Builder
+	b.Grow(len(data) * 4)
+	for _, v := range data {
+		fmt.Fprintf(&b, "\\x%02x", v)
+	}
+	return b.String()
+}
 func bytesToCPPArrayLiteral(data []byte) string {
 	if len(data) == 0 {
 		return "0x00"
