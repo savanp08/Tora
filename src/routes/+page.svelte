@@ -29,9 +29,25 @@
 	} from '$lib/utils/sessionPreferences';
 	import { setSessionToken } from '$lib/utils/sessionToken';
 	import { onMount, tick } from 'svelte';
+
+	type TurnstileApi = {
+		render: (container: HTMLElement, options: Record<string, unknown>) => string;
+		execute: (widgetId?: string) => void;
+		reset: (widgetId?: string) => void;
+		remove: (widgetId?: string) => void;
+	};
+
+	type TurnstileHostWindow = Window & {
+		turnstile?: TurnstileApi;
+		onTurnstileSuccess?: (token: string) => void;
+	};
+
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
-	const CLIENT_LOG_PREFIX = '[home-client]';
+	const TURNSTILE_SITE_KEY_RAW = import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined;
+	const TURNSTILE_SITE_KEY = TURNSTILE_SITE_KEY_RAW?.trim() ?? '';
+	const TURNSTILE_VERIFY_TIMEOUT_MS = 12000;
+	const TURNSTILE_POLL_INTERVAL_MS = 120;
 	const ROOM_CODE_DIGITS = APP_LIMITS.room.codeDigits;
 	const ROOM_NAME_MAX_LENGTH = APP_LIMITS.room.nameMaxLength;
 	const ROOM_PASSWORD_MAX_LENGTH = APP_LIMITS.room.passwordMaxLength;
@@ -63,6 +79,11 @@
 	let isReviveDragActive = false;
 	let isRevivingRoom = false;
 	let reviveDragDepth = 0;
+	let turnstileContainerElement: HTMLDivElement | null = null;
+	let turnstileWidgetID = '';
+	let turnstileToken = '';
+	let turnstileResolve: ((token: string) => void) | null = null;
+	let turnstileTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
 	function persistSessionRoomPreferences() {
 		const normalized = writeSessionRoomPreferences({
@@ -92,16 +113,103 @@
 		persistSessionRoomPreferences();
 	}
 
-	function clientLog(event: string, payload?: unknown) {
-		const timestamp = new Date().toISOString();
-		if (payload === undefined) {
-			console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
-			return;
+	function clientLog(_event: string, _payload?: unknown) {}
+
+	function getTurnstileHostWindow() {
+		return window as TurnstileHostWindow;
+	}
+
+	function clearTurnstilePendingState() {
+		if (turnstileTimeoutHandle) {
+			clearTimeout(turnstileTimeoutHandle);
+			turnstileTimeoutHandle = null;
 		}
-		console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
+		turnstileResolve = null;
+	}
+
+	function resetTurnstile() {
+		turnstileToken = '';
+		clearTurnstilePendingState();
+		const hostWindow = getTurnstileHostWindow();
+		if (turnstileWidgetID && hostWindow.turnstile?.reset) {
+			hostWindow.turnstile.reset(turnstileWidgetID);
+		}
+	}
+
+	function initializeTurnstileWidget() {
+		if (turnstileWidgetID) {
+			return true;
+		}
+		const hostWindow = getTurnstileHostWindow();
+		if (!TURNSTILE_SITE_KEY || !turnstileContainerElement || !hostWindow.turnstile?.render) {
+			return false;
+		}
+
+		turnstileWidgetID = hostWindow.turnstile.render(turnstileContainerElement, {
+			sitekey: TURNSTILE_SITE_KEY,
+			size: 'invisible',
+			callback: (token: string) => {
+				const callbackWindow = getTurnstileHostWindow();
+				if (typeof callbackWindow.onTurnstileSuccess === 'function') {
+					callbackWindow.onTurnstileSuccess(token);
+				}
+			}
+		});
+		return turnstileWidgetID !== '';
+	}
+
+	async function waitForTurnstileAPI(timeoutMs = TURNSTILE_VERIFY_TIMEOUT_MS) {
+		if (getTurnstileHostWindow().turnstile?.render) {
+			return true;
+		}
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			await new Promise((resolve) => setTimeout(resolve, TURNSTILE_POLL_INTERVAL_MS));
+			if (getTurnstileHostWindow().turnstile?.render) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	async function requestTurnstileToken() {
+		if (!TURNSTILE_SITE_KEY) {
+			throw new Error('Security verification is not configured');
+		}
+		const isReady = await waitForTurnstileAPI();
+		const hostWindow = getTurnstileHostWindow();
+		if (!isReady || !initializeTurnstileWidget() || !hostWindow.turnstile?.execute) {
+			throw new Error('Security verification is unavailable. Refresh and try again.');
+		}
+
+		turnstileToken = '';
+		clearTurnstilePendingState();
+		return await new Promise<string>((resolve, reject) => {
+			turnstileResolve = resolve;
+			turnstileTimeoutHandle = setTimeout(() => {
+				clearTurnstilePendingState();
+				reject(new Error('Security verification timed out. Please retry.'));
+			}, TURNSTILE_VERIFY_TIMEOUT_MS);
+			try {
+				hostWindow.turnstile?.execute(turnstileWidgetID);
+			} catch (_error) {
+				clearTurnstilePendingState();
+				reject(new Error('Failed to run security verification.'));
+			}
+		});
 	}
 
 	onMount(() => {
+		const hostWindow = getTurnstileHostWindow();
+		const previousTurnstileCallback = hostWindow.onTurnstileSuccess;
+		hostWindow.onTurnstileSuccess = (token: string) => {
+			turnstileToken = (token || '').trim();
+			if (turnstileToken && turnstileResolve) {
+				turnstileResolve(turnstileToken);
+				clearTurnstilePendingState();
+			}
+		};
+
 		roomName = generateRoomName();
 		const identity = getOrInitIdentity();
 		currentUser.set({ id: identity.id, username: identity.username });
@@ -120,6 +228,17 @@
 			window.removeEventListener('dragover', onWindowDragOver);
 			window.removeEventListener('dragleave', onWindowDragLeave);
 			window.removeEventListener('drop', onWindowDrop);
+			clearTurnstilePendingState();
+			const cleanupWindow = getTurnstileHostWindow();
+			if (turnstileWidgetID && cleanupWindow.turnstile?.remove) {
+				cleanupWindow.turnstile.remove(turnstileWidgetID);
+			}
+			turnstileWidgetID = '';
+			if (previousTurnstileCallback) {
+				cleanupWindow.onTurnstileSuccess = previousTurnstileCallback;
+			} else {
+				delete cleanupWindow.onTurnstileSuccess;
+			}
 		};
 	});
 
@@ -300,8 +419,12 @@
 			.slice(0, ROOM_PASSWORD_MAX_LENGTH);
 		activeRoomPassword.set(normalizedRoomPassword);
 		const sessionPreferences = persistSessionRoomPreferences();
+		let requestTurnstileTokenValue = '';
 
 		try {
+			if (mode === 'create') {
+				requestTurnstileTokenValue = await requestTurnstileToken();
+			}
 			clientLog('api-rooms-join-request', {
 				roomName: requestRoomName,
 				roomCode: requestRoomCode,
@@ -322,6 +445,7 @@
 					type: 'ephemeral',
 					mode,
 					roomDurationHours,
+					turnstileToken: requestTurnstileTokenValue,
 					aiEnabled: sessionPreferences.aiEnabled,
 					e2eEnabled: sessionPreferences.e2eEnabled
 				})
@@ -353,6 +477,9 @@
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
 			joinError = e.message;
 		} finally {
+			if (mode === 'create') {
+				resetTurnstile();
+			}
 			isJoining = false;
 			activeActionMode = '';
 		}
@@ -551,6 +678,17 @@
 					</div>
 				{/if}
 
+				{#if TURNSTILE_SITE_KEY}
+					<div
+						class="cf-turnstile"
+						bind:this={turnstileContainerElement}
+						data-sitekey={TURNSTILE_SITE_KEY}
+						data-callback="onTurnstileSuccess"
+						data-size="invisible"
+						aria-hidden="true"
+					></div>
+				{/if}
+
 				<div class="action-row">
 					<button
 						class="btn-primary-action"
@@ -694,9 +832,10 @@
 
 	header {
 		display: flex;
-		justify-content: flex-start;
+		justify-content: center;
 		align-items: center;
-		margin-bottom: 28px;
+		width: 100%;
+		margin: 5rem 0 0.75rem;
 	}
 
 	.logo {
@@ -757,6 +896,15 @@
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
+	}
+
+	.cf-turnstile {
+		position: absolute;
+		width: 0;
+		height: 0;
+		overflow: hidden;
+		opacity: 0;
+		pointer-events: none;
 	}
 
 	.advanced-toggle {
@@ -1014,6 +1162,10 @@
 	}
 
 	@media (max-width: 760px) {
+		header {
+			margin-top: 1rem;
+		}
+
 		.container {
 			min-height: 100svh;
 		}

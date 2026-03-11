@@ -8,7 +8,6 @@
 	import DiscussionModal from '$lib/components/chat/DiscussionModal.svelte';
 	import FloatingActivityBox from '$lib/components/chat/FloatingActivityBox.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
-	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import PrivateAiChat from '$lib/components/chat/PrivateAiChat.svelte';
 	import ChatRoomHeader from '$lib/components/chat/ChatRoomHeader.svelte';
 	import RoomDashboard from '$lib/components/chat/RoomDashboard.svelte';
@@ -117,10 +116,12 @@
 		toWireMessage
 	} from '$lib/utils/chat/messages';
 	import {
+		buildThreadSearchResults,
 		collectLocalRoomSubtreeIDs,
 		filterThreadList,
 		filterThreadsByStatus,
-		sortThreads
+		sortThreads,
+		type ThreadSearchResult
 	} from '$lib/utils/chat/threadList';
 	import {
 		applyMessageReactionsState,
@@ -168,10 +169,8 @@
 	import { onDestroy, onMount, tick } from 'svelte';
 	import './page.css';
 
-	const CLIENT_LOG_PREFIX = '[chat-client]';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
-	const CLIENT_DEBUG = (import.meta.env.VITE_CHAT_DEBUG as string | undefined) === '1';
 	const TYPING_PING_INTERVAL_MS = 3000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
@@ -447,6 +446,7 @@
 	let messageActionMode: MessageActionMode = 'none';
 	let selectedActionMessageId = '';
 	let chatListSearch = '';
+	let sidebarSearchResults: ThreadSearchResult[] = [];
 	let roomMessageSearch = '';
 	let draftMessage = '';
 	let attachedFile: File | null = null;
@@ -832,6 +832,7 @@
 		roomId
 	);
 	$: filteredLeftRooms = filterThreadList(leftRooms, chatListSearch, messagesByRoom, roomId);
+	$: sidebarSearchResults = buildThreadSearchResults(roomThreads, chatListSearch, messagesByRoom);
 	$: if (canCollapseRoomList && isRoomListCollapsed && showLeftMenu) {
 		showLeftMenu = false;
 	}
@@ -1600,17 +1601,7 @@
 		// increases server load and can cause jank, so leaving out for now
 	}
 
-	function clientLog(event: string, payload?: unknown) {
-		if (!CLIENT_DEBUG) {
-			return;
-		}
-		const timestamp = new Date().toISOString();
-		if (payload === undefined) {
-			console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
-			return;
-		}
-		console.log(`${CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
-	}
+	function clientLog(_event: string, _payload?: unknown) {}
 
 	function formatCallDuration(totalSeconds: number) {
 		const safeSeconds = Math.max(0, Math.floor(totalSeconds));
@@ -2792,7 +2783,12 @@
 	}
 
 	function onSidebarSelect(
-		event: CustomEvent<{ id: string; isMember: boolean; status: ThreadStatus }>
+		event: CustomEvent<{
+			id: string;
+			isMember: boolean;
+			status: ThreadStatus;
+			focusMessageId?: string;
+		}>
 	) {
 		const targetRoomId = normalizeRoomIDValue(event.detail.id);
 		if (!targetRoomId) {
@@ -2802,7 +2798,7 @@
 			showErrorToast('You left this room. Open one of its child rooms.');
 			return;
 		}
-		selectRoom(targetRoomId, event.detail.isMember);
+		selectRoom(targetRoomId, event.detail.isMember, event.detail.focusMessageId || '');
 	}
 
 	function selectRoom(targetRoomId: string, memberState: boolean, focusMsgID = '') {
@@ -5635,6 +5631,11 @@
 		}
 	}
 
+	function closeRoomSearch() {
+		showRoomSearch = false;
+		roomMessageSearch = '';
+	}
+
 	function openRoomDetails() {
 		showRoomDetails = true;
 	}
@@ -6512,13 +6513,12 @@
 	class:sidebar-collapsed={canCollapseRoomList && isRoomListCollapsed}
 	class:online-collapsed={isOnlinePanelEffectivelyCollapsed}
 >
-	<MonochromeRoomBackground seed={roomId || 'chat-room'} />
-
 	<div class="sidebar-pane">
 		<ChatSidebar
 			myRooms={filteredMyRooms}
 			discoverableRooms={filteredDiscoverableRooms}
 			leftRooms={filteredLeftRooms}
+			searchResults={sidebarSearchResults}
 			accessibleParentRoomIds={roomThreads.map((thread) => thread.id)}
 			activeRoomId={roomId}
 			{isMobileView}
@@ -6599,6 +6599,7 @@
 						on:trustedChoice={(event) => onTrustedDeviceChoice(event.detail.choice)}
 						on:cancelSelection={cancelSelectionMode}
 						on:deleteSelected={deleteSelectedMessagesBatch}
+						on:closeRoomSearch={closeRoomSearch}
 					/>
 				{/if}
 

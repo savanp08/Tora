@@ -18,10 +18,7 @@ import (
 	"github.com/savanp08/converse/internal/models"
 )
 
-const (
-	privateAIChatLogsTableName = "private_ai_logs"
-	privateAIRoomHistoryPrefix = "room:history:"
-)
+const privateAIRoomHistoryPrefix = "room:history:"
 
 const privateAISystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
 RULES:
@@ -41,11 +38,6 @@ var privateAIChatAuditStore struct {
 	scylla *database.ScyllaStore
 }
 
-var privateAIChatSchemaState struct {
-	mu      sync.Mutex
-	ensured map[string]bool
-}
-
 type privateAIChatRequest struct {
 	Prompt   string `json:"prompt"`
 	DeviceID string `json:"deviceId"`
@@ -54,16 +46,6 @@ type privateAIChatRequest struct {
 
 type privateAIChatResponse struct {
 	Response string `json:"response"`
-}
-
-type privateAIChatAuditRecord struct {
-	UserID    string
-	Username  string
-	IPAddress string
-	DeviceID  string
-	Prompt    string
-	Response  string
-	Timestamp time.Time
 }
 
 func privateAIContextMessageLimit() int {
@@ -148,20 +130,6 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAIChatError(w, http.StatusBadGateway, "Failed to generate AI response")
-		return
-	}
-
-	record := privateAIChatAuditRecord{
-		UserID:    userID,
-		Username:  username,
-		IPAddress: ipAddress,
-		DeviceID:  deviceID,
-		Prompt:    prompt,
-		Response:  responseText,
-		Timestamp: time.Now().UTC(),
-	}
-	if err := persistPrivateAIChatAuditRecord(r.Context(), record); err != nil {
-		writeAIChatError(w, http.StatusInternalServerError, "Failed to audit AI interaction")
 		return
 	}
 
@@ -251,12 +219,6 @@ func readNestedContextUserValue(ctx context.Context, field string) string {
 	return ""
 }
 
-func activePrivateAIChatScyllaStore() *database.ScyllaStore {
-	privateAIChatAuditStore.mu.RLock()
-	defer privateAIChatAuditStore.mu.RUnlock()
-	return privateAIChatAuditStore.scylla
-}
-
 func activePrivateAIChatStores() (*database.RedisStore, *database.ScyllaStore) {
 	privateAIChatAuditStore.mu.RLock()
 	defer privateAIChatAuditStore.mu.RUnlock()
@@ -328,7 +290,7 @@ func buildPrivateAIPromptWithRoomContext(ctx context.Context, roomID, prompt str
 	if len(contextMessages) > 0 {
 		payload, err := json.Marshal(contextMessages)
 		if err != nil {
-			log.Printf("[private-ai] context marshal failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[private-ai] context marshal failed: %v", err)
 		} else {
 			encodedMessages = string(payload)
 		}
@@ -361,7 +323,7 @@ func loadPrivateAIRoomSummary(ctx context.Context, roomID string) string {
 	if redisStore != nil {
 		summary, err := redisStore.GetRoomSummary(ctx, normalizedRoomID)
 		if err != nil {
-			log.Printf("[private-ai] redis summary lookup failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[private-ai] redis summary lookup failed: %v", err)
 		} else if strings.TrimSpace(summary) != "" {
 			return strings.TrimSpace(summary)
 		}
@@ -370,11 +332,11 @@ func loadPrivateAIRoomSummary(ctx context.Context, roomID string) string {
 	if scyllaStore != nil {
 		summary, err := scyllaStore.GetRoomSummary(ctx, normalizedRoomID)
 		if err != nil {
-			log.Printf("[private-ai] scylla summary lookup failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[private-ai] scylla summary lookup failed: %v", err)
 		} else if strings.TrimSpace(summary) != "" {
 			if redisStore != nil {
 				if cacheErr := redisStore.SetRoomSummary(ctx, normalizedRoomID, summary); cacheErr != nil {
-					log.Printf("[private-ai] redis summary backfill failed room=%s err=%v", normalizedRoomID, cacheErr)
+					log.Printf("[private-ai] redis summary backfill failed: %v", cacheErr)
 				}
 			}
 			return strings.TrimSpace(summary)
@@ -407,7 +369,7 @@ func loadPrivateAIRecentMessages(ctx context.Context, roomID string, limit int) 
 		-1,
 	).Result()
 	if err != nil {
-		log.Printf("[private-ai] redis message context lookup failed room=%s err=%v", normalizedRoomID, err)
+		log.Printf("[private-ai] redis message context lookup failed: %v", err)
 		return []models.Message{}
 	}
 
@@ -513,73 +475,6 @@ func parsePrivateAITime(value any) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func persistPrivateAIChatAuditRecord(ctx context.Context, record privateAIChatAuditRecord) error {
-	store := activePrivateAIChatScyllaStore()
-	if store == nil || store.Session == nil {
-		return fmt.Errorf("ai audit storage unavailable")
-	}
-	if err := ensurePrivateAIChatAuditSchema(ctx, store); err != nil {
-		return err
-	}
-
-	query := fmt.Sprintf(
-		`INSERT INTO %s (user_id, logged_at, username, ip_address, device_id, prompt, response) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		store.Table(privateAIChatLogsTableName),
-	)
-	return store.Session.Query(
-		query,
-		record.UserID,
-		record.Timestamp.UTC(),
-		record.Username,
-		record.IPAddress,
-		record.DeviceID,
-		record.Prompt,
-		record.Response,
-	).WithContext(ctx).Exec()
-}
-
-func ensurePrivateAIChatAuditSchema(ctx context.Context, store *database.ScyllaStore) error {
-	if store == nil || store.Session == nil {
-		return fmt.Errorf("ai audit storage unavailable")
-	}
-	tableName := store.Table(privateAIChatLogsTableName)
-	if tableName == "" {
-		return fmt.Errorf("ai audit table is not configured")
-	}
-
-	privateAIChatSchemaState.mu.Lock()
-	if privateAIChatSchemaState.ensured == nil {
-		privateAIChatSchemaState.ensured = make(map[string]bool)
-	}
-	if privateAIChatSchemaState.ensured[tableName] {
-		privateAIChatSchemaState.mu.Unlock()
-		return nil
-	}
-	privateAIChatSchemaState.mu.Unlock()
-
-	query := fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s (
-			user_id text,
-			logged_at timestamp,
-			username text,
-			ip_address text,
-			device_id text,
-			prompt text,
-			response text,
-			PRIMARY KEY (user_id, logged_at)
-		) WITH CLUSTERING ORDER BY (logged_at DESC)`,
-		tableName,
-	)
-	if err := store.Session.Query(query).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("ensure private ai log schema: %w", err)
-	}
-
-	privateAIChatSchemaState.mu.Lock()
-	privateAIChatSchemaState.ensured[tableName] = true
-	privateAIChatSchemaState.mu.Unlock()
-	return nil
 }
 
 func writeAIChatError(w http.ResponseWriter, status int, message string) {

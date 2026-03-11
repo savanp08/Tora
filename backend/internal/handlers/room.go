@@ -15,6 +15,7 @@ import (
 	mrand "math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -143,6 +144,7 @@ type JoinRoomRequest struct {
 	RoomName          string  `json:"roomName"`
 	RoomCode          string  `json:"roomCode"`
 	RoomPassword      string  `json:"roomPassword"`
+	TurnstileToken    string  `json:"turnstileToken"`
 	Username          string  `json:"username"`
 	UserID            string  `json:"userId"`
 	Type              string  `json:"type"`
@@ -169,6 +171,38 @@ type JoinRoomResponse struct {
 	AIEnabled        bool   `json:"aiEnabled"`
 	E2EEnabled       bool   `json:"e2eEnabled"`
 	ServerNow        int64  `json:"serverNow,omitempty"`
+}
+
+func verifyTurnstile(token string, secret string) bool {
+	normalizedToken := strings.TrimSpace(token)
+	normalizedSecret := strings.TrimSpace(secret)
+	if normalizedToken == "" || normalizedSecret == "" {
+		return false
+	}
+
+	response, err := http.PostForm(
+		"https://challenges.cloudflare.com/turnstile/v0/siteverify",
+		url.Values{
+			"secret":   {normalizedSecret},
+			"response": {normalizedToken},
+		},
+	)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		return false
+	}
+
+	var payload struct {
+		Success bool `json:"success"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return false
+	}
+	return payload.Success
 }
 
 type ExtendRoomRequest struct {
@@ -450,6 +484,14 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "mode must be 'create' or 'join'"})
 		return
+	}
+	if mode == "create" {
+		turnstileSecret := strings.TrimSpace(os.Getenv("TURNSTILE_SECRET_KEY"))
+		if !verifyTurnstile(req.TurnstileToken, turnstileSecret) {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Turnstile verification failed"})
+			return
+		}
 	}
 	requestedAIEnabled := resolveOptionalBool(req.AIEnabled, req.AIEnabledAlt)
 	requestedE2EEnabled := resolveOptionalBool(req.E2EEnabled, req.E2EEnabledAlt, req.E2EEEnabledAlt)

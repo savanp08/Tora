@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +29,11 @@ import (
 
 func main() {
 	cfg := config.LoadConfig()
+	if isServerLoggingEnabled() {
+		log.SetOutput(newPrivacyLogWriter(os.Stderr))
+	} else {
+		log.SetOutput(io.Discard)
+	}
 	ai.RefreshDefaultProvidersFromEnv()
 	log.Println("🚀 Starting Converse Backend...")
 	websocket.SetTrustedProxies(cfg.TrustedProxies)
@@ -184,7 +191,7 @@ func cleanupExpiredRoom(
 	if redisStore != nil && redisStore.Client != nil {
 		keys, err := redisStore.Client.SMembers(ctx, filesKey).Result()
 		if err != nil {
-			log.Printf("[expiry-worker] room file index lookup failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[expiry-worker] room file index lookup failed: %v", err)
 		} else {
 			objectKeys = keys
 		}
@@ -193,14 +200,14 @@ func cleanupExpiredRoom(
 	if r2Client != nil && len(objectKeys) > 0 {
 		deleteCtx, cancelDelete := context.WithTimeout(ctx, 45*time.Second)
 		if err := r2Client.DeleteObjects(deleteCtx, objectKeys); err != nil {
-			log.Printf("[expiry-worker] r2 cleanup failed room=%s files=%d err=%v", normalizedRoomID, len(objectKeys), err)
+			log.Printf("[expiry-worker] r2 cleanup failed files=%d err=%v", len(objectKeys), err)
 		}
 		cancelDelete()
 	}
 
 	if redisStore != nil && redisStore.Client != nil {
 		if err := redisStore.Client.Del(ctx, filesKey).Err(); err != nil {
-			log.Printf("[expiry-worker] failed to clear room file index room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[expiry-worker] failed to clear room file index: %v", err)
 		}
 	}
 
@@ -209,10 +216,63 @@ func cleanupExpiredRoom(
 		messagesTable := scyllaStore.Table("messages")
 		deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ?`, messagesTable)
 		if err := scyllaStore.Session.Query(deleteQuery, normalizedRoomID).WithContext(deleteCtx).Exec(); err != nil {
-			log.Printf("[expiry-worker] scylla partition delete failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[expiry-worker] scylla partition delete failed: %v", err)
 		}
 		cancelDelete()
 	}
+}
+
+func isServerLoggingEnabled() bool {
+	value := strings.TrimSpace(os.Getenv("ENABLE_SERVER_LOGS"))
+	if value == "" {
+		return true
+	}
+	switch strings.ToLower(value) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+type privacyLogWriter struct {
+	target io.Writer
+}
+
+var (
+	privacyLogKeyValuePattern = regexp.MustCompile(`\b(room|user|email|message|comment|pin|device|ip|remote|object|key|owner|repo|ref|filename|parent|origin|msg|action)=([^\s,]+)`)
+	privacyLogEmailPattern    = regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`)
+	privacyLogIPv4Pattern     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b`)
+	privacyLogIDAfterWord     = regexp.MustCompile(`\b(room|user|client|sender)\s+[A-Za-z0-9._:\-]{3,}`)
+)
+
+func newPrivacyLogWriter(target io.Writer) io.Writer {
+	return &privacyLogWriter{target: target}
+}
+
+func (w *privacyLogWriter) Write(p []byte) (int, error) {
+	if w == nil || w.target == nil {
+		return len(p), nil
+	}
+	sanitized := sanitizeLogLine(string(p))
+	if _, err := w.target.Write([]byte(sanitized)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func sanitizeLogLine(raw string) string {
+	sanitized := privacyLogKeyValuePattern.ReplaceAllString(raw, `$1=[redacted]`)
+	sanitized = privacyLogEmailPattern.ReplaceAllString(sanitized, "[redacted-email]")
+	sanitized = privacyLogIPv4Pattern.ReplaceAllString(sanitized, "[redacted-ip]")
+	sanitized = privacyLogIDAfterWord.ReplaceAllStringFunc(sanitized, func(fragment string) string {
+		parts := strings.Fields(fragment)
+		if len(parts) == 0 {
+			return "[redacted]"
+		}
+		return parts[0] + " [redacted]"
+	})
+	return sanitized
 }
 
 func extractRoomIDFromExpiredKey(key string) string {

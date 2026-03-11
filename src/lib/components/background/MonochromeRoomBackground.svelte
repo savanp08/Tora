@@ -104,9 +104,9 @@
 		const ph3 = rng() * Math.PI * 2;
 
 		// Stroke color — visible contrast in both modes
-		const strokeR = dark ? 200 : 30;
-		const strokeG = dark ? 210 : 40;
-		const strokeB = dark ? 240 : 70;
+		const strokeR = dark ? 200 : 14;
+		const strokeG = dark ? 210 : 16;
+		const strokeB = dark ? 240 : 24;
 
 		const diag = Math.sqrt(w * w + h * h);
 		const stepSize = Math.max(2, diag * 0.0025);   // adaptive step

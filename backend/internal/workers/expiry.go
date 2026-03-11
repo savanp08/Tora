@@ -488,7 +488,7 @@ func (h *ExpiryEmailTaskHandler) sendRoomArchiveEmail(
 		return fmt.Errorf("send archive email: %w", err)
 	}
 
-	log.Printf("[expiry-email-worker] archive email sent room=%s email=%s object=%s", roomID, normalizedEmail, objectKey)
+	log.Printf("[expiry-email-worker] archive email sent")
 	return nil
 }
 

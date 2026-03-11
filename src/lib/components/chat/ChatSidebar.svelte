@@ -2,6 +2,7 @@
 	import { createEventDispatcher, onMount } from 'svelte';
 	import IconSet from '$lib/components/icons/IconSet.svelte';
 	import type { ChatThread, ThemePreference, ThreadStatus } from '$lib/types/chat';
+	import type { ThreadSearchResult } from '$lib/utils/chat/threadList';
 
 	type TreeRow = {
 		thread: ChatThread;
@@ -33,6 +34,7 @@
 	export let myRooms: ChatThread[] = [];
 	export let discoverableRooms: ChatThread[] = [];
 	export let leftRooms: ChatThread[] = [];
+	export let searchResults: ThreadSearchResult[] = [];
 	export let accessibleParentRoomIds: string[] = [];
 	export let activeRoomId = '';
 	export let showLeftMenu = false;
@@ -44,7 +46,7 @@
 	export let isCollapsed = false;
 
 	const dispatch = createEventDispatcher<{
-		select: { id: string; isMember: boolean; status: ThreadStatus };
+		select: { id: string; isMember: boolean; status: ThreadStatus; focusMessageId?: string };
 		jumpOrigin: {
 			parentRoomId: string;
 			originMessageId: string;
@@ -145,6 +147,9 @@
 	$: currentTreeRows = currentTreeRootId ? flattenTree(currentTreeRootId) : [];
 	$: activeThread = threadByID.get(activeRoomId);
 	$: activeParentRoomId = activeThread?.parentRoomId || '';
+	$: hasSearchQuery = chatListSearch.trim().length > 0;
+	$: roomSearchResults = searchResults.filter((result) => result.kind === 'room');
+	$: messageSearchResults = searchResults.filter((result) => result.kind === 'message');
 	$: highlightedChildIds = new Set(
 		allThreads
 			.filter((thread) => thread.parentRoomId && thread.parentRoomId === activeRoomId)
@@ -483,6 +488,43 @@
 		}
 	}
 
+	function selectSearchRoom(thread: ChatThread, focusMessageId = '') {
+		streamlinedManualRootList = false;
+		dispatch('select', {
+			id: thread.id,
+			isMember: thread.status === 'joined',
+			status: thread.status,
+			focusMessageId
+		});
+		if (!isFullView) {
+			streamlinedParentRoomId = getStreamlinedContextRoomID(
+				thread.id,
+				threadByID,
+				childrenByParent
+			);
+		}
+	}
+
+	function onSearchResultSelect(result: ThreadSearchResult) {
+		const thread = threadByID.get(result.roomId);
+		if (!thread) {
+			return;
+		}
+		if (result.kind === 'message') {
+			selectSearchRoom(thread, result.messageId || '');
+			return;
+		}
+		selectSearchRoom(thread);
+	}
+
+	function getSearchMessagePreview(result: ThreadSearchResult) {
+		const sender = (result.senderName || '').trim();
+		if (!sender) {
+			return result.preview;
+		}
+		return `${sender}: ${result.preview}`;
+	}
+
 	function getStreamlinedContextRoomID(
 		currentActiveID: string,
 		threadIndex: Map<string, ChatThread>,
@@ -686,7 +728,102 @@
 		bind:value={chatListSearch} placeholder="Search names or messages" />
 	</div>
 	<div class="room-items">
-		{#if isFullView}
+		{#if hasSearchQuery}
+			{#if searchResults.length === 0}
+				<div class="empty-label">No chats or messages matched your search.</div>
+			{:else}
+				{#if roomSearchResults.length > 0}
+					<div class="section-label">Rooms</div>
+					{#each roomSearchResults as result (result.key)}
+						{@const thread = threadByID.get(result.roomId)}
+						{#if thread}
+							<button
+								type="button"
+								class={getRoomItemClasses(thread)}
+								on:click={() => onSearchResultSelect(result)}
+							>
+								<span
+									class="avatar {isChildThread(thread)
+										? 'child-avatar'
+										: 'original-avatar'}"
+									title={thread.name}
+								>
+									{getTreeAvatarLabel(thread)}
+								</span>
+								<span class="item-main">
+									<span class="item-top">
+										<span class="room-name-wrap">
+											<span
+												class="status-dot {thread.status === 'joined'
+													? 'green'
+													: thread.status === 'left'
+														? 'gray'
+														: 'orange'}"
+											></span>
+											<span class="room-name">{thread.name}</span>
+											{#if thread.requiresPassword}
+												<span class="room-lock" title="Password protected room">🔒</span>
+											{/if}
+										</span>
+										<span class="room-time">{formatClock(thread.lastActivity)}</span>
+									</span>
+									<span class="item-bottom">
+										<span class="room-preview">{result.preview}</span>
+									</span>
+								</span>
+							</button>
+						{/if}
+					{/each}
+				{/if}
+				{#if messageSearchResults.length > 0}
+					<div class="section-label">Messages</div>
+					{#each messageSearchResults as result (result.key)}
+						{@const thread = threadByID.get(result.roomId)}
+						{#if thread}
+							<button
+								type="button"
+								class={getRoomItemClasses(thread)}
+								on:click={() => onSearchResultSelect(result)}
+							>
+								<span
+									class="avatar {isChildThread(thread)
+										? 'child-avatar'
+										: 'original-avatar'}"
+									title={thread.name}
+								>
+									{getTreeAvatarLabel(thread)}
+								</span>
+								<span class="item-main">
+									<span class="item-top">
+										<span class="room-name-wrap">
+											<span
+												class="status-dot {thread.status === 'joined'
+													? 'green'
+													: thread.status === 'left'
+														? 'gray'
+														: 'orange'}"
+											></span>
+											<span class="room-name">{thread.name}</span>
+											{#if thread.requiresPassword}
+												<span class="room-lock" title="Password protected room">🔒</span>
+											{/if}
+										</span>
+										<span class="room-time"
+											>{formatClock(result.messageCreatedAt ?? thread.lastActivity)}</span
+										>
+									</span>
+									<span class="item-bottom">
+										<span class="room-preview search-message-preview"
+											>{getSearchMessagePreview(result)}</span
+										>
+									</span>
+								</span>
+							</button>
+						{/if}
+					{/each}
+				{/if}
+			{/if}
+		{:else if isFullView}
 			{#if myRooms.length === 0 && discoverableRooms.length === 0 && leftRooms.length === 0}
 				<div class="empty-label">No chats matched your search.</div>
 			{:else}
@@ -1503,6 +1640,15 @@
 
 	.room-list.theme-dark .room-preview {
 		color: #a9b8d4;
+	}
+
+	.search-message-preview {
+		color: #1e293b;
+		font-weight: 500;
+	}
+
+	.room-list.theme-dark .search-message-preview {
+		color: #dbe7ff;
 	}
 
 	.badges {

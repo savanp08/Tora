@@ -15,6 +15,7 @@
 		trustedChoice: { choice: 'yes' | 'no' };
 		cancelSelection: void;
 		deleteSelected: void;
+		closeRoomSearch: void;
 	}>();
 </script>
 
@@ -74,7 +75,18 @@
 
 {#if showRoomSearch}
 	<div class="chat-search-row {isDarkMode ? 'theme-dark' : ''}">
-		<input type="text" bind:value={roomMessageSearch} placeholder="Search in this room" />
+		<div class="chat-search-controls">
+			<input type="text" bind:value={roomMessageSearch} placeholder="Search in this room" />
+			<button
+				type="button"
+				class="chat-search-close"
+				aria-label="Close room search"
+				title="Close search"
+				on:click={() => dispatch('closeRoomSearch')}
+			>
+				X
+			</button>
+		</div>
 	</div>
 {/if}
 
@@ -234,8 +246,14 @@
 		border-bottom-color: #2b2b30;
 	}
 
+	.chat-search-controls {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
 	.chat-search-row input {
-		width: 100%;
+		width: min(72vw, 30rem);
 		border: 1px solid #c7cfdb;
 		border-radius: 8px;
 		padding: 0.55rem 0.7rem;
@@ -256,5 +274,38 @@
 
 	.chat-search-row.theme-dark input::placeholder {
 		color: #9898a1;
+	}
+
+	.chat-search-close {
+		width: 2rem;
+		height: 2rem;
+		border: 1px solid #c7cfdb;
+		border-radius: 8px;
+		background: #edf2f8;
+		color: #2b394f;
+		font-size: 0.82rem;
+		font-weight: 700;
+		cursor: pointer;
+		flex: 0 0 auto;
+	}
+
+	.chat-search-close:hover {
+		background: #e3ebf5;
+	}
+
+	.chat-search-row.theme-dark .chat-search-close {
+		border-color: #38383d;
+		background: #18181b;
+		color: #efeff4;
+	}
+
+	.chat-search-row.theme-dark .chat-search-close:hover {
+		background: #202026;
+	}
+
+	@media (max-width: 720px) {
+		.chat-search-row input {
+			width: calc(100vw - 7.2rem);
+		}
 	}
 </style>

@@ -56,11 +56,14 @@
 			const nextDigits = [...digits];
 			nextDigits[index] = '';
 			applyAndEmit(nextDigits);
+			// Keep DOM input value in sync even when state didn't visibly change.
+			input.value = '';
 			return;
 		}
 
 		const { nextDigits, cursor } = fillDigitsFrom(index, entered);
 		applyAndEmit(nextDigits);
+		input.value = nextDigits[index] || '';
 		if (cursor < CODE_LENGTH) {
 			focusDigit(cursor);
 			return;
@@ -68,20 +71,53 @@
 		input.blur();
 	}
 
+	function onDigitBeforeInput(event: InputEvent) {
+		// Guard at the earliest stage so invalid characters never appear in the input.
+		if (event.inputType.startsWith('delete')) {
+			return;
+		}
+		const incoming = typeof event.data === 'string' ? event.data : '';
+		if (!incoming) {
+			return;
+		}
+		if (!/^\d+$/.test(incoming)) {
+			event.preventDefault();
+		}
+	}
+
+	function isControlKey(event: KeyboardEvent) {
+		if (event.ctrlKey || event.metaKey || event.altKey) {
+			return true;
+		}
+		return (
+			event.key === 'Tab' ||
+			event.key === 'Escape' ||
+			event.key === 'Enter' ||
+			event.key === 'Home' ||
+			event.key === 'End' ||
+			event.key === 'Delete'
+		);
+	}
+
 	function onDigitKeyDown(index: number, event: KeyboardEvent) {
+		const input = event.currentTarget as HTMLInputElement;
 		if (event.key === 'Backspace') {
 			event.preventDefault();
 			const nextDigits = [...digits];
 			if (nextDigits[index]) {
 				nextDigits[index] = '';
 				applyAndEmit(nextDigits);
+				input.value = '';
 				return;
 			}
 			if (index > 0) {
 				nextDigits[index - 1] = '';
 				applyAndEmit(nextDigits);
 				focusDigit(index - 1);
+				return;
 			}
+			// Fallback for stale DOM value when state is already empty.
+			input.value = '';
 			return;
 		}
 		if (event.key === 'ArrowLeft') {
@@ -95,6 +131,12 @@
 			return;
 		}
 		if (event.key === ' ') {
+			event.preventDefault();
+		}
+		if (isControlKey(event)) {
+			return;
+		}
+		if (!/^\d$/.test(event.key)) {
 			event.preventDefault();
 		}
 	}
@@ -132,6 +174,7 @@
 			value={digit}
 			{disabled}
 			on:input={(event) => onDigitInput(index, event)}
+			on:beforeinput={(event) => onDigitBeforeInput(event)}
 			on:keydown={(event) => onDigitKeyDown(index, event)}
 			on:paste={(event) => onDigitPaste(index, event)}
 		/>

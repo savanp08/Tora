@@ -2402,7 +2402,7 @@
 	/* Light theme: pure black-on-white art — no filter, just a heavy white scrim
 	   via the overlay so strokes are whisper-faint */
 	.messages-shell :global(.mrb-overlay) {
-		background: rgba(242, 244, 250, 0.82);
+		background: rgba(255, 255, 255, 0.92);
 	}
 
 	/* Dark theme: heavy dark scrim to dim the light strokes */

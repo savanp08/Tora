@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/savanp08/converse/internal/ai"
@@ -21,7 +20,6 @@ const (
 	toraLegacyMentionToken  = "@Tora"
 	toraBotSenderID         = "Tora-Bot"
 	toraBotSenderName       = "Tora-Bot"
-	toraAuditLogsTable      = "private_ai_logs"
 	toraRequestTimeout      = 25 * time.Second
 	toraSummaryTimeout      = 20 * time.Second
 )
@@ -34,26 +32,11 @@ RULES:
 4. Accuracy: never invent facts; use room context; say when unsure.
 5. Formatting: no heavy markdown (**, *, #, ---). Use - or • for lists.`
 
-var toraAuditSchemaState struct {
-	mu      sync.Mutex
-	ensured map[string]bool
-}
-
-type toraAuditRecord struct {
-	UserID    string
-	Username  string
-	IPAddress string
-	DeviceID  string
-	Prompt    string
-	Response  string
-	Timestamp time.Time
-}
-
 func toraContextMsgLimit() int {
 	return config.LoadAppLimits().AI.ContextMessageLimit
 }
 
-func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, deviceID string) {
+func (h *Hub) handlePublicToraMention(userMessage models.Message, _ string, _ string) {
 	if h == nil {
 		return
 	}
@@ -78,16 +61,7 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 	aiPrompt := buildToraPrompt(rollingSummary, contextMessages, prompt)
 	aiResponse, err := ai.DefaultRouter.GenerateChatResponse(ctx, aiPrompt)
 	if err != nil {
-		log.Printf("[ws] tora mention ai response failed room=%s user=%s err=%v", roomID, userMessage.SenderID, err)
-		_ = h.persistToraAuditRecord(context.Background(), toraAuditRecord{
-			UserID:    strings.TrimSpace(userMessage.SenderID),
-			Username:  strings.TrimSpace(userMessage.SenderName),
-			IPAddress: strings.TrimSpace(ipAddress),
-			DeviceID:  strings.TrimSpace(deviceID),
-			Prompt:    prompt,
-			Response:  "ERROR: " + strings.TrimSpace(err.Error()),
-			Timestamp: time.Now().UTC(),
-		})
+		log.Printf("[ws] tora mention ai response failed: %v", err)
 		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(err))
 		return
 	}
@@ -95,29 +69,8 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, ipAddress, dev
 	responseText := strings.TrimSpace(aiResponse)
 	if responseText == "" {
 		fallbackError := errors.New("empty ai response")
-		_ = h.persistToraAuditRecord(context.Background(), toraAuditRecord{
-			UserID:    strings.TrimSpace(userMessage.SenderID),
-			Username:  strings.TrimSpace(userMessage.SenderName),
-			IPAddress: strings.TrimSpace(ipAddress),
-			DeviceID:  strings.TrimSpace(deviceID),
-			Prompt:    prompt,
-			Response:  "ERROR: empty ai response",
-			Timestamp: time.Now().UTC(),
-		})
 		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(fallbackError))
 		return
-	}
-
-	if err := h.persistToraAuditRecord(context.Background(), toraAuditRecord{
-		UserID:    strings.TrimSpace(userMessage.SenderID),
-		Username:  strings.TrimSpace(userMessage.SenderName),
-		IPAddress: strings.TrimSpace(ipAddress),
-		DeviceID:  strings.TrimSpace(deviceID),
-		Prompt:    prompt,
-		Response:  responseText,
-		Timestamp: time.Now().UTC(),
-	}); err != nil {
-		log.Printf("[ws] tora mention audit log failed room=%s user=%s err=%v", roomID, userMessage.SenderID, err)
 	}
 
 	h.broadcast <- newToraBotMessage(roomID, responseText)
@@ -273,7 +226,7 @@ func (h *Hub) loadRecentMessagesFromRedis(ctx context.Context, roomID string, li
 		-1,
 	).Result()
 	if err != nil {
-		log.Printf("[ws] tora mention redis context lookup failed room=%s err=%v", normalizedRoomID, err)
+		log.Printf("[ws] tora mention redis context lookup failed: %v", err)
 		return []models.Message{}
 	}
 
@@ -296,7 +249,7 @@ func (h *Hub) loadRoomRollingSummary(ctx context.Context, roomID string) string 
 	if h.msgService.Redis != nil {
 		summary, err := h.msgService.Redis.GetRoomSummary(ctx, normalizedRoomID)
 		if err != nil {
-			log.Printf("[ws] tora summary redis lookup failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[ws] tora summary redis lookup failed: %v", err)
 		} else if strings.TrimSpace(summary) != "" {
 			return strings.TrimSpace(summary)
 		}
@@ -305,11 +258,11 @@ func (h *Hub) loadRoomRollingSummary(ctx context.Context, roomID string) string 
 	if h.msgService.Scylla != nil {
 		summary, err := h.msgService.Scylla.GetRoomSummary(ctx, normalizedRoomID)
 		if err != nil {
-			log.Printf("[ws] tora summary scylla lookup failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[ws] tora summary scylla lookup failed: %v", err)
 		} else if strings.TrimSpace(summary) != "" {
 			if h.msgService.Redis != nil {
 				if cacheErr := h.msgService.Redis.SetRoomSummary(ctx, normalizedRoomID, summary); cacheErr != nil {
-					log.Printf("[ws] tora summary redis backfill failed room=%s err=%v", normalizedRoomID, cacheErr)
+					log.Printf("[ws] tora summary redis backfill failed: %v", cacheErr)
 				}
 			}
 			return strings.TrimSpace(summary)
@@ -336,7 +289,7 @@ func (h *Hub) refreshRoomRollingSummary(roomID string, previousSummary string, r
 		recentMessages,
 	)
 	if err != nil {
-		log.Printf("[ws] tora summary generation failed room=%s err=%v", normalizedRoomID, err)
+		log.Printf("[ws] tora summary generation failed: %v", err)
 		return
 	}
 
@@ -347,12 +300,12 @@ func (h *Hub) refreshRoomRollingSummary(roomID string, previousSummary string, r
 
 	if h.msgService.Redis != nil {
 		if err := h.msgService.Redis.SetRoomSummary(ctx, normalizedRoomID, nextSummary); err != nil {
-			log.Printf("[ws] tora summary redis save failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[ws] tora summary redis save failed: %v", err)
 		}
 	}
 	if h.msgService.Scylla != nil {
 		if err := h.msgService.Scylla.UpdateRoomSummary(ctx, normalizedRoomID, nextSummary); err != nil {
-			log.Printf("[ws] tora summary scylla save failed room=%s err=%v", normalizedRoomID, err)
+			log.Printf("[ws] tora summary scylla save failed: %v", err)
 		}
 	}
 }
@@ -362,7 +315,7 @@ func buildToraPrompt(rollingSummary string, contextMessages []models.Message, pr
 	if len(contextMessages) > 0 {
 		payload, err := json.Marshal(contextMessages)
 		if err != nil {
-			log.Printf("[ws] tora context marshal failed err=%v", err)
+			log.Printf("[ws] tora context marshal failed: %v", err)
 		} else {
 			encodedMessages = string(payload)
 		}
@@ -374,71 +327,4 @@ func buildToraPrompt(rollingSummary string, contextMessages []models.Message, pr
 		encodedMessages,
 		strings.TrimSpace(prompt),
 	)
-}
-
-func (h *Hub) persistToraAuditRecord(ctx context.Context, record toraAuditRecord) error {
-	if h == nil || h.msgService == nil || h.msgService.Scylla == nil || h.msgService.Scylla.Session == nil {
-		return fmt.Errorf("ai audit storage unavailable")
-	}
-	if err := ensureToraAuditSchema(ctx, h.msgService); err != nil {
-		return err
-	}
-
-	insertQuery := fmt.Sprintf(
-		`INSERT INTO %s (user_id, logged_at, username, ip_address, device_id, prompt, response) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		h.msgService.Scylla.Table(toraAuditLogsTable),
-	)
-	return h.msgService.Scylla.Session.Query(
-		insertQuery,
-		strings.TrimSpace(record.UserID),
-		record.Timestamp.UTC(),
-		strings.TrimSpace(record.Username),
-		strings.TrimSpace(record.IPAddress),
-		strings.TrimSpace(record.DeviceID),
-		strings.TrimSpace(record.Prompt),
-		strings.TrimSpace(record.Response),
-	).WithContext(ctx).Exec()
-}
-
-func ensureToraAuditSchema(ctx context.Context, service *MessageService) error {
-	if service == nil || service.Scylla == nil || service.Scylla.Session == nil {
-		return fmt.Errorf("ai audit storage unavailable")
-	}
-
-	tableName := service.Scylla.Table(toraAuditLogsTable)
-	if tableName == "" {
-		return fmt.Errorf("ai audit table is not configured")
-	}
-
-	toraAuditSchemaState.mu.Lock()
-	if toraAuditSchemaState.ensured == nil {
-		toraAuditSchemaState.ensured = make(map[string]bool)
-	}
-	if toraAuditSchemaState.ensured[tableName] {
-		toraAuditSchemaState.mu.Unlock()
-		return nil
-	}
-	toraAuditSchemaState.mu.Unlock()
-
-	createQuery := fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s (
-			user_id text,
-			logged_at timestamp,
-			username text,
-			ip_address text,
-			device_id text,
-			prompt text,
-			response text,
-			PRIMARY KEY (user_id, logged_at)
-		) WITH CLUSTERING ORDER BY (logged_at DESC)`,
-		tableName,
-	)
-	if err := service.Scylla.Session.Query(createQuery).WithContext(ctx).Exec(); err != nil {
-		return fmt.Errorf("ensure tora ai audit schema: %w", err)
-	}
-
-	toraAuditSchemaState.mu.Lock()
-	toraAuditSchemaState.ensured[tableName] = true
-	toraAuditSchemaState.mu.Unlock()
-	return nil
 }

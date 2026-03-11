@@ -21,6 +21,7 @@ tmp/
 /.gocache
 .gocache
 .gocache/
+backend/logs/*.log
 
 # Env
 .env

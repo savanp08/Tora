@@ -329,7 +329,7 @@ func (h *AuthHandler) ForgotPasswordRequest(w http.ResponseWriter, r *http.Reque
 	}
 
 	if err := sendPasswordResetEmail(email, otp, expiresAt); err != nil {
-		log.Printf("[auth] password-reset email delivery failed email=%s err=%v", email, err)
+		log.Printf("[auth] password-reset email delivery failed: %v", err)
 	}
 
 	if shouldExposePasswordResetDebugOTP() {

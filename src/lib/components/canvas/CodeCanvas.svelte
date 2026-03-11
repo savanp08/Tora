@@ -167,7 +167,6 @@
 	const MODEL_SYNC_ORIGIN = 'canvas-model-sync';
 	const SNAPSHOT_LOAD_TIMEOUT_MS = 15000;
 	const PROMPT_CANCELLED_ERROR = 'canvas-prompt-cancelled';
-	const CANVAS_CLIENT_LOG_PREFIX = '[canvas-client]';
 	const CANVAS_AI_DEVICE_ID_STORAGE_KEY = 'canvasAiDeviceId';
 	const CANVAS_AI_SYSTEM_PROMPT = `You are an in-editor coding assistant for a collaborative canvas IDE.
 Return ONLY valid JSON with this exact shape:
@@ -383,23 +382,9 @@ Rules:
 		sendSnippet: CanvasSnippetPayload;
 	}>();
 
-	function canvasClientLog(event: string, payload?: unknown) {
-		const timestamp = new Date().toISOString();
-		if (payload === undefined) {
-			console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${event}`);
-			return;
-		}
-		console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${event}`, payload);
-	}
+	function canvasClientLog(_event: string, _payload?: unknown) {}
 
-	function canvasClientNarrative(message: string, payload?: unknown) {
-		const timestamp = new Date().toISOString();
-		if (payload === undefined) {
-			console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${message}`);
-			return;
-		}
-		console.log(`${CANVAS_CLIENT_LOG_PREFIX} ${timestamp} ${message}`, payload);
-	}
+	function canvasClientNarrative(_message: string, _payload?: unknown) {}
 
 	function describeSocketPayload(payload: unknown) {
 		if (typeof payload === 'string') {

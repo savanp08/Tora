@@ -212,7 +212,7 @@
 				}))
 			];
 			return {
-				title: normalizedState.pane === 'list' ? 'EPHEMERAL_LIST' : 'EPHEMERAL_CHAT',
+				title: normalizedState.pane === 'list' ? 'EPHEMERAL_LIST' : 'EPHEMERAL_SPACE',
 				items: chatItems
 			};
 		}
