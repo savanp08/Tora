@@ -470,78 +470,71 @@ func splitCFamilyFiles(files []ExecutionFile) (sourceFiles []ExecutionFile, data
 
 func buildCPPDataInjector(dataFiles []ExecutionFile) (string, error) {
 	var builder strings.Builder
-	builder.WriteString("#include <cstddef>\n")
-	builder.WriteString("#include <filesystem>\n\n")
-	builder.WriteString("#include <fstream>\n")
+	builder.WriteString("#include <cstdio>\n")
+	builder.WriteString("#include <filesystem>\n")
 	builder.WriteString("#include <iostream>\n")
+	builder.WriteString("#include <fstream>\n")
 	builder.WriteString("#include <sstream>\n")
 	builder.WriteString("#include <string>\n\n")
+
+	// --- injector: write input files before main() runs ---
 	builder.WriteString("struct ToraDataInjector {\n")
 	builder.WriteString("  ToraDataInjector() {\n")
-	for index, file := range dataFiles {
+	for _, file := range dataFiles {
 		decodedBytes, decodeErr := base64.StdEncoding.DecodeString(strings.TrimSpace(file.Content))
 		if decodeErr != nil {
 			decodedBytes = []byte(file.Content)
 		}
-		arrayLiteral := bytesToCPPArrayLiteral(decodedBytes)
-		arrayLength := len(decodedBytes)
 		filePath := strings.TrimSpace(file.Name)
 		parentDir := strings.TrimSpace(pathDir(filePath))
-		arrayName := fmt.Sprintf("tora_data_%d", index)
 
 		builder.WriteString(fmt.Sprintf("    // Restore %s\n", filePath))
-		builder.WriteString(
-			fmt.Sprintf("    const unsigned char %s[] = {%s};\n", arrayName, arrayLiteral),
-		)
-		builder.WriteString(
-			fmt.Sprintf("    const std::size_t %s_len = %d;\n", arrayName, arrayLength),
-		)
+		builder.WriteString("    {\n") // own scope — prevents redeclaration across files
 		if parentDir != "" && parentDir != "." {
 			builder.WriteString(
-				fmt.Sprintf(
-					"    std::filesystem::create_directories(\"%s\");\n",
-					escapeCPPString(parentDir),
-				),
+				fmt.Sprintf("      std::filesystem::create_directories(\"%s\");\n",
+					escapeCPPString(parentDir)),
 			)
 		}
 		builder.WriteString(
-			fmt.Sprintf("    std::ofstream out(\"%s\", std::ios::binary);\n", escapeCPPString(filePath)),
+			fmt.Sprintf("      FILE* f = fopen(\"%s\", \"wb\");\n", escapeCPPString(filePath)),
 		)
-		builder.WriteString("    if (out) {\n")
-		builder.WriteString(
-			fmt.Sprintf(
-				"      out.write(reinterpret_cast<const char*>(%s), static_cast<std::streamsize>(%s_len));\n",
-				arrayName,
-				arrayName,
-			),
-		)
+		builder.WriteString("      if (f) {\n")
+		if len(decodedBytes) > 0 {
+			builder.WriteString(
+				fmt.Sprintf("        static const unsigned char d[] = \"%s\";\n",
+					bytesToCPPHexEscaped(decodedBytes)),
+			)
+			builder.WriteString(
+				fmt.Sprintf("        fwrite(d, 1, %d, f);\n", len(decodedBytes)),
+			)
+		}
+		builder.WriteString("        fclose(f);\n")
+		builder.WriteString("      }\n")
 		builder.WriteString("    }\n\n")
 	}
-
 	builder.WriteString("  }\n")
 	builder.WriteString("};\n\n")
-	builder.WriteString("static ToraDataInjector tora_data_injector_instance;\n")
-	builder.WriteString("\n")
+	builder.WriteString("static ToraDataInjector tora_data_injector_instance;\n\n")
+
+	// --- extractor: read output files after main() returns ---
 	builder.WriteString("struct ToraOutputExtractor {\n")
 	builder.WriteString("  ~ToraOutputExtractor() {\n")
 	for _, file := range dataFiles {
 		filePath := strings.TrimSpace(file.Name)
-		markerFileName := escapeCPPString(filePath)
+		escaped := escapeCPPString(filePath)
+
 		builder.WriteString(fmt.Sprintf("    // Extract %s\n", filePath))
-		builder.WriteString(
-			fmt.Sprintf("    std::ifstream in(\"%s\", std::ios::binary);\n", markerFileName),
-		)
-		builder.WriteString("    if (in) {\n")
-		builder.WriteString("      std::ostringstream content_stream;\n")
-		builder.WriteString("      content_stream << in.rdbuf();\n")
-		builder.WriteString("      std::string content = content_stream.str();\n")
-		builder.WriteString(
-			fmt.Sprintf("      std::cout << \"===TORA_FILE_START:%s===\\\\n\";\n", markerFileName),
-		)
-		builder.WriteString("      std::cout << content;\n")
-		builder.WriteString(
-			fmt.Sprintf("      std::cout << \"===TORA_FILE_END:%s===\\\\n\";\n", markerFileName),
-		)
+		builder.WriteString("    {\n") // own scope — prevents redeclaration of 'in' across files
+		builder.WriteString(fmt.Sprintf("      std::ifstream in(\"%s\", std::ios::binary);\n", escaped))
+		builder.WriteString("      if (in) {\n")
+		builder.WriteString("        std::ostringstream ss;\n")
+		builder.WriteString("        ss << in.rdbuf();\n")
+		builder.WriteString("        std::string content = ss.str();\n")
+		builder.WriteString(fmt.Sprintf("        std::cout << \"===TORA_FILE_START:%s===\\n\";\n", escaped))
+		builder.WriteString("        std::cout << content;\n")
+		builder.WriteString(fmt.Sprintf("        std::cout << \"\\n===TORA_FILE_END:%s===\\n\";\n", escaped))
+		builder.WriteString("      }\n")
 		builder.WriteString("    }\n\n")
 	}
 	builder.WriteString("  }\n")
@@ -549,7 +542,6 @@ func buildCPPDataInjector(dataFiles []ExecutionFile) (string, error) {
 	builder.WriteString("static ToraOutputExtractor tora_output_extractor_instance;\n")
 	return builder.String(), nil
 }
-
 // bytesToCPPHexEscaped encodes bytes as C string hex escapes (\xNN).
 // A single string literal compiles orders of magnitude faster than
 // a comma-separated array of thousands of integer literals.
