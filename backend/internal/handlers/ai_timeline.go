@@ -135,9 +135,6 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		),
 	)
 	clientIP := strings.TrimSpace(extractClientIP(r))
-	if clientIP == "" {
-		clientIP = "unknown"
-	}
 
 	isMember, memberErr := h.isRoomMember(r.Context(), roomID, userID)
 	if memberErr != nil {
@@ -284,9 +281,6 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 		),
 	)
 	clientIP := strings.TrimSpace(extractClientIP(r))
-	if clientIP == "" {
-		clientIP = "unknown"
-	}
 
 	isMember, memberErr := h.isRoomMember(r.Context(), roomID, userID)
 	if memberErr != nil {

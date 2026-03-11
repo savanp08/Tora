@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/monitor"
+	"github.com/savanp08/converse/internal/netutil"
 )
 
 const (
@@ -153,29 +154,25 @@ func buildPrivateAILimitChecks(
 	loaded := config.LoadAppLimits().AI
 
 	normalizedUserID := normalizeIdentifier(userID)
-
 	normalizedRoomID := normalizeRoomID(roomID)
-	if normalizedRoomID == "" {
-		normalizedRoomID = "unknown_room"
-	}
-
-	normalizedIP := strings.TrimSpace(ipAddress)
-	if normalizedIP == "" {
-		normalizedIP = "unknown_ip"
-	}
-
+	normalizedIP := normalizePrivateAILimitIP(ipAddress)
 	normalizedDeviceID := normalizeDeviceIdentifier(deviceID)
-	if normalizedDeviceID == "" {
-		normalizedDeviceID = "unknown_device"
-	}
 
 	checks := make([]privateAILimitCheck, 0, 16)
 	if normalizedUserID != "" && normalizedUserID != "guest" {
 		checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeUser, normalizedUserID, loaded.UserRequestLimits)...)
 	}
-	checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeRoom, normalizedRoomID, loaded.RoomRequestLimits)...)
-	checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeIP, normalizedIP, loaded.IPRequestLimits)...)
-	checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeDeviceID, normalizedDeviceID, loaded.DeviceRequestLimits)...)
+	if normalizedRoomID != "" {
+		checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeRoom, normalizedRoomID, loaded.RoomRequestLimits)...)
+	}
+
+	// IP buckets are only applied for unauthenticated/guest traffic.
+	if normalizedIP != "" && (normalizedUserID == "" || normalizedUserID == "guest") {
+		checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeIP, normalizedIP, loaded.IPRequestLimits)...)
+	}
+	if normalizedDeviceID != "" {
+		checks = append(checks, expandPrivateAILimitChecks(aiLimitScopeDeviceID, normalizedDeviceID, loaded.DeviceRequestLimits)...)
+	}
 	return checks
 }
 
@@ -373,6 +370,17 @@ func normalizeDeviceIdentifier(raw string) string {
 		}
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+func normalizePrivateAILimitIP(raw string) string {
+	normalized := netutil.NormalizeIP(raw)
+	if normalized == "" {
+		return ""
+	}
+	if !netutil.IsPublicIP(normalized) {
+		return ""
+	}
+	return normalized
 }
 
 func toInt64(value any) int64 {

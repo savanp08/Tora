@@ -1674,7 +1674,9 @@
 </script>
 
 <div
-	class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode ? 'theme-dark' : ''}"
+	class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode ? 'theme-dark' : ''} {isMember
+		? ''
+		: 'readonly-mode'}"
 >
 	<MonochromeRoomBackground seed={roomId || 'chat-room'} />
 	<div class="messages" bind:this={viewport} on:scroll={onMessagesScroll}>
@@ -2533,9 +2535,15 @@
 	.join-footer {
 		border-top: 1px solid #cbd4e1;
 		background: #eef3f9;
-		padding: 0.7rem;
+		position: sticky;
+		bottom: 0;
+		z-index: 4;
+		padding: 0.7rem max(0.7rem, env(safe-area-inset-right)) calc(
+				0.7rem + env(safe-area-inset-bottom)
+			) max(0.7rem, env(safe-area-inset-left));
 		display: flex;
 		justify-content: center;
+		flex-shrink: 0;
 	}
 
 	.join-room-btn {
@@ -2564,6 +2572,10 @@
 		cursor: pointer;
 		box-shadow: 0 8px 18px rgba(0, 0, 0, 0.16);
 		z-index: 3;
+	}
+
+	.messages-shell.readonly-mode .scroll-bottom-button {
+		bottom: calc(3.9rem + env(safe-area-inset-bottom));
 	}
 
 	.scroll-bottom-button:hover {

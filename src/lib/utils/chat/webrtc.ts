@@ -425,8 +425,10 @@ export class WebRTCManager extends EventTarget {
 			if (!fromUserId) {
 				return;
 			}
+			// Do not auto-open mic/camera from a raw signaling packet.
+			// The page-level flow should explicitly start local media after user accepts.
 			if (!this.localStream) {
-				await this.startLocalStream(callType === 'video');
+				return;
 			}
 			const offer = toRecord(payload.offer || source.offer);
 			const sdpType = toStringValue(offer.type || 'offer');

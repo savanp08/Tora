@@ -2256,6 +2256,12 @@
 			}
 			return;
 		}
+
+		// Keep invite/accept semantics explicit: ignore SDP/ICE packets until the user
+		// is already in an active call session.
+		if (!activeCall && kind !== 'call_invite') {
+			return;
+		}
 		ensureWebRTCManager();
 		if (!webrtcManager) {
 			return;

@@ -123,9 +123,6 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ipAddress := strings.TrimSpace(extractClientIP(r))
-	if ipAddress == "" {
-		ipAddress = "unknown"
-	}
 
 	if limitErr := enforcePrivateAIRequestLimits(r.Context(), userID, roomID, ipAddress, deviceID); limitErr != nil {
 		var exceeded *privateAILimitExceededError

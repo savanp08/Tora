@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/handlers"
 	"github.com/savanp08/converse/internal/monitor"
+	"github.com/savanp08/converse/internal/netutil"
 	"github.com/savanp08/converse/internal/repository"
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/storage"
@@ -277,30 +277,5 @@ func rateLimitMiddleware(limiter *security.Limiter, message string) func(http.Ha
 }
 
 func extractClientIP(r *http.Request) string {
-	if r == nil {
-		return "unknown"
-	}
-
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		if len(parts) > 0 {
-			ip := strings.TrimSpace(parts[0])
-			if ip != "" {
-				return ip
-			}
-		}
-	}
-
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
-	}
-
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err == nil && host != "" {
-		return host
-	}
-	if strings.TrimSpace(r.RemoteAddr) != "" {
-		return strings.TrimSpace(r.RemoteAddr)
-	}
-	return "unknown"
+	return netutil.ExtractClientIP(r)
 }

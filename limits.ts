@@ -282,45 +282,45 @@ export const LIMITS: AppLimits = {
 		// 24 hour throttle window.
 		windowSeconds: 86400,
 		// Per-user private AI call cap in the window.
-		perUser: 120,
+		perUser: 1000,
 		// Per-room private AI call cap in the window.
-		perRoom: 500,
+		perRoom: 6000,
 		// Per-IP private AI call cap in the window.
-		perIP: 220,
+		perIP: 2000,
 		// Per-device private AI call cap in the window.
-		perDeviceId: 180,
+		perDeviceId: 1200,
 		// Private AI per-user hourly cap.
-		privateUserPerHour: 24,
+		privateUserPerHour: 120,
 		// Private AI per-user daily cap.
-		privateUserPerDay: 120,
+		privateUserPerDay: 1000,
 		// Private AI per-user weekly cap.
-		privateUserPerWeek: 600,
+		privateUserPerWeek: 5000,
 		// Private AI per-user monthly cap.
-		privateUserPerMonth: 1800,
+		privateUserPerMonth: 20000,
 		// Private AI per-room hourly cap.
-		privateRoomPerHour: 80,
+		privateRoomPerHour: 800,
 		// Private AI per-room daily cap.
-		privateRoomPerDay: 500,
+		privateRoomPerDay: 6000,
 		// Private AI per-room weekly cap.
-		privateRoomPerWeek: 2500,
+		privateRoomPerWeek: 30000,
 		// Private AI per-room monthly cap.
-		privateRoomPerMonth: 7000,
+		privateRoomPerMonth: 120000,
 		// Private AI per-IP hourly cap.
-		privateIpPerHour: 40,
+		privateIpPerHour: 300,
 		// Private AI per-IP daily cap.
-		privateIpPerDay: 220,
+		privateIpPerDay: 2000,
 		// Private AI per-IP weekly cap.
-		privateIpPerWeek: 1000,
+		privateIpPerWeek: 10000,
 		// Private AI per-IP monthly cap.
-		privateIpPerMonth: 3000,
+		privateIpPerMonth: 40000,
 		// Private AI per-device hourly cap.
-		privateDevicePerHour: 30,
+		privateDevicePerHour: 180,
 		// Private AI per-device daily cap.
-		privateDevicePerDay: 180,
+		privateDevicePerDay: 1200,
 		// Private AI per-device weekly cap.
-		privateDevicePerWeek: 800,
+		privateDevicePerWeek: 6000,
 		// Private AI per-device monthly cap.
-		privateDevicePerMonth: 2400,
+		privateDevicePerMonth: 25000,
 		// Keep last 50 messages in AI context.
 		contextMessageLimit: 50,
 		// AI organize request body cap = 2MB.

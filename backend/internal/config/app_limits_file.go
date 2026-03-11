@@ -101,28 +101,28 @@ var (
 			OrganizeTextMaxLength:   3000,
 			OrganizeRequestTimeout:  30 * time.Second,
 			UserRequestLimits: TimeWindowLimit{
-				PerHour:  24,
-				PerDay:   120,
-				PerWeek:  600,
-				PerMonth: 1800,
+				PerHour:  120,
+				PerDay:   1000,
+				PerWeek:  5000,
+				PerMonth: 20000,
 			},
 			RoomRequestLimits: TimeWindowLimit{
-				PerHour:  80,
-				PerDay:   500,
-				PerWeek:  2500,
-				PerMonth: 7000,
+				PerHour:  800,
+				PerDay:   6000,
+				PerWeek:  30000,
+				PerMonth: 120000,
 			},
 			IPRequestLimits: TimeWindowLimit{
-				PerHour:  40,
-				PerDay:   220,
-				PerWeek:  1000,
-				PerMonth: 3000,
+				PerHour:  300,
+				PerDay:   2000,
+				PerWeek:  10000,
+				PerMonth: 40000,
 			},
 			DeviceRequestLimits: TimeWindowLimit{
-				PerHour:  30,
-				PerDay:   180,
-				PerWeek:  800,
-				PerMonth: 2400,
+				PerHour:  180,
+				PerDay:   1200,
+				PerWeek:  6000,
+				PerMonth: 25000,
 			},
 		},
 		Board: BoardLimits{
@@ -215,6 +215,7 @@ var (
 	}
 
 	appLimitPatternCache sync.Map
+	appLimitsDefaultsLog sync.Once
 
 	appLimitsState struct {
 		mu           sync.Mutex
@@ -269,6 +270,9 @@ func resolveAppLimitsFilePath() string {
 func readAppLimitsFromFile(path string) AppLimits {
 	limits := defaultAppLimits
 	if strings.TrimSpace(path) == "" {
+		appLimitsDefaultsLog.Do(func() {
+			log.Printf("[limits] no limits.ts file found (set APP_LIMITS_FILE to override); using built-in defaults")
+		})
 		return limits
 	}
 
