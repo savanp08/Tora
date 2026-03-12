@@ -78,6 +78,9 @@
 	const UTF8_ENCODER = new TextEncoder();
 	const THEME_ADAPTIVE_LIGHT_INK = '#111827';
 	const THEME_ADAPTIVE_DARK_INK = '#f8fafc';
+	const ERASER_CURSOR_SVG =
+		"<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 24 24'><path d='M15.4 3.1a2.2 2.2 0 0 1 3.1 0l2.4 2.4a2.2 2.2 0 0 1 0 3.1L12 17.5H6.4l-3.3-3.3a2.2 2.2 0 0 1 0-3.1l12.3-8z' fill='#f59e0b' stroke='#78350f' stroke-width='1.2'/><path d='M16.9 4.8 7.2 14.5' stroke='#ffffff' stroke-width='1.2' stroke-linecap='round'/><path d='M6.2 18.5h10.7' stroke='#334155' stroke-width='1.4' stroke-linecap='round'/></svg>";
+	const ERASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(ERASER_CURSOR_SVG)}") 5 18, auto`;
 
 	type ToolMode = 'select' | 'draw' | 'eraser' | 'duster';
 	type ShapeKind = 'line' | 'arrow' | 'rect' | 'circle' | 'ellipse' | 'triangle';
@@ -101,6 +104,14 @@
 		top: number;
 		width: number;
 		height: number;
+	};
+
+	type PinchGestureState = {
+		pointerA: number;
+		pointerB: number;
+		initialDistance: number;
+		initialZoom: number;
+		anchorBoardPoint: { x: number; y: number };
 	};
 
 	type FabricObjectLike = Record<string, unknown> & {
@@ -256,6 +267,8 @@
 	let isPanning = false;
 	let panLastX = 0;
 	let panLastY = 0;
+	let activeTouchPointerPositions = new Map<number, { x: number; y: number }>();
+	let pinchGestureState: PinchGestureState | null = null;
 	let pendingBoardUpdates: PendingBoardUpdate[] = [];
 	let boardUpdateFlushInterval: ReturnType<typeof setInterval> | null = null;
 	let remoteCursors: BoardCursorWire[] = [];
@@ -407,6 +420,8 @@
 		pendingTapGesture = null;
 		cancelPendingOperation(false);
 		stopDusterDrag();
+		activeTouchPointerPositions.clear();
+		pinchGestureState = null;
 		if (removeMessageSubscription) {
 			removeMessageSubscription();
 			removeMessageSubscription = null;
@@ -1122,6 +1137,90 @@
 		return null;
 	}
 
+	function isTouchPointerEvent(event: PointerEvent) {
+		return event.pointerType === 'touch';
+	}
+
+	function computePointerDistance(
+		left: { x: number; y: number },
+		right: { x: number; y: number }
+	) {
+		return Math.hypot(right.x - left.x, right.y - left.y);
+	}
+
+	function getFirstTwoTouchPointers() {
+		const entries = [...activeTouchPointerPositions.entries()];
+		if (entries.length < 2) {
+			return null;
+		}
+		const [first, second] = entries;
+		return {
+			pointerA: first[0],
+			pointA: first[1],
+			pointerB: second[0],
+			pointB: second[1]
+		};
+	}
+
+	function canContinueCurrentPinchGesture(state: PinchGestureState) {
+		return (
+			activeTouchPointerPositions.has(state.pointerA) &&
+			activeTouchPointerPositions.has(state.pointerB)
+		);
+	}
+
+	function beginPinchGestureFromActiveTouches() {
+		if (!fabricCanvas || !canvasEl || activeTouchPointerPositions.size < 2) {
+			return false;
+		}
+		const pair = getFirstTwoTouchPointers();
+		if (!pair) {
+			return false;
+		}
+		const initialDistance = Math.max(1, computePointerDistance(pair.pointA, pair.pointB));
+		const centerX = (pair.pointA.x + pair.pointB.x) / 2;
+		const centerY = (pair.pointA.y + pair.pointB.y) / 2;
+		pinchGestureState = {
+			pointerA: pair.pointerA,
+			pointerB: pair.pointerB,
+			initialDistance,
+			initialZoom: clampZoom(toNumber(fabricCanvas.getZoom?.(), 1)),
+			anchorBoardPoint: getBoardPointFromClientPosition(centerX, centerY)
+		};
+		pendingTapGesture = null;
+		isPanning = false;
+		fabricCanvas.selection = true;
+		stopDusterDrag();
+		return true;
+	}
+
+	function applyPinchGestureZoom() {
+		if (!fabricCanvas || !canvasEl || !pinchGestureState) {
+			return false;
+		}
+		const pointA = activeTouchPointerPositions.get(pinchGestureState.pointerA);
+		const pointB = activeTouchPointerPositions.get(pinchGestureState.pointerB);
+		if (!pointA || !pointB) {
+			return false;
+		}
+		const currentDistance = Math.max(1, computePointerDistance(pointA, pointB));
+		const nextZoom = clampZoom(
+			(pinchGestureState.initialZoom * currentDistance) / pinchGestureState.initialDistance
+		);
+		const centerX = (pointA.x + pointB.x) / 2;
+		const centerY = (pointA.y + pointB.y) / 2;
+		const canvasRect = canvasEl.getBoundingClientRect();
+		const viewport = fabricCanvas.viewportTransform ?? [nextZoom, 0, 0, nextZoom, 0, 0];
+		viewport[0] = nextZoom;
+		viewport[3] = nextZoom;
+		viewport[4] = centerX - canvasRect.left - pinchGestureState.anchorBoardPoint.x * nextZoom;
+		viewport[5] = centerY - canvasRect.top - pinchGestureState.anchorBoardPoint.y * nextZoom;
+		fabricCanvas.setViewportTransform?.(viewport);
+		clampViewportTransform();
+		fabricCanvas.requestRenderAll?.();
+		return true;
+	}
+
 	function getBoardPointFromClientPosition(clientX: number, clientY: number) {
 		if (!canvasEl || !fabricCanvas) {
 			return { x: 0, y: 0 };
@@ -1385,6 +1484,7 @@
 		if (!fabricCanvas) {
 			return;
 		}
+		applyCanvasCursorForToolMode(mode);
 		fabricCanvas.isDrawingMode = mode === 'draw' && canEdit;
 		if (mode === 'draw' && canEdit) {
 			const PencilBrushClass = getFabricClass('PencilBrush');
@@ -1404,6 +1504,22 @@
 		if (resetSelection && mode !== 'eraser') {
 			fabricCanvas.discardActiveObject?.();
 			fabricCanvas.requestRenderAll?.();
+		}
+	}
+
+	function applyCanvasCursorForToolMode(mode: ToolMode) {
+		if (!fabricCanvas) {
+			return;
+		}
+		const baseCursor = mode === 'eraser' ? ERASER_CURSOR : mode === 'draw' ? 'crosshair' : 'default';
+		const hoverCursor = mode === 'eraser' ? ERASER_CURSOR : 'move';
+		fabricCanvas.defaultCursor = baseCursor;
+		fabricCanvas.hoverCursor = hoverCursor;
+		fabricCanvas.moveCursor = hoverCursor;
+		fabricCanvas.freeDrawingCursor = mode === 'eraser' ? ERASER_CURSOR : 'crosshair';
+		const upperCanvasEl = (fabricCanvas.upperCanvasEl as HTMLCanvasElement | undefined) ?? null;
+		if (upperCanvasEl) {
+			upperCanvasEl.style.cursor = baseCursor;
 		}
 	}
 
@@ -4325,6 +4441,14 @@
 		if (candidateTarget && boardContainerEl && !boardContainerEl.contains(candidateTarget)) {
 			return;
 		}
+		if (isTouchPointerEvent(event)) {
+			activeTouchPointerPositions.set(event.pointerId, { x: event.clientX, y: event.clientY });
+			if (activeTouchPointerPositions.size >= 2 && beginPinchGestureFromActiveTouches()) {
+				event.preventDefault();
+				event.stopPropagation();
+				return;
+			}
+		}
 		const boardPoint = getBoardPointFromClientPosition(event.clientX, event.clientY);
 		contextMenuPoint = boardPoint;
 		if (!canEdit) {
@@ -4504,6 +4628,19 @@
 	}
 
 	function onBoardPointerMove(event: PointerEvent) {
+		if (isTouchPointerEvent(event)) {
+			activeTouchPointerPositions.set(event.pointerId, { x: event.clientX, y: event.clientY });
+			if (activeTouchPointerPositions.size >= 2) {
+				if (!pinchGestureState || !canContinueCurrentPinchGesture(pinchGestureState)) {
+					void beginPinchGestureFromActiveTouches();
+				}
+				if (pinchGestureState && applyPinchGestureZoom()) {
+					event.preventDefault();
+					event.stopPropagation();
+					return;
+				}
+			}
+		}
 		if (activeTool === 'duster') {
 			if (!canManageAllBoardElements) {
 				return;
@@ -4531,6 +4668,22 @@
 	}
 
 	function onBoardPointerUp(event: PointerEvent) {
+		if (isTouchPointerEvent(event)) {
+			activeTouchPointerPositions.delete(event.pointerId);
+			if (pinchGestureState) {
+				if (!canContinueCurrentPinchGesture(pinchGestureState)) {
+					if (activeTouchPointerPositions.size >= 2) {
+						void beginPinchGestureFromActiveTouches();
+						void applyPinchGestureZoom();
+					} else {
+						pinchGestureState = null;
+					}
+				}
+				pendingTapGesture = null;
+				event.preventDefault();
+				return;
+			}
+		}
 		if (activeTool === 'duster') {
 			if (dusterIsDragging && (dusterPointerId === null || event.pointerId === dusterPointerId)) {
 				event.preventDefault();
@@ -4558,7 +4711,13 @@
 		lastEmptyTapAt = now;
 	}
 
-	function onBoardPointerCancel() {
+	function onBoardPointerCancel(event: PointerEvent) {
+		if (isTouchPointerEvent(event)) {
+			activeTouchPointerPositions.delete(event.pointerId);
+		}
+		if (pinchGestureState && !canContinueCurrentPinchGesture(pinchGestureState)) {
+			pinchGestureState = null;
+		}
 		pendingTapGesture = null;
 		stopDusterDrag();
 	}
@@ -4595,13 +4754,6 @@
 		const input = event.currentTarget as HTMLInputElement | null;
 		const file = input?.files?.[0] ?? null;
 		if (!file) {
-			return;
-		}
-		if (isEphemeralRoom && file.type.startsWith('image/')) {
-			dispatch('toastError', { message: 'Image uploads are disabled in ephemeral rooms.' });
-			if (input) {
-				input.value = '';
-			}
 			return;
 		}
 		isUploadingMedia = true;
@@ -5023,26 +5175,40 @@
 					class="tool-icon-button"
 					class:active={activeTool === 'draw'}
 					on:click={() => toggleToolMode('draw')}
-				title="Free draw"
-			>
-				<svg class="tool-icon" viewBox="0 0 24 24">
-					<path
-						d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z"
-					/>
-				</svg>
-			</button>
-			<button
-				type="button"
-				class="tool-icon-button"
-				on:click={insertTextBox}
-				title="Insert text box"
-				aria-label="Insert text box"
-				disabled={!canEdit}
-			>
-				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-					<path d="M5 6h14v2H13v10h-2V8H5z" />
-				</svg>
-			</button>
+					title="Free draw"
+				>
+					<svg class="tool-icon" viewBox="0 0 24 24">
+						<path
+							d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z"
+						/>
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool-icon-button"
+					class:active={activeTool === 'eraser'}
+					on:click={() => toggleToolMode('eraser')}
+					title="Eraser"
+					aria-label="Eraser"
+					disabled={!canModerateBoardActions}
+				>
+					<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M15.2 4a2 2 0 0 1 2.8 0l2 2a2 2 0 0 1 0 2.8L12 16.8H6.4L4 14.4a2 2 0 0 1 0-2.8z" />
+						<path d="M6 19h10.5" fill="none" stroke="currentColor" stroke-width="1.8" />
+					</svg>
+				</button>
+				<button
+					type="button"
+					class="tool-icon-button"
+					on:click={insertTextBox}
+					title="Insert text box"
+					aria-label="Insert text box"
+					disabled={!canEdit}
+				>
+					<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M5 6h14v2H13v10h-2V8H5z" />
+					</svg>
+				</button>
 			<div class="color-menu-wrap" bind:this={colorMenuWrapEl}>
 				<button
 					type="button"
@@ -5528,7 +5694,7 @@
 	<input
 		bind:this={mediaInputEl}
 		type="file"
-		accept={isEphemeralRoom ? 'video/*,audio/*,.pdf,.doc,.docx,.txt' : 'image/*,video/*,audio/*,.pdf,.doc,.docx,.txt'}
+		accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt"
 		class="hidden-input"
 		on:change={onMediaFileSelected}
 		disabled={isUploadingMedia}
@@ -5547,6 +5713,8 @@
 	}
 
 	.board-toolbar {
+	   
+	   max-width: 89vw;
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
