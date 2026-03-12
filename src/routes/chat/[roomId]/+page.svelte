@@ -1537,6 +1537,7 @@
 			markRoomMembershipSynced(joinedRoomId);
 			ensureRoomMeta(joinedRoomId, joinedCreatedAt, joinedExpiresAt);
 			ensureOnlineSeed(joinedRoomId);
+			forceWritableRoomSubscription(joinedRoomId);
 
 			const params = new URLSearchParams($page.url.searchParams.toString());
 			removeLegacyRoomTimeQueryParams(params);
@@ -2543,6 +2544,14 @@
 		};
 	}
 
+	function forceWritableRoomSubscription(targetRoomId: string) {
+		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
+		if (!browser || !identityReady || !normalizedRoomId) {
+			return;
+		}
+		subscribeToRooms([normalizedRoomId], { force: true });
+	}
+
 	async function syncRoomMembership(targetRoomId: string) {
 		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
 		if (!browser || !normalizedRoomId || !isMember) {
@@ -2617,6 +2626,7 @@
 				)
 			);
 			ensureRoomMeta(normalizedRoomId, joinedCreatedAt, joinedExpiresAt);
+			forceWritableRoomSubscription(normalizedRoomId);
 			await refreshSidebarRooms();
 		} catch (error) {
 			clientLog('api-room-sync-error', {
@@ -5320,6 +5330,7 @@
 				);
 				markRoomMembershipSynced(nextRoomId);
 				ensureRoomMeta(nextRoomId, nextCreatedAt, nextExpiresAt);
+				forceWritableRoomSubscription(nextRoomId);
 
 				const params = new URLSearchParams({
 					name: nextRoomName,
@@ -5414,6 +5425,7 @@
 				ensureRoomThread(roomId, joinedName, 'joined');
 				markRoomMembershipSynced(roomId);
 				ensureRoomMeta(roomId, joinedCreatedAt, joinedExpiresAt);
+				forceWritableRoomSubscription(roomId);
 				roomThreads = sortThreads(
 					roomThreads.map((thread) =>
 						thread.id === roomId
@@ -6454,6 +6466,7 @@
 			);
 			markRoomMembershipSynced(breakRoomId);
 			ensureRoomMeta(breakRoomId, breakCreatedAt, breakExpiresAt);
+			forceWritableRoomSubscription(breakRoomId);
 			const params = new URLSearchParams({
 				name: breakRoomName,
 				member: '1'

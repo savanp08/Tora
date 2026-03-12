@@ -46,11 +46,16 @@ export function initGlobalSocket(userId: string, username: string) {
 	connectSocket();
 }
 
-export function subscribeToRooms(roomIds: string[]) {
+type SubscribeToRoomsOptions = {
+	force?: boolean;
+};
+
+export function subscribeToRooms(roomIds: string[], options: SubscribeToRoomsOptions = {}) {
 	if (!browser || !Array.isArray(roomIds)) {
 		return;
 	}
 
+	const shouldForce = options.force === true;
 	for (const roomId of roomIds) {
 		const normalizedRoomID = normalizeRoomID(roomId);
 		if (!normalizedRoomID) {
@@ -58,7 +63,7 @@ export function subscribeToRooms(roomIds: string[]) {
 		}
 		subscribedRoomIDs.add(normalizedRoomID);
 	}
-	sendSubscriptions();
+	sendSubscriptions(shouldForce);
 }
 
 export function sendSocketPayload(payload: unknown) {

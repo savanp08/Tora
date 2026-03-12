@@ -77,6 +77,8 @@
 	const BOARD_TEXT_BOX_SCHEMA = 'board_text_box_v1';
 	const BOARD_SHAPE_STYLE_SCHEMA = 'board_shape_style_v1';
 	const UTF8_ENCODER = new TextEncoder();
+	const THEME_ADAPTIVE_LIGHT_INK = '#111827';
+	const THEME_ADAPTIVE_DARK_INK = '#f8fafc';
 
 	type ToolMode = 'select' | 'draw' | 'eraser' | 'duster';
 	type ShapeKind = 'line' | 'arrow' | 'rect' | 'circle' | 'ellipse' | 'triangle';
@@ -335,7 +337,7 @@
 					: '';
 	$: canModerateBoardActions = canEdit;
 	$: canManageAllBoardElements = canEdit && canModerateBoard;
-	$: isWidthControlVisible = activeTool === 'draw' || activeTool === 'eraser';
+	$: isWidthControlVisible = activeTool === 'draw';
 	$: if (!isWidthControlVisible && showWidthMenu) {
 		showWidthMenu = false;
 	}
@@ -1385,7 +1387,7 @@
 				fabricCanvas.freeDrawingBrush = new PencilBrushClass(fabricCanvas);
 			}
 			if (fabricCanvas.freeDrawingBrush) {
-				fabricCanvas.freeDrawingBrush.color = boardInkColor;
+				fabricCanvas.freeDrawingBrush.color = resolveThemeAwareInkColor(boardInkColor);
 				fabricCanvas.freeDrawingBrush.width = drawBrushWidth;
 			}
 		}
@@ -1413,11 +1415,46 @@
 	}
 
 	function normalizeColorHex(value: string) {
-		const trimmed = toStringValue(value).trim();
-		if (/^#[0-9a-f]{6}$/i.test(trimmed)) {
-			return trimmed.toLowerCase();
+		const normalized = normalizeHexColorValue(value);
+		if (normalized) {
+			return normalized;
 		}
 		return boardInkColor;
+	}
+
+	function normalizeHexColorValue(value: unknown) {
+		const trimmed = toStringValue(value).trim().toLowerCase();
+		if (/^#[0-9a-f]{6}$/i.test(trimmed)) {
+			return trimmed;
+		}
+		const shortHexMatch = trimmed.match(/^#([0-9a-f]{3})$/i);
+		if (shortHexMatch) {
+			const shortHex = shortHexMatch[1];
+			return `#${shortHex
+				.split('')
+				.map((part) => `${part}${part}`)
+				.join('')}`;
+		}
+		return '';
+	}
+
+	function resolveThemeAwareInkColor(color: string) {
+		const normalizedHex = normalizeHexColorValue(color);
+		if (!normalizedHex) {
+			return toStringValue(color).trim();
+		}
+		const red = Number.parseInt(normalizedHex.slice(1, 3), 16);
+		const green = Number.parseInt(normalizedHex.slice(3, 5), 16);
+		const blue = Number.parseInt(normalizedHex.slice(5, 7), 16);
+		const channelSpread = Math.max(red, green, blue) - Math.min(red, green, blue);
+		const brightness = (red + green + blue) / 3;
+		const isNearNeutral = channelSpread <= 16;
+		const isNearWhite = brightness >= 215;
+		const isNearBlack = brightness <= 40;
+		if (!isNearNeutral || (!isNearWhite && !isNearBlack)) {
+			return normalizedHex;
+		}
+		return isDarkMode ? THEME_ADAPTIVE_DARK_INK : THEME_ADAPTIVE_LIGHT_INK;
 	}
 
 	function setBoardInkColor(value: string) {
@@ -1425,7 +1462,7 @@
 		boardInkColor = nextColor;
 		boardInkColorCustomized = true;
 		if (fabricCanvas?.freeDrawingBrush) {
-			fabricCanvas.freeDrawingBrush.color = nextColor;
+			fabricCanvas.freeDrawingBrush.color = resolveThemeAwareInkColor(nextColor);
 		}
 	}
 
@@ -1500,7 +1537,7 @@
 			height,
 			fontSize: 18,
 			lineHeight: 1.28,
-			fill: boardInkColor,
+			fill: resolveThemeAwareInkColor(boardInkColor),
 			backgroundColor: 'transparent',
 			padding: 8
 		}) as FabricObjectLike;
@@ -1846,7 +1883,7 @@
 			return null;
 		}
 		const sharedStyle = {
-			stroke: boardInkColor,
+			stroke: resolveThemeAwareInkColor(boardInkColor),
 			strokeWidth: 2,
 			fill: 'transparent'
 		};
@@ -1906,7 +1943,7 @@
 		}
 		const anchor = clampBoardPoint(point);
 		return new LineClass([anchor.x, anchor.y, anchor.x + 1, anchor.y + 1], {
-			stroke: boardInkColor,
+			stroke: resolveThemeAwareInkColor(boardInkColor),
 			strokeWidth: kind === 'arrow' ? 4 : 3
 		}) as FabricObjectLike;
 	}
@@ -2832,8 +2869,8 @@
 			}
 			const strokeContent = parseStrokeContent(element.content);
 			const pathData = strokeContent?.path || element.content;
-			const strokeColor = strokeContent?.stroke || fallbackStrokeColor;
-			const fillColor = strokeContent?.fill || '';
+			const strokeColor = resolveThemeAwareInkColor(strokeContent?.stroke || fallbackStrokeColor);
+			const fillColor = resolveThemeAwareInkColor(strokeContent?.fill || '');
 			const strokeWidth = strokeContent?.strokeWidth || 2;
 			try {
 				return new PathClass(pathData, {
@@ -2849,8 +2886,8 @@
 		}
 
 		const shapeStyle = parseShapeStyleContent(element.content);
-		const shapeStrokeColor = shapeStyle?.stroke || fallbackStrokeColor;
-		const shapeFillColor = shapeStyle?.fill || fallbackFillColor;
+		const shapeStrokeColor = resolveThemeAwareInkColor(shapeStyle?.stroke || fallbackStrokeColor);
+		const shapeFillColor = resolveThemeAwareInkColor(shapeStyle?.fill || fallbackFillColor);
 		const shapeStrokeWidth = shapeStyle?.strokeWidth || 2;
 
 		if (elementType === 'rect' || elementType === 'shape') {
@@ -2926,7 +2963,7 @@
 			const linePoints = lineContent
 				? [lineContent.x1, lineContent.y1, lineContent.x2, lineContent.y2]
 				: parseLinePoints(element.content, element);
-			const lineStrokeColor = lineContent?.stroke || fallbackStrokeColor;
+			const lineStrokeColor = resolveThemeAwareInkColor(lineContent?.stroke || fallbackStrokeColor);
 			const lineStrokeWidth = lineContent?.strokeWidth || (elementType === 'arrow' ? 4 : 3);
 			return new LineClass(linePoints, {
 				stroke: lineStrokeColor,
@@ -2982,7 +3019,7 @@
 		if (elementType === 'text_box') {
 			const textBoxContent = parseTextBoxContent(element.content);
 			const textValue = textBoxContent ? textBoxContent.text : element.content || 'Text';
-			const textColor = textBoxContent?.fill || fallbackTextColor;
+			const textColor = resolveThemeAwareInkColor(textBoxContent?.fill || fallbackTextColor);
 			const textFontSize = textBoxContent?.fontSize || 18;
 			const textLineHeight = textBoxContent?.lineHeight || 1.28;
 			const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
@@ -5264,20 +5301,6 @@
 					</div>
 				{/if}
 			</div>
-
-			<button
-				type="button"
-				class="tool-icon-button"
-				class:active={activeTool === 'eraser'}
-				on:click={() => toggleToolMode('eraser')}
-				title="Eraser"
-			>
-				<svg class="tool-icon" viewBox="0 0 24 24">
-					<path
-						d="M3.6 14.5 11.9 6a1.7 1.7 0 0 1 2.4 0l6.1 6.1a1.7 1.7 0 0 1 0 2.4l-4.1 4.1a1.7 1.7 0 0 1-1.2.5H8.8a1.7 1.7 0 0 1-1.2-.5l-4-4a1.7 1.7 0 0 1 0-2.4Zm7.7-6.8L5.2 13.8l3.5 3.5h3.1l5.2-5.2-5.7-5.4Z"
-					/>
-				</svg>
-			</button>
 
 			<button
 				type="button"
