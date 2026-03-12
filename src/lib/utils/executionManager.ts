@@ -569,7 +569,15 @@ export async function executePythonWorkspace(
 			}
 		};
 		const onError = (event: ErrorEvent) => {
-			const message = event.message || 'Python worker crashed';
+			event.preventDefault?.();
+			const messageFromError =
+				typeof event.error === 'object' &&
+				event.error !== null &&
+				'message' in event.error &&
+				typeof (event.error as { message?: unknown }).message === 'string'
+					? (event.error as { message: string }).message
+					: '';
+			const message = event.message || messageFromError || 'Python worker crashed';
 			finishReject(new Error(message));
 		};
 		const onAbort = () => {
@@ -992,15 +1000,26 @@ export class ExecutionManager {
 			this.handleWorkerMessage(workerLanguage, event.data);
 		};
 		const onError = (event: ErrorEvent) => {
+			event.preventDefault?.();
 			const activeRunId = this.activeRunIdByRuntimeLanguage.get(workerLanguage);
 			if (!activeRunId) {
+				this.terminateWorker(workerLanguage);
 				return;
 			}
 			const context = this.activeRunById.get(activeRunId);
 			if (!context) {
+				this.terminateWorker(workerLanguage);
 				return;
 			}
-			const errorMessage = event.message || `Worker error for ${context.language}`;
+			const messageFromError =
+				typeof event.error === 'object' &&
+				event.error !== null &&
+				'message' in event.error &&
+				typeof (event.error as { message?: unknown }).message === 'string'
+					? (event.error as { message: string }).message
+					: '';
+			const errorMessage =
+				event.message || messageFromError || `Worker error for ${context.language}`;
 			this.finishWithError(context, new Error(errorMessage));
 			this.terminateWorker(workerLanguage);
 		};

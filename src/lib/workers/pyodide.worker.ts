@@ -431,6 +431,7 @@ async function resolveLoadPyodide(): Promise<LoadPyodideFn> {
 	if (loadPyodideFn) {
 		return loadPyodideFn;
 	}
+	const initializationErrors: string[] = [];
 	const globalLoadPyodide = (self as unknown as { loadPyodide?: unknown }).loadPyodide;
 	if (typeof globalLoadPyodide === 'function') {
 		loadPyodideFn = globalLoadPyodide as LoadPyodideFn;
@@ -447,8 +448,9 @@ async function resolveLoadPyodide(): Promise<LoadPyodideFn> {
 			loadPyodideFn = moduleLoadPyodide as LoadPyodideFn;
 			return loadPyodideFn;
 		}
-	} catch {
-		// Fall through to script-based fallback.
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		initializationErrors.push(`module import failed: ${message}`);
 	}
 	try {
 		importScripts('https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js');
@@ -457,10 +459,15 @@ async function resolveLoadPyodide(): Promise<LoadPyodideFn> {
 			loadPyodideFn = legacyLoadPyodide as LoadPyodideFn;
 			return loadPyodideFn;
 		}
-	} catch {
-		// Ignore and throw a single consistent error below.
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		initializationErrors.push(`importScripts fallback failed: ${message}`);
 	}
-	throw new Error('Unable to initialize Pyodide runtime in worker');
+	const detail =
+		initializationErrors.length > 0
+			? ` Details: ${initializationErrors.join(' | ')}`
+			: '';
+	throw new Error(`Unable to initialize Pyodide runtime in worker.${detail}`);
 }
 
 self.onmessage = async (event: MessageEvent<PyodideExecuteMessage>) => {
