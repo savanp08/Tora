@@ -103,8 +103,26 @@
 		id: string;
 		previousCode: string;
 		diffText: string;
-		applyState: 'pending' | 'applied' | 'failed';
+		applyState: 'pending' | 'applied' | 'failed' | 'cancelled';
 		applyError: string;
+	};
+
+	type CanvasAIDiffPreviewLine = {
+		kind: 'context' | 'add' | 'remove';
+		oldLine: number | null;
+		newLine: number | null;
+		text: string;
+	};
+
+	type CanvasAITempDiffFile = {
+		tabPath: string;
+		messageId: string;
+		changeId: string;
+		filePath: string;
+		action: CanvasAIChangeAction;
+		summary: string;
+		locationHint: string;
+		lines: CanvasAIDiffPreviewLine[];
 	};
 
 	type CanvasAIChatMessage = {
@@ -208,6 +226,8 @@ Rules:
 	const CANVAS_AI_MAX_CHARS_PER_FILE = 12000;
 	const CANVAS_AI_DIFF_CONTEXT_LINES = 3;
 	const CANVAS_AI_DIFF_MAX_LINES = 320;
+	const CANVAS_AI_DIFF_MAX_PREVIEW_LINES = 900;
+	const CANVAS_AI_DIFF_TAB_PREFIX = '.canvas-temp/ai-diff/';
 	const EXPLORER_LONG_PRESS_DELAY_MS = 520;
 	const EXPLORER_LONG_PRESS_MOVE_TOLERANCE_PX = 12;
 	const EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS = 700;
@@ -369,6 +389,8 @@ Rules:
 	let canvasAISidebarThreadElement: HTMLDivElement | null = null;
 	let canvasAIChatMessages: CanvasAIChatMessage[] = [];
 	let canvasAILastSuggestedMessageId = '';
+	let canvasAITempDiffFiles: Record<string, CanvasAITempDiffFile> = {};
+	let activeCanvasAIDiff: CanvasAITempDiffFile | null = null;
 	let canSendSnippetFromSelection = false;
 	let showSelectionSnippetAction = false;
 	let selectionSnippetActionTop = 0;
@@ -381,6 +403,8 @@ Rules:
 	const dispatch = createEventDispatcher<{
 		sendSnippet: CanvasSnippetPayload;
 	}>();
+
+	$: activeCanvasAIDiff = canvasAITempDiffFiles[currentFile] ?? null;
 
 	function canvasClientLog(_event: string, _payload?: unknown) {}
 
@@ -1804,8 +1828,13 @@ Rules:
 		const availableFiles = new Set(
 			fileTree.filter((entry) => !entry.isDir).map((entry) => entry.relativePath)
 		);
-		openTabs = openTabs.filter((tab) => availableFiles.has(tab));
-		if (currentFile && availableFiles.has(currentFile)) {
+		openTabs = openTabs.filter(
+			(tab) => isCanvasAIDiffTabPath(tab) || availableFiles.has(tab)
+		);
+		if (
+			currentFile &&
+			(isCanvasAIDiffTabPath(currentFile) || availableFiles.has(currentFile))
+		) {
 			return;
 		}
 		if (openTabs.length > 0) {
@@ -1826,6 +1855,9 @@ Rules:
 	}
 
 	function currentFileEntry() {
+		if (isCanvasAIDiffTabPath(currentFile)) {
+			return null;
+		}
 		return fileTree.find((entry) => !entry.isDir && entry.relativePath === currentFile) ?? null;
 	}
 
@@ -1907,6 +1939,13 @@ Rules:
 		const normalized = normalizeProjectName(fileName);
 		if (!normalized) {
 			return 'Untitled';
+		}
+		if (isCanvasAIDiffTabPath(normalized)) {
+			const diffFile = canvasAITempDiffFiles[normalized];
+			const labelSource = diffFile?.filePath || normalized;
+			const parts = normalizeProjectName(labelSource).split('/');
+			const leaf = parts[parts.length - 1] || 'change';
+			return `${leaf}.diff`;
 		}
 		const parts = normalized.split('/');
 		return parts[parts.length - 1] || normalized;
@@ -3404,6 +3443,17 @@ Rules:
 		return `${createCanvasAIMessageID()}-${slug}`;
 	}
 
+	function isCanvasAIDiffTabPath(filePath: string) {
+		const normalized = normalizeProjectName(filePath);
+		return normalized.startsWith(CANVAS_AI_DIFF_TAB_PREFIX);
+	}
+
+	function buildCanvasAIDiffTabPath(change: CanvasAIProposedChange) {
+		const safeChangeID = normalizeProjectName(change.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+		const safeFilePath = normalizeProjectName(change.filePath).replace(/[^a-zA-Z0-9/_-]/g, '_');
+		return `${CANVAS_AI_DIFF_TAB_PREFIX}${safeChangeID}_${safeFilePath}.diff`;
+	}
+
 	function appendCanvasAIMessage(
 		role: CanvasAIChatRole,
 		text: string,
@@ -4078,6 +4128,101 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		return diffLines.join('\n');
 	}
 
+	function buildCanvasAIDiffPreviewLines(previousCode: string, updatedCode: string) {
+		const oldLines = splitCanvasAIContentIntoLines(previousCode);
+		const newLines = splitCanvasAIContentIntoLines(updatedCode);
+		const previewLines: CanvasAIDiffPreviewLine[] = [];
+		let oldIndex = 0;
+		let newIndex = 0;
+		while (
+			(oldIndex < oldLines.length || newIndex < newLines.length) &&
+			previewLines.length < CANVAS_AI_DIFF_MAX_PREVIEW_LINES
+		) {
+			const oldLine = oldIndex < oldLines.length ? oldLines[oldIndex] ?? '' : null;
+			const newLine = newIndex < newLines.length ? newLines[newIndex] ?? '' : null;
+			if (oldLine !== null && newLine !== null && oldLine === newLine) {
+				previewLines.push({
+					kind: 'context',
+					oldLine: oldIndex + 1,
+					newLine: newIndex + 1,
+					text: oldLine
+				});
+				oldIndex += 1;
+				newIndex += 1;
+				continue;
+			}
+			if (oldLine !== null) {
+				previewLines.push({
+					kind: 'remove',
+					oldLine: oldIndex + 1,
+					newLine: null,
+					text: oldLine
+				});
+				oldIndex += 1;
+			}
+			if (newLine !== null && previewLines.length < CANVAS_AI_DIFF_MAX_PREVIEW_LINES) {
+				previewLines.push({
+					kind: 'add',
+					oldLine: null,
+					newLine: newIndex + 1,
+					text: newLine
+				});
+				newIndex += 1;
+			}
+		}
+		if (oldIndex < oldLines.length || newIndex < newLines.length) {
+			previewLines.push({
+				kind: 'context',
+				oldLine: null,
+				newLine: null,
+				text: '... diff preview truncated ...'
+			});
+		}
+		return previewLines;
+	}
+
+	function openCanvasAIDiffPreview(messageId: string, changeId: string) {
+		const message = canvasAIChatMessages.find((entry) => entry.id === messageId);
+		const change = message?.changes?.find((entry) => entry.id === changeId);
+		if (!message || !change) {
+			canvasAIError = 'Unable to locate this AI change preview.';
+			return;
+		}
+		const tabPath = buildCanvasAIDiffTabPath(change);
+		if (!canvasAITempDiffFiles[tabPath]) {
+			const nextDiffFile: CanvasAITempDiffFile = {
+				tabPath,
+				messageId,
+				changeId,
+				filePath: change.filePath,
+				action: change.action,
+				summary: change.summary,
+				locationHint: change.locationHint,
+				lines: buildCanvasAIDiffPreviewLines(change.previousCode, change.updatedCode)
+			};
+			canvasAITempDiffFiles = {
+				...canvasAITempDiffFiles,
+				[tabPath]: nextDiffFile
+			};
+		}
+		void switchToFile(tabPath);
+	}
+
+	async function closeCanvasAIDiffPreview(tabPath: string) {
+		const normalized = normalizeProjectName(tabPath);
+		if (!normalized) {
+			return;
+		}
+		if (canvasAITempDiffFiles[normalized]) {
+			const nextFiles = { ...canvasAITempDiffFiles };
+			delete nextFiles[normalized];
+			canvasAITempDiffFiles = nextFiles;
+		}
+		if (openTabs.includes(normalized)) {
+			await closeTab(normalized);
+		}
+	}
+
 	async function buildCanvasAIProposedChanges(changes: CanvasAIChangeDraft[]) {
 		const latestByPath = new Map<string, CanvasAIChangeDraft>();
 		for (const change of changes) {
@@ -4173,7 +4318,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			canvasAIError = 'Unable to locate this AI change.';
 			return;
 		}
-		if (change.applyState === 'applied') {
+		if (change.applyState === 'applied' || change.applyState === 'cancelled') {
 			return;
 		}
 		if (
@@ -4195,6 +4340,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						: candidate
 				)
 			}));
+			await closeCanvasAIDiffPreview(buildCanvasAIDiffTabPath(change));
 			writeTerminalLine(`\x1b[35m> Applied AI change for ${change.filePath}.\x1b[0m`);
 		} catch (error) {
 			const messageText = error instanceof Error ? error.message : 'Failed to apply AI change.';
@@ -4208,6 +4354,29 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			}));
 			canvasAIError = messageText;
 		}
+	}
+
+	async function cancelCanvasAIChange(messageId: string, changeId: string) {
+		const message = canvasAIChatMessages.find((entry) => entry.id === messageId);
+		const change = message?.changes?.find((entry) => entry.id === changeId);
+		if (!message || !change) {
+			canvasAIError = 'Unable to locate this AI change.';
+			return;
+		}
+		if (change.applyState === 'applied') {
+			canvasAIError = 'This change is already applied.';
+			return;
+		}
+		canvasAIError = '';
+		updateCanvasAIMessageById(messageId, (entry) => ({
+			...entry,
+			changes: (entry.changes ?? []).map((candidate) =>
+				candidate.id === changeId
+					? { ...candidate, applyState: 'cancelled', applyError: '' }
+					: candidate
+			)
+		}));
+		await closeCanvasAIDiffPreview(buildCanvasAIDiffTabPath(change));
 	}
 
 	async function applyAllCanvasAIChanges(messageId: string) {
@@ -4231,6 +4400,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			try {
 				await applyCanvasAIChangeToWorkspace(change);
 				succeededIds.add(change.id);
+				await closeCanvasAIDiffPreview(buildCanvasAIDiffTabPath(change));
 			} catch (error) {
 				failedById.set(
 					change.id,
@@ -4474,6 +4644,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		if (!normalized) {
 			return;
 		}
+		if (isCanvasAIDiffTabPath(normalized)) {
+			return;
+		}
 		let modelValue = '';
 		try {
 			// Snapshot synchronously so async work below cannot race with model disposal.
@@ -4571,8 +4744,14 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		if (!normalized) {
 			return;
 		}
+		const isDiffTab = isCanvasAIDiffTabPath(normalized);
 		const tabIndex = openTabs.indexOf(normalized);
 		if (tabIndex < 0) {
+			if (isDiffTab && canvasAITempDiffFiles[normalized]) {
+				const nextFiles = { ...canvasAITempDiffFiles };
+				delete nextFiles[normalized];
+				canvasAITempDiffFiles = nextFiles;
+			}
 			return;
 		}
 		const wasCurrent = normalized === currentFile;
@@ -4581,6 +4760,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		}
 		const nextTabs = openTabs.filter((tab) => tab !== normalized);
 		openTabs = nextTabs;
+		if (isDiffTab && canvasAITempDiffFiles[normalized]) {
+			const nextFiles = { ...canvasAITempDiffFiles };
+			delete nextFiles[normalized];
+			canvasAITempDiffFiles = nextFiles;
+		}
 		if (!wasCurrent) {
 			return;
 		}
@@ -4604,9 +4788,46 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		}
 		if (normalized === currentFile) {
 			ensureTabOpen(normalized);
+			if (isCanvasAIDiffTabPath(normalized)) {
+				return;
+			}
 			const model = editor?.getModel?.();
 			if (model && monacoApi) {
 				monacoApi.editor.setModelLanguage(model, getLanguageFromExtension(normalized));
+			}
+			return;
+		}
+		if (isCanvasAIDiffTabPath(normalized)) {
+			ensureTabOpen(normalized);
+			fileExplorerError = '';
+			try {
+				if (!isCanvasAIDiffTabPath(currentFile)) {
+					await persistCurrentFileToFS();
+				}
+				currentFile = normalized;
+				binding?.destroy();
+				binding = null;
+				currentYText = null;
+				clearRemoteSelectionDecorations();
+				clearLocalSelectionState();
+				selectedSnippetText = '';
+				canSendSnippetFromSelection = false;
+				hideSelectionSnippetAction();
+				showReadOnlyWarning = false;
+				const model = editor?.getModel?.();
+				if (model && monacoApi) {
+					monacoApi.editor.setModelLanguage(model, 'plaintext');
+					model.setValue('');
+				}
+				if (editor) {
+					editor.updateOptions({ readOnly: true });
+				}
+				if (awareness) {
+					awareness.setLocalStateField('currentFile', currentFile);
+					awareness.setLocalStateField('selection', null);
+				}
+			} catch (error) {
+				fileExplorerError = error instanceof Error ? error.message : 'Unable to open AI diff';
 			}
 			return;
 		}
@@ -4622,7 +4843,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		expandedDirectories = ensureExpandedDirectoriesForPath(normalized);
 		fileExplorerError = '';
 		try {
-			await persistCurrentFileToFS();
+			if (!isCanvasAIDiffTabPath(currentFile)) {
+				await persistCurrentFileToFS();
+			}
 			currentFile = normalized;
 			const model = editor?.getModel?.();
 			if (model && monacoApi) {
@@ -5013,6 +5236,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			return;
 		}
 		if (!currentFile) {
+			editor.updateOptions({ readOnly: true });
+			showReadOnlyWarning = false;
+			return;
+		}
+		if (isCanvasAIDiffTabPath(currentFile)) {
 			editor.updateOptions({ readOnly: true });
 			showReadOnlyWarning = false;
 			return;
@@ -6030,7 +6258,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						{#if canvasAIChatMessages.length === 0}
 							<div class="canvas-ai-empty">
 								<p>Chat with AI about the currently selected file.</p>
-								<p>AI proposes file-level diffs that you can accept one-by-one or all at once.</p>
+								<p>AI proposes file-level changes. Use Show Diff to open a temp diff tab, then apply or cancel.</p>
 							</div>
 						{:else}
 							{#each canvasAIChatMessages as message (message.id)}
@@ -6049,20 +6277,13 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 										<div class="canvas-ai-change-list">
 											<div class="canvas-ai-change-list-header">
 												<span>{message.changes.length} proposed file change(s)</span>
-												<button
-													type="button"
-													class="canvas-ai-action secondary"
-													on:click={() => void applyAllCanvasAIChanges(message.id)}
-													disabled={isCanvasAIGenerating || getCanvasAIPendingChangeCount(message) === 0}
-												>
-													Accept All
-												</button>
 											</div>
 											{#each message.changes as change (change.id)}
 												<section
 													class="canvas-ai-code-block"
 													class:is-applied={change.applyState === 'applied'}
 													class:is-failed={change.applyState === 'failed'}
+													class:is-cancelled={change.applyState === 'cancelled'}
 												>
 													<div class="canvas-ai-change-headline">
 														<div class="canvas-ai-change-meta">
@@ -6072,20 +6293,22 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 														<span class="canvas-ai-change-location">{change.locationHint}</span>
 													</div>
 													<p class="canvas-ai-change-summary">{change.summary}</p>
-													<pre class="canvas-ai-code">{change.diffText}</pre>
-													{#if change.applyError}
-														<div class="canvas-ai-change-error">{change.applyError}</div>
-													{/if}
 													<div class="canvas-ai-code-actions">
 														<button
 															type="button"
-															class="canvas-ai-action primary"
-															on:click={() => void applyCanvasAIChange(message.id, change.id)}
-															disabled={isCanvasAIGenerating || change.applyState === 'applied'}
+															class="canvas-ai-action secondary canvas-ai-show-diff"
+															on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
+															disabled={isCanvasAIGenerating}
 														>
-															{change.applyState === 'applied' ? 'Applied' : 'Accept'}
+															Show Diff <span aria-hidden="true">↗</span>
 														</button>
+														<span class={`canvas-ai-change-state state-${change.applyState}`}>
+															{change.applyState}
+														</span>
 													</div>
+													{#if change.applyError}
+														<div class="canvas-ai-change-error">{change.applyError}</div>
+													{/if}
 												</section>
 											{/each}
 										</div>
@@ -6102,12 +6325,12 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						bind:value={canvasAIPrompt}
 						rows="2"
 						class="canvas-ai-input"
-						placeholder={currentFile
+						placeholder={currentFileEntry()
 							? 'Ask AI what to change in this file...'
 							: 'Open a file from Explorer to start code-aware AI chat...'}
 						on:input={handleCanvasAIPromptInput}
 						on:keydown={handleCanvasAIPromptKeydown}
-						disabled={isCanvasAIGenerating || !currentFile}
+						disabled={isCanvasAIGenerating || !currentFileEntry()}
 					></textarea>
 					<div class="canvas-ai-actions">
 						<button
@@ -6124,22 +6347,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						</button>
 						<button
 							type="button"
-							class="canvas-ai-action secondary"
-							on:click={() => {
-								const latest = resolveCanvasAILastSuggestedMessage();
-								if (latest) {
-									void applyAllCanvasAIChanges(latest.id);
-								}
-							}}
-							disabled={isCanvasAIGenerating || getCanvasAILastPendingChangeCount() === 0}
-						>
-							Accept Latest
-						</button>
-						<button
-							type="button"
 							class="canvas-ai-action primary"
 							on:click={() => void sendCanvasAIMessage()}
-							disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFile}
+							disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFileEntry()}
 						>
 							{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
 						</button>
@@ -6204,7 +6414,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			</div>
 		</div>
 		<div class="editor-breadcrumb-bar">
-			{#if currentFile}
+			{#if currentFile && !isCanvasAIDiffTabPath(currentFile)}
 				<div class="editor-breadcrumb-path">
 					{#each currentFile.split('/') as segment, index (`${segment}-${index}`)}
 						<span class="editor-breadcrumb-segment">{segment}</span>
@@ -6220,6 +6430,10 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				>
 					Copy Path
 				</button>
+			{:else if activeCanvasAIDiff}
+				<div class="editor-breadcrumb-empty">
+					AI Diff Preview · {activeCanvasAIDiff.filePath}
+				</div>
 			{:else}
 				<div class="editor-breadcrumb-empty">No file selected</div>
 			{/if}
@@ -6237,7 +6451,66 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 					on:drop|capture={handleEditorCodeDrop}
 					on:dragend|capture={handleEditorCodeDragEnd}
 				>
-					<div class="code-canvas" bind:this={editorContainer}></div>
+					<div class="code-canvas" class:is-hidden={Boolean(activeCanvasAIDiff)} bind:this={editorContainer}></div>
+					{#if activeCanvasAIDiff}
+						<section class="canvas-ai-diff-pane" aria-label="AI diff preview">
+							<header class="canvas-ai-diff-header">
+								<div class="canvas-ai-diff-title">
+									<strong>{activeCanvasAIDiff.filePath}</strong>
+									<span class="canvas-ai-change-chip">{activeCanvasAIDiff.action.toUpperCase()}</span>
+								</div>
+								<p class="canvas-ai-diff-summary">{activeCanvasAIDiff.summary}</p>
+								<p class="canvas-ai-diff-location">{activeCanvasAIDiff.locationHint}</p>
+								<div class="canvas-ai-diff-actions">
+									<button
+										type="button"
+										class="canvas-ai-action primary"
+										on:click={() =>
+											void applyCanvasAIChange(
+												activeCanvasAIDiff.messageId,
+												activeCanvasAIDiff.changeId
+											)}
+										disabled={
+											isCanvasAIGenerating ||
+											['applied', 'cancelled'].includes(
+												canvasAIChatMessages
+													.find((message) => message.id === activeCanvasAIDiff?.messageId)
+													?.changes?.find((change) => change.id === activeCanvasAIDiff?.changeId)
+													?.applyState ?? ''
+											)
+										}
+									>
+										Apply Changes
+									</button>
+									<button
+										type="button"
+										class="canvas-ai-action secondary"
+										on:click={() =>
+											void cancelCanvasAIChange(
+												activeCanvasAIDiff.messageId,
+												activeCanvasAIDiff.changeId
+											)}
+										disabled={isCanvasAIGenerating}
+									>
+										Cancel
+									</button>
+								</div>
+							</header>
+							<div class="canvas-ai-diff-body" role="table" aria-label="Diff lines">
+								{#each activeCanvasAIDiff.lines as line, index (`${activeCanvasAIDiff.tabPath}-${index}`)}
+									<div class={`canvas-ai-diff-line kind-${line.kind}`}>
+										<span class="canvas-ai-diff-gutter old">
+											{line.oldLine ?? ''}
+										</span>
+										<span class="canvas-ai-diff-gutter new">
+											{line.newLine ?? ''}
+										</span>
+										<code class="canvas-ai-diff-code">{line.text}</code>
+									</div>
+								{/each}
+							</div>
+						</section>
+					{/if}
 					{#if aiEnabled && showCanvasAIPrompt}
 						<div class="canvas-ai-overlay" role="presentation">
 							<div class="canvas-ai-panel" role="dialog" aria-modal="true" aria-label="AI code prompt">
@@ -6261,7 +6534,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 									{#if canvasAIChatMessages.length === 0}
 										<div class="canvas-ai-empty">
 											<p>Chat with AI about this file. Ask for refactors, fixes, or new features.</p>
-											<p>AI responses include structured file diffs you can accept individually.</p>
+											<p>AI responses include structured file changes. Use Show Diff to review in a temp diff tab.</p>
 										</div>
 									{:else}
 										{#each canvasAIChatMessages as message (message.id)}
@@ -6280,20 +6553,13 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 													<div class="canvas-ai-change-list">
 														<div class="canvas-ai-change-list-header">
 															<span>{message.changes.length} proposed file change(s)</span>
-															<button
-																type="button"
-																class="canvas-ai-action secondary"
-																on:click={() => void applyAllCanvasAIChanges(message.id)}
-																disabled={isCanvasAIGenerating || getCanvasAIPendingChangeCount(message) === 0}
-															>
-																Accept All
-															</button>
 														</div>
 														{#each message.changes as change (change.id)}
 															<section
 																class="canvas-ai-code-block"
 																class:is-applied={change.applyState === 'applied'}
 																class:is-failed={change.applyState === 'failed'}
+																class:is-cancelled={change.applyState === 'cancelled'}
 															>
 																<div class="canvas-ai-change-headline">
 																	<div class="canvas-ai-change-meta">
@@ -6303,20 +6569,22 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 																	<span class="canvas-ai-change-location">{change.locationHint}</span>
 																</div>
 																<p class="canvas-ai-change-summary">{change.summary}</p>
-																<pre class="canvas-ai-code">{change.diffText}</pre>
-																{#if change.applyError}
-																	<div class="canvas-ai-change-error">{change.applyError}</div>
-																{/if}
 																<div class="canvas-ai-code-actions">
 																	<button
 																		type="button"
-																		class="canvas-ai-action primary"
-																		on:click={() => void applyCanvasAIChange(message.id, change.id)}
-																		disabled={isCanvasAIGenerating || change.applyState === 'applied'}
+																		class="canvas-ai-action secondary canvas-ai-show-diff"
+																		on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
+																		disabled={isCanvasAIGenerating}
 																	>
-																		{change.applyState === 'applied' ? 'Applied' : 'Accept'}
+																		Show Diff <span aria-hidden="true">↗</span>
 																	</button>
+																	<span class={`canvas-ai-change-state state-${change.applyState}`}>
+																		{change.applyState}
+																	</span>
 																</div>
+																{#if change.applyError}
+																	<div class="canvas-ai-change-error">{change.applyError}</div>
+																{/if}
 															</section>
 														{/each}
 													</div>
@@ -6336,7 +6604,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 									placeholder="Ask AI what to change in this file..."
 									on:input={handleCanvasAIPromptInput}
 									on:keydown={handleCanvasAIPromptKeydown}
-									disabled={isCanvasAIGenerating}
+									disabled={isCanvasAIGenerating || !currentFileEntry()}
 								></textarea>
 								<div class="canvas-ai-actions">
 									<button
@@ -6349,22 +6617,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 									</button>
 									<button
 										type="button"
-										class="canvas-ai-action secondary"
-										on:click={() => {
-											const latest = resolveCanvasAILastSuggestedMessage();
-											if (latest) {
-												void applyAllCanvasAIChanges(latest.id);
-											}
-										}}
-										disabled={isCanvasAIGenerating || getCanvasAILastPendingChangeCount() === 0}
-									>
-										Accept Latest
-									</button>
-									<button
-										type="button"
 										class="canvas-ai-action primary"
 										on:click={() => void sendCanvasAIMessage()}
-										disabled={isCanvasAIGenerating || !canvasAIPrompt.trim()}
+										disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFileEntry()}
 									>
 										{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
 									</button>
@@ -6694,7 +6949,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		position: relative;
 		width: 100%;
 		height: 100%;
-		min-height: 320px;
+		min-height: min(320px, 100%);
 		display: flex;
 		overflow: hidden;
 	}
@@ -6776,69 +7031,69 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		min-height: 0;
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr) auto auto;
-		gap: 0.45rem;
-		padding: 0.1rem;
+		gap: 0.5rem;
+		padding: 0.28rem 0.22rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-panel-header {
-		font-size: 0.75rem;
-		padding: 0.18rem 0.18rem 0.12rem;
+		font-size: 0.78rem;
+		padding: 0.24rem 0.2rem 0.16rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-file-pill {
-		max-width: 10.5rem;
-		font-size: 0.6rem;
+		max-width: 11.5rem;
+		font-size: 0.63rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-thread {
-		gap: 0.38rem;
-		padding-right: 0.05rem;
+		gap: 0.5rem;
+		padding-right: 0.08rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-empty p {
-		font-size: 0.68rem;
+		font-size: 0.72rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-message {
-		padding: 0.45rem 0.5rem;
-		gap: 0.24rem;
+		padding: 0.54rem 0.58rem;
+		gap: 0.3rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-message-header strong {
-		font-size: 0.6rem;
+		font-size: 0.64rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-message-header time {
-		font-size: 0.58rem;
+		font-size: 0.6rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-message-text {
-		font-size: 0.71rem;
-		line-height: 1.4;
+		font-size: 0.75rem;
+		line-height: 1.5;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-code {
 		max-height: 150px;
-		font-size: 0.66rem;
+		font-size: 0.68rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-input {
-		font-size: 0.74rem;
-		padding: 0.42rem 0.5rem;
+		font-size: 0.76rem;
+		padding: 0.52rem 0.58rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-error {
-		font-size: 0.67rem;
-		padding: 0.3rem 0.42rem;
+		font-size: 0.7rem;
+		padding: 0.32rem 0.46rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-actions {
-		gap: 0.34rem;
+		gap: 0.38rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-action {
-		font-size: 0.66rem;
-		padding: 0.34rem 0.56rem;
+		font-size: 0.68rem;
+		padding: 0.36rem 0.6rem;
 	}
 
 	.canvas-sidebar.drag-over {
@@ -7630,12 +7885,18 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		flex: 1;
 		min-width: 0;
 		min-height: 0;
+		overflow: hidden;
 	}
 
 	.code-canvas {
 		width: 100%;
 		height: 100%;
-		min-height: 220px;
+		min-height: min(220px, 100%);
+	}
+
+	.code-canvas.is-hidden {
+		visibility: hidden;
+		pointer-events: none;
 	}
 
 	.canvas-editor-pane.is-empty .code-canvas {
@@ -7735,9 +7996,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		position: fixed;
 		inset: 0;
 		z-index: 10040;
-		background: rgba(5, 10, 18, 0.72);
-		backdrop-filter: blur(7px) saturate(120%);
-		-webkit-backdrop-filter: blur(7px) saturate(120%);
+		background: rgba(0, 0, 0, 0.58);
+		backdrop-filter: blur(4px);
+		-webkit-backdrop-filter: blur(4px);
 	}
 
 	.canvas-ai-panel {
@@ -7746,14 +8007,14 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		z-index: 10041;
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr) auto auto;
-		gap: 0.68rem;
+		gap: 0.62rem;
 		padding:
-			max(0.9rem, env(safe-area-inset-top))
+			max(0.78rem, env(safe-area-inset-top))
 			max(1rem, env(safe-area-inset-right))
-			max(0.9rem, env(safe-area-inset-bottom))
+			max(0.78rem, env(safe-area-inset-bottom))
 			max(1rem, env(safe-area-inset-left));
-		background: linear-gradient(180deg, rgba(14, 20, 31, 0.99) 0%, rgba(10, 15, 24, 0.99) 100%);
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+		background: #1e1f24;
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 	}
 
 	.canvas-ai-panel-header {
@@ -7761,10 +8022,12 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.5rem;
-		color: #e2ebfb;
-		font-size: 0.9rem;
+		color: #e8eaed;
+		font-size: 0.88rem;
 		font-weight: 600;
-		letter-spacing: 0.01em;
+		letter-spacing: 0.02em;
+		padding-bottom: 0.15rem;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.07);
 	}
 
 	.canvas-ai-panel-head-main {
@@ -7778,12 +8041,12 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		display: inline-flex;
 		align-items: center;
 		max-width: min(38rem, 70vw);
-		padding: 0.2rem 0.55rem;
+		padding: 0.22rem 0.52rem;
 		border-radius: 999px;
-		border: 1px solid rgba(126, 160, 212, 0.55);
-		background: rgba(40, 57, 84, 0.74);
-		color: #d8e9ff;
-		font-size: 0.7rem;
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		background: rgba(255, 255, 255, 0.05);
+		color: #bdc1c6;
+		font-size: 0.68rem;
 		font-weight: 600;
 		white-space: nowrap;
 		overflow: hidden;
@@ -7791,24 +8054,24 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	.canvas-ai-close {
-		border: 1px solid rgba(101, 121, 151, 0.56);
-		background: rgba(27, 37, 53, 0.9);
-		color: #d6e5fd;
-		border-radius: 0.44rem;
-		width: 1.8rem;
-		height: 1.8rem;
+		border: none;
+		background: transparent;
+		color: #9aa0a6;
+		border-radius: 0.5rem;
+		width: 2rem;
+		height: 2rem;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		cursor: pointer;
 		padding: 0;
-		font-size: 0.95rem;
+		font-size: 1rem;
 		line-height: 1;
 	}
 
 	.canvas-ai-close:hover:not(:disabled) {
-		border-color: rgba(138, 165, 208, 0.78);
-		background: rgba(43, 58, 82, 0.94);
+		background: rgba(255, 100, 100, 0.12);
+		color: #ff6b6b;
 	}
 
 	.canvas-ai-thread {
@@ -7816,39 +8079,39 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		overflow-y: auto;
 		display: grid;
 		align-content: start;
-		gap: 0.55rem;
+		gap: 0.72rem;
 		padding-right: 0.2rem;
 		overscroll-behavior: contain;
 	}
 
 	.canvas-ai-empty {
-		border: 1px dashed rgba(109, 133, 168, 0.58);
-		border-radius: 0.56rem;
-		background: rgba(24, 34, 49, 0.68);
-		padding: 0.62rem 0.68rem;
+		border: 1px dashed rgba(255, 255, 255, 0.18);
+		border-radius: 0.8rem;
+		background: rgba(255, 255, 255, 0.03);
+		padding: 0.82rem 0.88rem;
 		display: grid;
-		gap: 0.4rem;
+		gap: 0.48rem;
 	}
 
 	.canvas-ai-empty p {
 		margin: 0;
-		font-size: 0.82rem;
-		line-height: 1.4;
-		color: rgba(197, 214, 238, 0.9);
+		font-size: 0.8rem;
+		line-height: 1.5;
+		color: #9aa0a6;
 	}
 
 	.canvas-ai-message {
-		border: 1px solid rgba(98, 122, 160, 0.62);
-		border-radius: 0.66rem;
-		background: rgba(22, 31, 44, 0.9);
-		padding: 0.62rem 0.72rem;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 0.9rem;
+		background: rgba(255, 255, 255, 0.03);
+		padding: 0.66rem 0.72rem;
 		display: grid;
-		gap: 0.4rem;
+		gap: 0.32rem;
 	}
 
 	.canvas-ai-message.user {
-		border-color: rgba(106, 154, 220, 0.72);
-		background: rgba(41, 60, 90, 0.72);
+		border-color: rgba(26, 115, 232, 0.28);
+		background: rgba(26, 115, 232, 0.14);
 	}
 
 	.canvas-ai-message-header {
@@ -7859,33 +8122,33 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	.canvas-ai-message-header strong {
-		font-size: 0.74rem;
+		font-size: 0.7rem;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
-		color: rgba(188, 208, 239, 0.92);
+		color: #bdc1c6;
 	}
 
 	.canvas-ai-message-header time {
-		font-size: 0.68rem;
-		color: rgba(165, 183, 212, 0.8);
+		font-size: 0.66rem;
+		color: #9aa0a6;
 	}
 
 	.canvas-ai-message-text {
 		margin: 0;
-		font-size: 0.88rem;
-		line-height: 1.5;
-		color: #e4eefc;
+		font-size: 0.84rem;
+		line-height: 1.56;
+		color: #e8eaed;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
 
 	.canvas-ai-code-block {
-		border: 1px solid rgba(86, 109, 145, 0.64);
-		border-radius: 0.5rem;
-		background: rgba(13, 19, 30, 0.94);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 0.72rem;
+		background: rgba(0, 0, 0, 0.22);
 		display: grid;
 		gap: 0.42rem;
-		padding: 0.48rem;
+		padding: 0.56rem;
 	}
 
 	.canvas-ai-code-block.is-applied {
@@ -7896,6 +8159,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	.canvas-ai-code-block.is-failed {
 		border-color: rgba(188, 94, 94, 0.78);
 		background: rgba(40, 17, 20, 0.9);
+	}
+
+	.canvas-ai-code-block.is-cancelled {
+		border-color: rgba(151, 151, 151, 0.65);
+		background: rgba(28, 28, 28, 0.88);
 	}
 
 	.canvas-ai-change-list {
@@ -7910,7 +8178,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		gap: 0.6rem;
 		font-size: 0.72rem;
 		font-weight: 600;
-		color: rgba(198, 213, 237, 0.9);
+		color: #bdc1c6;
 	}
 
 	.canvas-ai-change-headline {
@@ -7930,7 +8198,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 	.canvas-ai-change-file {
 		font-size: 0.74rem;
-		color: #e7f1ff;
+		color: #e8eaed;
 		word-break: break-word;
 	}
 
@@ -7940,23 +8208,62 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		justify-content: center;
 		padding: 0.08rem 0.34rem;
 		border-radius: 999px;
-		border: 1px solid rgba(109, 142, 191, 0.62);
-		background: rgba(36, 56, 86, 0.88);
-		color: #d7e8ff;
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		background: rgba(255, 255, 255, 0.06);
+		color: #bdc1c6;
 		font-size: 0.6rem;
 		letter-spacing: 0.03em;
 	}
 
 	.canvas-ai-change-location {
 		font-size: 0.66rem;
-		color: rgba(183, 201, 227, 0.9);
+		color: #9aa0a6;
 	}
 
 	.canvas-ai-change-summary {
 		margin: 0;
 		font-size: 0.76rem;
-		line-height: 1.4;
-		color: rgba(218, 231, 250, 0.95);
+		line-height: 1.5;
+		color: #bdc1c6;
+	}
+
+	.canvas-ai-change-state {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.14rem 0.44rem;
+		border-radius: 999px;
+		border: 1px solid rgba(112, 126, 150, 0.6);
+		background: rgba(30, 40, 57, 0.9);
+		color: #d5e2f7;
+		font-size: 0.64rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.canvas-ai-change-state.state-pending {
+		border-color: rgba(112, 126, 150, 0.6);
+		background: rgba(30, 40, 57, 0.9);
+		color: #d5e2f7;
+	}
+
+	.canvas-ai-change-state.state-applied {
+		border-color: rgba(82, 162, 118, 0.72);
+		background: rgba(17, 58, 39, 0.84);
+		color: #caf8dd;
+	}
+
+	.canvas-ai-change-state.state-failed {
+		border-color: rgba(188, 94, 94, 0.72);
+		background: rgba(83, 31, 38, 0.85);
+		color: #ffd8d8;
+	}
+
+	.canvas-ai-change-state.state-cancelled {
+		border-color: rgba(151, 151, 151, 0.65);
+		background: rgba(46, 46, 46, 0.9);
+		color: #e7e7e7;
 	}
 
 	.canvas-ai-change-error {
@@ -7986,32 +8293,147 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 	.canvas-ai-code-actions {
 		display: flex;
-		justify-content: flex-end;
+		justify-content: space-between;
+		align-items: center;
+		gap: 0.42rem;
+		flex-wrap: wrap;
+	}
+
+	.canvas-ai-show-diff span {
+		font-size: 0.86em;
+	}
+
+	.canvas-ai-diff-pane {
+		position: absolute;
+		inset: 0;
+		z-index: 8;
+		display: flex;
+		flex-direction: column;
+		gap: 0.72rem;
+		padding: 0.84rem 0.92rem;
+		box-sizing: border-box;
+		overflow: hidden;
+		background: linear-gradient(180deg, rgba(9, 14, 22, 0.98) 0%, rgba(8, 12, 19, 0.98) 100%);
+	}
+
+	.canvas-ai-diff-header {
+		display: grid;
+		gap: 0.34rem;
+		padding: 0.58rem 0.64rem;
+		border-radius: 0.56rem;
+		border: 1px solid rgba(86, 109, 145, 0.64);
+		background: rgba(18, 25, 38, 0.92);
+	}
+
+	.canvas-ai-diff-title {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.42rem;
+		min-width: 0;
+	}
+
+	.canvas-ai-diff-title strong {
+		font-size: 0.82rem;
+		color: #ebf4ff;
+		word-break: break-word;
+	}
+
+	.canvas-ai-diff-summary {
+		margin: 0;
+		font-size: 0.78rem;
+		color: #d7e6fb;
+	}
+
+	.canvas-ai-diff-location {
+		margin: 0;
+		font-size: 0.7rem;
+		color: rgba(183, 201, 227, 0.9);
+	}
+
+	.canvas-ai-diff-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.48rem;
+		flex-wrap: wrap;
+	}
+
+	.canvas-ai-diff-body {
+		flex: 1;
+		min-height: 0;
+		overflow: auto;
+		border: 1px solid rgba(86, 109, 145, 0.64);
+		border-radius: 0.56rem;
+		background: rgba(10, 14, 21, 0.98);
+		font-family:
+			'SFMono-Regular',
+			Consolas,
+			'Liberation Mono',
+			Menlo,
+			monospace;
+		font-size: 0.78rem;
+		line-height: 1.36;
+	}
+
+	.canvas-ai-diff-line {
+		display: grid;
+		grid-template-columns: 3.4rem 3.4rem minmax(0, 1fr);
+		align-items: start;
+	}
+
+	.canvas-ai-diff-gutter {
+		padding: 0.16rem 0.44rem;
+		font-size: 0.7rem;
+		color: rgba(164, 186, 219, 0.82);
+		text-align: right;
+		user-select: none;
+		background: rgba(20, 27, 40, 0.92);
+		border-right: 1px solid rgba(58, 73, 98, 0.68);
+	}
+
+	.canvas-ai-diff-gutter.new {
+		border-right: 1px solid rgba(58, 73, 98, 0.68);
+	}
+
+	.canvas-ai-diff-code {
+		display: block;
+		padding: 0.16rem 0.56rem;
+		white-space: pre;
+		color: #dbe9ff;
+	}
+
+	.canvas-ai-diff-line.kind-add .canvas-ai-diff-code,
+	.canvas-ai-diff-line.kind-add .canvas-ai-diff-gutter {
+		background: rgba(22, 84, 53, 0.42);
+	}
+
+	.canvas-ai-diff-line.kind-remove .canvas-ai-diff-code,
+	.canvas-ai-diff-line.kind-remove .canvas-ai-diff-gutter {
+		background: rgba(127, 29, 29, 0.44);
 	}
 
 	.canvas-ai-input {
 		width: 100%;
 		min-height: 0;
-		border: 1px solid rgba(113, 134, 168, 0.56);
-		background: rgba(22, 31, 44, 0.92);
-		color: #eaf2ff;
-		border-radius: 0.62rem;
-		padding: 0.62rem 0.74rem;
-		font-size: 0.9rem;
-		line-height: 1.42;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.04);
+		color: #e8eaed;
+		border-radius: 0.85rem;
+		padding: 0.66rem 0.76rem;
+		font-size: 0.88rem;
+		line-height: 1.5;
 		resize: none;
 		overflow-y: hidden;
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 	}
 
 	.canvas-ai-input::placeholder {
-		color: rgba(172, 191, 224, 0.76);
+		color: #5f6368;
 	}
 
 	.canvas-ai-input:focus {
 		outline: none;
-		border-color: rgba(130, 172, 243, 0.88);
-		box-shadow: 0 0 0 2px rgba(117, 166, 248, 0.2);
+		border-color: rgba(26, 115, 232, 0.5);
+		box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.18);
 	}
 
 	.canvas-ai-error {
@@ -8029,39 +8451,39 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		align-items: center;
 		justify-content: flex-end;
 		gap: 0.5rem;
-		padding-top: 0.08rem;
+		padding-top: 0.1rem;
 		flex-wrap: wrap;
 	}
 
 	.canvas-ai-action {
-		border: 1px solid rgba(104, 126, 157, 0.62);
-		border-radius: 0.45rem;
-		padding: 0.5rem 0.86rem;
-		font-size: 0.8rem;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 0.56rem;
+		padding: 0.48rem 0.84rem;
+		font-size: 0.78rem;
 		font-weight: 600;
 		cursor: pointer;
 		line-height: 1.16;
 	}
 
 	.canvas-ai-action.secondary {
-		background: rgba(30, 40, 57, 0.9);
-		color: #d5e2f7;
+		background: rgba(255, 255, 255, 0.05);
+		color: #bdc1c6;
 	}
 
 	.canvas-ai-action.primary {
-		border-color: rgba(81, 119, 177, 0.8);
-		background: linear-gradient(180deg, rgba(57, 89, 137, 0.98) 0%, rgba(45, 73, 116, 0.98) 100%);
-		color: #f2f8ff;
+		border-color: rgba(26, 115, 232, 0.6);
+		background: #1a73e8;
+		color: #fff;
 	}
 
 	.canvas-ai-action:hover:not(:disabled) {
-		border-color: rgba(139, 164, 205, 0.78);
-		background: rgba(43, 58, 80, 0.95);
+		border-color: rgba(26, 115, 232, 0.45);
+		background: rgba(26, 115, 232, 0.15);
 	}
 
 	.canvas-ai-action.primary:hover:not(:disabled) {
-		border-color: rgba(121, 161, 224, 0.88);
-		background: linear-gradient(180deg, rgba(67, 103, 159, 0.98) 0%, rgba(52, 83, 131, 0.98) 100%);
+		border-color: rgba(26, 115, 232, 0.7);
+		background: #1967d2;
 	}
 
 	.canvas-ai-action:disabled {

@@ -5,7 +5,6 @@
 		projectTimeline,
 		timelineLoading
 	} from '$lib/stores/timeline';
-	import { addBoardActivity } from '$lib/stores/boardActivity';
 	import { initializeTaskStoreForRoom } from '$lib/stores/tasks';
 	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
 
@@ -28,12 +27,18 @@
 	let messages: ToraMessage[] = [];
 	let submitError = '';
 	let threadElement: HTMLDivElement | null = null;
+	let composerTextarea: HTMLTextAreaElement | null = null;
 	let loadedConversationKey = '';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const TORA_CHAT_STORAGE_PREFIX = 'tora_ai_chat';
 	const TORA_CHAT_HISTORY_LIMIT = 80;
+	const TORA_PROMPT_SUGGESTIONS = [
+		'Rebalance unfinished tasks into the next sprint and keep priority order.',
+		'Identify blockers and add follow-up tasks with owners and due dates.',
+		'Review sprint budget vs spent and suggest where to reduce scope.'
+	];
 
 	$: normalizedRoomID = normalizeRoomIDValue(roomId);
 	$: currentState = $projectTimeline;
@@ -182,12 +187,9 @@
 
 		try {
 			const result = await editAITimeline(normalizedRoomID, prompt, currentState);
-			await initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE });
-			addBoardActivity({
-				type: 'board_edited',
-				title: 'Board edited via Tora AI',
-				subtitle: prompt.length > 64 ? `${prompt.slice(0, 61)}...` : prompt
-			});
+			if (result.intent !== 'chat') {
+				await initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE });
+			}
 			appendMessage('assistant', result.assistantReply || formatSuccessMessage());
 		} catch (error) {
 			submitError = error instanceof Error ? error.message : 'Failed to apply Tora AI edit.';
@@ -202,6 +204,19 @@
 		event.preventDefault();
 		void submitEditPrompt();
 	}
+
+	function applyToraSuggestion(prompt: string) {
+		draft = prompt;
+		submitError = '';
+		void tick().then(() => composerTextarea?.focus());
+	}
+
+	function formatMessageTime(timestamp: number) {
+		return new Date(timestamp).toLocaleTimeString([], {
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
 </script>
 
 <section class="tora-chat" aria-label="Tora AI chat">
@@ -210,7 +225,7 @@
 			<span class="tora-brand-icon" aria-hidden="true">✦</span>
 			<div class="tora-brand-copy">
 				<h2>Tora AI</h2>
-				<p>Chat to update the current task board</p>
+				<p>Taskboard agent</p>
 			</div>
 		</div>
 		<div class="tora-meta">
@@ -223,32 +238,51 @@
 
 	<div class="tora-thread" bind:this={threadElement}>
 		{#if messages.length === 0}
-			<article class="tora-message assistant starter">
-				<header>
-					<strong>Tora AI</strong>
-					<time>Now</time>
-				</header>
-				<p>
-					Ask me to add sprints, rebalance priorities, adjust budgets, or update task status. I will
-					apply changes directly to this board.
-				</p>
-			</article>
+			<div class="empty-state-v2">
+				<div class="es-icon" aria-hidden="true">✦</div>
+				<h4>Start planning with Tora</h4>
+				<p>Ask Tora to reorganize tasks, budgets, priorities, and sprint structure in real time.</p>
+			</div>
 		{:else}
 			{#each messages as message (message.id)}
-				<article class="tora-message" class:user={message.role === 'user'}>
-					<header>
-						<strong>{message.role === 'user' ? 'You' : 'Tora AI'}</strong>
-						<time>
-							{new Date(message.timestamp).toLocaleTimeString([], {
-								hour: '2-digit',
-								minute: '2-digit'
-							})}
-						</time>
-					</header>
-					<p>{message.text}</p>
-				</article>
+				{#if message.role === 'user'}
+					<div class="user-bubble-row">
+						<article class="user-bubble">{message.text}</article>
+					</div>
+				{:else}
+					<article class="ai-response-block">
+						<div class="ai-response-meta">
+							<span class="ai-response-dot" aria-hidden="true"></span>
+							<div class="ai-response-title">
+								Tora AI
+								<span class="ai-time-chip">{formatMessageTime(message.timestamp)}</span>
+							</div>
+						</div>
+						<div class="ai-response-body">{message.text}</div>
+					</article>
+				{/if}
 			{/each}
 		{/if}
+		{#if $timelineLoading && currentState}
+			<div class="ai-loading-row">
+				<span class="ai-spinner" aria-hidden="true"></span>
+				Applying board updates...
+			</div>
+		{/if}
+	</div>
+
+	<div class="suggestions-panel">
+		{#each TORA_PROMPT_SUGGESTIONS as suggestion}
+			<button
+				type="button"
+				class="suggestion-item"
+				on:click={() => applyToraSuggestion(suggestion)}
+				disabled={$timelineLoading || !currentState}
+			>
+				<span class="suggestion-arrow" aria-hidden="true">→</span>
+				<span class="suggestion-text">{suggestion}</span>
+			</button>
+		{/each}
 	</div>
 
 	{#if submitError}
@@ -256,101 +290,88 @@
 	{/if}
 
 	<form class="tora-composer" on:submit|preventDefault={() => void submitEditPrompt()}>
-		<div class="tora-input-shell">
+		<div class="tora-input-box">
 			<textarea
+				class="tora-textarea"
+				bind:this={composerTextarea}
 				bind:value={draft}
 				rows="1"
 				placeholder="Ask Tora to update this sprint plan..."
 				on:keydown={handleComposerKeydown}
 				disabled={$timelineLoading || !currentState}
 			></textarea>
-			<button type="submit" disabled={$timelineLoading || !draft.trim() || !currentState}>
-				{#if $timelineLoading}
-					<span class="send-spinner" aria-hidden="true"></span>
-					Applying
-				{:else}
-					Send
-				{/if}
-			</button>
-		</div>
-		<div class="tora-composer-meta">
-			<span>Enter to send</span>
-			{#if !currentState}
-				<span>Create a project to start chatting</span>
-			{:else if isLargeProject}
-				<span>Large board: state payload is auto-compressed for AI</span>
-			{/if}
+			<div class="tora-toolbar">
+				<span class="tora-hint">
+					{#if !currentState}
+						Create a project to start chatting
+					{:else if isLargeProject}
+						Large board mode enabled
+					{:else}
+						Enter to send
+					{/if}
+				</span>
+				<div class="toolbar-spacer"></div>
+				<button
+					type="submit"
+					class="send-btn"
+					disabled={$timelineLoading || !draft.trim() || !currentState}
+					aria-label="Send message"
+				>
+					{#if $timelineLoading}
+						<span class="ai-spinner" aria-hidden="true"></span>
+					{:else}
+						<svg viewBox="0 0 14 14" aria-hidden="true">
+							<path d="M2 7h10M8 3l4 4-4 4"></path>
+						</svg>
+					{/if}
+				</button>
+			</div>
 		</div>
 	</form>
 </section>
 
 <style>
-	:global(:root) {
-		--tora-bg: #0d1016;
-		--tora-surface: rgba(255, 255, 255, 0.03);
-		--tora-border: rgba(157, 179, 214, 0.24);
-		--tora-text: #eaf1ff;
-		--tora-muted: rgba(188, 205, 235, 0.78);
-		--tora-accent: #73adff;
-		--tora-accent-soft: rgba(115, 173, 255, 0.18);
-		--tora-user-bg: rgba(63, 103, 165, 0.36);
-		--tora-user-border: rgba(120, 171, 245, 0.5);
-		--tora-assistant-bg: rgba(24, 34, 52, 0.85);
-	}
-
-	:global(:root[data-theme='light']),
-	:global(.theme-light) {
-		--tora-bg: #f4f7fc;
-		--tora-surface: rgba(255, 255, 255, 0.84);
-		--tora-border: rgba(145, 168, 209, 0.32);
-		--tora-text: #132442;
-		--tora-muted: rgba(65, 88, 128, 0.76);
-		--tora-accent: #1f63ce;
-		--tora-accent-soft: rgba(31, 99, 206, 0.14);
-		--tora-user-bg: rgba(31, 99, 206, 0.14);
-		--tora-user-border: rgba(31, 99, 206, 0.35);
-		--tora-assistant-bg: rgba(255, 255, 255, 0.9);
-	}
-
 	.tora-chat {
 		height: 100%;
 		min-height: 0;
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr) auto auto;
-		background: var(--tora-bg);
-		color: var(--tora-text);
-		border-radius: 0.88rem;
+		background: #1e1f24;
+		color: #e8eaed;
+		border-radius: 1rem;
 		overflow: hidden;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45);
 	}
 
 	.tora-chat-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.85rem;
-		padding: 0.86rem 1rem;
-		border-bottom: 1px solid var(--tora-border);
-		background: var(--tora-surface);
+		gap: 0.75rem;
+		padding: 0.72rem 0.9rem;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+		background: rgba(255, 255, 255, 0.02);
 	}
 
 	.tora-brand {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.58rem;
+		gap: 0.5rem;
 		min-width: 0;
 	}
 
 	.tora-brand-icon {
-		width: 1.55rem;
-		height: 1.55rem;
-		border-radius: 0.46rem;
-		border: 1px solid color-mix(in srgb, var(--tora-accent) 40%, var(--tora-border));
-		background: color-mix(in srgb, var(--tora-accent-soft) 68%, var(--tora-surface));
+		width: 1.4rem;
+		height: 1.4rem;
+		border-radius: 8px;
+		border: 1px solid rgba(26, 115, 232, 0.26);
+		background: rgba(26, 115, 232, 0.14);
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 0.82rem;
-		color: var(--tora-accent);
+		font-size: 0.7rem;
+		color: #8ab4f8;
 		flex: 0 0 auto;
 	}
 
@@ -362,15 +383,14 @@
 
 	.tora-brand-copy h2 {
 		margin: 0;
-		font-size: 0.88rem;
-		font-weight: 700;
-		letter-spacing: 0.03em;
+		font-size: 0.86rem;
+		font-weight: 600;
 	}
 
 	.tora-brand-copy p {
 		margin: 0;
-		font-size: 0.72rem;
-		color: var(--tora-muted);
+		font-size: 0.68rem;
+		color: #9aa0a6;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -379,183 +399,318 @@
 	.tora-meta {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.45rem;
-		font-size: 0.7rem;
-		color: var(--tora-muted);
+		gap: 0.4rem;
+		font-size: 0.66rem;
+		color: #9aa0a6;
 		white-space: nowrap;
 	}
 
 	.tora-meta-badge {
-		border: 1px solid rgba(238, 170, 75, 0.45);
-		background: rgba(238, 170, 75, 0.16);
-		color: #f4cf9a;
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		background: rgba(255, 255, 255, 0.07);
+		color: #bdc1c6;
 		border-radius: 999px;
-		padding: 0.15rem 0.44rem;
-		font-size: 0.62rem;
+		padding: 0.14rem 0.4rem;
+		font-size: 0.58rem;
 		font-weight: 600;
-		letter-spacing: 0.04em;
+		letter-spacing: 0.05em;
 		text-transform: uppercase;
 	}
 
 	.tora-thread {
 		min-height: 0;
 		overflow-y: auto;
-		display: grid;
-		align-content: start;
-		gap: 0.56rem;
-		padding: 0.88rem 1rem;
-	}
-
-	.tora-message {
-		border: 1px solid var(--tora-border);
-		border-radius: 0.72rem;
-		background: var(--tora-assistant-bg);
-		padding: 0.68rem 0.74rem;
-		display: grid;
-		gap: 0.32rem;
-		max-width: min(52rem, 100%);
-	}
-
-	.tora-message.user {
-		margin-left: auto;
-		border-color: var(--tora-user-border);
-		background: var(--tora-user-bg);
-	}
-
-	.tora-message.starter {
-		border-color: color-mix(in srgb, var(--tora-accent) 34%, var(--tora-border));
-		background: color-mix(in srgb, var(--tora-accent-soft) 70%, var(--tora-assistant-bg));
-	}
-
-	.tora-message header {
 		display: flex;
-		align-items: baseline;
-		justify-content: space-between;
-		gap: 0.6rem;
+		flex-direction: column;
+		gap: 0.86rem;
+		padding: 0.86rem;
 	}
 
-	.tora-message strong {
-		font-size: 0.67rem;
-		font-weight: 700;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--tora-muted);
+	.tora-thread::-webkit-scrollbar {
+		width: 4px;
 	}
 
-	.tora-message time {
-		font-size: 0.63rem;
-		color: var(--tora-muted);
+	.tora-thread::-webkit-scrollbar-thumb {
+		background: rgba(255, 255, 255, 0.12);
+		border-radius: 4px;
 	}
 
-	.tora-message p {
-		margin: 0;
-		font-size: 0.82rem;
-		line-height: 1.46;
-		color: var(--tora-text);
-		white-space: pre-wrap;
-	}
-
-	.tora-error {
-		margin: 0 1rem;
-		margin-bottom: 0.45rem;
-		font-size: 0.74rem;
-		color: #ffd2d2;
-		background: rgba(153, 27, 27, 0.32);
-		border: 1px solid rgba(224, 128, 128, 0.5);
-		border-radius: 0.56rem;
-		padding: 0.42rem 0.55rem;
-	}
-
-	.tora-composer {
-		border-top: 1px solid var(--tora-border);
-		background: var(--tora-surface);
-		padding: 0.72rem 1rem 0.86rem;
-		display: grid;
-		gap: 0.42rem;
-	}
-
-	.tora-input-shell {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 0.52rem;
-		align-items: end;
-	}
-
-	.tora-input-shell textarea {
-		min-height: 2.35rem;
-		max-height: 7.5rem;
-		border: 1px solid var(--tora-border);
-		border-radius: 0.66rem;
-		background: rgba(0, 0, 0, 0.16);
-		color: var(--tora-text);
-		padding: 0.58rem 0.72rem;
-		font-size: 0.82rem;
-		line-height: 1.42;
-		resize: vertical;
-	}
-
-	:global(.theme-light) .tora-input-shell textarea {
-		background: rgba(255, 255, 255, 0.84);
-	}
-
-	.tora-input-shell textarea:focus {
-		outline: none;
-		border-color: var(--tora-accent);
-		box-shadow: 0 0 0 2px color-mix(in srgb, var(--tora-accent) 24%, transparent);
-	}
-
-	.tora-input-shell textarea::placeholder {
-		color: var(--tora-muted);
-	}
-
-	.tora-input-shell textarea:disabled {
-		opacity: 0.58;
-	}
-
-	.tora-input-shell button {
-		border: 1px solid color-mix(in srgb, var(--tora-accent) 56%, var(--tora-border));
-		border-radius: 0.58rem;
-		background: color-mix(in srgb, var(--tora-accent-soft) 70%, var(--tora-surface));
-		color: var(--tora-text);
-		min-width: 5.4rem;
-		height: 2.35rem;
-		padding: 0 0.9rem;
-		font-size: 0.76rem;
-		font-weight: 600;
-		display: inline-flex;
+	.empty-state-v2 {
+		display: flex;
+		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 0.38rem;
+		text-align: center;
+		padding: 1.4rem 1rem;
+		gap: 0.54rem;
+	}
+
+	.empty-state-v2 .es-icon {
+		width: 42px;
+		height: 42px;
+		border-radius: 999px;
+		border: 1px solid rgba(26, 115, 232, 0.2);
+		background: rgba(26, 115, 232, 0.12);
+		color: #8ab4f8;
+		display: grid;
+		place-items: center;
+	}
+
+	.empty-state-v2 h4 {
+		margin: 0;
+		font-size: 0.86rem;
+		color: #e8eaed;
+	}
+
+	.empty-state-v2 p {
+		margin: 0;
+		font-size: 0.76rem;
+		line-height: 1.55;
+		color: #9aa0a6;
+		max-width: 320px;
+	}
+
+	.ai-response-block {
+		display: grid;
+		gap: 0.26rem;
+	}
+
+	.ai-response-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.46rem;
+	}
+
+	.ai-response-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 999px;
+		background: #1a73e8;
+	}
+
+	.ai-response-title {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.46rem;
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: #e8eaed;
+	}
+
+	.ai-time-chip {
+		border-radius: 999px;
+		padding: 0.1rem 0.44rem;
+		font-size: 0.62rem;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: rgba(255, 255, 255, 0.06);
+		color: #9aa0a6;
+	}
+
+	.ai-response-body {
+		margin-left: 0.72rem;
+		padding-left: 0.72rem;
+		border-left: 2px solid rgba(255, 255, 255, 0.1);
+		margin: 0;
+		font-size: 0.8rem;
+		line-height: 1.6;
+		color: #bdc1c6;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.user-bubble-row {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.user-bubble {
+		max-width: 88%;
+		border-radius: 18px 18px 4px 18px;
+		border: 1px solid rgba(26, 115, 232, 0.25);
+		background: rgba(26, 115, 232, 0.15);
+		color: #e8eaed;
+		padding: 0.56rem 0.74rem;
+		font-size: 0.8rem;
+		line-height: 1.46;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.ai-loading-row {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.78rem;
+		color: #9aa0a6;
+		font-style: italic;
+	}
+
+	.ai-spinner {
+		width: 14px;
+		height: 14px;
+		border: 2px solid rgba(255, 255, 255, 0.12);
+		border-top-color: #1a73e8;
+		border-radius: 999px;
+		animation: tora-spin 0.8s linear infinite;
+	}
+
+	.suggestions-panel {
+		display: grid;
+		padding: 0.34rem 0;
+		background: rgba(255, 255, 255, 0.03);
+		border-top: 1px solid rgba(255, 255, 255, 0.07);
+	}
+
+	.suggestion-item {
+		border: none;
+		background: transparent;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		text-align: left;
+		padding: 0.46rem 0.82rem;
 		cursor: pointer;
 	}
 
-	.tora-input-shell button:hover:not(:disabled) {
-		border-color: var(--tora-accent);
-		background: color-mix(in srgb, var(--tora-accent-soft) 88%, var(--tora-surface));
+	.suggestion-item:hover:not(:disabled) {
+		background: rgba(26, 115, 232, 0.12);
 	}
 
-	.tora-input-shell button:disabled {
-		opacity: 0.5;
+	.suggestion-item:disabled {
+		opacity: 0.58;
 		cursor: not-allowed;
 	}
 
-	.send-spinner {
-		display: inline-block;
-		width: 0.72rem;
-		height: 0.72rem;
-		border-radius: 50%;
-		border: 1.6px solid rgba(255, 255, 255, 0.35);
-		border-top-color: currentColor;
-		animation: tora-spin 0.72s linear infinite;
+	.suggestion-arrow {
+		font-size: 0.82rem;
+		color: #9aa0a6;
 	}
 
-	.tora-composer-meta {
-		display: flex;
+	.suggestion-text {
+		font-size: 0.75rem;
+		line-height: 1.32;
+		color: #bdc1c6;
+	}
+
+	.tora-error {
+		margin: 0 0.82rem 0.58rem;
+		font-size: 0.76rem;
+		color: #ffd7d7;
+		background: rgba(132, 33, 33, 0.44);
+		border: 1px solid rgba(227, 134, 134, 0.52);
+		border-radius: 10px;
+		padding: 0.48rem 0.62rem;
+	}
+
+	.tora-composer {
+		padding: 0.66rem 0.74rem 0.8rem;
+		border-top: 1px solid rgba(255, 255, 255, 0.07);
+		background: rgba(255, 255, 255, 0.02);
+	}
+
+	.tora-input-box {
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 14px;
+		background: rgba(255, 255, 255, 0.04);
+		padding: 0.58rem 0.62rem;
+		display: grid;
+		gap: 0.42rem;
+		transition:
+			border-color 0.18s ease,
+			background 0.18s ease;
+	}
+
+	.tora-input-box:focus-within {
+		border-color: rgba(26, 115, 232, 0.5);
+		background: rgba(26, 115, 232, 0.04);
+	}
+
+	.tora-textarea {
+		min-height: 22px;
+		max-height: 120px;
+		border: none;
+		background: transparent;
+		color: #e8eaed;
+		padding: 0;
+		font-size: 0.84rem;
+		line-height: 1.46;
+		resize: none;
+	}
+
+	.tora-textarea:focus {
+		outline: none;
+	}
+
+	.tora-textarea::placeholder {
+		color: #5f6368;
+	}
+
+	.tora-textarea:disabled {
+		opacity: 0.58;
+	}
+
+	.tora-toolbar {
+		display: inline-flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 0.64rem;
+		gap: 0.46rem;
+	}
+
+	.tora-hint {
 		font-size: 0.68rem;
-		color: var(--tora-muted);
+		color: #9aa0a6;
+	}
+
+	.toolbar-spacer {
+		flex: 1;
+	}
+
+	.send-btn {
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+		border: none;
+		background: #1a73e8;
+		color: #fff;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		box-shadow: 0 2px 10px rgba(26, 115, 232, 0.38);
+		transition:
+			background 0.18s ease,
+			transform 0.18s ease,
+			box-shadow 0.18s ease;
+	}
+
+	.send-btn svg {
+		width: 14px;
+		height: 14px;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.send-btn:hover:not(:disabled) {
+		background: #1967d2;
+		transform: scale(1.05);
+		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.48);
+	}
+
+	.send-btn:disabled {
+		background: rgba(255, 255, 255, 0.08);
+		cursor: not-allowed;
+		box-shadow: none;
+		transform: none;
+	}
+
+	.send-btn .ai-spinner {
+		width: 13px;
+		height: 13px;
+		border-width: 1.8px;
+		border-color: rgba(255, 255, 255, 0.42);
+		border-top-color: #fff;
 	}
 
 	@keyframes tora-spin {
@@ -576,11 +731,7 @@
 		}
 
 		.tora-thread {
-			padding: 0.72rem 0.8rem;
-		}
-
-		.tora-composer {
-			padding: 0.64rem 0.8rem 0.8rem;
+			padding: 0.72rem 0.72rem;
 		}
 	}
 </style>

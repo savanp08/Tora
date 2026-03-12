@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
+	import { get } from 'svelte/store';
 	import ProjectOnboarding from '$lib/components/workspace/ProjectOnboarding.svelte';
 	import ProgressGanttTab from '$lib/components/workspace/ProgressGanttTab.svelte';
 	import TaskBoard from '$lib/components/workspace/TaskBoard.svelte';
@@ -21,9 +22,11 @@
 		timelineLoading,
 		type ProjectTab
 	} from '$lib/stores/timeline';
-	import { clearBoardActivity, setBoardActivityRoom } from '$lib/stores/boardActivity';
-	import { initializeTaskStoreForRoom } from '$lib/stores/tasks';
+	import { addBoardActivity, setBoardActivityRoom } from '$lib/stores/boardActivity';
+	import { initializeTaskStoreForRoom, taskStore } from '$lib/stores/tasks';
 	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
+	import { sendSocketPayload } from '$lib/ws';
+	import { buildBoardActivitySocketPayload, buildTaskSocketPayload } from '$lib/ws/client';
 
 	export let roomId = '';
 	export let canEdit = true;
@@ -149,6 +152,9 @@
 
 		clearingTaskboard = true;
 		timelineError.set('');
+		const existingTasks = get(taskStore).filter(
+			(task) => normalizeRoomIDValue(task.roomId) === normalizedWorkspaceRoomID
+		);
 		try {
 			const response = await fetch(
 				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedWorkspaceRoomID)}/tasks`,
@@ -160,12 +166,27 @@
 			);
 			if (!response.ok) throw new Error(await parseWorkspaceError(response));
 
+			for (const task of existingTasks) {
+				sendSocketPayload(
+					buildTaskSocketPayload('task_delete', normalizedWorkspaceRoomID, task)
+				);
+			}
+
+			const clearEvent = addBoardActivity({
+				type: 'board_cleared',
+				title: 'Cleared task board',
+				subtitle: 'Removed all tasks in this room',
+				actor: sessionUserID || 'Unknown'
+			});
+			sendSocketPayload(
+				buildBoardActivitySocketPayload(normalizedWorkspaceRoomID, clearEvent)
+			);
+
 			await Promise.all([
 				initializeProjectTimelineForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
 				initializeTaskStoreForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE })
 			]);
 
-			clearBoardActivity(normalizedWorkspaceRoomID);
 			activeProjectTab.set('overview');
 		} catch (error) {
 			timelineError.set(error instanceof Error ? error.message : 'Failed to clear room taskboard');

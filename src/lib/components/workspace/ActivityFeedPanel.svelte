@@ -11,7 +11,9 @@
 			case 'task_completed': return '✓';
 			case 'task_added':    return '+';
 			case 'task_modified': return '✎';
+			case 'task_deleted':  return '−';
 			case 'task_moved':    return '⇄';
+			case 'board_cleared': return '⟲';
 			case 'sprint_started': return '▶';
 			case 'budget_update': return '$';
 			case 'board_generated': return '✦';
@@ -25,7 +27,9 @@
 			case 'task_completed': return 'ev-done';
 			case 'task_added':    return 'ev-add';
 			case 'task_modified': return 'ev-mod';
+			case 'task_deleted':  return 'ev-del';
 			case 'task_moved':    return 'ev-move';
+			case 'board_cleared': return 'ev-clear';
 			case 'sprint_started': return 'ev-sprint';
 			case 'budget_update': return 'ev-budget';
 			case 'board_generated':
@@ -226,7 +230,9 @@
 	.ev-done    { background: rgba(95, 209, 139, 0.18); border-color: rgba(95, 209, 139, 0.4); color: #5fd18b; }
 	.ev-add     { background: rgba(122, 181, 255, 0.18); border-color: rgba(122, 181, 255, 0.4); color: #7ab5ff; }
 	.ev-mod     { background: rgba(247, 178, 79, 0.18); border-color: rgba(247, 178, 79, 0.4); color: #f7b24f; }
+	.ev-del     { background: rgba(239, 68, 68, 0.18); border-color: rgba(239, 68, 68, 0.38); color: #fca5a5; }
 	.ev-move    { background: rgba(155, 120, 255, 0.18); border-color: rgba(155, 120, 255, 0.4); color: #b09aff; }
+	.ev-clear   { background: rgba(123, 132, 153, 0.18); border-color: rgba(123, 132, 153, 0.36); color: #b9c3d8; }
 	.ev-sprint  { background: rgba(65, 199, 199, 0.18); border-color: rgba(65, 199, 199, 0.4); color: #41c7c7; }
 	.ev-budget  { background: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.38); color: #fca5a5; }
 	.ev-ai      { background: rgba(122, 181, 255, 0.22); border-color: rgba(122, 181, 255, 0.52); color: #a8cbff; }

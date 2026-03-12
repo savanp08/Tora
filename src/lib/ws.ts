@@ -1,6 +1,6 @@
 import { browser } from '$app/environment';
 import { APP_LIMITS } from '$lib/config/limits';
-import { syncTaskStoreFromSocketPayload } from '$lib/ws/client';
+import { syncBoardActivityFromSocketPayload, syncTaskStoreFromSocketPayload } from '$lib/ws/client';
 import { writable } from 'svelte/store';
 
 export type GlobalSocketState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
@@ -126,6 +126,7 @@ function connectSocket() {
 		}
 		const payload = parseMessagePayload(event.data);
 		syncTaskStoreFromSocketPayload(payload);
+		syncBoardActivityFromSocketPayload(payload);
 		globalMessages.set({
 			payload,
 			receivedAt: Date.now()

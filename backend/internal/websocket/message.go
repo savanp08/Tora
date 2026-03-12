@@ -41,6 +41,7 @@ const (
 	boardElementAddType        = "board_element_add"
 	boardElementMoveType       = "board_element_move"
 	boardElementDeleteType     = "board_element_delete"
+	boardActivityType          = "board_activity"
 	boardEventBatchType        = "board_event_batch"
 	boardSizeTotalPrefix       = "board:size:total:"
 	boardSizeElementsPrefix    = "board:size:elements:"
@@ -66,6 +67,7 @@ var supportedBoardEventTypes = map[string]struct{}{
 	boardElementAddType:    {},
 	boardElementMoveType:   {},
 	boardElementDeleteType: {},
+	boardActivityType:      {},
 }
 
 type MessageService struct {

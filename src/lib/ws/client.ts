@@ -5,9 +5,11 @@ import {
 	type TaskStatus,
 	upsertTaskStoreEntry
 } from '$lib/stores/tasks';
+import { addBoardActivityFromSocket, type BoardActivityEvent } from '$lib/stores/boardActivity';
 import { normalizeRoomIDValue, toStringValue } from '$lib/utils/chat/core';
 
 export type TaskSocketEventType = 'task_create' | 'task_update' | 'task_move' | 'task_delete';
+export const BOARD_ACTIVITY_SOCKET_EVENT_TYPE = 'board_activity';
 
 const TASK_SOCKET_EVENT_TYPES = new Set<TaskSocketEventType>([
 	'task_create',
@@ -141,6 +143,22 @@ export function buildTaskSocketPayload(
 	};
 }
 
+export function buildBoardActivitySocketPayload(roomId: string, event: BoardActivityEvent) {
+	const normalizedRoomId = normalizeRoomIDValue(roomId);
+	return {
+		type: BOARD_ACTIVITY_SOCKET_EVENT_TYPE,
+		roomId: normalizedRoomId,
+		room_id: normalizedRoomId,
+		payload: {
+			roomId: normalizedRoomId,
+			room_id: normalizedRoomId,
+			activity: {
+				...event
+			}
+		}
+	};
+}
+
 export function syncTaskStoreFromSocketPayload(rawPayload: unknown) {
 	const source = toRecord(rawPayload);
 	if (!source) {
@@ -168,5 +186,30 @@ export function syncTaskStoreFromSocketPayload(rawPayload: unknown) {
 	nextTaskSource.roomId = eventRoomId;
 	nextTaskSource.room_id = eventRoomId;
 	upsertTaskStoreEntry(nextTaskSource, eventRoomId);
+	return true;
+}
+
+export function syncBoardActivityFromSocketPayload(rawPayload: unknown) {
+	const source = toRecord(rawPayload);
+	if (!source) {
+		return false;
+	}
+
+	const eventType = toStringValue(source.type).trim().toLowerCase();
+	if (eventType !== BOARD_ACTIVITY_SOCKET_EVENT_TYPE) {
+		return false;
+	}
+
+	const payload = toRecord(source.payload);
+	const eventRoomID = normalizeRoomIDValue(
+		toStringValue(source.roomId ?? source.room_id ?? payload?.roomId ?? payload?.room_id)
+	);
+	if (!eventRoomID) {
+		return true;
+	}
+
+	const activityCandidate =
+		payload && 'activity' in payload ? payload.activity : source.activity ?? source.payload;
+	addBoardActivityFromSocket(activityCandidate, eventRoomID);
 	return true;
 }

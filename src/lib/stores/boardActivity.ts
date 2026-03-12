@@ -6,7 +6,9 @@ export type BoardActivityType =
 	| 'task_completed'
 	| 'task_added'
 	| 'task_modified'
+	| 'task_deleted'
 	| 'task_moved'
+	| 'board_cleared'
 	| 'sprint_started'
 	| 'budget_update'
 	| 'board_generated'
@@ -22,6 +24,8 @@ export interface BoardActivityEvent {
 	timestamp: number;
 }
 
+export type BoardActivityInput = Omit<BoardActivityEvent, 'id' | 'timestamp'>;
+
 const MAX_ACTIVITY_EVENTS = 100;
 const STORAGE_KEY_PREFIX = 'converse:board-activity:v1';
 
@@ -35,17 +39,31 @@ function createEventID() {
 	return `evt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function addBoardActivity(event: Omit<BoardActivityEvent, 'id' | 'timestamp'>) {
+export function addBoardActivity(event: BoardActivityInput): BoardActivityEvent {
 	const fullEvent: BoardActivityEvent = {
 		...event,
 		id: createEventID(),
 		timestamp: Date.now()
 	};
-	boardActivity.update((events) => {
-		const nextEvents = [fullEvent, ...events].slice(0, MAX_ACTIVITY_EVENTS);
-		persistBoardActivity(nextEvents);
-		return nextEvents;
-	});
+	if (!activeBoardActivityRoomID) {
+		boardActivity.update((events) => sortAndLimitEvents([fullEvent, ...events]));
+		return fullEvent;
+	}
+	commitBoardActivityEvent(activeBoardActivityRoomID, fullEvent);
+	return fullEvent;
+}
+
+export function addBoardActivityFromSocket(rawEvent: unknown, roomID: string) {
+	const normalizedRoomID = normalizeRoomIDValue(roomID);
+	if (!normalizedRoomID) {
+		return false;
+	}
+	const normalizedEvent = normalizeIncomingEvent(rawEvent);
+	if (!normalizedEvent) {
+		return false;
+	}
+	commitBoardActivityEvent(normalizedRoomID, normalizedEvent);
+	return true;
 }
 
 export function setBoardActivityRoom(roomID: string) {
@@ -72,6 +90,10 @@ export function clearBoardActivity(roomID?: string) {
 	}
 }
 
+export function getActiveBoardActivityRoomID() {
+	return activeBoardActivityRoomID;
+}
+
 export function formatTimeAgo(timestamp: number): string {
 	const diff = Date.now() - timestamp;
 	const minutes = Math.floor(diff / 60000);
@@ -94,7 +116,9 @@ function isBoardActivityType(value: unknown): value is BoardActivityType {
 		value === 'task_completed' ||
 		value === 'task_added' ||
 		value === 'task_modified' ||
+		value === 'task_deleted' ||
 		value === 'task_moved' ||
+		value === 'board_cleared' ||
 		value === 'sprint_started' ||
 		value === 'budget_update' ||
 		value === 'board_generated' ||
@@ -102,7 +126,7 @@ function isBoardActivityType(value: unknown): value is BoardActivityType {
 	);
 }
 
-function normalizeStoredEvent(raw: unknown): BoardActivityEvent | null {
+function normalizeIncomingEvent(raw: unknown): BoardActivityEvent | null {
 	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
 		return null;
 	}
@@ -111,7 +135,7 @@ function normalizeStoredEvent(raw: unknown): BoardActivityEvent | null {
 	if (!isBoardActivityType(type)) {
 		return null;
 	}
-	const id = typeof source.id === 'string' ? source.id.trim() : '';
+	const id = typeof source.id === 'string' ? source.id.trim() : createEventID();
 	const title = typeof source.title === 'string' ? source.title.trim() : '';
 	const timestamp =
 		typeof source.timestamp === 'number' && Number.isFinite(source.timestamp)
@@ -131,6 +155,34 @@ function normalizeStoredEvent(raw: unknown): BoardActivityEvent | null {
 	};
 }
 
+function sortAndLimitEvents(events: BoardActivityEvent[]) {
+	return [...events]
+		.sort((left, right) => right.timestamp - left.timestamp)
+		.slice(0, MAX_ACTIVITY_EVENTS);
+}
+
+function mergeActivityEvent(events: BoardActivityEvent[], event: BoardActivityEvent) {
+	const withoutDuplicate = events.filter((candidate) => candidate.id !== event.id);
+	return sortAndLimitEvents([event, ...withoutDuplicate]);
+}
+
+function commitBoardActivityEvent(roomID: string, event: BoardActivityEvent) {
+	if (!roomID) {
+		return;
+	}
+	if (roomID === activeBoardActivityRoomID) {
+		boardActivity.update((events) => {
+			const nextEvents = mergeActivityEvent(events, event);
+			persistBoardActivity(nextEvents, roomID);
+			return nextEvents;
+		});
+		return;
+	}
+	const currentEvents = loadBoardActivity(roomID);
+	const nextEvents = mergeActivityEvent(currentEvents, event);
+	persistBoardActivity(nextEvents, roomID);
+}
+
 function loadBoardActivity(roomID: string): BoardActivityEvent[] {
 	if (!browser || !roomID) {
 		return [];
@@ -144,23 +196,23 @@ function loadBoardActivity(roomID: string): BoardActivityEvent[] {
 		if (!Array.isArray(parsed)) {
 			return [];
 		}
-		return parsed
-			.map((entry) => normalizeStoredEvent(entry))
-			.filter((entry): entry is BoardActivityEvent => Boolean(entry))
-			.sort((left, right) => right.timestamp - left.timestamp)
-			.slice(0, MAX_ACTIVITY_EVENTS);
+		return sortAndLimitEvents(
+			parsed
+				.map((entry) => normalizeIncomingEvent(entry))
+				.filter((entry): entry is BoardActivityEvent => Boolean(entry))
+		);
 	} catch {
 		return [];
 	}
 }
 
-function persistBoardActivity(events: BoardActivityEvent[]) {
-	if (!browser || !activeBoardActivityRoomID) {
+function persistBoardActivity(events: BoardActivityEvent[], roomID = activeBoardActivityRoomID) {
+	if (!browser || !roomID) {
 		return;
 	}
 	try {
 		window.localStorage.setItem(
-			storageKeyForRoom(activeBoardActivityRoomID),
+			storageKeyForRoom(roomID),
 			JSON.stringify(events)
 		);
 	} catch {

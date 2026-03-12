@@ -3,7 +3,7 @@
 	import type { OnlineMember } from '$lib/types/chat';
 	import { currentUser } from '$lib/store';
 	import { activeContext } from '$lib/stores/jiraContext';
-	import { addBoardActivity } from '$lib/stores/boardActivity';
+	import { addBoardActivity, type BoardActivityInput } from '$lib/stores/boardActivity';
 	import { applyTimelineTaskStatusUpdate } from '$lib/stores/timeline';
 	import {
 		moveTaskOptimistic,
@@ -15,7 +15,7 @@
 	} from '$lib/stores/tasks';
 	import { normalizeIdentifier, normalizeRoomIDValue, toStringValue } from '$lib/utils/chat/core';
 	import { sendSocketPayload } from '$lib/ws';
-	import { buildTaskSocketPayload } from '$lib/ws/client';
+	import { buildBoardActivitySocketPayload, buildTaskSocketPayload } from '$lib/ws/client';
 
 	export let roomId = '';
 	export let canEdit = true;
@@ -825,6 +825,15 @@
 		roomBoardError = message;
 	}
 
+	function publishRoomBoardActivity(roomID: string, event: BoardActivityInput) {
+		const normalizedRoomID = normalizeRoomIDValue(roomID);
+		const fullEvent = addBoardActivity(event);
+		if (normalizedRoomID) {
+			sendSocketPayload(buildBoardActivitySocketPayload(normalizedRoomID, fullEvent));
+		}
+		return fullEvent;
+	}
+
 	async function loadContextTasks() {
 		if (!contextAware) {
 			return;
@@ -889,7 +898,10 @@
 		return 'pending';
 	}
 
-	async function persistContextTaskStatus(taskID: string, columnKey: ColumnKey) {
+	async function persistContextTaskStatus(
+		taskID: string,
+		columnKey: ColumnKey
+	): Promise<StatusUpdateMetadata | null> {
 		if ($activeContext.type === 'personal') {
 			const response = await fetch(
 				`${API_BASE}/api/personal/items/${encodeURIComponent(taskID)}/status`,
@@ -905,7 +917,7 @@
 			if (!response.ok) {
 				throw new Error(await parseErrorMessage(response));
 			}
-			return;
+			return null;
 		}
 
 		const normalizedWorkspaceRoomID = normalizeRoomIDValue($activeContext.id);
@@ -924,6 +936,8 @@
 		if (!response.ok) {
 			throw new Error(await parseErrorMessage(response));
 		}
+		const payload = (await response.json().catch(() => null)) as unknown;
+		return parseStatusUpdateMetadata(payload, columnKey);
 	}
 
 	async function moveContextTaskToColumn(taskID: string, columnKey: ColumnKey) {
@@ -936,7 +950,8 @@
 		}
 
 		const previousStatus = targetTask.status;
-		if (resolveColumn(previousStatus) === columnKey) {
+		const previousColumn = resolveColumn(previousStatus);
+		if (previousColumn === columnKey) {
 			return;
 		}
 
@@ -954,7 +969,42 @@
 		);
 
 		try {
-			await persistContextTaskStatus(taskID, columnKey);
+			const statusMeta = await persistContextTaskStatus(taskID, columnKey);
+			if ($activeContext.type === 'room') {
+				const normalizedWorkspaceRoomID = normalizeRoomIDValue($activeContext.id);
+				contextTasks = contextTasks.map((task) => {
+					if (task.id !== taskID) {
+						return task;
+					}
+					return {
+						...task,
+						status: statusMeta?.status || columnKey,
+						statusActorId: statusMeta?.statusActorId || sessionUserID || task.statusActorId,
+						statusActorName:
+							statusMeta?.statusActorName || sessionUsername || task.statusActorName,
+						statusChangedAt: statusMeta?.statusChangedAt || Date.now(),
+						updatedAt: statusMeta?.updatedAt || Date.now()
+					} satisfies DisplayTask;
+				});
+				const nextTaskForSocket = contextTasks.find((task) => task.id === taskID);
+				if (normalizedWorkspaceRoomID && nextTaskForSocket) {
+					publishRoomBoardActivity(normalizedWorkspaceRoomID, {
+						type: columnKey === 'done' ? 'task_completed' : 'task_moved',
+						title:
+							columnKey === 'done'
+								? `Completed ${targetTask.title}`
+								: `Moved ${targetTask.title}`,
+						subtitle: `${statusLabel(previousColumn)} → ${statusLabel(columnKey)}`,
+						actor:
+							nextTaskForSocket.statusActorName ||
+							nextTaskForSocket.statusActorId ||
+							'Unknown'
+					});
+					sendSocketPayload(
+						buildTaskSocketPayload('task_move', normalizedWorkspaceRoomID, nextTaskForSocket)
+					);
+				}
+			}
 		} catch (error) {
 			contextTasks = contextTasks.map((task) =>
 				task.id === taskID
@@ -1024,6 +1074,15 @@
 					throw new Error('Invalid room task response');
 				}
 				contextTasks = [created, ...contextTasks];
+				sendSocketPayload(
+					buildTaskSocketPayload('task_create', normalizedWorkspaceRoomID, created)
+				);
+				publishRoomBoardActivity(normalizedWorkspaceRoomID, {
+					type: 'task_added',
+					title: `Added ${created.title}`,
+					subtitle: 'Created task',
+					actor: sessionUsername || sessionUserID || 'Unknown'
+				});
 			}
 			newTaskContent = '';
 		} catch (error) {
@@ -1089,7 +1148,7 @@
 				statusActorName: nextTask.statusActorName,
 				statusChangedAt: nextTask.statusChangedAt
 			});
-			addBoardActivity({
+			publishRoomBoardActivity(targetRoomId, {
 				type: targetColumn === 'done' ? 'task_completed' : 'task_moved',
 				title:
 					targetColumn === 'done'
@@ -1142,6 +1201,12 @@
 				throw new Error('Invalid room task response');
 			}
 			sendSocketPayload(buildTaskSocketPayload('task_create', normalizedTargetRoomID, createdTask));
+			publishRoomBoardActivity(normalizedTargetRoomID, {
+				type: 'task_added',
+				title: `Added ${createdTask.title}`,
+				subtitle: 'Created task',
+				actor: sessionUsername || sessionUserID || 'Unknown'
+			});
 			newTaskContent = '';
 		} catch (error) {
 			roomBoardError = error instanceof Error ? error.message : 'Failed to create task';
@@ -1308,9 +1373,15 @@
 		if (!normalizedUpdatedTask) {
 			throw new Error('Invalid task update response');
 		}
-		contextTasks = contextTasks.map((entry) =>
-			entry.id === task.id ? { ...normalizedUpdatedTask, source: task.source } : entry
-		);
+		const nextTask = { ...normalizedUpdatedTask, source: task.source };
+		contextTasks = contextTasks.map((entry) => (entry.id === task.id ? nextTask : entry));
+		sendSocketPayload(buildTaskSocketPayload('task_update', normalizedWorkspaceRoomID, nextTask));
+		publishRoomBoardActivity(normalizedWorkspaceRoomID, {
+			type: 'task_modified',
+			title: `Updated ${nextTask.title}`,
+			subtitle: `Edited ${fieldLabel(field)}`,
+			actor: sessionUsername || sessionUserID || 'Unknown'
+		});
 	}
 
 	function updateContextPersonalTaskField(task: DisplayTask, field: EditableField, nextValue: string) {
@@ -1422,7 +1493,7 @@
 			throw new Error('Invalid task update response');
 		}
 
-		addBoardActivity({
+		publishRoomBoardActivity(targetRoomId, {
 			type: 'task_modified',
 			title: `Updated ${updatedTask.title}`,
 			subtitle: `Edited ${fieldLabel(field)}`,
@@ -1769,12 +1840,25 @@
 					throw new Error('Invalid support ticket response');
 				}
 				contextTasks = [createdTask, ...contextTasks];
+				sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, createdTask));
+				publishRoomBoardActivity(targetRoomId, {
+					type: 'task_added',
+					title: `Added ${createdTask.title}`,
+					subtitle: 'Created support ticket',
+					actor: sessionUsername || sessionUserID || 'Unknown'
+				});
 			} else {
 				const createdTask = upsertTaskStoreEntry(createdPayload, targetRoomId);
 				if (!createdTask) {
 					throw new Error('Invalid support ticket response');
 				}
 				sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, createdTask));
+				publishRoomBoardActivity(targetRoomId, {
+					type: 'task_added',
+					title: `Added ${createdTask.title}`,
+					subtitle: 'Created support ticket',
+					actor: sessionUsername || sessionUserID || 'Unknown'
+				});
 			}
 			resetSupportComposer();
 		} catch (error) {
@@ -1826,7 +1910,18 @@
 			{ method: 'DELETE', headers: withSessionUserHeaders(), credentials: 'include' }
 		);
 		if (!response.ok) throw new Error(await parseErrorMessage(response));
-		removeTaskStoreEntry(task.id, targetRoomId);
+		if (contextAware) {
+			contextTasks = contextTasks.filter((entry) => entry.id !== task.id);
+		} else {
+			removeTaskStoreEntry(task.id, targetRoomId);
+		}
+		sendSocketPayload(buildTaskSocketPayload('task_delete', targetRoomId, task));
+		publishRoomBoardActivity(targetRoomId, {
+			type: 'task_deleted',
+			title: `Deleted ${task.title}`,
+			subtitle: 'Removed task',
+			actor: sessionUsername || sessionUserID || 'Unknown'
+		});
 		return true;
 	}
 
@@ -1881,10 +1976,23 @@
 					throw new Error('Invalid task response');
 				}
 				contextTasks = [created, ...contextTasks];
+				sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, created));
+				publishRoomBoardActivity(targetRoomId, {
+					type: 'task_added',
+					title: `Added ${created.title}`,
+					subtitle: sprintName.trim() ? `Added to ${sprintName.trim()}` : 'Created task',
+					actor: sessionUsername || sessionUserID || 'Unknown'
+				});
 			} else {
 				const created = upsertTaskStoreEntry(payload, targetRoomId);
 				if (!created) throw new Error('Invalid task response');
 				sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, created));
+				publishRoomBoardActivity(targetRoomId, {
+					type: 'task_added',
+					title: `Added ${created.title}`,
+					subtitle: sprintName.trim() ? `Added to ${sprintName.trim()}` : 'Created task',
+					actor: sessionUsername || sessionUserID || 'Unknown'
+				});
 			}
 			sprintAddContent = '';
 			sprintAddKey = '';

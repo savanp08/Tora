@@ -6,6 +6,11 @@
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const PRIVATE_AI_ROOM_ID = 'private-ai';
 	const DEVICE_ID_STORAGE_KEY = 'privateAiDeviceId';
+	const PRIVATE_AI_SUGGESTIONS = [
+		'Summarize key risks in this room and how to mitigate them.',
+		'Draft an action plan for the next 3 days based on current tasks.',
+		'What blockers should we resolve first to keep momentum?'
+	];
 
 	export let open = false;
 	export let isDarkMode = false;
@@ -22,6 +27,7 @@
 	let isSending = false;
 	let errorText = '';
 	let viewportEl: HTMLDivElement | null = null;
+	let composerTextarea: HTMLTextAreaElement | null = null;
 	let requestAbortController: AbortController | null = null;
 
 	$: canSend = !isSending && draft.trim().length > 0;
@@ -199,6 +205,19 @@
 			dispatch('close');
 		}
 	}
+
+	function applyPrivateSuggestion(prompt: string) {
+		draft = prompt;
+		errorText = '';
+		void tick().then(() => composerTextarea?.focus());
+	}
+
+	function formatMessageTime(timestamp: number) {
+		return new Date(timestamp).toLocaleTimeString([], {
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
 </script>
 
 {#if open}
@@ -210,43 +229,103 @@
 	>
 		<div class="private-ai-drawer" role="dialog" aria-modal="true" aria-label="Private AI Assistant">
 			<header class="private-ai-header">
-				<h2>Private AI Assistant</h2>
-				<button type="button" class="close-btn" on:click={() => dispatch('close')} aria-label="Close">
-					×
-				</button>
+				<div class="private-ai-title-wrap">
+					<h2>Private Tora AI</h2>
+					<p>Only visible to you</p>
+				</div>
+				<div class="private-ai-header-actions">
+					<span class="model-chip">
+						<span class="model-dot" aria-hidden="true"></span>
+						ToraAI
+					</span>
+					<button type="button" class="close-btn" on:click={() => dispatch('close')} aria-label="Close">
+						<svg viewBox="0 0 12 12" aria-hidden="true">
+							<path d="M2 2l8 8M10 2 2 10"></path>
+						</svg>
+					</button>
+				</div>
 			</header>
 
 			<div class="private-ai-messages" bind:this={viewportEl}>
 				{#if messages.length === 0}
-					<div class="empty-state">Start a private conversation with Tora.</div>
+					<div class="empty-state-v2">
+						<div class="es-icon" aria-hidden="true">✦</div>
+						<h4>Start a private conversation</h4>
+						<p>Ask Tora about code, tasks, blockers, or planning for this room.</p>
+					</div>
 				{:else}
 					{#each messages as message (message.id)}
 						{@const isMine = message.senderId === currentUserId}
-						<article class="bubble-row {isMine ? 'mine' : 'other'}">
-							<div class="bubble">
-								<div class="bubble-author">{isMine ? 'You' : 'Tora'}</div>
-								<div class="bubble-content">{message.content}</div>
+						{#if isMine}
+							<div class="user-bubble-row">
+								<article class="user-bubble">{message.content}</article>
 							</div>
-						</article>
+						{:else if message.pending}
+							<div class="ai-loading-row">
+								<span class="ai-spinner" aria-hidden="true"></span>
+								Tora is thinking...
+							</div>
+						{:else}
+							<article class="ai-response-block">
+								<div class="ai-response-meta">
+									<span class="ai-response-dot" aria-hidden="true"></span>
+									<div class="ai-response-title">
+										Tora AI
+										<span class="ai-time-chip">{formatMessageTime(message.createdAt)}</span>
+									</div>
+								</div>
+								<div class="ai-response-body">{message.content}</div>
+							</article>
+						{/if}
 					{/each}
 				{/if}
+			</div>
+
+			<div class="suggestions-panel">
+				{#each PRIVATE_AI_SUGGESTIONS as suggestion}
+					<button
+						type="button"
+						class="suggestion-item"
+						on:click={() => applyPrivateSuggestion(suggestion)}
+						disabled={isSending}
+					>
+						<span class="suggestion-arrow" aria-hidden="true">→</span>
+						<span class="suggestion-text">{suggestion}</span>
+					</button>
+				{/each}
 			</div>
 
 			{#if errorText}
 				<div class="private-ai-error">{errorText}</div>
 			{/if}
 
-			<footer class="private-ai-input-row">
-				<textarea
-					rows="1"
-					bind:value={draft}
-					placeholder="Ask something privately..."
-					on:keydown={onInputKeyDown}
-					disabled={isSending}
-				></textarea>
-				<button type="button" on:click={() => void sendPrompt()} disabled={!canSend}>
-					{isSending ? '...' : 'Send'}
-				</button>
+			<footer class="private-ai-input-area">
+				<div class="private-ai-input-box">
+					<textarea
+						rows="1"
+						bind:this={composerTextarea}
+						bind:value={draft}
+						class="private-ai-textarea"
+						placeholder="Ask Tora anything..."
+						on:keydown={onInputKeyDown}
+						disabled={isSending}
+					></textarea>
+					<div class="private-ai-toolbar">
+						<span class="private-ai-hint">Enter to send</span>
+						<div class="toolbar-spacer"></div>
+						<button
+							type="button"
+							class="send-btn"
+							on:click={() => void sendPrompt()}
+							disabled={!canSend}
+							aria-label="Send prompt"
+						>
+							<svg viewBox="0 0 14 14" aria-hidden="true">
+								<path d="M2 7h10M8 3l4 4-4 4"></path>
+							</svg>
+						</button>
+					</div>
+				</div>
 			</footer>
 		</div>
 	</div>
@@ -257,217 +336,413 @@
 		position: fixed;
 		inset: 0;
 		z-index: 1080;
-		background: rgba(15, 23, 42, 0.28);
+		background: rgba(0, 0, 0, 0.56);
+		backdrop-filter: blur(4px);
+		-webkit-backdrop-filter: blur(4px);
 		display: flex;
 		justify-content: flex-end;
-	}
-
-	.private-ai-overlay.theme-dark {
-		background: rgba(2, 6, 14, 0.58);
+		animation: private-ai-fade-in 0.18s ease;
 	}
 
 	.private-ai-drawer {
-		width: min(420px, 100%);
+		width: min(400px, 100%);
 		height: 100%;
-		background: #f9fbff;
-		border-left: 1px solid #d7deea;
+		background: #1e1f24;
+		border-left: 1px solid rgba(255, 255, 255, 0.08);
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr) auto auto;
-		animation: ai-drawer-slide-in 170ms ease-out;
-	}
-
-	.theme-dark .private-ai-drawer {
-		background: #171c24;
-		border-left-color: #2f3742;
+		animation: private-ai-slide-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+		box-shadow: -8px 0 40px rgba(0, 0, 0, 0.5);
 	}
 
 	.private-ai-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: 0.5rem;
 		padding: 0.75rem 0.85rem;
-		border-bottom: 1px solid #d7deea;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+		background: rgba(255, 255, 255, 0.02);
 	}
 
-	.theme-dark .private-ai-header {
-		border-bottom-color: #2f3742;
+	.private-ai-title-wrap {
+		display: grid;
+		gap: 0.1rem;
+		min-width: 0;
 	}
 
-	.private-ai-header h2 {
+	.private-ai-title-wrap h2 {
 		margin: 0;
-		font-size: 0.98rem;
-		font-weight: 700;
-		color: #111827;
+		font-size: 0.88rem;
+		font-weight: 600;
+		color: #e8eaed;
 	}
 
-	.theme-dark .private-ai-header h2 {
-		color: #f3f4f6;
+	.private-ai-title-wrap p {
+		margin: 0;
+		font-size: 0.72rem;
+		color: #9aa0a6;
+	}
+
+	.private-ai-header-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.model-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		border-radius: 8px;
+		padding: 0.22rem 0.48rem;
+		font-size: 0.68rem;
+		font-weight: 600;
+		color: #bdc1c6;
+	}
+
+	.model-dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 999px;
+		background: linear-gradient(135deg, #1a73e8, #34a853);
 	}
 
 	.close-btn {
-		width: 1.9rem;
-		height: 1.9rem;
-		border: 1px solid #c9d1de;
-		border-radius: 9px;
-		background: #f4f6fb;
-		color: #334155;
+		width: 32px;
+		height: 32px;
+		border-radius: 8px;
+		border: none;
+		background: transparent;
+		color: #9aa0a6;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
 		cursor: pointer;
-		font-size: 1.2rem;
-		line-height: 1;
+		transition:
+			background 0.15s ease,
+			color 0.15s ease;
 	}
 
-	.theme-dark .close-btn {
-		background: #242b36;
-		color: #e5e7eb;
-		border-color: #3b4653;
+	.close-btn svg {
+		width: 12px;
+		height: 12px;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		fill: none;
+		stroke-linecap: round;
+	}
+
+	.close-btn:hover {
+		background: rgba(255, 100, 100, 0.12);
+		color: #ff6b6b;
 	}
 
 	.private-ai-messages {
-		padding: 0.8rem;
+		padding: 0.92rem;
 		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
-		gap: 0.56rem;
+		gap: 0.9rem;
 	}
 
-	.empty-state {
-		padding: 0.7rem;
-		border-radius: 10px;
-		background: #eef2f8;
-		color: #475569;
-		font-size: 0.84rem;
+	.private-ai-messages::-webkit-scrollbar {
+		width: 4px;
 	}
 
-	.theme-dark .empty-state {
-		background: #252d39;
-		color: #cbd5e1;
+	.private-ai-messages::-webkit-scrollbar-thumb {
+		background: rgba(255, 255, 255, 0.12);
+		border-radius: 4px;
 	}
 
-	.bubble-row {
+	.empty-state-v2 {
 		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		padding: 1.6rem 1rem;
+		gap: 0.52rem;
 	}
 
-	.bubble-row.mine {
+	.empty-state-v2 .es-icon {
+		width: 44px;
+		height: 44px;
+		border-radius: 999px;
+		border: 1px solid rgba(26, 115, 232, 0.24);
+		background: rgba(26, 115, 232, 0.15);
+		color: #8ab4f8;
+		display: grid;
+		place-items: center;
+		font-size: 1rem;
+	}
+
+	.empty-state-v2 h4 {
+		margin: 0;
+		font-size: 0.88rem;
+		color: #e8eaed;
+	}
+
+	.empty-state-v2 p {
+		margin: 0;
+		font-size: 0.78rem;
+		color: #9aa0a6;
+		line-height: 1.55;
+		max-width: 280px;
+	}
+
+	.ai-loading-row {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.55rem;
+		font-size: 0.81rem;
+		color: #9aa0a6;
+		font-style: italic;
+	}
+
+	.ai-spinner {
+		width: 14px;
+		height: 14px;
+		border: 2px solid rgba(255, 255, 255, 0.12);
+		border-top-color: #1a73e8;
+		border-radius: 999px;
+		animation: private-ai-spin 0.8s linear infinite;
+	}
+
+	.ai-response-block {
+		display: grid;
+		gap: 0.26rem;
+	}
+
+	.ai-response-meta {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
+	.ai-response-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 999px;
+		background: #1a73e8;
+	}
+
+	.ai-response-title {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: #e8eaed;
+	}
+
+	.ai-time-chip {
+		border-radius: 999px;
+		padding: 0.1rem 0.44rem;
+		font-size: 0.64rem;
+		font-weight: 500;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: rgba(255, 255, 255, 0.06);
+		color: #9aa0a6;
+	}
+
+	.ai-response-body {
+		margin-left: 0.72rem;
+		padding-left: 0.72rem;
+		border-left: 2px solid rgba(255, 255, 255, 0.1);
+		font-size: 0.82rem;
+		color: #bdc1c6;
+		line-height: 1.65;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.user-bubble-row {
+		display: flex;
 		justify-content: flex-end;
 	}
 
-	.bubble-row.other {
-		justify-content: flex-start;
-	}
-
-	.bubble {
-		max-width: 84%;
-		padding: 0.5rem 0.6rem;
-		border-radius: 12px;
-		background: #e8eef8;
-		color: #1f2937;
-	}
-
-	.bubble-row.mine .bubble {
-		background: #dce9ff;
-	}
-
-	.theme-dark .bubble {
-		background: #252d39;
-		color: #e5e7eb;
-	}
-
-	.theme-dark .bubble-row.mine .bubble {
-		background: #324054;
-	}
-
-	.bubble-author {
-		font-size: 0.68rem;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		opacity: 0.74;
-		margin-bottom: 0.16rem;
-	}
-
-	.bubble-content {
+	.user-bubble {
+		max-width: 85%;
+		background: rgba(26, 115, 232, 0.15);
+		border: 1px solid rgba(26, 115, 232, 0.25);
+		border-radius: 18px 18px 4px 18px;
+		padding: 0.56rem 0.72rem;
+		font-size: 0.82rem;
+		color: #e8eaed;
+		line-height: 1.5;
 		white-space: pre-wrap;
 		word-break: break-word;
-		line-height: 1.4;
-		font-size: 0.9rem;
 	}
 
-	.private-ai-error {
-		padding: 0.42rem 0.78rem;
-		font-size: 0.76rem;
-		color: #b91c1c;
-		border-top: 1px solid #f0d4d4;
-		background: #fff5f5;
-	}
-
-	.theme-dark .private-ai-error {
-		color: #fecaca;
-		border-top-color: #5f2a2a;
-		background: #352024;
-	}
-
-	.private-ai-input-row {
+	.suggestions-panel {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 0.45rem;
-		padding: 0.72rem 0.78rem;
-		border-top: 1px solid #d7deea;
-		background: #f5f8fd;
+		border-top: 1px solid rgba(255, 255, 255, 0.07);
+		background: rgba(255, 255, 255, 0.03);
+		padding: 0.34rem 0;
 	}
 
-	.theme-dark .private-ai-input-row {
-		border-top-color: #2f3742;
-		background: #1a2028;
-	}
-
-	.private-ai-input-row textarea {
-		resize: none;
-		min-height: 2.2rem;
-		max-height: 6.5rem;
-		border-radius: 10px;
-		border: 1px solid #c7cfdd;
-		background: #ffffff;
-		color: #111827;
-		padding: 0.48rem 0.54rem;
-		font: inherit;
-		font-size: 0.9rem;
-		line-height: 1.35;
-	}
-
-	.theme-dark .private-ai-input-row textarea {
-		border-color: #3a4553;
-		background: #202734;
-		color: #e5e7eb;
-	}
-
-	.private-ai-input-row button {
-		border-radius: 10px;
-		border: 1px solid #1f4fa0;
-		background: #2a65c8;
-		color: #ffffff;
-		padding: 0.4rem 0.72rem;
-		font-size: 0.82rem;
-		font-weight: 600;
+	.suggestion-item {
+		border: none;
+		background: transparent;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.52rem;
+		text-align: left;
+		padding: 0.48rem 0.82rem;
 		cursor: pointer;
 	}
 
-	.private-ai-input-row button:disabled {
+	.suggestion-item:hover:not(:disabled) {
+		background: rgba(26, 115, 232, 0.12);
+	}
+
+	.suggestion-item:disabled {
+		opacity: 0.62;
 		cursor: not-allowed;
-		opacity: 0.65;
 	}
 
-	.theme-dark .private-ai-input-row button {
-		border-color: #4b5c76;
-		background: #394a63;
+	.suggestion-arrow {
+		font-size: 0.82rem;
+		color: #9aa0a6;
 	}
 
-	@keyframes ai-drawer-slide-in {
+	.suggestion-text {
+		font-size: 0.76rem;
+		color: #bdc1c6;
+		line-height: 1.3;
+	}
+
+	.private-ai-error {
+		margin: 0 0.82rem 0.58rem;
+		border-radius: 10px;
+		padding: 0.48rem 0.62rem;
+		font-size: 0.76rem;
+		color: #ffd7d7;
+		border: 1px solid rgba(227, 134, 134, 0.52);
+		background: rgba(132, 33, 33, 0.44);
+	}
+
+	.private-ai-input-area {
+		border-top: 1px solid rgba(255, 255, 255, 0.07);
+		background: rgba(255, 255, 255, 0.02);
+		padding: 0.65rem 0.72rem 0.82rem;
+	}
+
+	.private-ai-input-box {
+		border-radius: 14px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.04);
+		padding: 0.58rem 0.62rem;
+		display: grid;
+		gap: 0.45rem;
+		transition:
+			border-color 0.18s ease,
+			background 0.18s ease;
+	}
+
+	.private-ai-input-box:focus-within {
+		border-color: rgba(26, 115, 232, 0.5);
+		background: rgba(26, 115, 232, 0.04);
+	}
+
+	.private-ai-textarea {
+		resize: none;
+		min-height: 20px;
+		max-height: 120px;
+		border: none;
+		outline: none;
+		background: transparent;
+		color: #e8eaed;
+		padding: 0;
+		font: inherit;
+		font-size: 0.86rem;
+		line-height: 1.48;
+	}
+
+	.private-ai-textarea::placeholder {
+		color: #5f6368;
+	}
+
+	.private-ai-toolbar {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.42rem;
+	}
+
+	.private-ai-hint {
+		font-size: 0.68rem;
+		color: #9aa0a6;
+	}
+
+	.toolbar-spacer {
+		flex: 1;
+	}
+
+	.send-btn {
+		width: 32px;
+		height: 32px;
+		border-radius: 999px;
+		border: none;
+		background: #1a73e8;
+		color: #fff;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		box-shadow: 0 2px 10px rgba(26, 115, 232, 0.4);
+		transition:
+			background 0.18s ease,
+			transform 0.18s ease,
+			box-shadow 0.18s ease;
+	}
+
+	.send-btn svg {
+		width: 14px;
+		height: 14px;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.send-btn:hover:not(:disabled) {
+		background: #1967d2;
+		transform: scale(1.05);
+		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.5);
+	}
+
+	.send-btn:disabled {
+		background: rgba(255, 255, 255, 0.08);
+		cursor: not-allowed;
+		box-shadow: none;
+		transform: none;
+	}
+
+	@keyframes private-ai-fade-in {
 		from {
-			transform: translateX(20px);
 			opacity: 0;
 		}
 		to {
-			transform: translateX(0);
 			opacity: 1;
+		}
+	}
+
+	@keyframes private-ai-slide-in {
+		from {
+			transform: translateX(100%);
+		}
+		to {
+			transform: translateX(0);
+		}
+	}
+
+	@keyframes private-ai-spin {
+		to {
+			transform: rotate(360deg);
 		}
 	}
 </style>

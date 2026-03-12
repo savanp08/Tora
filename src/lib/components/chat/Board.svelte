@@ -27,7 +27,6 @@
 	const MAX_ZOOM = APP_LIMITS.board.maxZoom;
 	const DOUBLE_TAP_MS = 340;
 	const TAP_MOVE_TOLERANCE = 8;
-	const CURSOR_MOVE_THROTTLE_MS = APP_LIMITS.board.cursorMoveThrottleMs;
 	const BOARD_UPDATE_STACK_FLUSH_MS = 1000;
 	const BOARD_EVENT_BATCH_TYPE = 'board_event_batch';
 	const REMOTE_CURSOR_STALE_MS = APP_LIMITS.board.remoteCursorStaleMs;
@@ -229,8 +228,9 @@
 	let canRedoLocalAction = false;
 	let boardElementCount = 0;
 	let boardApproxBytes = 0;
+	let effectiveBoardStorageLimitBytes = BOARD_STORAGE_LIMIT_BYTES;
 	let boardStorageUsagePercent = 0;
-	let boardRemainingBytes = BOARD_STORAGE_LIMIT_BYTES;
+	let boardRemainingBytes = effectiveBoardStorageLimitBytes;
 	let latestSerializedBoardSnapshot = '';
 	let latestSerializedBoardSnapshotBytes = 0;
 	let lastDrawBoardLimitToastAt = 0;
@@ -256,7 +256,6 @@
 	let isPanning = false;
 	let panLastX = 0;
 	let panLastY = 0;
-	let lastCursorMoveBroadcastAt = 0;
 	let pendingBoardUpdates: PendingBoardUpdate[] = [];
 	let boardUpdateFlushInterval: ReturnType<typeof setInterval> | null = null;
 	let remoteCursors: BoardCursorWire[] = [];
@@ -349,6 +348,9 @@
 	}
 	$: canUndoLocalAction = localUndoStack.length > 0;
 	$: canRedoLocalAction = localRedoStack.length > 0;
+	$: effectiveBoardStorageLimitBytes = isEphemeralRoom
+		? EPHEMERAL_DRAW_BOARD_LIMIT_BYTES
+		: BOARD_STORAGE_LIMIT_BYTES;
 	$: canCancelCurrentOperation =
 		isInsertOperationActive ||
 		activeTool !== 'select' ||
@@ -359,10 +361,10 @@
 		showBoardDetails;
 	$: dusterScreenMetrics = resolveDusterScreenMetrics(viewportRenderTick, dusterCenterX);
 	$: boardStorageUsagePercent =
-		BOARD_STORAGE_LIMIT_BYTES > 0
-			? Math.min(100, (boardApproxBytes / BOARD_STORAGE_LIMIT_BYTES) * 100)
+		effectiveBoardStorageLimitBytes > 0
+			? Math.min(100, (boardApproxBytes / effectiveBoardStorageLimitBytes) * 100)
 			: 0;
-	$: boardRemainingBytes = Math.max(0, BOARD_STORAGE_LIMIT_BYTES - boardApproxBytes);
+	$: boardRemainingBytes = Math.max(0, effectiveBoardStorageLimitBytes - boardApproxBytes);
 	$: boardPermissionRefreshKey = `${canEdit ? 1 : 0}:${canManageAllBoardElements ? 1 : 0}:${normalizedCurrentUserID}`;
 	$: if (boardReady) {
 		void boardPermissionRefreshKey;
@@ -444,7 +446,7 @@
 		boardElementCount = 0;
 		boardApproxBytes = 0;
 		boardStorageUsagePercent = 0;
-		boardRemainingBytes = BOARD_STORAGE_LIMIT_BYTES;
+		boardRemainingBytes = effectiveBoardStorageLimitBytes;
 		latestSerializedBoardSnapshot = '';
 		latestSerializedBoardSnapshotBytes = 0;
 		boardZoomLevel = 1;
@@ -502,6 +504,9 @@
 				return;
 			}
 			const target = event.target;
+			if (target instanceof HTMLElement && target.closest('.mobile-expand-btn')) {
+				return;
+			}
 			if (target instanceof Node) {
 				if (insertWrapEl && insertWrapEl.contains(target)) {
 					return;
@@ -615,7 +620,13 @@
 			isToolbarExpanded = false;
 			return;
 		}
-		shouldUseToolbarMenu = true;
+		const toolbarWidth = boardToolbarEl.clientWidth;
+		const collapseBreakpoint = 560;
+		const shouldCollapse = toolbarWidth > 0 && toolbarWidth <= collapseBreakpoint;
+		shouldUseToolbarMenu = shouldCollapse;
+		if (!shouldCollapse) {
+			isToolbarExpanded = false;
+		}
 	}
 
 	function closeBoardView() {
@@ -894,6 +905,15 @@
 			if (!clientPoint) {
 				return;
 			}
+			if (canEdit && normalizedCurrentUserID) {
+				const boardPoint = getBoardPointFromClientPosition(clientPoint.x, clientPoint.y);
+				sendBoardEnvelope('board_cursor_move', {
+					x: boardPoint.x,
+					y: boardPoint.y,
+					userId: normalizedCurrentUserID,
+					name: normalizedCurrentUsername || 'Guest'
+				});
+			}
 			if (activeTool === 'duster') {
 				return;
 			}
@@ -957,21 +977,6 @@
 			const clientPoint = getNativeClientPoint(nativeEvent);
 			if (!clientPoint) {
 				return;
-			}
-			const boardPoint = getBoardPointFromClientPosition(clientPoint.x, clientPoint.y);
-			const now = Date.now();
-			if (
-				canEdit &&
-				normalizedCurrentUserID &&
-				now - lastCursorMoveBroadcastAt >= CURSOR_MOVE_THROTTLE_MS
-			) {
-				lastCursorMoveBroadcastAt = now;
-				sendBoardEnvelope('board_cursor_move', {
-					x: boardPoint.x,
-					y: boardPoint.y,
-					userId: normalizedCurrentUserID,
-					name: normalizedCurrentUsername || 'Guest'
-				});
 			}
 			if (isPanning) {
 				const viewport = fabricCanvas.viewportTransform;
@@ -4930,7 +4935,6 @@
 
 		const content = toStringValue(message.content).trim();
 		const mediaURL = toStringValue(message.mediaUrl).trim();
-		const fileName = toStringValue(message.fileName).trim();
 
 		if (
 			normalizedType === 'image' ||
@@ -4938,12 +4942,9 @@
 			normalizedType === 'audio' ||
 			normalizedType === 'file'
 		) {
-			const lines = [`${resolveMessageTypeLabel(message)}: ${fileName || 'Attachment'}`];
+			const lines = [`${resolveMessageTypeLabel(message)} attachment`];
 			if (content && content !== mediaURL) {
 				lines.push(content);
-			}
-			if (mediaURL) {
-				lines.push(mediaURL);
 			}
 			return lines.join('\n');
 		}
@@ -5126,16 +5127,7 @@
 						{/if}
 					</svg>
 				</button>
-			{/if}
-		</div>
-
-		<div
-			class="toolbar-secondary-group"
-			class:expanded={isToolbarExpanded}
-			class:menu-mode={shouldUseToolbarMenu}
-			bind:this={toolbarSecondaryEl}
-		>
-			<button
+				<button
 				type="button"
 				class="tool-icon-button"
 				on:click={redo}
@@ -5153,49 +5145,8 @@
 					<path d="M21 13A9 9 0 0 0 6 6.3L3 9" />
 				</svg>
 			</button>
-
-			{#if isWidthControlVisible}
-				<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
-					<button
-						type="button"
-						class="line-width-toggle"
-						on:click={toggleWidthMenu}
-						aria-haspopup="true"
-						aria-expanded={showWidthMenu}
-						title={showWidthMenu ? undefined : 'Brush width'}
-					>
-						<svg class="brush-width-icon" viewBox="0 0 24 24" aria-hidden="true">
-							<line
-								x1="4"
-								y1="12"
-								x2="20"
-								y2="12"
-								stroke="currentColor"
-								stroke-linecap="round"
-								stroke-width={Math.max(2, Math.min(8, drawBrushWidth))}
-							/>
-						</svg>
-						<span class="brush-width-text">{drawBrushWidth.toFixed(1)}px</span>
-					</button>
-					{#if showWidthMenu}
-						<div class="brush-width-menu">
-							{#each BRUSH_WIDTH_PRESETS as width}
-								<button
-									type="button"
-									class="brush-width-option"
-									class:active={Math.abs(drawBrushWidth - width) < 0.01}
-									on:click={() => setDrawWidthPreset(width)}
-								>
-									<span class="brush-width-sample" style={`height:${Math.max(2, width)}px;`}></span>
-									<span>{width.toFixed(1)}px</span>
-								</button>
-							{/each}
-						</div>
-					{/if}
-				</div>
 			{/if}
-
-			<div class="insert-wrap" bind:this={insertWrapEl}>
+				<div class="insert-wrap" bind:this={insertWrapEl}>
 				<button
 					type="button"
 					class="insert-toggle"
@@ -5301,6 +5252,58 @@
 					</div>
 				{/if}
 			</div>
+		</div>
+
+		<div
+			class="toolbar-secondary-group"
+			class:expanded={isToolbarExpanded}
+			class:menu-mode={shouldUseToolbarMenu}
+			bind:this={toolbarSecondaryEl}
+		>
+			
+
+			{#if isWidthControlVisible}
+				<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
+					<button
+						type="button"
+						class="line-width-toggle"
+						on:click={toggleWidthMenu}
+						aria-haspopup="true"
+						aria-expanded={showWidthMenu}
+						title={showWidthMenu ? undefined : 'Brush width'}
+					>
+						<svg class="brush-width-icon" viewBox="0 0 24 24" aria-hidden="true">
+							<line
+								x1="4"
+								y1="12"
+								x2="20"
+								y2="12"
+								stroke="currentColor"
+								stroke-linecap="round"
+								stroke-width={Math.max(2, Math.min(8, drawBrushWidth))}
+							/>
+						</svg>
+						<span class="brush-width-text">{drawBrushWidth.toFixed(1)}px</span>
+					</button>
+					{#if showWidthMenu}
+						<div class="brush-width-menu">
+							{#each BRUSH_WIDTH_PRESETS as width}
+								<button
+									type="button"
+									class="brush-width-option"
+									class:active={Math.abs(drawBrushWidth - width) < 0.01}
+									on:click={() => setDrawWidthPreset(width)}
+								>
+									<span class="brush-width-sample" style={`height:${Math.max(2, width)}px;`}></span>
+									<span>{width.toFixed(1)}px</span>
+								</button>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			{/if}
+
+		
 
 			<button
 				type="button"
@@ -5352,7 +5355,7 @@
 							<span>Used</span>
 							<strong>
 								{formatStorageBytes(boardApproxBytes)} / {formatStorageBytes(
-									BOARD_STORAGE_LIMIT_BYTES
+									effectiveBoardStorageLimitBytes
 								)}
 							</strong>
 						</div>
@@ -6317,12 +6320,16 @@
 
 	@media (max-width: 768px) {
 		.board-toolbar {
-			flex-direction: column;
-			align-items: stretch;
+			flex-direction: row;
+			flex-wrap: wrap;
+			align-items: flex-start;
+			justify-content: flex-start;
 			gap: 0.3rem;
 			padding: 0.42rem;
 			padding-right: 2.5rem;
-			width: 80vw;
+			width: 100%;
+			max-width: 92vw;
+			box-sizing: border-box;
 		}
 
 		.toolbar-open-hint {
@@ -6331,8 +6338,9 @@
 		}
 
 		.toolbar-primary-group {
-			width: 100%;
-			flex: 0 0 auto;
+			width: auto;
+			flex: 0 1 auto;
+			min-width: 0;
 			justify-content: flex-start;
 			gap: 0.3rem;
 			flex-wrap: wrap;
@@ -6342,17 +6350,21 @@
 		.mobile-expand-btn {
 			display: inline-flex;
 			margin-left: auto;
+			order: 60;
 		}
 
 		.toolbar-secondary-group {
 			display: flex;
-			width: 100%;
+			width: auto;
+			flex: 1 1 auto;
+			min-width: 0;
 			gap: 0.3rem;
 			flex-wrap: wrap;
 		}
 
 		.toolbar-secondary-group.menu-mode {
 			display: none;
+			flex: 1 0 100%;
 			width: 100%;
 			border-top: 1px solid var(--border-subtle);
 			padding-top: 0.42rem;

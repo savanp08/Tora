@@ -817,6 +817,14 @@
 			tabindex="-1"
 			on:keydown={onDialogKeyDown}
 		>
+			<button
+				type="button"
+				class="close-button discussion-close-x"
+				aria-label="Close discussion"
+				on:click={closeModal}
+			>
+				X
+			</button>
 				<header class="modal-header-grid">
 					<section class="context-column">
 						<div class="column-title-row">
@@ -903,7 +911,6 @@
 				<section class="notes-column">
 					<div class="column-title-row">
 						<h3>Quick Notes</h3>
-						<button type="button" class="close-button" on:click={closeModal}>Close</button>
 					</div>
 					<div class="notes-list" aria-live="polite">
 						{#if notes.length === 0}
@@ -1172,7 +1179,7 @@
 		display: grid;
 		grid-template-columns: 1fr 1fr;
 		gap: 1.5rem;
-		padding: 1.5rem;
+		padding: 1.5rem 4rem 1.5rem 1.5rem;
 		border-bottom: 1px solid var(--border-default);
 		background: var(--surface-secondary);
 		flex-shrink: 0;
@@ -1224,18 +1231,44 @@
 	}
 
 	.close-button {
-		border: 1px solid var(--border-default);
-		background: var(--surface-primary);
-		color: var(--text-secondary);
-		border-radius: 8px;
-		padding: 0.32rem 0.62rem;
-		font-size: 0.76rem;
-		font-weight: 600;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
 		cursor: pointer;
 	}
 
-	.close-button:hover {
-		background: var(--surface-hover);
+	.discussion-close-x {
+		position: absolute;
+		top: 0.9rem;
+		right: 0.9rem;
+		width: 2rem;
+		height: 2rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border: 1px solid rgba(239, 68, 68, 0.65);
+		border-radius: 999px;
+		background: rgba(239, 68, 68, 0.12);
+		color: #ef4444;
+		font-size: 0.82rem;
+		font-weight: 800;
+		line-height: 1;
+		transition:
+			background-color 0.16s ease,
+			border-color 0.16s ease,
+			color 0.16s ease;
+	}
+
+	.discussion-close-x:hover {
+		background: rgba(239, 68, 68, 0.22);
+		border-color: rgba(239, 68, 68, 0.95);
+		color: #dc2626;
+	}
+
+	.discussion-close-x:focus-visible {
+		outline: 2px solid rgba(239, 68, 68, 0.45);
+		outline-offset: 2px;
 	}
 
 	.pinned-message-block {

@@ -831,6 +831,17 @@ func (h *Hub) handleClientBoardEvent(event *ClientBoardEvent) {
 	if nestedPayload, ok := payload["payload"].(map[string]interface{}); ok && nestedPayload != nil {
 		payloadBody = nestedPayload
 	}
+
+	if eventType == boardActivityType {
+		h.publishRoomEvent(RoomEvent{
+			Type:         eventType,
+			RoomID:       roomID,
+			Payload:      payload,
+			OriginUserID: client.UserID,
+		})
+		return
+	}
+
 	normalizedActorUserID := normalizeUsername(client.UserID)
 	isRoomAdmin, adminErr := h.isClientRoomAdmin(normalizedActorUserID, roomID)
 	if adminErr != nil {

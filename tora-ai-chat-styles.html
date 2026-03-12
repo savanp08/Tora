@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Tora AI Chat — Gemini-style UI Reference</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: #131316;
+  color: #e8eaed;
+  min-height: 100vh;
+  display: flex;
+  gap: 32px;
+  padding: 40px;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* ─────────────────────────────────────────
+   LABEL SYSTEM
+───────────────────────────────────────── */
+.demo-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 380px;
+  max-width: 420px;
+}
+.demo-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #5f6368;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 4px;
+}
+
+/* ─────────────────────────────────────────
+   THE AI CHAT PANEL (matches screenshot)
+───────────────────────────────────────── */
+.ai-panel {
+  background: #1e1f24;
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.08);
+  overflow: hidden;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+/* Header */
+.ai-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.02);
+}
+.ai-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-header-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #e8eaed;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.ai-header-title svg { opacity: 0.6; }
+.ai-header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ai-icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: #9aa0a6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.ai-icon-btn:hover {
+  background: rgba(255,255,255,0.07);
+  color: #e8eaed;
+}
+.ai-icon-btn.close:hover {
+  background: rgba(255,100,100,0.12);
+  color: #ff6b6b;
+}
+
+/* Toggle */
+.ai-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.78rem;
+  color: #9aa0a6;
+  font-weight: 500;
+}
+.toggle-switch {
+  width: 36px; height: 20px;
+  background: #1a73e8;
+  border-radius: 100px;
+  position: relative;
+  cursor: pointer;
+}
+.toggle-knob {
+  position: absolute;
+  width: 14px; height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  top: 3px; right: 3px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+/* Messages */
+.ai-messages {
+  flex: 1;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  min-height: 200px;
+  max-height: 340px;
+}
+.ai-messages::-webkit-scrollbar { width: 4px; }
+.ai-messages::-webkit-scrollbar-track { background: transparent; }
+.ai-messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
+/* AI response with left accent */
+.ai-response-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ai-response-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-response-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #1a73e8;
+  flex-shrink: 0;
+}
+.ai-response-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #e8eaed;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-time-chip {
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #9aa0a6;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.09);
+  padding: 2px 8px;
+  border-radius: 100px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ai-response-body {
+  margin-left: 14px;
+  padding-left: 12px;
+  border-left: 2px solid rgba(255,255,255,0.1);
+  font-size: 0.85rem;
+  color: #bdc1c6;
+  line-height: 1.7;
+}
+.ai-link {
+  color: #8ab4f8;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(138,180,248,0.35);
+  transition: border-color 0.15s, color 0.15s;
+  cursor: pointer;
+  position: relative;
+}
+.ai-link:hover {
+  color: #aecbfa;
+  border-bottom-color: rgba(174,203,250,0.6);
+}
+/* Inline reply tooltip */
+.inline-tooltip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #1a73e8;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(26,115,232,0.5);
+  position: absolute;
+  top: -32px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
+}
+
+/* Loading spinner row */
+.ai-loading-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.84rem;
+  color: #9aa0a6;
+  font-style: italic;
+}
+.ai-spinner {
+  width: 16px; height: 16px;
+  border: 2px solid rgba(255,255,255,0.1);
+  border-top-color: #1a73e8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* User bubble */
+.user-bubble-row {
+  display: flex;
+  justify-content: flex-end;
+}
+.user-bubble {
+  max-width: 82%;
+  background: rgba(26,115,232,0.15);
+  border: 1px solid rgba(26,115,232,0.25);
+  border-radius: 18px 18px 4px 18px;
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  color: #e8eaed;
+  line-height: 1.6;
+}
+
+/* ─────────────────────────────────────────
+   SUGGESTIONS PANEL (the arrow list)
+───────────────────────────────────────── */
+.suggestions-panel {
+  background: rgba(255,255,255,0.03);
+  border-top: 1px solid rgba(255,255,255,0.07);
+  padding: 8px 0;
+}
+.suggestions-hints {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 14px 8px;
+}
+.hint-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.hint-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.68rem;
+  color: #5f6368;
+  font-weight: 500;
+}
+.hint-key {
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 0.64rem;
+  color: #9aa0a6;
+  font-family: monospace;
+}
+.suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+  border-radius: 0;
+}
+.suggestion-item:hover, .suggestion-item.active {
+  background: rgba(26,115,232,0.12);
+}
+.suggestion-item.active {
+  background: rgba(26,115,232,0.15);
+}
+.suggestion-arrow {
+  color: #9aa0a6;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  transition: color 0.15s, transform 0.15s;
+}
+.suggestion-item:hover .suggestion-arrow,
+.suggestion-item.active .suggestion-arrow {
+  color: #8ab4f8;
+  transform: translateX(2px);
+}
+.suggestion-text {
+  font-size: 0.84rem;
+  color: #bdc1c6;
+  font-weight: 400;
+}
+.suggestion-item:hover .suggestion-text,
+.suggestion-item.active .suggestion-text {
+  color: #e8eaed;
+}
+
+/* ─────────────────────────────────────────
+   INPUT AREA
+───────────────────────────────────────── */
+.ai-input-area {
+  border-top: 1px solid rgba(255,255,255,0.07);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255,255,255,0.01);
+}
+
+/* Reply context bar */
+.reply-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(26,115,232,0.1);
+  border: 1px solid rgba(26,115,232,0.25);
+  border-radius: 10px;
+  padding: 7px 10px;
+}
+.reply-icon {
+  color: #8ab4f8;
+  flex-shrink: 0;
+  font-size: 0.9rem;
+}
+.reply-text {
+  flex: 1;
+  font-size: 0.8rem;
+  color: #8ab4f8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reply-close {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,0.07);
+  color: #9aa0a6;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.reply-close:hover { background: rgba(255,255,255,0.14); }
+
+/* Text input */
+.ai-input-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 10px 12px;
+  transition: border-color 0.2s;
+}
+.ai-input-box:focus-within {
+  border-color: rgba(26,115,232,0.5);
+  background: rgba(26,115,232,0.04);
+}
+.ai-textarea {
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.87rem;
+  color: #e8eaed;
+  resize: none;
+  line-height: 1.5;
+  min-height: 20px;
+}
+.ai-textarea::placeholder { color: #5f6368; }
+.ai-input-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.toolbar-btn {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: #9aa0a6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  font-size: 0.85rem;
+}
+.toolbar-btn:hover { background: rgba(255,255,255,0.07); color: #e8eaed; }
+.model-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #bdc1c6;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.model-chip:hover { background: rgba(255,255,255,0.09); }
+.model-gem {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1a73e8, #34a853);
+  flex-shrink: 0;
+}
+.toolbar-spacer { flex: 1; }
+.send-btn {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: #1a73e8;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(26,115,232,0.4);
+  transition: all 0.18s;
+  flex-shrink: 0;
+}
+.send-btn:hover {
+  background: #1967d2;
+  transform: scale(1.05);
+  box-shadow: 0 4px 16px rgba(26,115,232,0.5);
+}
+.send-btn:disabled {
+  background: rgba(255,255,255,0.06);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.mic-btn {
+  color: #9aa0a6;
+}
+
+/* ─────────────────────────────────────────
+   EMPTY STATE
+───────────────────────────────────────── */
+.empty-state-v2 {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  text-align: center;
+  gap: 12px;
+}
+.empty-state-v2 .es-icon {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  background: rgba(26,115,232,0.12);
+  border: 1px solid rgba(26,115,232,0.2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.4rem;
+}
+.empty-state-v2 h4 {
+  font-size: 0.9rem; font-weight: 600; color: #e8eaed;
+}
+.empty-state-v2 p {
+  font-size: 0.8rem; color: #5f6368; line-height: 1.6; max-width: 260px;
+}
+
+/* ─────────────────────────────────────────
+   FULL-PAGE OVERLAY DRAWER VARIANT
+   (for the floating Private AI drawer)
+───────────────────────────────────────── */
+.overlay-demo {
+  position: relative;
+  width: 100%;
+  height: 600px;
+  background: #111;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.overlay-bg-hint {
+  padding: 20px;
+  font-size: 0.8rem;
+  color: rgba(255,255,255,0.15);
+}
+.ai-drawer {
+  position: absolute;
+  right: 0; top: 0; bottom: 0;
+  width: 380px;
+  background: #1e1f24;
+  border-left: 1px solid rgba(255,255,255,0.08);
+  display: flex;
+  flex-direction: column;
+  animation: slideIn 0.22s ease;
+  box-shadow: -8px 0 40px rgba(0,0,0,0.5);
+}
+@keyframes slideIn {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+/* ─────────────────────────────────────────
+   CSS VARIABLES REFERENCE BLOCK
+───────────────────────────────────────── */
+.vars-block {
+  background: #0f1013;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 14px;
+  padding: 20px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.78rem;
+  line-height: 2;
+  color: #bdc1c6;
+}
+.vars-block .v-comment { color: #5f6368; font-style: italic; }
+.vars-block .v-var { color: #8ab4f8; }
+.vars-block .v-val { color: #81c995; }
+
+/* Code block */
+.code-block {
+  background: #0f1013;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 14px;
+  padding: 20px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.75rem;
+  line-height: 1.9;
+  color: #bdc1c6;
+  white-space: pre;
+  overflow-x: auto;
+}
+.code-block .ck { color: #bb9af7; }
+.code-block .cs { color: #9ece6a; }
+.code-block .cc { color: #565f89; font-style: italic; }
+.code-block .cp { color: #7aa2f7; }
+.code-block .cn { color: #ff9e64; }
+
+h2 {
+  font-size: 1.4rem; font-weight: 700;
+  color: #fff; margin-bottom: 4px;
+}
+p.subtitle {
+  font-size: 0.85rem; color: #5f6368;
+  margin-bottom: 32px; line-height: 1.6;
+}
+.full-width { grid-column: 1 / -1; width: 100%; max-width: 100%; }
+.page-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  max-width: 1000px;
+  width: 100%;
+}
+.section-title {
+  font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: #5f6368; margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+.section-title::before {
+  content: ''; display: block;
+  width: 16px; height: 1px;
+  background: #5f6368;
+}
+</style>
+</head>
+<body>
+<div style="width:100%;max-width:1000px">
+  <h2>Tora AI Chat — Gemini-style UI Reference</h2>
+  <p class="subtitle">Drop-in styles for PrivateAiChat.svelte and the Code Canvas / Taskboard AI sidebars.<br>Based on the Google Gemini screenshot you provided.</p>
+
+  <div class="page-grid">
+    <!-- LEFT: Full panel demo -->
+    <div>
+      <div class="section-title">Full Private AI Drawer</div>
+      <div class="ai-panel">
+        <!-- Header -->
+        <div class="ai-header">
+          <div class="ai-header-left">
+            <div class="ai-header-title">
+              🤖 Tora AI
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M3 5l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </div>
+          </div>
+          <div class="ai-header-right">
+            <div class="ai-toggle">
+              Private
+              <div class="toggle-switch"><div class="toggle-knob"></div></div>
+            </div>
+            <button class="ai-icon-btn">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
+            </button>
+            <button class="ai-icon-btn close">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Messages -->
+        <div class="ai-messages">
+          <!-- Loading state -->
+          <div class="ai-loading-row">
+            <div class="ai-spinner"></div>
+            Getting a detailed report<span style="animation: ellipsis 1.2s ease infinite">…</span>
+          </div>
+
+          <!-- AI response block -->
+          <div class="ai-response-block">
+            <div class="ai-response-meta">
+              <div class="ai-response-dot"></div>
+              <div class="ai-response-title">
+                Shaping the AI Chat Experience
+                <span class="ai-time-chip">1:40 ↗</span>
+              </div>
+            </div>
+            <div class="ai-response-body">
+              During the meeting, the project vision was presented: to design a modern, intuitive, and trustworthy AI chat interface that emphasizes clarity, usability, and intelligent interaction.
+              Key design principles discussed include minimalism, accessibility, conversational flow, and visual cues that
+              <span class="ai-link" style="position:relative">
+                enhance user confidence in AI-driven responses
+                <span class="inline-tooltip">
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 5h6M5 2l3 3-3 3" stroke="#fff" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  Reply
+                </span>
+              </span>.
+              The project scope was outlined, covering wireframes, visual design concepts, and color schemes.
+            </div>
+          </div>
+
+          <!-- User bubble -->
+          <div class="user-bubble-row">
+            <div class="user-bubble">Can you break down the security implications of the JWT rotation approach?</div>
+          </div>
+        </div>
+
+        <!-- Suggestions panel -->
+        <div class="suggestions-panel">
+          <div class="suggestions-hints">
+            <div class="hint-group">
+              <div class="hint-item"><span class="hint-key">↑↓</span> to navigate</div>
+              <div class="hint-item"><span class="hint-key">↵</span> to select</div>
+            </div>
+            <div class="hint-item"><span class="hint-key">ESC</span> to close</div>
+          </div>
+          <div class="suggestion-item">
+            <span class="suggestion-arrow">→</span>
+            <span class="suggestion-text">How should AI show uncertainty?</span>
+          </div>
+          <div class="suggestion-item active">
+            <span class="suggestion-arrow">→</span>
+            <span class="suggestion-text">Which UI elements build trust in AI responses?</span>
+          </div>
+          <div class="suggestion-item">
+            <span class="suggestion-arrow">→</span>
+            <span class="suggestion-text">What signals make AI responses feel reliable?</span>
+          </div>
+        </div>
+
+        <!-- Input area -->
+        <div class="ai-input-area">
+          <div class="reply-context">
+            <span class="reply-icon">↩</span>
+            <span class="reply-text">enhance user confidence in AI-driven responses</span>
+            <button class="reply-close">✕</button>
+          </div>
+          <div class="ai-input-box">
+            <textarea class="ai-textarea" placeholder="Ask AI anything" rows="1"></textarea>
+            <div class="ai-input-toolbar">
+              <button class="toolbar-btn" title="Attach file">📎</button>
+              <div class="model-chip">
+                <div class="model-gem"></div>
+                ToraAI
+              </div>
+              <button class="toolbar-btn" title="Web search">🌐</button>
+              <button class="toolbar-btn">···</button>
+              <div class="toolbar-spacer"></div>
+              <button class="toolbar-btn mic-btn" title="Voice">🎤</button>
+              <button class="send-btn">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M8 3l4 4-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: CSS Variables + Code -->
+    <div style="display:flex;flex-direction:column;gap:20px">
+      <div>
+        <div class="section-title">CSS Variables (add to :root or .ai-panel)</div>
+        <div class="vars-block">
+<span class="v-comment">/* ── Tora AI Chat — Gemini-style tokens ── */</span>
+<span class="v-var">--ai-bg</span>: <span class="v-val">#1e1f24</span>;
+<span class="v-var">--ai-bg-subtle</span>: <span class="v-val">rgba(255,255,255,0.02)</span>;
+<span class="v-var">--ai-border</span>: <span class="v-val">rgba(255,255,255,0.08)</span>;
+<span class="v-var">--ai-border-active</span>: <span class="v-val">rgba(26,115,232,0.5)</span>;
+<span class="v-var">--ai-blue</span>: <span class="v-val">#1a73e8</span>;
+<span class="v-var">--ai-blue-dim</span>: <span class="v-val">rgba(26,115,232,0.15)</span>;
+<span class="v-var">--ai-blue-text</span>: <span class="v-val">#8ab4f8</span>;
+<span class="v-var">--ai-text-1</span>: <span class="v-val">#e8eaed</span>;
+<span class="v-var">--ai-text-2</span>: <span class="v-val">#bdc1c6</span>;
+<span class="v-var">--ai-text-3</span>: <span class="v-val">#9aa0a6</span>;
+<span class="v-var">--ai-text-4</span>: <span class="v-val">#5f6368</span>;
+<span class="v-var">--ai-radius</span>: <span class="v-val">14px</span>;
+<span class="v-var">--ai-radius-lg</span>: <span class="v-val">20px</span>;
+<span class="v-var">--ai-radius-xl</span>: <span class="v-val">18px</span>;
+        </div>
+      </div>
+
+      <div>
+        <div class="section-title">Empty State</div>
+        <div class="ai-panel" style="padding:0">
+          <div class="empty-state-v2">
+            <div class="es-icon">🤖</div>
+            <h4>Start a private conversation</h4>
+            <p>Ask ToraAI anything about your room — code, tasks, or meeting context. Only you can see this.</p>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="section-title">Anatomy breakdown</div>
+        <div style="font-size:0.8rem;line-height:2;color:#9aa0a6;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:16px">
+          <div>① <b style="color:#e8eaed">Header</b> — title dropdown + private toggle + icon buttons</div>
+          <div>② <b style="color:#e8eaed">Messages</b> — scrollable, with spinner / response blocks / user bubbles</div>
+          <div>③ <b style="color:#e8eaed">Response block</b> — colored dot + title chip + left-border body text</div>
+          <div>④ <b style="color:#e8eaed">AI link</b> — blue underline + inline Reply tooltip on hover</div>
+          <div>⑤ <b style="color:#e8eaed">Suggestions panel</b> — frosted bg + keyboard hints + arrow items</div>
+          <div>⑥ <b style="color:#e8eaed">Reply context bar</b> — blue-tinted, shows quoted text + X dismiss</div>
+          <div>⑦ <b style="color:#e8eaed">Input box</b> — textarea + toolbar (attach, model chip, web, send)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FULL WIDTH: The actual Svelte CSS to copy -->
+    <div style="grid-column:1/-1">
+      <div class="section-title">Drop-in Svelte CSS — replace your existing &lt;style&gt; block</div>
+      <div class="code-block"><span class="cc">/* ── PrivateAiChat.svelte — Gemini-inspired styles ── */</span>
+
+<span class="ck">.private-ai-overlay</span> {
+  position: fixed; inset: 0; z-index: 1080;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  display: flex; justify-content: flex-end;
+  animation: fadeIn 0.18s ease;
+}
+@keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+
+<span class="ck">.private-ai-drawer</span> {
+  width: min(400px, 100%);
+  height: 100%;
+  background: <span class="cs">#1e1f24</span>;
+  border-left: 1px solid rgba(255,255,255,0.08);
+  display: flex; flex-direction: column;
+  animation: slideIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: -8px 0 40px rgba(0,0,0,0.5);
+}
+@keyframes slideIn {
+  from { transform: translateX(100%) }
+  to { transform: translateX(0) }
+}
+
+<span class="cc">/* ── HEADER ── */</span>
+<span class="ck">.private-ai-header</span> {
+  display: flex; align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  background: rgba(255,255,255,0.02);
+  flex-shrink: 0;
+}
+<span class="ck">.private-ai-header h2</span> {
+  font-size: 0.88rem; font-weight: 600;
+  color: #e8eaed; display: flex;
+  align-items: center; gap: 8px;
+}
+<span class="ck">.close-btn</span> {
+  width: 30px; height: 30px;
+  border-radius: 8px; border: none;
+  background: transparent; color: #9aa0a6;
+  cursor: pointer; font-size: 1rem;
+  display: flex; align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+<span class="ck">.close-btn:hover</span> {
+  background: rgba(255,100,100,0.12); color: #ff6b6b;
+}
+
+<span class="cc">/* ── MESSAGES ── */</span>
+<span class="ck">.private-ai-messages</span> {
+  flex: 1; padding: 14px;
+  overflow-y: auto; display: flex;
+  flex-direction: column; gap: 14px;
+  scroll-behavior: smooth;
+}
+<span class="ck">.private-ai-messages::-webkit-scrollbar</span> { width: 3px }
+<span class="ck">.private-ai-messages::-webkit-scrollbar-thumb</span> {
+  background: rgba(255,255,255,0.1); border-radius: 4px;
+}
+
+<span class="cc">/* ── EMPTY STATE ── */</span>
+<span class="ck">.empty-state</span> {
+  display: flex; flex-direction: column;
+  align-items: center; text-align: center;
+  padding: 32px 20px; gap: 10px;
+  color: #5f6368; font-size: 0.83rem;
+  line-height: 1.6;
+}
+
+<span class="cc">/* ── AI RESPONSE BLOCK ── */</span>
+<span class="ck">.ai-response-block</span> {
+  display: flex; flex-direction: column; gap: 6px;
+}
+<span class="ck">.ai-response-meta</span> {
+  display: flex; align-items: center; gap: 8px;
+}
+<span class="ck">.ai-dot</span> {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #1a73e8; flex-shrink: 0;
+}
+<span class="ck">.ai-response-title</span> {
+  font-size: 0.84rem; font-weight: 600;
+  color: #e8eaed;
+}
+<span class="ck">.ai-response-body</span> {
+  margin-left: 14px;
+  padding-left: 12px;
+  border-left: 2px solid rgba(255,255,255,0.1);
+  font-size: 0.83rem; color: #bdc1c6;
+  line-height: 1.7; white-space: pre-wrap;
+}
+
+<span class="cc">/* Typing / loading */</span>
+<span class="ck">.ai-response-body.pending</span> {
+  display: flex; align-items: center; gap: 8px;
+}
+<span class="ck">.typing-dots span</span> {
+  display: inline-block; width: 5px; height: 5px;
+  border-radius: 50%; background: #9aa0a6;
+  animation: tdot 1.2s ease infinite;
+}
+<span class="ck">.typing-dots span:nth-child(2)</span> { animation-delay: 0.15s }
+<span class="ck">.typing-dots span:nth-child(3)</span> { animation-delay: 0.3s }
+@keyframes tdot {
+  0%,100% { transform: translateY(0); opacity: 0.3 }
+  50% { transform: translateY(-4px); opacity: 1 }
+}
+
+<span class="cc">/* ── USER BUBBLE ── */</span>
+<span class="ck">.bubble-row.mine</span> { display: flex; justify-content: flex-end }
+<span class="ck">.bubble-row.mine .bubble</span> {
+  max-width: 80%;
+  background: rgba(26,115,232,0.14);
+  border: 1px solid rgba(26,115,232,0.25);
+  border-radius: 18px 18px 4px 18px;
+  padding: 10px 14px;
+  font-size: 0.84rem; color: #e8eaed; line-height: 1.6;
+}
+<span class="ck">.bubble-row.other .bubble</span> { <span class="cc">/* handled by ai-response-block */</span> }
+
+<span class="cc">/* ── SUGGESTIONS ── */</span>
+<span class="ck">.ai-suggestions</span> {
+  background: rgba(255,255,255,0.02);
+  border-top: 1px solid rgba(255,255,255,0.07);
+  padding: 6px 0; flex-shrink: 0;
+}
+<span class="ck">.suggestion-item</span> {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; cursor: pointer;
+  transition: background 0.15s;
+  font-size: 0.83rem; color: #bdc1c6;
+}
+<span class="ck">.suggestion-item:hover, .suggestion-item.active</span> {
+  background: rgba(26,115,232,0.12); color: #e8eaed;
+}
+<span class="ck">.suggestion-item .arrow</span> {
+  color: #5f6368; transition: transform 0.15s, color 0.15s;
+}
+<span class="ck">.suggestion-item:hover .arrow</span> {
+  color: #8ab4f8; transform: translateX(3px);
+}
+
+<span class="cc">/* ── INPUT AREA ── */</span>
+<span class="ck">.private-ai-input-row</span> {
+  padding: 10px 12px;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  display: flex; flex-direction: column; gap: 8px;
+  background: rgba(255,255,255,0.01); flex-shrink: 0;
+}
+
+<span class="cc">/* Reply context bar */</span>
+<span class="ck">.reply-bar</span> {
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(26,115,232,0.1);
+  border: 1px solid rgba(26,115,232,0.25);
+  border-radius: 10px; padding: 7px 10px;
+}
+<span class="ck">.reply-bar-text</span> {
+  flex: 1; font-size: 0.78rem; color: #8ab4f8;
+  white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+<span class="cc">/* Textarea container */</span>
+<span class="ck">.input-box</span> {
+  display: flex; flex-direction: column; gap: 8px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px; padding: 10px 12px;
+  transition: border-color 0.2s, background 0.2s;
+}
+<span class="ck">.input-box:focus-within</span> {
+  border-color: rgba(26,115,232,0.45);
+  background: rgba(26,115,232,0.03);
+}
+<span class="ck">textarea</span> {
+  background: transparent; border: none; outline: none;
+  font-family: inherit; font-size: 0.86rem;
+  color: #e8eaed; resize: none; line-height: 1.5;
+}
+<span class="ck">textarea::placeholder</span> { color: #5f6368 }
+
+<span class="cc">/* Toolbar row */</span>
+<span class="ck">.input-toolbar</span> {
+  display: flex; align-items: center; gap: 6px;
+}
+<span class="ck">.toolbar-icon-btn</span> {
+  width: 28px; height: 28px; border-radius: 7px;
+  border: none; background: transparent; color: #9aa0a6;
+  cursor: pointer; display: flex;
+  align-items: center; justify-content: center;
+  font-size: 0.82rem;
+  transition: background 0.15s, color 0.15s;
+}
+<span class="ck">.toolbar-icon-btn:hover</span> {
+  background: rgba(255,255,255,0.07); color: #e8eaed;
+}
+<span class="ck">.model-pill</span> {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px; padding: 4px 9px;
+  font-size: 0.73rem; font-weight: 600;
+  color: #bdc1c6; cursor: pointer;
+  transition: background 0.15s;
+}
+<span class="ck">.model-pill:hover</span> { background: rgba(255,255,255,0.09) }
+<span class="ck">.spacer</span> { flex: 1 }
+<span class="ck">.send-button</span> {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: none; background: #1a73e8; color: #fff;
+  cursor: pointer; display: flex;
+  align-items: center; justify-content: center;
+  box-shadow: 0 2px 10px rgba(26,115,232,0.35);
+  transition: all 0.18s;
+}
+<span class="ck">.send-button:hover</span> {
+  background: #1967d2; transform: scale(1.06);
+  box-shadow: 0 4px 18px rgba(26,115,232,0.5);
+}
+<span class="ck">.send-button:disabled</span> {
+  background: rgba(255,255,255,0.07);
+  box-shadow: none; cursor: not-allowed;
+}
+
+<span class="cc">/* ── ERROR STATE ── */</span>
+<span class="ck">.private-ai-error</span> {
+  margin: 0 12px 8px;
+  padding: 8px 12px;
+  background: rgba(234,67,53,0.1);
+  border: 1px solid rgba(234,67,53,0.25);
+  border-radius: 10px;
+  font-size: 0.78rem; color: #f28b82;
+}</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
