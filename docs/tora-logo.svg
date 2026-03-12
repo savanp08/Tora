@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" fill="none">
+  <defs>
+    <linearGradient id="paperGradient" x1="80" y1="72" x2="256" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f7e7bf" />
+      <stop offset="0.55" stop-color="#ecd29f" />
+      <stop offset="1" stop-color="#dfbd84" />
+    </linearGradient>
+    <filter id="paperShadow" x="52" y="52" width="250" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#000000" flood-opacity="0.18" />
+    </filter>
+    <clipPath id="paperClip">
+      <path d="M80 72H256V168L242 178L248 190L232 200L238 213L222 224L229 237L211 249L218 263L199 275L206 288L186 300L192 312L166 320H80V72Z" />
+    </clipPath>
+  </defs>
+
+  <path
+    d="M80 72H256V168L242 178L248 190L232 200L238 213L222 224L229 237L211 249L218 263L199 275L206 288L186 300L192 312L166 320H80V72Z"
+    fill="url(#paperGradient)"
+    stroke="#b78f5a"
+    stroke-width="2"
+    filter="url(#paperShadow)"
+  />
+
+  <path d="M80 72L80 96L104 72Z" fill="#e5c48d" stroke="#b88c55" stroke-width="1" />
+
+  <g clip-path="url(#paperClip)">
+    <line x1="98" y1="114" x2="214" y2="114" stroke="#6c4e2a" stroke-width="3.1" opacity="0.29" stroke-linecap="round" />
+    <line x1="98" y1="136" x2="206" y2="136" stroke="#6c4e2a" stroke-width="3.1" opacity="0.29" stroke-linecap="round" />
+    <line x1="98" y1="158" x2="198" y2="158" stroke="#6c4e2a" stroke-width="3.1" opacity="0.27" stroke-linecap="round" />
+    <line x1="98" y1="186" x2="210" y2="186" stroke="#6c4e2a" stroke-width="3" opacity="0.24" stroke-linecap="round" />
+    <line x1="98" y1="208" x2="196" y2="208" stroke="#6c4e2a" stroke-width="3" opacity="0.23" stroke-linecap="round" />
+    <line x1="98" y1="230" x2="204" y2="230" stroke="#6c4e2a" stroke-width="3" opacity="0.22" stroke-linecap="round" />
+    <line x1="98" y1="258" x2="190" y2="258" stroke="#6c4e2a" stroke-width="2.9" opacity="0.2" stroke-linecap="round" />
+    <line x1="98" y1="280" x2="206" y2="280" stroke="#6c4e2a" stroke-width="2.9" opacity="0.18" stroke-linecap="round" />
+    <path d="M122 150H174V171H158V253H138V171H122Z" fill="#2f2114" />
+  </g>
+
+  <path
+    d="M255 169L242 178L248 190L232 200L238 213L222 224L229 237L211 249L218 263L199 275L206 288L186 300L192 312L166 320"
+    stroke="#5a3619"
+    stroke-width="3.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity="0.95"
+  />
+  <path
+    d="M251 172L241 179L246 190L231 199L236 212L221 224L227 236L210 248L216 262L198 274L204 287L186 299L190 310L170 318"
+    stroke="#f59d46"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    opacity="0.78"
+  />
+
+  <circle cx="210" cy="286" r="3" fill="#3b2718" opacity="0.74" />
+  <circle cx="200" cy="298" r="2.6" fill="#3d2918" opacity="0.69" />
+  <circle cx="188" cy="309" r="2.3" fill="#2f1f13" opacity="0.65" />
+  <circle cx="174" cy="317" r="2" fill="#2a1b11" opacity="0.58" />
+  <circle cx="224" cy="271" r="2.6" fill="#6d4320" opacity="0.54" />
+  <circle cx="231" cy="258" r="2.2" fill="#7f4c22" opacity="0.5" />
+  <circle cx="223" cy="245" r="2" fill="#8e541f" opacity="0.48" />
+  <circle cx="214" cy="232" r="1.8" fill="#9c5c22" opacity="0.44" />
+  <circle cx="204" cy="220" r="1.7" fill="#b86a2a" opacity="0.38" />
+</svg>

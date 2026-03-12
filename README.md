@@ -2,7 +2,7 @@
 # Tora
 
 <p align="center">
-  <img src="docs/logo.png" width="120" alt="Tora logo">
+  <img src="docs/tora-logo.svg" width="120" alt="Tora logo">
 </p>
 
 <p align="center">
@@ -14,11 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/hero-demo.gif" width="900" alt="Tora hero demo">
-</p>
-
-<p align="center">
-  <sub>Replace <code>docs/media/hero-demo.gif</code> with a 10-20 second product demo.</sub>
+  <img src="docs/media/github_demo_dynamic.gif" width="900" alt="Tora hero demo">
 </p>
 
 <p align="center">
@@ -85,6 +81,20 @@ To collaborate privately, create a dedicated room and share that URL over your p
 - **OAuth login (GitHub) with JWT session management**
 - **Prometheus metrics endpoint** for self-hosted deployments
 
+<p align="center">
+  <img src="docs/media/chat_darkmode.png" width="420" alt="Chat interface in dark mode">
+  <img src="docs/media/chat_lightmode.png" width="420" alt="Chat interface in light mode">
+</p>
+
+<p align="center">
+  <img src="docs/media/Room_message_options.png" width="860" alt="Message actions menu in chat">
+</p>
+
+<p align="center">
+  <img src="docs/media/discussions_darkmode.png" width="420" alt="Discussion thread view in dark mode">
+  <img src="docs/media/discussions_lightmode.png" width="420" alt="Discussion thread view in light mode">
+</p>
+
 ## Encryptions
 
 - **WebRTC End-to-End Encryption** — All real-time audio and video streams are end-to-end encrypted natively via WebRTC protocols, ensuring media remains private between participants and never reaches the server unencrypted.
@@ -105,23 +115,33 @@ Tora's workspace is built around four boards. Each one is shared live, and every
 ### Code Canvas
 
 <p align="center">
-  <img src="docs/media/code-canvas.gif" width="860" alt="Code Canvas">
+  <img src="docs/media/github_demo_canvas_fixed.gif" width="860" alt="Code Canvas with AI and terminal">
 </p>
 
 A Monaco-powered editor where multiple participants write simultaneously. Edits are synced via Yjs CRDTs for conflict-free collaboration. Code runs directly in the workspace through sandboxed execution backends, and runnable snippets can be shared inline in chat.
 
+<p align="center">
+  <img src="docs/media/canvas_splitscreen.png" width="420" alt="Code Canvas in split-screen workspace layout">
+  <img src="docs/media/canvas_fullscreen.png" width="420" alt="Code Canvas in focused full-screen layout">
+</p>
+
 ### Project Management
 
 <p align="center">
-  <img src="docs/media/project-board.gif" width="860" alt="Project Management Board">
+  <img src="docs/media/github_demo_project_gen.gif" width="860" alt="AI-assisted project board generation">
 </p>
 
 A room-scoped task board for planning and execution. Create, assign, and track work without leaving the session. Useful for sprint planning, hackathons, and live debugging coordination.
 
+<p align="center">
+  <img src="docs/media/taskboard_AI.png" width="420" alt="Taskboard AI assistant panel">
+  <img src="docs/media/tasks.png" width="420" alt="Task card pinned in room conversation">
+</p>
+
 ### Freedraw
 
 <p align="center">
-  <img src="docs/media/freedraw.gif" width="860" alt="Freedraw Whiteboard">
+  <img src="docs/media/drawboard.png" width="860" alt="Freedraw whiteboard with collaborative annotations">
 </p>
 
 A shared whiteboard with freehand drawing, shape tools, and annotations. Live cursors show where collaborators are working. Useful for architecture diagrams, workflows, and visual brainstorming.
@@ -129,15 +149,10 @@ A shared whiteboard with freehand drawing, shape tools, and annotations. Live cu
 ### Dashboard
 
 <p align="center">
-  <img src="docs/media/dashboard.gif" width="860" alt="Dashboard">
+  <img src="docs/media/roomdetails_and_boards.png" width="860" alt="Room details panel and board switcher">
 </p>
 
 An overview of rooms, recent sessions, and activity. Create rooms, resume sessions, manage branched threads, and monitor workspace activity from one place.
-
-<p align="center">
-  <img src="docs/media/extra-1.gif" width="420" alt="Additional feature showcase">
-  <img src="docs/media/extra-2.gif" width="420" alt="Additional feature showcase">
-</p>
 
 ## Architecture
 
