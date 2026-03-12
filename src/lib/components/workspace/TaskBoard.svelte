@@ -219,8 +219,8 @@
 		void loadContextTasks();
 	}
 
-	$: roomTasks = [...$taskStore]
-		.map((task): DisplayTask => ({
+	$: roomTasks = dedupeDisplayTasksById(
+		[...$taskStore].map((task): DisplayTask => ({
 			id: task.id,
 			roomId: task.roomId,
 			title: task.title,
@@ -237,8 +237,8 @@
 			updatedAt: task.updatedAt,
 			source: 'room'
 		}))
-		.sort(compareTasksForGrid);
-	$: contextGridTasks = [...contextTasks].sort(compareTasksForGrid);
+	).sort(compareTasksForGrid);
+	$: contextGridTasks = dedupeDisplayTasksById([...contextTasks]).sort(compareTasksForGrid);
 	$: boardTasks = contextAware ? contextGridTasks : roomTasks;
 	$: boardLoading = contextAware ? contextLoading : $taskStoreLoading;
 	$: boardError = contextAware ? contextError : roomBoardError || $taskStoreError;
@@ -448,6 +448,21 @@
 		return left.title.localeCompare(right.title);
 	}
 
+	function dedupeDisplayTasksById(tasks: DisplayTask[]) {
+		const taskById = new Map<string, DisplayTask>();
+		for (const task of tasks) {
+			const taskId = toStringValue(task.id).trim();
+			if (!taskId) {
+				continue;
+			}
+			const existing = taskById.get(taskId);
+			if (!existing || (task.updatedAt || 0) >= (existing.updatedAt || 0)) {
+				taskById.set(taskId, task);
+			}
+		}
+		return [...taskById.values()];
+	}
+
 	function statusLabel(column: ColumnKey) {
 		if (column === 'in_progress') return 'Working on it';
 		if (column === 'done') return 'Done';
@@ -626,10 +641,20 @@
 	}
 
 	function splitMetadataList(value: string) {
-		return value
+		const seen = new Set<string>();
+		const next: string[] = [];
+		for (const entry of value
 			.split(/[;,]/)
-			.map((entry) => entry.trim())
-			.filter(Boolean);
+			.map((item) => item.trim())
+			.filter(Boolean)) {
+			const normalized = entry.toLowerCase();
+			if (seen.has(normalized)) {
+				continue;
+			}
+			seen.add(normalized);
+			next.push(entry);
+		}
+		return next;
 	}
 
 	function isSupportTicket(task: DisplayTask) {
@@ -2282,7 +2307,7 @@ t
 														{#if supportCard.concernedIds.length === 0}
 															<span class="support-avatar support-avatar-empty">--</span>
 														{:else}
-															{#each supportCard.concernedIds.slice(0, 4) as concernedMemberId, memberIndex (concernedMemberId)}
+															{#each supportCard.concernedIds.slice(0, 4) as concernedMemberId, memberIndex (`${concernedMemberId}-${memberIndex}`)}
 																{@const concernedMemberName = concernedMemberLabel(concernedMemberId)}
 																<span
 																	class="support-avatar"

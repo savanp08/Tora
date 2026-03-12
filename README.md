@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/github_demo_dynamic.gif" width="900" alt="Tora hero demo">
+  <img src="docs/media/project_tour_demo.gif" width="900" alt="Tora hero demo">
 </p>
 
 <p align="center">

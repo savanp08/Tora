@@ -41,6 +41,20 @@ type PersonalStatusResponse = {
 
 export const personalItems = writable<PersonalItem[]>([]);
 
+function dedupePersonalItemsById(items: PersonalItem[]) {
+	const seen = new Set<string>();
+	const next: PersonalItem[] = [];
+	for (const item of items) {
+		const itemId = item.item_id.trim();
+		if (!itemId || seen.has(itemId)) {
+			continue;
+		}
+		seen.add(itemId);
+		next.push(item);
+	}
+	return next;
+}
+
 function normalizeDateTimeOrNull(value: unknown) {
 	return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -119,7 +133,7 @@ export async function fetchItems() {
 	const normalized = records
 		.map((item) => normalizePersonalItem(item))
 		.filter((item): item is PersonalItem => Boolean(item));
-	personalItems.set(normalized);
+	personalItems.set(dedupePersonalItemsById(normalized));
 	return normalized;
 }
 
@@ -138,7 +152,7 @@ export async function addItem(input: PersonalItemInput) {
 	if (!created) {
 		throw new Error('Invalid personal item response');
 	}
-	personalItems.update((items) => [created, ...items]);
+	personalItems.update((items) => dedupePersonalItemsById([created, ...items]));
 	return created;
 }
 
@@ -164,7 +178,7 @@ export async function addItemsBulk(inputs: PersonalItemInput[]) {
 		.map((item) => normalizePersonalItem(item))
 		.filter((item): item is PersonalItem => Boolean(item));
 	if (created.length > 0) {
-		personalItems.update((items) => [...created, ...items]);
+		personalItems.update((items) => dedupePersonalItemsById([...created, ...items]));
 	}
 	return created;
 }
