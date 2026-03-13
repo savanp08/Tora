@@ -45,7 +45,7 @@ Tora is a real-time collaboration workspace where conversation, code, and visual
 - **Real-time:**
   - Messages, drawings, code edits, and presence updates propagate instantly between participants
 - **Complete chat experience**
-  - Supports Media, files, voice messages, replies, typing indicators, P2P voice and video calls, emojis, reactions, typing indictaors, GIFs, stickers, memes and more
+  - Supports Media, files, voice messages, replies, typing indicators, unread counters, P2P voice and video calls, emojis, reactions, typing indictaors, GIFs, stickers, memes and more
 - **AI-Powered Assistance**
   - **Auto Code Completion** — Get real-time, context-aware code suggestions directly in the Monaco-powered Code Canvas, specialized for the project you're currently building.
   - **Contextual Dialogue** — Mention @ToraAI in chat to interact with an assistant that has full visibility of your room's conversation history and active code boards.
@@ -95,12 +95,9 @@ To collaborate privately, create a dedicated room and share that URL over your p
   <tr>
     <td align="center">
       <img src="docs/media/discussions_darkmode.png" width="420" alt="Discussion thread view in dark mode"><br>
-      <sub>Discussions - Dark Theme</sub>
+      <sub>Discussions</sub>
     </td>
-    <td align="center">
-      <img src="docs/media/discussions_lightmode.png" width="420" alt="Discussion thread view in light mode"><br>
-      <sub>Discussions - Light Theme</sub>
-    </td>
+    
   </tr>
 </table>
 
