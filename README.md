@@ -81,19 +81,33 @@ To collaborate privately, create a dedicated room and share that URL over your p
 - **OAuth login (GitHub) with JWT session management**
 - **Prometheus metrics endpoint** for self-hosted deployments
 
-<p align="center">
-  <img src="docs/media/chat_darkmode.png" width="420" alt="Chat interface in dark mode">
-  <img src="docs/media/chat_lightmode.png" width="420" alt="Chat interface in light mode">
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/media/chat_darkmode.png" width="420" alt="Chat interface in dark mode"><br>
+      <sub>Chat - Dark Theme</sub>
+    </td>
+    <td align="center">
+      <img src="docs/media/chat_lightmode.png" width="420" alt="Chat interface in light mode"><br>
+      <sub>Chat - Light Theme</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/media/discussions_darkmode.png" width="420" alt="Discussion thread view in dark mode"><br>
+      <sub>Discussions - Dark Theme</sub>
+    </td>
+    <td align="center">
+      <img src="docs/media/discussions_lightmode.png" width="420" alt="Discussion thread view in light mode"><br>
+      <sub>Discussions - Light Theme</sub>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
   <img src="docs/media/Room_message_options.png" width="860" alt="Message actions menu in chat">
 </p>
-
-<p align="center">
-  <img src="docs/media/discussions_darkmode.png" width="420" alt="Discussion thread view in dark mode">
-  <img src="docs/media/discussions_lightmode.png" width="420" alt="Discussion thread view in light mode">
-</p>
+<p align="center"><sub>Message actions include reply, pin, edit, delete, and branch creation for focused follow-ups.</sub></p>
 
 ## Encryptions
 
@@ -110,7 +124,7 @@ To collaborate privately, create a dedicated room and share that URL over your p
 
 ## Boards
 
-Tora's workspace is built around four boards. Each one is shared live, and everyone in the room sees the same state in real time. The app supports split views for multiple boards for convinience.
+Tora's workspace is built around four boards. Each one is shared live, and everyone in the room sees the same state in real time. The app supports split views so teams can work across multiple boards without losing context.
 
 ### Code Canvas
 
@@ -120,10 +134,19 @@ Tora's workspace is built around four boards. Each one is shared live, and every
 
 A Monaco-powered editor where multiple participants write simultaneously. Edits are synced via Yjs CRDTs for conflict-free collaboration. Code runs directly in the workspace through sandboxed execution backends, and runnable snippets can be shared inline in chat.
 
-<p align="center">
-  <img src="docs/media/canvas_splitscreen.png" width="420" alt="Code Canvas in split-screen workspace layout">
-  <img src="docs/media/canvas_fullscreen.png" width="420" alt="Code Canvas in focused full-screen layout">
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/media/canvas_fullscreen.png" width="420" alt="Code Canvas in focused full-screen layout"><br>
+      <sub>Focused Canvas View</sub>
+    </td>
+    <td align="center">
+      <img src="docs/media/canvas_splitscreen.png" width="420" alt="Code Canvas in split-screen workspace layout"><br>
+      <sub>Split-Screen Workspace View</sub>
+    </td>
+  </tr>
+</table>
+<p align="center"><sub>Switch between focused and split layouts to code while keeping chat context visible.</sub></p>
 
 ### Project Management
 
@@ -133,10 +156,18 @@ A Monaco-powered editor where multiple participants write simultaneously. Edits 
 
 A room-scoped task board for planning and execution. Create, assign, and track work without leaving the session. Useful for sprint planning, hackathons, and live debugging coordination.
 
-<p align="center">
-  <img src="docs/media/taskboard_AI.png" width="420" alt="Taskboard AI assistant panel">
-  <img src="docs/media/tasks.png" width="420" alt="Task card pinned in room conversation">
-</p>
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/media/taskboard_AI.png" width="420" alt="Taskboard AI assistant panel"><br>
+      <sub>Generate and refine plans with Tora AI directly inside the task board.</sub>
+    </td>
+    <td align="center">
+      <img src="docs/media/tasks.png" width="420" alt="Task card pinned in room conversation"><br>
+      <sub>Share task cards in chat to keep planning and execution in sync.</sub>
+    </td>
+  </tr>
+</table>
 
 ### Freedraw
 
