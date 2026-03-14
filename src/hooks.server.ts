@@ -126,6 +126,8 @@ function parseUserFromToken(token: string): AuthenticatedUser | null {
 	}
 }
 
+
+
 export const handle: Handle = async ({ event, resolve }) => {
 	const token = event.cookies.get(AUTH_COOKIE_NAME)?.trim() || '';
 	authDebugLog('Incoming request auth check.', {
