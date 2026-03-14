@@ -1502,6 +1502,9 @@ Rules:
 		}
 		isRunInProgress = true;
 		runningFilePath = normalizeProjectName(target.relativePath || target.name);
+		if (language === 'python' || language === 'py') {
+			executionManager.resetWorker(language);
+		}
 		activeExecutionHandle = await executionManager.run(language, source, 30000, stdin, {
 			activeFile: normalizeProjectName(target.relativePath || target.name),
 			workspaceFiles,

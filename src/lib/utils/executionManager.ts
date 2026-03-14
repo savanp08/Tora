@@ -940,6 +940,27 @@ export class ExecutionManager {
 		}
 	}
 
+	resetWorker(language: string) {
+		const normalizedLanguage = this.normalizeLanguage(language);
+		const strategy = this.strategyByLanguage.get(normalizedLanguage);
+		if (!strategy || strategy.mode !== 'worker') {
+			return;
+		}
+
+		const runtimeLanguage = strategy.language;
+		const activeRunId = this.activeRunIdByRuntimeLanguage.get(runtimeLanguage);
+		if (activeRunId) {
+			const context = this.activeRunById.get(activeRunId);
+			if (context) {
+				this.timeoutRun(context, 0, true);
+				return;
+			}
+			this.activeRunIdByRuntimeLanguage.delete(runtimeLanguage);
+		}
+
+		this.terminateWorker(runtimeLanguage);
+	}
+
 	private registerStrategy(strategy: ExecutionStrategy) {
 		this.strategies.set(strategy.language, strategy);
 		this.strategyByLanguage.set(strategy.language, strategy);
