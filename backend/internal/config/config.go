@@ -38,7 +38,8 @@ type Config struct {
 }
 
 func LoadConfig() *Config {
-	if err := godotenv.Load("../.env", ".env"); err != nil {
+	if err := godotenv.Load("../.env", ".env"); 
+	err != nil {
 		log.Println("No .env file found, using system env variables")
 	}
 	appSecretKey := requireAppSecretKey()
