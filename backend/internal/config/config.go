@@ -169,7 +169,7 @@ func parseCSVEnv(key, fallback string) []string {
 		}
 	}
 	if len(hosts) == 0 {
-		return []string{"127.0.0.1"}
+		return []string{"127.0.0.1"} 
 	}
 	return hosts
 }

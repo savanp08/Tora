@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	googleOAuthStateCookieName = "tora_oauth_state"
-	googleOAuthStateTTL        = 5 * time.Minute
-	googleUserInfoURL          = "https://www.googleapis.com/oauth2/v2/userinfo"
+	googleOAuthStateCookieName    = "tora_oauth_state"
+	googleOAuthFrontendCookieName = "tora_oauth_frontend"
+	googleOAuthStateTTL           = 5 * time.Minute
+	googleUserInfoURL             = "https://www.googleapis.com/oauth2/v2/userinfo"
 )
 
 type googleUserProfile struct {
@@ -45,7 +46,7 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oauthConfig, err := googleOAuthConfig()
+	oauthConfig, err := googleOAuthConfig(r)
 	if err != nil {
 		oauthDebugf("Google login stopped. OAuth config is not valid: %v", err)
 		writeAuthError(w, http.StatusServiceUnavailable, "Google OAuth is not configured")
@@ -76,9 +77,22 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		Expires:  time.Now().UTC().Add(googleOAuthStateTTL),
 		MaxAge:   int(googleOAuthStateTTL.Seconds()),
 	})
+	frontendBase := resolveFrontendBaseURL(r, "").String()
+	http.SetCookie(w, &http.Cookie{
+		Name:     googleOAuthFrontendCookieName,
+		Value:    url.QueryEscape(frontendBase),
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secureCookie,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().UTC().Add(googleOAuthStateTTL),
+		MaxAge:   int(googleOAuthStateTTL.Seconds()),
+	})
 	oauthDebugf(
-		"Google login stored OAuth state cookie. cookie_name=%s secure_cookie=%t max_age_seconds=%d",
+		"Google login stored OAuth cookies. state_cookie=%s frontend_cookie=%s frontend_base=%s secure_cookie=%t max_age_seconds=%d",
 		googleOAuthStateCookieName,
+		googleOAuthFrontendCookieName,
+		frontendBase,
 		secureCookie,
 		int(googleOAuthStateTTL.Seconds()),
 	)
@@ -127,7 +141,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oauthConfig, err := googleOAuthConfig()
+	oauthConfig, err := googleOAuthConfig(r)
 	if err != nil {
 		oauthDebugf("Google callback stopped. OAuth config is not valid: %v", err)
 		writeAuthError(w, http.StatusServiceUnavailable, "Google OAuth is not configured")
@@ -152,6 +166,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secureCookie := shouldUseSecureCookies(r)
+	frontendBaseOverride := readOAuthFrontendBaseCookie(r)
 	http.SetCookie(w, &http.Cookie{
 		Name:     googleOAuthStateCookieName,
 		Value:    "",
@@ -162,7 +177,23 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 	})
-	oauthDebugf("Google callback cleared OAuth state cookie. secure_cookie=%t", secureCookie)
+	http.SetCookie(w, &http.Cookie{
+		Name:     googleOAuthFrontendCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secureCookie,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+	})
+	oauthDebugf(
+		"Google callback cleared OAuth cookies. state_cookie=%s frontend_cookie=%s frontend_override_present=%t secure_cookie=%t",
+		googleOAuthStateCookieName,
+		googleOAuthFrontendCookieName,
+		strings.TrimSpace(frontendBaseOverride) != "",
+		secureCookie,
+	)
 
 	if code == "" {
 		oauthDebugf("Google callback stopped. OAuth code is missing in callback query.")
@@ -221,7 +252,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 	setAuthCookie(w, r, signedJWT)
 	oauthDebugf("Google callback set auth cookie. secure_cookie=%t host=%s", shouldUseSecureCookies(r), strings.TrimSpace(r.Host))
 
-	redirectTarget := resolveFrontendGoogleSuccessRedirectURL(signedJWT, user)
+	redirectTarget := resolveFrontendGoogleSuccessRedirectURL(signedJWT, user, r, frontendBaseOverride)
 	oauthDebugf("Google callback redirecting user back to frontend. redirect_target=%s", redirectTarget)
 	http.Redirect(w, r, redirectTarget, http.StatusFound)
 }
@@ -421,17 +452,13 @@ func fetchGoogleUserProfile(ctx context.Context, client *http.Client) (googleUse
 	return profile, nil
 }
 
-func googleOAuthConfig() (*oauth2.Config, error) {
+func googleOAuthConfig(r *http.Request) (*oauth2.Config, error) {
 	clientID := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID"))
 	clientSecret := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET"))
-	redirectURL := strings.TrimSpace(os.Getenv("OAUTH_REDIRECT_URL"))
+	redirectURL := resolveGoogleOAuthRedirectURL(r)
 	if clientID == "" || clientSecret == "" {
 		oauthDebugf("Google OAuth config missing required env vars. has_client_id=%t has_client_secret=%t", clientID != "", clientSecret != "")
 		return nil, fmt.Errorf("google oauth env is not configured")
-	}
-	if redirectURL == "" {
-		oauthDebugf("OAUTH_REDIRECT_URL is empty. Using localhost fallback callback URL.")
-		redirectURL = "http://localhost:8080/api/auth/google/callback"
 	}
 	oauthDebugf(
 		"Google OAuth config ready. redirect_url=%s has_client_id=%t has_client_secret=%t",
@@ -457,7 +484,7 @@ func newOAuthState() (string, error) {
 }
 
 func resolveFrontendDashboardRedirectURL(r *http.Request) string {
-	parsed := resolveFrontendBaseURL()
+	parsed := resolveFrontendBaseURL(r, "")
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/dashboard"
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
@@ -465,8 +492,8 @@ func resolveFrontendDashboardRedirectURL(r *http.Request) string {
 	return parsed.String()
 }
 
-func resolveFrontendGoogleSuccessRedirectURL(token string, user models.User) string {
-	parsed := resolveFrontendBaseURL()
+func resolveFrontendGoogleSuccessRedirectURL(token string, user models.User, r *http.Request, frontendBaseOverride string) string {
+	parsed := resolveFrontendBaseURL(r, frontendBaseOverride)
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/login"
 	parsed.RawQuery = ""
 
@@ -487,19 +514,171 @@ func resolveFrontendGoogleSuccessRedirectURL(token string, user models.User) str
 	return parsed.String()
 }
 
-func resolveFrontendBaseURL() *url.URL {
-	base := strings.TrimSpace(os.Getenv("FRONTEND_BASE_URL"))
-	if base == "" {
-		oauthDebugf("FRONTEND_BASE_URL is empty. Using localhost frontend fallback URL.")
-		base = "http://localhost:5173"
+func resolveFrontendBaseURL(r *http.Request, frontendBaseOverride string) *url.URL {
+	if configured := parseAbsoluteHTTPURL(strings.TrimSpace(os.Getenv("FRONTEND_BASE_URL"))); configured != nil {
+		oauthDebugf("Frontend base URL resolved from FRONTEND_BASE_URL: %s", configured.String())
+		return configured
 	}
-	parsed, err := url.Parse(base)
-	if err != nil || strings.TrimSpace(parsed.Scheme) == "" || strings.TrimSpace(parsed.Host) == "" {
-		oauthDebugf("FRONTEND_BASE_URL is invalid. Falling back to localhost frontend URL. input=%q err=%v", base, err)
-		parsed, _ = url.Parse("http://localhost:5173")
+	if override := parseAbsoluteHTTPURL(frontendBaseOverride); override != nil {
+		oauthDebugf("Frontend base URL resolved from OAuth cookie override: %s", override.String())
+		return override
 	}
-	oauthDebugf("Frontend base URL resolved to %s", parsed.String())
+	if r != nil {
+		if requestOrigin := parseAbsoluteHTTPURL(firstHeaderValue(r.Header.Get("Origin"))); requestOrigin != nil {
+			oauthDebugf("Frontend base URL resolved from request Origin header: %s", requestOrigin.String())
+			return requestOrigin
+		}
+	}
+	if refererOrigin := parseRefererOrigin(r); refererOrigin != nil {
+		oauthDebugf("Frontend base URL resolved from request Referer header: %s", refererOrigin.String())
+		return refererOrigin
+	}
+
+	fallback := resolveRequestBaseURL(r)
+	if fallback != nil {
+		oauthDebugf("Frontend base URL resolved from request host fallback: %s", fallback.String())
+		return fallback
+	}
+
+	localhostFallback, _ := url.Parse("http://localhost:5173")
+	oauthDebugf("Frontend base URL fallback default used: %s", localhostFallback.String())
+	return localhostFallback
+}
+
+func resolveGoogleOAuthRedirectURL(r *http.Request) string {
+	configured := strings.TrimSpace(os.Getenv("OAUTH_REDIRECT_URL"))
+	if parsed := parseAbsoluteHTTPURL(configured); parsed != nil {
+		parsed.Path = "/api/auth/google/callback"
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+
+	if strings.TrimSpace(configured) != "" {
+		oauthDebugf("OAUTH_REDIRECT_URL is invalid. Falling back to request host. value=%q", configured)
+	}
+
+	fallback := resolveRequestBaseURL(r)
+	if fallback == nil {
+		fallback, _ = url.Parse("http://localhost:8080")
+	}
+	fallback.Path = "/api/auth/google/callback"
+	fallback.RawQuery = ""
+	fallback.Fragment = ""
+	return fallback.String()
+}
+
+func readOAuthFrontendBaseCookie(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	cookie, err := r.Cookie(googleOAuthFrontendCookieName)
+	if err != nil {
+		return ""
+	}
+	raw := strings.TrimSpace(cookie.Value)
+	if raw == "" {
+		return ""
+	}
+	decoded, decodeErr := url.QueryUnescape(raw)
+	if decodeErr != nil {
+		return ""
+	}
+	parsed := parseAbsoluteHTTPURL(decoded)
+	if parsed == nil {
+		return ""
+	}
+	return parsed.String()
+}
+
+func resolveRequestBaseURL(r *http.Request) *url.URL {
+	host := resolveRequestHost(r)
+	if host == "" {
+		return nil
+	}
+	return &url.URL{
+		Scheme: resolveRequestScheme(r),
+		Host:   host,
+	}
+}
+
+func resolveRequestHost(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	candidates := []string{
+		firstHeaderValue(r.Header.Get("X-Forwarded-Host")),
+		strings.TrimSpace(r.Host),
+	}
+	for _, candidate := range candidates {
+		normalized := strings.TrimSpace(candidate)
+		if normalized == "" {
+			continue
+		}
+		if strings.ContainsAny(normalized, " \t\r\n/\\") {
+			continue
+		}
+		return normalized
+	}
+	return ""
+}
+
+func resolveRequestScheme(r *http.Request) string {
+	if r == nil {
+		return "http"
+	}
+	forwarded := strings.ToLower(strings.TrimSpace(firstHeaderValue(r.Header.Get("X-Forwarded-Proto"))))
+	if forwarded == "http" || forwarded == "https" {
+		return forwarded
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func firstHeaderValue(raw string) string {
+	parts := strings.Split(raw, ",")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func parseAbsoluteHTTPURL(raw string) *url.URL {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return nil
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return nil
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
 	return parsed
+}
+
+func parseRefererOrigin(r *http.Request) *url.URL {
+	if r == nil {
+		return nil
+	}
+	referer := strings.TrimSpace(r.Referer())
+	parsed := parseAbsoluteHTTPURL(referer)
+	if parsed == nil {
+		return nil
+	}
+	return &url.URL{
+		Scheme: parsed.Scheme,
+		Host:   parsed.Host,
+	}
 }
 
 func oauthDebugf(_ string, _ ...any) {

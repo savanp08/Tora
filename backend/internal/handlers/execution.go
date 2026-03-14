@@ -8,13 +8,32 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/savanp08/converse/internal/execution"
 	"github.com/savanp08/converse/internal/monitor"
 )
 
-// DefaultExecutionManager serves execution requests using the local Piston runtime.
-var DefaultExecutionManager = execution.NewExecutionManager()
+// DefaultExecutionManager serves execution requests using the configured Piston runtime.
+//
+// It is initialized lazily so dotenv loading in main() can populate PISTON_ENDPOINT
+// before the manager resolves its endpoint.
+var DefaultExecutionManager *execution.ExecutionManager
+
+var defaultExecutionManagerOnce sync.Once
+
+func getExecutionManager() *execution.ExecutionManager {
+	defaultExecutionManagerOnce.Do(func() {
+		DefaultExecutionManager = execution.NewExecutionManager()
+	})
+	return DefaultExecutionManager
+}
+
+func ShutdownExecutionManager() {
+	if DefaultExecutionManager != nil {
+		DefaultExecutionManager.Shutdown()
+	}
+}
 
 type codeExecutionRequest struct {
 	Language string `json:"language"`
@@ -168,7 +187,8 @@ func HandleCodeExecution(w http.ResponseWriter, r *http.Request) {
 		Files:    decodedFiles,
 	}
 
-	response, err := DefaultExecutionManager.Execute(r.Context(), executionRequest)
+	executionManager := getExecutionManager()
+	response, err := executionManager.Execute(r.Context(), executionRequest)
 	if err != nil {
 
 		statusCode := execution.HTTPStatus(err)

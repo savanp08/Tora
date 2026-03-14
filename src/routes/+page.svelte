@@ -27,6 +27,7 @@
 		readSessionRoomPreferences,
 		writeSessionRoomPreferences
 	} from '$lib/utils/sessionPreferences';
+	import { captureCurrentRoom } from '$lib/utils/pendingRooms';
 	import { setSessionToken } from '$lib/utils/sessionToken';
 	import { onMount, tick } from 'svelte';
 
@@ -633,6 +634,7 @@
 			const resolvedRoomName =
 				lastRoomInputSource === 'code' ? requestRoomName : data.roomName || requestRoomName;
 			clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
+			captureCurrentRoom(resolvedRoomID, resolvedRoomName);
 			const roomPasswordHash = normalizedRoomPassword
 				? `#key=${encodeURIComponent(normalizedRoomPassword)}`
 				: '';

@@ -7,7 +7,21 @@
 	import { login } from '$lib/stores/auth';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const API_BASE = (() => {
+		const configured = API_BASE_RAW?.trim();
+		if (configured) {
+			return configured;
+		}
+		if (!browser) {
+			return 'http://localhost:8080';
+		}
+		const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+		const host = window.location.hostname;
+		if (host === 'localhost' || host === '127.0.0.1') {
+			return `${protocol}//${host}:8080`;
+		}
+		return window.location.origin;
+	})();
 
 	let email = '';
 	let password = '';
@@ -28,7 +42,10 @@
 
 	$: normalizedEmail = email.trim().toLowerCase();
 	$: normalizedUsername = normalizeAccountUsername(username);
-	$: canSubmit = normalizedEmail.length > 0 && password.trim().length > 0 && (!isRegisterMode || normalizedUsername.length > 0);
+	$: canSubmit =
+		normalizedEmail.length > 0 &&
+		password.trim().length > 0 &&
+		(!isRegisterMode || normalizedUsername.length > 0);
 	$: normalizedForgotEmail = forgotEmail.trim().toLowerCase();
 	$: normalizedForgotOtp = forgotOtp.replace(/\D+/g, '').slice(0, 6);
 	$: canForgotRequest = normalizedForgotEmail.length > 0;
@@ -117,7 +134,10 @@
 		};
 	}
 
-	function parseOAuthLocationPayload(rawHash: string, rawSearch: string): OAuthFragmentPayload | null {
+	function parseOAuthLocationPayload(
+		rawHash: string,
+		rawSearch: string
+	): OAuthFragmentPayload | null {
 		const trimmedHash = rawHash.trim();
 		if (trimmedHash) {
 			oauthDebugLog('OAuth fragment found. Attempting to parse payload.', {
@@ -141,37 +161,6 @@
 		return parseOAuthPayloadFromParams(new URLSearchParams(search), 'search');
 	}
 
-	async function trySessionCookieRedirect() {
-		if (!browser) {
-			return;
-		}
-		oauthDebugLog('No OAuth payload found. Probing backend auth session before staying on login page.');
-		try {
-			const response = await fetch(`${API_BASE}/api/dashboard/rooms`, {
-				method: 'GET',
-				credentials: 'include'
-			});
-			oauthDebugLog('Backend auth session probe completed.', {
-				status: response.status,
-				ok: response.ok
-			});
-			if (!response.ok) {
-				return;
-			}
-				const postAuthRedirect = requestedRedirect || '/dashboard';
-				oauthDebugLog('Backend session exists. Redirecting to dashboard.', {
-					postAuthRedirect
-				});
-				await goto(postAuthRedirect);
-				const expected = new URL(postAuthRedirect, window.location.origin);
-				if (window.location.pathname !== expected.pathname || window.location.search !== expected.search) {
-					window.location.assign(postAuthRedirect);
-				}
-		} catch (error: unknown) {
-			oauthDebugLog('Backend auth session probe failed.', { error });
-		}
-	}
-
 	onMount(() => {
 		if (!browser) {
 			return;
@@ -185,7 +174,9 @@
 			hashLength: rawHash.length
 		});
 
-		const hashParams = new URLSearchParams(rawHash.startsWith('#') ? rawHash.substring(1) : rawHash);
+		const hashParams = new URLSearchParams(
+			rawHash.startsWith('#') ? rawHash.substring(1) : rawHash
+		);
 		const oauthToken = hashParams.get('oauth_token')?.trim() || '';
 		const oauthUserID = hashParams.get('oauth_user_id')?.trim() || '';
 		const oauthUsername = hashParams.get('oauth_username')?.trim() || '';
@@ -201,10 +192,7 @@
 
 			const fallbackEmail = oauthEmail || 'oauth-user@local.invalid';
 			const displayName =
-				oauthUsername ||
-				oauthFullName ||
-				buildFallbackName(fallbackEmail) ||
-				'User';
+				oauthUsername || oauthFullName || buildFallbackName(fallbackEmail) || 'User';
 			login(oauthToken, {
 				id: oauthUserID || `oauth-${Date.now()}`,
 				email: fallbackEmail,
@@ -214,12 +202,12 @@
 			});
 
 			window.history.replaceState(null, '', window.location.pathname + window.location.search);
-			const postAuthRedirect = '/dashboard';
-			void goto(postAuthRedirect).then(() => {
-				const expected = new URL(postAuthRedirect, window.location.origin);
-				if (window.location.pathname !== expected.pathname || window.location.search !== expected.search) {
-					window.location.assign(postAuthRedirect);
-				}
+			const postAuthRedirect = requestedRedirect || '/dashboard';
+			void goto(postAuthRedirect).catch((error: unknown) => {
+				oauthDebugLog('Client navigation after immediate OAuth login failed.', {
+					redirectTarget: postAuthRedirect,
+					error
+				});
 			});
 			return;
 		}
@@ -227,7 +215,6 @@
 		const payload = parseOAuthLocationPayload(rawHash, rawSearch);
 		if (!payload) {
 			oauthDebugLog('No valid OAuth payload found. Staying on login page.');
-			void trySessionCookieRedirect();
 			return;
 		}
 
@@ -256,22 +243,7 @@
 			redirectTarget: postAuthRedirect,
 			requestedRedirect
 		});
-		void goto(postAuthRedirect).then(() => {
-			oauthDebugLog('Client navigation completed after OAuth login.', {
-				currentPath: window.location.pathname,
-				currentSearch: window.location.search
-			});
-			const expected = new URL(postAuthRedirect, window.location.origin);
-			if (window.location.pathname !== expected.pathname || window.location.search !== expected.search) {
-				oauthDebugLog('Current URL still does not match expected target. Forcing full-page navigation.', {
-					expectedPath: expected.pathname,
-					expectedSearch: expected.search,
-					actualPath: window.location.pathname,
-					actualSearch: window.location.search
-				});
-				window.location.assign(postAuthRedirect);
-			}
-		}).catch((error: unknown) => {
+		void goto(postAuthRedirect).catch((error: unknown) => {
 			oauthDebugLog('Client navigation after OAuth login failed.', {
 				redirectTarget: postAuthRedirect,
 				error
@@ -304,19 +276,17 @@
 				credentials: 'include',
 				body: JSON.stringify(payload)
 			});
-			const data = (await response.json().catch(() => null)) as
-				| {
-						error?: string;
-						token?: string;
-						user?: {
-							id?: string;
-							email?: string;
-							username?: string;
-							fullName?: string;
-							avatarUrl?: string;
-						};
-				  }
-				| null;
+			const data = (await response.json().catch(() => null)) as {
+				error?: string;
+				token?: string;
+				user?: {
+					id?: string;
+					email?: string;
+					username?: string;
+					fullName?: string;
+					avatarUrl?: string;
+				};
+			} | null;
 
 			if (!response.ok || !data?.token || !data.user?.id) {
 				authError = data?.error?.trim() || 'Unable to authenticate. Please retry.';
@@ -340,12 +310,6 @@
 
 			const postAuthRedirect = requestedRedirect || '/dashboard';
 			await goto(postAuthRedirect);
-			if (browser) {
-				const expected = new URL(postAuthRedirect, window.location.origin);
-				if (window.location.pathname !== expected.pathname || window.location.search !== expected.search) {
-					window.location.assign(postAuthRedirect);
-				}
-			}
 		} catch {
 			authError = 'Unable to reach the authentication service.';
 		} finally {
@@ -398,13 +362,11 @@
 				credentials: 'include',
 				body: JSON.stringify({ email: normalizedForgotEmail })
 			});
-			const data = (await response.json().catch(() => null)) as
-				| {
-						error?: string;
-						message?: string;
-						debugOtp?: string;
-				  }
-				| null;
+			const data = (await response.json().catch(() => null)) as {
+				error?: string;
+				message?: string;
+				debugOtp?: string;
+			} | null;
 
 			if (!response.ok) {
 				forgotError = data?.error?.trim() || 'Unable to request OTP right now.';
@@ -442,13 +404,11 @@
 					newPassword: forgotNewPassword
 				})
 			});
-			const data = (await response.json().catch(() => null)) as
-				| {
-						error?: string;
-						message?: string;
-						passwordUpdated?: boolean;
-				  }
-				| null;
+			const data = (await response.json().catch(() => null)) as {
+				error?: string;
+				message?: string;
+				passwordUpdated?: boolean;
+			} | null;
 
 			if (!response.ok) {
 				forgotError = data?.error?.trim() || 'Unable to verify OTP.';
@@ -655,7 +615,11 @@
 					{/if}
 				</div>
 
-				<button type="submit" class="btn-primary-action login-field" disabled={isSubmitting || !canSubmit}>
+				<button
+					type="submit"
+					class="btn-primary-action login-field"
+					disabled={isSubmitting || !canSubmit}
+				>
 					{#if isSubmitting}
 						{isRegisterMode ? 'Creating account...' : 'Signing in...'}
 					{:else}
@@ -666,7 +630,12 @@
 
 			<div class="separator"><span>or</span></div>
 
-			<button type="button" class="google-btn login-field" on:click={handleGoogleLogin} disabled={isSubmitting}>
+			<button
+				type="button"
+				class="google-btn login-field"
+				on:click={handleGoogleLogin}
+				disabled={isSubmitting}
+			>
 				<svg viewBox="0 0 24 24" aria-hidden="true">
 					<path
 						fill="#4285F4"

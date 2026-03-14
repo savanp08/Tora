@@ -1,7 +1,23 @@
-import { writable } from 'svelte/store';
+import { browser } from '$app/environment';
+import { get, writable } from 'svelte/store';
+import { authState } from '$lib/stores/auth';
 
 const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+const API_BASE = (() => {
+	const configured = API_BASE_RAW?.trim();
+	if (configured) {
+		return configured;
+	}
+	if (!browser) {
+		return 'http://localhost:8080';
+	}
+	const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+	const host = window.location.hostname;
+	if (host === 'localhost' || host === '127.0.0.1') {
+		return `${protocol}//${host}:8080`;
+	}
+	return window.location.origin;
+})();
 
 export type PersonalItemType = 'note' | 'reminder' | 'task';
 
@@ -40,6 +56,24 @@ type PersonalStatusResponse = {
 };
 
 export const personalItems = writable<PersonalItem[]>([]);
+
+function buildAuthHeaders(contentType = false) {
+	const headers: Record<string, string> = {};
+	if (contentType) {
+		headers['Content-Type'] = 'application/json';
+	}
+	if (!browser) {
+		return headers;
+	}
+
+	const fromStore = get(authState).token?.trim() || '';
+	const fromStorage = window.localStorage.getItem('converse.auth.token')?.trim() || '';
+	const token = fromStore || fromStorage;
+	if (token) {
+		headers.Authorization = `Bearer ${token}`;
+	}
+	return headers;
+}
 
 function dedupePersonalItemsById(items: PersonalItem[]) {
 	const seen = new Set<string>();
@@ -123,6 +157,7 @@ async function parseErrorMessage(response: Response) {
 export async function fetchItems() {
 	const response = await fetch(`${API_BASE}/api/personal/items`, {
 		method: 'GET',
+		headers: buildAuthHeaders(),
 		credentials: 'include'
 	});
 	if (!response.ok) {
@@ -141,7 +176,7 @@ export async function addItem(input: PersonalItemInput) {
 	const payload = sanitizeInput(input);
 	const response = await fetch(`${API_BASE}/api/personal/items`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: buildAuthHeaders(true),
 		credentials: 'include',
 		body: JSON.stringify(payload)
 	});
@@ -165,7 +200,7 @@ export async function addItemsBulk(inputs: PersonalItemInput[]) {
 	};
 	const response = await fetch(`${API_BASE}/api/personal/items/bulk`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: buildAuthHeaders(true),
 		credentials: 'include',
 		body: JSON.stringify(payload)
 	});
@@ -190,7 +225,7 @@ export async function updateStatus(itemId: string, status: string) {
 	}
 	const response = await fetch(`${API_BASE}/api/personal/items/${encodeURIComponent(normalizedItemID)}/status`, {
 		method: 'PUT',
-		headers: { 'Content-Type': 'application/json' },
+		headers: buildAuthHeaders(true),
 		credentials: 'include',
 		body: JSON.stringify({ status })
 	});
@@ -217,6 +252,7 @@ export async function deleteItem(itemId: string) {
 	}
 	const response = await fetch(`${API_BASE}/api/personal/items/${encodeURIComponent(normalizedItemID)}`, {
 		method: 'DELETE',
+		headers: buildAuthHeaders(),
 		credentials: 'include'
 	});
 	if (!response.ok) {

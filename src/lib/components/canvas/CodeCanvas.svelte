@@ -16,6 +16,8 @@
 	export let currentUser: { id: string; name: string; color: string };
 	export let isEphemeralRoom = true;
 	export let aiEnabled = true;
+	export let remoteSyncEnabled = true;
+	export let initialTerminalHeight = 200;
 
 	type ProjectFileEntry = {
 		path: string;
@@ -288,10 +290,10 @@ Rules:
 	let terminal: any = null;
 	let terminalFitAddon: any = null;
 	let terminalResizeObserver: ResizeObserver | null = null;
-	let terminalHeight = 200;
+	let terminalHeight = Math.max(180, Number(initialTerminalHeight) || 200);
 	let terminalResizeStartY = 0;
-	let terminalResizeStartHeight = 200;
-	let terminalExpandedHeight = 200;
+	let terminalResizeStartHeight = terminalHeight;
+	let terminalExpandedHeight = terminalHeight;
 	let terminalPanelCollapsed = false;
 	let activeTerminalPanelTab: TerminalPanelTab = 'out';
 	let terminalInputDraft = '';
@@ -485,7 +487,7 @@ Rules:
 	}
 
 	async function saveCanvasSnapshotNow(options?: { useBeacon?: boolean }) {
-		if (!roomId) {
+		if (!remoteSyncEnabled || !roomId) {
 			return false;
 		}
 		const snapshotBytes = createCanvasSnapshotBytes();
@@ -567,7 +569,7 @@ Rules:
 		}
 	}
 	function scheduleCanvasSnapshotSave() {
-		if (!ydoc || !roomId) {
+		if (!remoteSyncEnabled || !ydoc || !roomId) {
 			return;
 		}
 		snapshotDirty = true;
@@ -633,6 +635,7 @@ Rules:
 			}
 			void persistCurrentFileToFS();
 			if (
+				!remoteSyncEnabled ||
 				!ydoc ||
 				!roomId ||
 				typeof navigator === 'undefined' ||
@@ -651,7 +654,7 @@ Rules:
 	}
 
 	async function loadPersistedCanvasSnapshotFromServer() {
-		if (!roomId || !ydoc) {
+		if (!remoteSyncEnabled || !roomId || !ydoc) {
 			return;
 		}
 		let timeoutId: number | null = null;
@@ -2154,8 +2157,10 @@ Rules:
 	}
 
 	function stopTerminalResize() {
-		document.body.style.removeProperty('cursor');
-		document.body.style.removeProperty('user-select');
+		if (typeof document !== 'undefined') {
+			document.body.style.removeProperty('cursor');
+			document.body.style.removeProperty('user-select');
+		}
 		if (removeTerminalResizeListeners) {
 			removeTerminalResizeListeners();
 			removeTerminalResizeListeners = null;
@@ -2163,7 +2168,11 @@ Rules:
 	}
 
 	function startTerminalResize(event: PointerEvent) {
-		if (terminalPanelCollapsed) {
+		if (
+			terminalPanelCollapsed ||
+			typeof window === 'undefined' ||
+			typeof document === 'undefined'
+		) {
 			return;
 		}
 		terminalResizeStartY = event.clientY;
@@ -5423,6 +5432,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	onMount(async () => {
+		terminalHeight = Math.max(180, Number(initialTerminalHeight) || 200);
+		terminalResizeStartHeight = terminalHeight;
+		terminalExpandedHeight = terminalHeight;
 		executionManager = new ExecutionManager();
 		try {
 			canvasClientLog('init-start', { roomId });
@@ -5454,8 +5466,6 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			await configureMonacoWorkerEnvironment();
 			const monaco = await import('monaco-editor');
 			const Y = await import('yjs');
-			const { WebsocketProvider } = await import('y-websocket');
-			const { MonacoBinding } = await import('y-monaco');
 			monacoApi = monaco;
 			yjsApi = Y;
 
@@ -5557,58 +5567,63 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				window.clearInterval(periodicSnapshotInterval);
 				periodicSnapshotInterval = null;
 			}
-			periodicSnapshotInterval = window.setInterval(() => {
-				if (!snapshotDirty) {
-					return;
-				}
-				void saveCanvasSnapshotNow();
-			}, 15000);
+			if (remoteSyncEnabled) {
+				periodicSnapshotInterval = window.setInterval(() => {
+					if (!snapshotDirty) {
+						return;
+					}
+					void saveCanvasSnapshotNow();
+				}, 15000);
+			}
 			yFileTree = ydoc.getMap('fileTree');
-			await loadPersistedCanvasSnapshotFromServer();
-			const wsURL = canvasWebSocketURL();
-			canvasClientLog('provider-create', { roomId, wsURL });
-			provider = new WebsocketProvider(wsURL, roomId, ydoc);
-			awareness = provider.awareness;
-			syncLocalPresenceMetadata();
-			provider.on('status', (event: { status: string }) => {
-				canvasClientLog('provider-status', { roomId, status: event.status });
-				if (event.status === 'connected') {
-					attachProviderTransportDebugListener();
-					attachProviderSnapshotListener();
-					syncLocalPresenceMetadata();
-					syncLocalSelectionState();
-				}
-			});
-			provider.on('connection-error', () => {
-				canvasClientLog('provider-connection-error', { roomId });
-			});
-			provider.on('connection-close', (event: CloseEvent | null) => {
-				canvasClientLog('provider-connection-close', {
-					roomId,
-					code: event?.code ?? 0,
-					reason: event?.reason ?? '',
-					wasClean: event?.wasClean ?? false
+			if (remoteSyncEnabled) {
+				await loadPersistedCanvasSnapshotFromServer();
+				const { WebsocketProvider } = await import('y-websocket');
+				const wsURL = canvasWebSocketURL();
+				canvasClientLog('provider-create', { roomId, wsURL });
+				provider = new WebsocketProvider(wsURL, roomId, ydoc);
+				awareness = provider.awareness;
+				syncLocalPresenceMetadata();
+				provider.on('status', (event: { status: string }) => {
+					canvasClientLog('provider-status', { roomId, status: event.status });
+					if (event.status === 'connected') {
+						attachProviderTransportDebugListener();
+						attachProviderSnapshotListener();
+						syncLocalPresenceMetadata();
+						syncLocalSelectionState();
+					}
 				});
-			});
-			const defaultQueryAwarenessHandler = provider.messageHandlers[QUERY_AWARENESS_MESSAGE_TYPE];
-			provider.messageHandlers[QUERY_AWARENESS_MESSAGE_TYPE] = (
-				encoder: unknown,
-				decoder: unknown,
-				wsProvider: unknown,
-				emitSynced: boolean,
-				messageType: number
-			) => {
-				canvasClientLog('provider-query-awareness', { roomId });
-				if (typeof defaultQueryAwarenessHandler === 'function') {
-					defaultQueryAwarenessHandler(encoder, decoder, wsProvider, emitSynced, messageType);
-				}
-			};
-			awarenessChangeHandler = () => {
-				void handleAwarenessChange();
-			};
-			awareness.on('change', awarenessChangeHandler);
-			attachProviderTransportDebugListener();
-			attachProviderSnapshotListener();
+				provider.on('connection-error', () => {
+					canvasClientLog('provider-connection-error', { roomId });
+				});
+				provider.on('connection-close', (event: CloseEvent | null) => {
+					canvasClientLog('provider-connection-close', {
+						roomId,
+						code: event?.code ?? 0,
+						reason: event?.reason ?? '',
+						wasClean: event?.wasClean ?? false
+					});
+				});
+				const defaultQueryAwarenessHandler = provider.messageHandlers[QUERY_AWARENESS_MESSAGE_TYPE];
+				provider.messageHandlers[QUERY_AWARENESS_MESSAGE_TYPE] = (
+					encoder: unknown,
+					decoder: unknown,
+					wsProvider: unknown,
+					emitSynced: boolean,
+					messageType: number
+				) => {
+					canvasClientLog('provider-query-awareness', { roomId });
+					if (typeof defaultQueryAwarenessHandler === 'function') {
+						defaultQueryAwarenessHandler(encoder, decoder, wsProvider, emitSynced, messageType);
+					}
+				};
+				awarenessChangeHandler = () => {
+					void handleAwarenessChange();
+				};
+				awareness.on('change', awarenessChangeHandler);
+				attachProviderTransportDebugListener();
+				attachProviderSnapshotListener();
+			}
 			yFileTreeObserver = (event: any) => {
 				if (event.transaction.local) {
 					return;
@@ -5650,9 +5665,6 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				})();
 			};
 			yFileTree.observe(yFileTreeObserver);
-
-			// Keep type reference alive for dynamic import consistency.
-			void MonacoBinding;
 
 			await initFileSystem({ createDefaultIfEmpty: yFileTree.size === 0 });
 			if (yFileTree.size > 0) {

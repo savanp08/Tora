@@ -4,7 +4,21 @@
 	import toraLogo from '$lib/assets/tora-logo.svg';
 	import { normalizeUsernameInput } from '$lib/utils/homeJoin';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const API_BASE = (() => {
+		const configured = API_BASE_RAW?.trim();
+		if (configured) {
+			return configured;
+		}
+		if (!browser) {
+			return 'http://localhost:8080';
+		}
+		const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+		const host = window.location.hostname;
+		if (host === 'localhost' || host === '127.0.0.1') {
+			return `${protocol}//${host}:8080`;
+		}
+		return window.location.origin;
+	})();
 
 	export let isOpen: boolean = false;
 	let isRegisterMode: boolean = false;
@@ -31,7 +45,11 @@
 	$: switchPrompt = isRegisterMode
 		? 'Prefer quick access with just email + password?'
 		: 'Want to lock in a custom handle for this session?';
-	$: submitLabel = isLoading ? 'Processing...' : isRegisterMode ? 'Create Account' : 'Start Session';
+	$: submitLabel = isLoading
+		? 'Processing...'
+		: isRegisterMode
+			? 'Create Account'
+			: 'Start Session';
 
 	function clientLog(_event: string, _payload?: unknown) {
 		// Auth modal debug logs intentionally disabled.
@@ -142,10 +160,10 @@
 					maxlength="254"
 					required
 				/>
-					<small class="input-helper">Required. Sent lowercase after trimming spaces.</small>
-					{#if normalizedEmail !== '' && !hasValidEmail}
-						<small class="input-helper invalid">Use a valid address like you@example.com.</small>
-					{/if}
+				<small class="input-helper">Required. Sent lowercase after trimming spaces.</small>
+				{#if normalizedEmail !== '' && !hasValidEmail}
+					<small class="input-helper invalid">Use a valid address like you@example.com.</small>
+				{/if}
 			</div>
 
 			{#if isRegisterMode}
@@ -161,12 +179,12 @@
 						pattern="[A-Za-z0-9 _-]+"
 						required={isRegisterMode}
 					/>
-						<small class="input-helper">
-							Required for signup. Must be unique. Saved lowercase with underscores.
-						</small>
-						{#if username.trim() !== '' && normalizedUsername !== username.trim().toLowerCase()}
-							<small class="input-helper">Will be normalized to {normalizedUsername}.</small>
-						{/if}
+					<small class="input-helper">
+						Required for signup. Must be unique. Saved lowercase with underscores.
+					</small>
+					{#if username.trim() !== '' && normalizedUsername !== username.trim().toLowerCase()}
+						<small class="input-helper">Will be normalized to {normalizedUsername}.</small>
+					{/if}
 					{#if username.trim() !== '' && !hasSignupUsername}
 						<small class="input-helper invalid">
 							Username must include at least one letter or number.
@@ -335,7 +353,9 @@
 		font-weight: 600;
 		font-size: 1rem;
 		cursor: pointer;
-		transition: opacity 0.2s ease, transform 0.1s ease;
+		transition:
+			opacity 0.2s ease,
+			transform 0.1s ease;
 	}
 
 	.auth-modal button:hover:not(:disabled) {

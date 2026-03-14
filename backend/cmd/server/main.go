@@ -137,7 +137,7 @@ func main() {
 		!errors.Is(err, http.ErrServerClosed) {
 		log.Printf("Server shutdown encountered an error: %v", err)
 	}
-	handlers.DefaultExecutionManager.Shutdown()
+	handlers.ShutdownExecutionManager()
 
 	if listenErr != nil {
 		return

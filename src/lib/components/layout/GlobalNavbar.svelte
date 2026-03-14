@@ -72,6 +72,7 @@
 	$: pathname = $page.url.pathname;
 	$: isGhostMode = scrollY < 50 && !isHovered;
 	$: navLinks = buildNavLinks(pathname, $authState.isAuthenticated);
+	$: isIdeRoute = pathname === '/ide' || pathname.startsWith('/ide/');
 	$: hideDesktopNavForRoute = pathname.startsWith('/chat/') || pathname === '/rooms' || pathname.startsWith('/rooms/');
 	$: isPublicCompactNavRoute =
 		pathname === '/' ||
@@ -83,8 +84,8 @@
 		navLinks.find((link) => isPathActiveForNavLink(pathname, link.href))?.label ??
 		navLinks[0]?.label ??
 		'';
-	$: desktopNavVisible = innerWidth >= MOBILE_BREAKPOINT && !hideDesktopNavForRoute;
-	$: mobileFabVisible = innerWidth > 0 && !hideFloatingFabForRoute;
+	$: desktopNavVisible = innerWidth >= MOBILE_BREAKPOINT && !hideDesktopNavForRoute && !isIdeRoute;
+	$: mobileFabVisible = innerWidth > 0 && !hideFloatingFabForRoute && !isIdeRoute;
 	$: mobileMenuConfig = buildMobileMenu(pathname, $authState.isAuthenticated, chatQuickState);
 	$: mobileMenuTitle = mobileMenuConfig.title;
 	$: mobileMenuItems = mobileMenuConfig.items;

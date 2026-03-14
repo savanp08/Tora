@@ -47,7 +47,7 @@
 	<section class="jira-layout">
 		<aside class="sidebar">
 			<div class="sidebar-block">
-				<h2>Jira-Lite</h2>
+				<h2>Projects</h2>
 				<p>Switch workspaces instantly.</p>
 			</div>
 
