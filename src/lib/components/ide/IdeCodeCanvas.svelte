@@ -253,6 +253,7 @@
 	const PROMPT_CANCELLED_ERROR = 'canvas-prompt-cancelled';
 	const CANVAS_AI_DEVICE_ID_STORAGE_KEY = 'canvasAiDeviceId';
 	const CANVAS_IDE_SESSION_ID_STORAGE_KEY = 'canvasIdeSessionId';
+	const IDE_WORKSPACE_SESSION_STATE_STORAGE_PREFIX = 'converse_ide_canvas_workspace_v1';
 	const CANVAS_AI_SYSTEM_PROMPT = `You are an in-editor coding assistant for a collaborative canvas IDE.
 Return ONLY valid JSON with this exact shape:
 {
@@ -313,7 +314,6 @@ Rules:
 	const SIDEBAR_MAX_WIDTH = 560;
 	const SIDEBAR_EDITOR_MIN_WIDTH = 340;
 	const IMPORT_MENU_VIEWPORT_PADDING_PX = 10;
-	const IMPORT_MENU_ANCHOR_GAP_PX = 6;
 	const IMPORT_MENU_MAX_WIDTH_PX = 360;
 	const IMPORT_MENU_MAX_HEIGHT_PX = 420;
 	const SMART_INPUT_MAX_FIELDS = 12;
@@ -462,10 +462,10 @@ Rules:
 	let suppressNativeExplorerContextMenuUntil = 0;
 	let importZipInput: HTMLInputElement | null = null;
 	let importMenuElement: HTMLDivElement | null = null;
+	let importMenuAlign: 'left' | 'right' = 'right';
+	let importMenuDirection: 'down' | 'up' = 'down';
 	let importMenuMaxWidthPx = IMPORT_MENU_MAX_WIDTH_PX;
 	let importMenuMaxHeightPx = IMPORT_MENU_MAX_HEIGHT_PX;
-	let importMenuLeftPx = IMPORT_MENU_VIEWPORT_PADDING_PX;
-	let importMenuTopPx = IMPORT_MENU_VIEWPORT_PADDING_PX;
 	let languageMenuElement: HTMLDivElement | null = null;
 	let sidebarElement: HTMLElement | null = null;
 	let isSidebarDragOver = false;
@@ -495,6 +495,7 @@ Rules:
 	let filePersistTimeout: number | null = null;
 	let periodicSnapshotInterval: number | null = null;
 	let snapshotDirty = false;
+	let ideWorkspaceStateReady = false;
 	let executionManager: ExecutionManager | null = null;
 	let activeExecutionHandle: ExecutionRunHandle | null = null;
 	let removeExecutionOutputSubscription: (() => void) | null = null;
@@ -761,6 +762,7 @@ Rules:
 				saveTimeout = null;
 			}
 			void persistCurrentFileToFS();
+			persistIdeWorkspaceSessionState();
 			if (
 				!remoteSyncEnabled ||
 				!ydoc ||
@@ -1124,7 +1126,10 @@ Rules:
 	}
 
 	function canUseLanguagePicker() {
-		return Boolean(vfs);
+		if (requestScope === 'ide') {
+			return true;
+		}
+		return Boolean(currentFileEntry() ?? firstFileEntry());
 	}
 
 	function positionImportMenu() {
@@ -1144,47 +1149,32 @@ Rules:
 			220,
 			Math.min(IMPORT_MENU_MAX_WIDTH_PX, viewportWidth - horizontalPadding * 2)
 		);
-		importMenuMaxWidthPx = Math.max(1, Math.floor(viewportWidth - horizontalPadding * 2));
-		const measuredMenuWidth = Math.max(
-			1,
-			Math.min(
-				importMenuMaxWidthPx,
-				Math.max(desiredWidth, dropdown.offsetWidth, dropdown.scrollWidth)
-			)
-		);
-		const rightAlignedLeft = anchorRect.right - measuredMenuWidth;
-		const leftAlignedLeft = anchorRect.left;
-		const hasSpaceRightAligned =
-			rightAlignedLeft >= horizontalPadding &&
-			rightAlignedLeft + measuredMenuWidth <= viewportWidth - horizontalPadding;
-		const preferredLeft = hasSpaceRightAligned ? rightAlignedLeft : leftAlignedLeft;
-		importMenuLeftPx = Math.max(
-			horizontalPadding,
-			Math.min(viewportWidth - measuredMenuWidth - horizontalPadding, preferredLeft)
-		);
+		const leftAlignedAvailableWidth = viewportWidth - anchorRect.left - horizontalPadding;
+		const rightAlignedAvailableWidth = anchorRect.right - horizontalPadding;
+		let nextAlign: 'left' | 'right' = 'right';
+		if (
+			rightAlignedAvailableWidth < desiredWidth &&
+			leftAlignedAvailableWidth > rightAlignedAvailableWidth
+		) {
+			nextAlign = 'left';
+		}
+		importMenuAlign = nextAlign;
+		const maxWidthForAlignment =
+			nextAlign === 'left' ? leftAlignedAvailableWidth : rightAlignedAvailableWidth;
+		importMenuMaxWidthPx = Math.max(1, Math.min(desiredWidth, Math.floor(maxWidthForAlignment)));
 
-		const availableBelow =
-			viewportHeight - anchorRect.bottom - verticalPadding - IMPORT_MENU_ANCHOR_GAP_PX;
-		const availableAbove = anchorRect.top - verticalPadding - IMPORT_MENU_ANCHOR_GAP_PX;
+		const availableBelow = viewportHeight - anchorRect.bottom - verticalPadding;
+		const availableAbove = anchorRect.top - verticalPadding;
 		const measuredMenuHeight = Math.max(dropdown.offsetHeight, dropdown.scrollHeight);
-		const menuDirection: 'down' | 'up' =
-			availableBelow < measuredMenuHeight && availableAbove > availableBelow ? 'up' : 'down';
-		const maxHeightForDirection = menuDirection === 'up' ? availableAbove : availableBelow;
+		let nextDirection: 'down' | 'up' = 'down';
+		if (availableBelow < measuredMenuHeight && availableAbove > availableBelow) {
+			nextDirection = 'up';
+		}
+		importMenuDirection = nextDirection;
+		const maxHeightForDirection = nextDirection === 'up' ? availableAbove : availableBelow;
 		importMenuMaxHeightPx = Math.max(
 			1,
 			Math.min(IMPORT_MENU_MAX_HEIGHT_PX, Math.floor(maxHeightForDirection))
-		);
-		const effectiveMenuHeight = Math.min(
-			Math.max(1, measuredMenuHeight),
-			importMenuMaxHeightPx
-		);
-		const preferredTop =
-			menuDirection === 'up'
-				? anchorRect.top - effectiveMenuHeight - IMPORT_MENU_ANCHOR_GAP_PX
-				: anchorRect.bottom + IMPORT_MENU_ANCHOR_GAP_PX;
-		importMenuTopPx = Math.max(
-			verticalPadding,
-			Math.min(viewportHeight - effectiveMenuHeight - verticalPadding, preferredTop)
 		);
 	}
 
@@ -4985,6 +4975,157 @@ Rules:
 		return generated;
 	}
 
+	function resolveIdeWorkspaceSessionStateStorageKey() {
+		const normalizedRoomID = normalizeProjectName(roomId);
+		const suffix = normalizedRoomID || resolveCanvasIDESessionID() || 'default';
+		return `${IDE_WORKSPACE_SESSION_STATE_STORAGE_PREFIX}:${suffix}`;
+	}
+
+	function persistIdeWorkspaceSessionState() {
+		if (
+			requestScope !== 'ide' ||
+			!ideWorkspaceStateReady ||
+			typeof window === 'undefined'
+		) {
+			return;
+		}
+		try {
+			const filePaths = new Set(
+				fileTree
+					.filter((entry) => !entry.isDir)
+					.map((entry) => normalizeProjectName(entry.relativePath || entry.name))
+					.filter((path): path is string => Boolean(path))
+			);
+			const directoryPaths = new Set(
+				fileTree
+					.filter((entry) => entry.isDir)
+					.map((entry) => normalizeProjectName(entry.relativePath || entry.name))
+					.filter((path): path is string => Boolean(path))
+			);
+			const normalizedOpenTabs = Array.from(
+				new Set(
+					openTabs
+						.map((tabPath) => normalizeProjectName(tabPath))
+						.filter(
+							(tabPath): tabPath is string =>
+								Boolean(tabPath) &&
+								!isCanvasAIDiffTabPath(tabPath) &&
+								filePaths.has(tabPath)
+						)
+				)
+			);
+			let normalizedCurrentFile = normalizeProjectName(currentFile);
+			if (
+				!normalizedCurrentFile ||
+				!filePaths.has(normalizedCurrentFile) ||
+				isCanvasAIDiffTabPath(normalizedCurrentFile)
+			) {
+				normalizedCurrentFile = normalizedOpenTabs[normalizedOpenTabs.length - 1] || '';
+			}
+			if (normalizedCurrentFile && !normalizedOpenTabs.includes(normalizedCurrentFile)) {
+				normalizedOpenTabs.push(normalizedCurrentFile);
+			}
+			const expandedDirectoryState: Record<string, boolean> = {};
+			for (const directoryPath of directoryPaths) {
+				if (expandedDirectories[directoryPath]) {
+					expandedDirectoryState[directoryPath] = true;
+				}
+			}
+			const storageKey = resolveIdeWorkspaceSessionStateStorageKey();
+			if (
+				!normalizedCurrentFile &&
+				normalizedOpenTabs.length === 0 &&
+				Object.keys(expandedDirectoryState).length === 0
+			) {
+				window.sessionStorage.removeItem(storageKey);
+				return;
+			}
+			window.sessionStorage.setItem(
+				storageKey,
+				JSON.stringify({
+					currentFile: normalizedCurrentFile,
+					openTabs: normalizedOpenTabs,
+					expandedDirectories: expandedDirectoryState,
+					updatedAt: Date.now()
+				})
+			);
+		} catch {
+			// Ignore sessionStorage quota/availability issues in IDE session mode.
+		}
+	}
+
+	function restoreIdeWorkspaceSessionState() {
+		if (requestScope !== 'ide' || typeof window === 'undefined') {
+			return false;
+		}
+		const storageKey = resolveIdeWorkspaceSessionStateStorageKey();
+		const raw = window.sessionStorage.getItem(storageKey);
+		if (!raw) {
+			return false;
+		}
+		try {
+			const parsed = JSON.parse(raw) as Record<string, unknown>;
+			const filePaths = new Set(
+				fileTree
+					.filter((entry) => !entry.isDir)
+					.map((entry) => normalizeProjectName(entry.relativePath || entry.name))
+					.filter((path): path is string => Boolean(path))
+			);
+			const directoryPaths = new Set(
+				fileTree
+					.filter((entry) => entry.isDir)
+					.map((entry) => normalizeProjectName(entry.relativePath || entry.name))
+					.filter((path): path is string => Boolean(path))
+			);
+			const parsedOpenTabs = Array.isArray(parsed.openTabs) ? parsed.openTabs : [];
+			const normalizedOpenTabs = Array.from(
+				new Set(
+					parsedOpenTabs
+						.map((value) => normalizeProjectName(String(value || '')))
+						.filter(
+							(path): path is string =>
+								Boolean(path) &&
+								!isCanvasAIDiffTabPath(path) &&
+								filePaths.has(path)
+						)
+				)
+			);
+			const rawCurrentFile =
+				typeof parsed.currentFile === 'string' ? parsed.currentFile : '';
+			let normalizedCurrentFile = normalizeProjectName(rawCurrentFile);
+			if (!normalizedCurrentFile || !filePaths.has(normalizedCurrentFile)) {
+				normalizedCurrentFile = normalizedOpenTabs[normalizedOpenTabs.length - 1] || '';
+			}
+			if (normalizedCurrentFile && !normalizedOpenTabs.includes(normalizedCurrentFile)) {
+				normalizedOpenTabs.push(normalizedCurrentFile);
+			}
+			const parsedExpandedDirectories =
+				parsed.expandedDirectories &&
+				typeof parsed.expandedDirectories === 'object' &&
+				!Array.isArray(parsed.expandedDirectories)
+					? (parsed.expandedDirectories as Record<string, unknown>)
+					: {};
+			const nextExpandedDirectories: Record<string, boolean> = {};
+			for (const directoryPath of directoryPaths) {
+				nextExpandedDirectories[directoryPath] = Boolean(parsedExpandedDirectories[directoryPath]);
+			}
+			if (normalizedCurrentFile) {
+				expandedDirectories = ensureExpandedDirectoriesForPath(
+					normalizedCurrentFile,
+					nextExpandedDirectories
+				);
+			} else {
+				expandedDirectories = nextExpandedDirectories;
+			}
+			openTabs = normalizedOpenTabs;
+			currentFile = normalizedCurrentFile;
+			return Boolean(normalizedCurrentFile || normalizedOpenTabs.length > 0);
+		} catch {
+			window.sessionStorage.removeItem(storageKey);
+			return false;
+		}
+	}
+
 	function stripCodeFences(rawResponse: string) {
 		let normalized = String(rawResponse || '').replace(/\r\n/g, '\n').trim();
 		if (!normalized) {
@@ -6676,7 +6817,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			return;
 		}
 		if (!target || target.isDir) {
-			await createLanguageFileFromDefault(option, '');
+			if (requestScope === 'ide') {
+				await createLanguageFileFromDefault(option, '');
+				return;
+			}
+			fileExplorerError = 'Open a file before choosing a language';
 			return;
 		}
 
@@ -7103,8 +7248,16 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		});
 	}
 
-	$: if (!canUseLanguagePicker() && showLanguageMenu) {
+	$: if (!(currentFileEntry() ?? firstFileEntry()) && showLanguageMenu) {
 		closeLanguageMenu();
+	}
+
+	$: if (requestScope === 'ide' && ideWorkspaceStateReady) {
+		currentFile;
+		openTabs;
+		expandedDirectories;
+		fileTree.length;
+		persistIdeWorkspaceSessionState();
 	}
 
 	$: if (activeTerminalPanelTab === 'smart') {
@@ -7492,7 +7645,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				);
 			}
 			await ensureWorkspaceHasAtLeastOneFile();
-			if (!currentFile) {
+			const restoredWorkspaceState = restoreIdeWorkspaceSessionState();
+			ideWorkspaceStateReady = true;
+			if (!restoredWorkspaceState && !currentFile) {
 				selectInitialFileFromTree();
 			}
 			if (currentFile) {
@@ -7519,6 +7674,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 	onDestroy(() => {
 		void persistCurrentFileToFS();
+		persistIdeWorkspaceSessionState();
 		canvasAIAbortController?.abort();
 		canvasAIAbortController = null;
 		if (activeExecutionHandle && executionManager) {
@@ -7761,8 +7917,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 							{#if showImportMenu}
 								<div
 									class="import-menu-dropdown"
-									style:left={`${importMenuLeftPx}px`}
-									style:top={`${importMenuTopPx}px`}
+									class:align-left={importMenuAlign === 'left'}
+									class:align-right={importMenuAlign === 'right'}
+									class:flip-vertical={importMenuDirection === 'up'}
 									style:max-width={`${importMenuMaxWidthPx}px`}
 									style:max-height={`${importMenuMaxHeightPx}px`}
 									role="menu"
@@ -9525,8 +9682,10 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	.import-menu-dropdown {
-		position: fixed;
-		z-index: 140;
+		position: absolute;
+		top: calc(100% + 0.35rem);
+		right: 0;
+		z-index: 20;
 		width: min(19rem, calc(100vw - 1.4rem));
 		padding: 0.45rem;
 		display: flex;
@@ -9538,6 +9697,21 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34);
 		overflow: auto;
 		overscroll-behavior: contain;
+	}
+
+	.import-menu-dropdown.align-left {
+		left: 0;
+		right: auto;
+	}
+
+	.import-menu-dropdown.align-right {
+		right: 0;
+		left: auto;
+	}
+
+	.import-menu-dropdown.flip-vertical {
+		top: auto;
+		bottom: calc(100% + 0.35rem);
 	}
 
 	.import-menu-action {

@@ -6503,6 +6503,12 @@
 	}
 </script>
 
+<svelte:head>
+	<title>Room | Tora</title>
+	<meta name="robots" content="noindex, nofollow, noarchive" />
+	<meta name="googlebot" content="noindex, nofollow, noarchive" />
+</svelte:head>
+
 {#if showToast}
 	<div class="toast" role="status" aria-live="polite">{toastMessage}</div>
 {/if}

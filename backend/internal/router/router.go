@@ -54,6 +54,8 @@ func New(
 			"X-Username",
 			"X-Device-Id",
 			"X-Device-ID",
+			"X-Ide-Mode",
+			"X-Ide-Session-Id",
 			"X-Room-Id",
 		},
 		ExposedHeaders:   []string{"Link"},
@@ -143,6 +145,9 @@ func New(
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(middleware.Timeout(60 * time.Second))
+		r.Post("/ide/execute", handlers.HandleIDECodeExecution)
+		r.Post("/ide/ai/chat", handlers.HandleIDEPrivateAIChat)
+		r.Post("/ide/ai/private-chat", handlers.HandleIDEPrivateAIChat)
 		r.Post("/execute", handlers.HandleCodeExecution)
 		r.Post("/ai/chat", handlers.HandlePrivateAIChat)
 		r.Post("/ai/private-chat", handlers.HandlePrivateAIChat)

@@ -10,6 +10,23 @@
 	}
 </script>
 
+<svelte:head>
+	<title>Tora Workspace | Project Management and Team Collaboration</title>
+	<meta
+		name="description"
+		content="Tora Workspace helps teams collaborate with temporary or persistent rooms, project task management, breakout discussions, and real-time coordination."
+	/>
+	<meta
+		property="og:title"
+		content="Tora Workspace | Project Management and Team Collaboration"
+	/>
+	<meta
+		property="og:description"
+		content="Plan projects, communicate in real time, and keep work moving with integrated tasks and room-based collaboration."
+	/>
+	<meta name="twitter:card" content="summary_large_image" />
+</svelte:head>
+
 <div class="home-container">
 	<MonochromeRoomBackground seed="tora-home-launch" />
 

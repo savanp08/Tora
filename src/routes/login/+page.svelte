@@ -440,6 +440,12 @@
 
 <svelte:head>
 	<title>Login | Converse</title>
+	<meta
+		name="description"
+		content="Sign in to your persistent Tora account workspace and settings."
+	/>
+	<meta name="robots" content="noindex, nofollow, noarchive" />
+	<meta name="googlebot" content="noindex, nofollow, noarchive" />
 </svelte:head>
 
 <main class="login-shell">

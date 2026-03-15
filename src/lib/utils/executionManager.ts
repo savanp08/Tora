@@ -54,7 +54,8 @@ type RemoteExecutionStrategy = {
 		language: string,
 		signal: AbortSignal,
 		stdin: string,
-		workspace: NormalizedExecutionWorkspace
+		workspace: NormalizedExecutionWorkspace,
+		requestOptions?: RemoteExecutionRequestOptions
 	) => Promise<RemoteExecutionPayload>;
 };
 
@@ -110,11 +111,19 @@ export type ExecutionRunHandle = {
 
 export type ExecutionWorkspaceFile = ExecutionArtifact;
 export type ExecutionArtifactsCallback = (files: ExecutionWorkspaceFile[]) => void;
+export type ExecutionRequestHeaders = Record<string, string>;
 
 export type ExecutionWorkspaceInput = {
 	activeFile: string;
 	workspaceFiles: ExecutionWorkspaceFile[];
 	onArtifacts?: ExecutionArtifactsCallback;
+	endpoint?: string;
+	requestHeaders?: ExecutionRequestHeaders;
+};
+
+type RemoteExecutionRequestOptions = {
+	endpoint?: string;
+	requestHeaders?: ExecutionRequestHeaders;
 };
 
 type NormalizedExecutionWorkspace = {
@@ -609,6 +618,7 @@ export async function executeCodeWithRouter(
 		pythonWorker?: Worker;
 		signal?: AbortSignal;
 		endpoint?: string;
+		requestHeaders?: ExecutionRequestHeaders;
 		stdin?: string;
 		activeFile?: string;
 		workspaceFiles?: ExecutionWorkspaceFile[];
@@ -706,6 +716,10 @@ export async function executeCodeWithRouter(
 		normalizedLanguage === 'rs'
 	) {
 		const endpoint = (options?.endpoint || EXECUTE_ENDPOINT).trim() || EXECUTE_ENDPOINT;
+		const requestHeaders: Record<string, string> = {
+			'Content-Type': 'application/json',
+			...(options?.requestHeaders || {})
+		};
 		const requestPayload = buildExecutionPayload(
 			normalizedLanguage,
 			options?.stdin || '',
@@ -714,9 +728,7 @@ export async function executeCodeWithRouter(
 		);
 		const response = await fetch(endpoint, {
 			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json'
-			},
+			headers: requestHeaders,
 			body: JSON.stringify(requestPayload),
 			signal
 		});
@@ -777,36 +789,36 @@ export class ExecutionManager {
 				mode: 'remote',
 				language: 'cpp',
 				aliases: ['c++'],
-				runRemote: (language, signal, stdin, workspace) =>
-					this.runRemote(language, signal, stdin, workspace)
+				runRemote: (language, signal, stdin, workspace, requestOptions) =>
+					this.runRemote(language, signal, stdin, workspace, requestOptions)
 			},
 			{
 				mode: 'remote',
 				language: 'c',
 				aliases: [],
-				runRemote: (language, signal, stdin, workspace) =>
-					this.runRemote(language, signal, stdin, workspace)
+				runRemote: (language, signal, stdin, workspace, requestOptions) =>
+					this.runRemote(language, signal, stdin, workspace, requestOptions)
 			},
 			{
 				mode: 'remote',
 				language: 'java',
 				aliases: [],
-				runRemote: (language, signal, stdin, workspace) =>
-					this.runRemote(language, signal, stdin, workspace)
+				runRemote: (language, signal, stdin, workspace, requestOptions) =>
+					this.runRemote(language, signal, stdin, workspace, requestOptions)
 			},
 			{
 				mode: 'remote',
 				language: 'go',
 				aliases: ['golang'],
-				runRemote: (language, signal, stdin, workspace) =>
-					this.runRemote(language, signal, stdin, workspace)
+				runRemote: (language, signal, stdin, workspace, requestOptions) =>
+					this.runRemote(language, signal, stdin, workspace, requestOptions)
 			},
 			{
 				mode: 'remote',
 				language: 'rust',
 				aliases: ['rs'],
-				runRemote: (language, signal, stdin, workspace) =>
-					this.runRemote(language, signal, stdin, workspace)
+				runRemote: (language, signal, stdin, workspace, requestOptions) =>
+					this.runRemote(language, signal, stdin, workspace, requestOptions)
 			}
 		];
 
@@ -899,7 +911,11 @@ export class ExecutionManager {
 				normalizedLanguage,
 				abortController.signal,
 				stdin,
-				workspace
+				workspace,
+				{
+					endpoint: workspaceInput?.endpoint,
+					requestHeaders: workspaceInput?.requestHeaders
+				}
 			);
 		}
 
@@ -1110,10 +1126,17 @@ export class ExecutionManager {
 		language: string,
 		signal: AbortSignal,
 		stdin: string,
-		workspace: NormalizedExecutionWorkspace
+		workspace: NormalizedExecutionWorkspace,
+		requestOptions?: RemoteExecutionRequestOptions
 	) {
 		try {
-			const remotePayload = await strategy.runRemote(language, signal, stdin, workspace);
+			const remotePayload = await strategy.runRemote(
+				language,
+				signal,
+				stdin,
+				workspace,
+				requestOptions
+			);
 			if (context.settled) {
 				return;
 			}
@@ -1205,16 +1228,20 @@ export class ExecutionManager {
 		language: string,
 		signal: AbortSignal,
 		stdin: string,
-		workspace: NormalizedExecutionWorkspace
+		workspace: NormalizedExecutionWorkspace,
+		requestOptions?: RemoteExecutionRequestOptions
 	) {
 		const requestPayload = buildExecutionPayload(language, stdin, workspace.mainFile, workspace.files);
+		const endpoint = (requestOptions?.endpoint || EXECUTE_ENDPOINT).trim() || EXECUTE_ENDPOINT;
+		const requestHeaders: Record<string, string> = {
+			'Content-Type': 'application/json',
+			...(requestOptions?.requestHeaders || {})
+		};
 		let response: Response;
 		try {
-			response = await fetch(EXECUTE_ENDPOINT, {
+			response = await fetch(endpoint, {
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
+				headers: requestHeaders,
 				body: JSON.stringify(requestPayload),
 				signal
 			});

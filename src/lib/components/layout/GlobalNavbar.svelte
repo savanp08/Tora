@@ -85,7 +85,7 @@
 		navLinks[0]?.label ??
 		'';
 	$: desktopNavVisible = innerWidth >= MOBILE_BREAKPOINT && !hideDesktopNavForRoute && !isIdeRoute;
-	$: mobileFabVisible = innerWidth > 0 && !hideFloatingFabForRoute && !isIdeRoute;
+	$: mobileFabVisible = innerWidth > 0 && !hideFloatingFabForRoute;
 	$: mobileMenuConfig = buildMobileMenu(pathname, $authState.isAuthenticated, chatQuickState);
 	$: mobileMenuTitle = mobileMenuConfig.title;
 	$: mobileMenuItems = mobileMenuConfig.items;

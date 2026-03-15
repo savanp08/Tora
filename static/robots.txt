@@ -1,3 +1,10 @@
-# allow crawling everything by default
 User-agent: *
-Disallow:
+Allow: /
+Disallow: /api/
+Disallow: /chat/
+Disallow: /dashboard
+Disallow: /rooms
+Disallow: /tasks
+Disallow: /login
+
+Sitemap: /sitemap.xml

@@ -1,12 +1,50 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import CodeCanvas from '$lib/components/canvas/CodeCanvas.svelte';
-	import FreeDrawBoard from '$lib/components/ide/FreeDrawBoard.svelte';
+	import { isDarkMode } from '$lib/store';
+	import IdeCodeCanvas from '$lib/components/ide/IdeCodeCanvas.svelte';
+	import IdeDrawBoard from '$lib/components/ide/IdeDrawBoard.svelte';
+	import { buildSoftwareApplicationSchema } from '$lib/utils/seo';
 
 	type WorkspaceMode = 'ide' | 'draw';
 
-	const ideSessionId = `ide-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const IDE_SESSION_STORAGE_KEY = 'canvasIdeSessionId';
+	const IDE_WORKSPACE_MODE_STORAGE_KEY = 'converse_ide_workspace_mode';
+
+	function resolveIdeSessionId() {
+		if (!browser) {
+			return 'ide-local-session';
+		}
+		const existing = (window.sessionStorage.getItem(IDE_SESSION_STORAGE_KEY) || '').trim();
+		if (existing) {
+			return `ide-local-${existing}`;
+		}
+		const generated =
+			typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+				? crypto.randomUUID()
+				: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		window.sessionStorage.setItem(IDE_SESSION_STORAGE_KEY, generated);
+		return `ide-local-${generated}`;
+	}
+
+	function resolveInitialWorkspaceMode(): WorkspaceMode {
+		if (!browser) {
+			return 'ide';
+		}
+		const stored = (window.sessionStorage.getItem(IDE_WORKSPACE_MODE_STORAGE_KEY) || '')
+			.trim()
+			.toLowerCase();
+		return stored === 'draw' ? 'draw' : 'ide';
+	}
+
+	const ideSessionId = resolveIdeSessionId();
+	const ideDrawSessionId = `${ideSessionId}-draw`;
+	const ideSchemaJson = buildSoftwareApplicationSchema({
+		name: 'Tora AI IDE and Online Code Runner',
+		description:
+			'Browser IDE with AI-assisted coding, online code execution, and collaborative draw board.',
+		url: '/ide'
+	});
 	const ideUser = {
 		id: 'ide-guest',
 		name: 'IDE Guest',
@@ -14,38 +52,94 @@
 	};
 
 	let workspaceMode: WorkspaceMode = 'ide';
+	let workspaceModeReady = false;
+
+	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
+
+	function applyTheme(preference: 'light' | 'dark') {
+		const nextDarkMode = preference === 'dark';
+		isDarkMode.set(nextDarkMode);
+		if (browser) {
+			window.localStorage.setItem(THEME_PREFERENCE_KEY, preference);
+		}
+	}
 
 	onMount(() => {
 		if (!browser) {
 			return;
 		}
+		workspaceMode = resolveInitialWorkspaceMode();
+		workspaceModeReady = true;
 		document.body.classList.add('ide-lab-mode');
 		return () => {
 			document.body.classList.remove('ide-lab-mode');
 		};
 	});
+
+	$: if (browser && workspaceModeReady) {
+		window.sessionStorage.setItem(IDE_WORKSPACE_MODE_STORAGE_KEY, workspaceMode);
+	}
 </script>
 
-<section class="ide-lab">
+<svelte:head>
+	<title>AI IDE Online | Run C++ and Other Languages | Tora</title>
+	<meta
+		name="description"
+		content="AI-assisted online IDE to run C++, Python, JavaScript and more with code canvas, terminal, and free draw board."
+	/>
+	<meta property="og:title" content="AI IDE Online | Run C++ and Other Languages | Tora" />
+	<meta
+		property="og:description"
+		content="Execute code online with AI assistance, collaborative tools, and a full-screen IDE workflow."
+	/>
+	<meta name="twitter:card" content="summary_large_image" />
+	<script type="application/ld+json">
+		{@html ideSchemaJson}
+	</script>
+</svelte:head>
+
+<section class="ide-lab" class:theme-light={!$isDarkMode}>
 	<div class="ide-main">
 		<header class="ide-toolbar">
-			<div class="mode-toggle">
-				<button
-					type="button"
-					class="mode-btn"
-					class:is-active={workspaceMode === 'ide'}
-					on:click={() => (workspaceMode = 'ide')}
-				>
-					IDE
-				</button>
-				<button
-					type="button"
-					class="mode-btn"
-					class:is-active={workspaceMode === 'draw'}
-					on:click={() => (workspaceMode = 'draw')}
-				>
-					Free Draw
-				</button>
+			<div class="toolbar-left">
+				<div class="mode-toggle">
+					<button
+						type="button"
+						class="mode-btn"
+						class:is-active={workspaceMode === 'ide'}
+						on:click={() => (workspaceMode = 'ide')}
+					>
+						IDE
+					</button>
+					<button
+						type="button"
+						class="mode-btn"
+						class:is-active={workspaceMode === 'draw'}
+						on:click={() => (workspaceMode = 'draw')}
+					>
+						Free Draw
+					</button>
+				</div>
+				<div class="theme-toggle" role="group" aria-label="Theme">
+					<button
+						type="button"
+						class="theme-btn"
+						class:is-active={!$isDarkMode}
+						on:click={() => applyTheme('light')}
+						aria-pressed={!$isDarkMode}
+					>
+						Light
+					</button>
+					<button
+						type="button"
+						class="theme-btn"
+						class:is-active={$isDarkMode}
+						on:click={() => applyTheme('dark')}
+						aria-pressed={$isDarkMode}
+					>
+						Dark
+					</button>
+				</div>
 			</div>
 			<p class="mode-note">
 				Local-only session. No backend save or sync.
@@ -54,15 +148,26 @@
 
 		<div class="ide-stage">
 			{#if workspaceMode === 'ide'}
-				<CodeCanvas
+				<IdeCodeCanvas
 					roomId={ideSessionId}
 					currentUser={ideUser}
 					isEphemeralRoom={true}
+					requestScope="ide"
 					remoteSyncEnabled={false}
 					initialTerminalHeight={320}
 				/>
 			{:else}
-				<FreeDrawBoard />
+				<IdeDrawBoard
+					roomId={ideDrawSessionId}
+					isDarkMode={$isDarkMode}
+					sessionOnly={true}
+					canEdit={true}
+					canModerateBoard={true}
+					currentUserId={ideUser.id}
+					currentUsername={ideUser.name}
+					isEphemeralRoom={true}
+					on:close={() => (workspaceMode = 'ide')}
+				/>
 			{/if}
 		</div>
 	</div>
@@ -70,11 +175,11 @@
 	<aside class="ide-ad-rail" aria-label="Sponsored panel placeholder">
 		<div class="ad-card">
 			<h2>Ad Slot</h2>
-			<p>Reserved area for sponsor modules or promo cards.</p>
+			<p>Primary Area for sponsor modules or promo cards.</p>
 		</div>
 		<div class="ad-card muted">
-			<h3>Secondary Slot</h3>
-			<p>Keep this rail for contextual ads or announcements.</p>
+			<h3>Second Slot</h3>
+			<p>contextual ads or announcements.</p>
 		</div>
 	</aside>
 </section>
@@ -117,6 +222,13 @@
 		gap: 0.4rem;
 	}
 
+	.toolbar-left {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.52rem;
+		flex-wrap: wrap;
+	}
+
 	.mode-btn {
 		border: 1px solid rgba(148, 163, 184, 0.42);
 		background: rgba(30, 41, 59, 0.86);
@@ -136,6 +248,36 @@
 	.mode-btn.is-active {
 		border-color: rgba(34, 197, 94, 0.75);
 		background: rgba(22, 163, 74, 0.24);
+	}
+
+	.theme-toggle {
+		display: inline-flex;
+		gap: 0.34rem;
+		padding: 0.2rem;
+		border: 1px solid rgba(148, 163, 184, 0.28);
+		border-radius: 0.58rem;
+		background: rgba(15, 23, 42, 0.46);
+	}
+
+	.theme-btn {
+		border: 1px solid rgba(148, 163, 184, 0.36);
+		background: rgba(30, 41, 59, 0.66);
+		color: #dbe7f8;
+		padding: 0.34rem 0.56rem;
+		border-radius: 0.46rem;
+		font-size: 0.72rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.theme-btn:hover {
+		border-color: rgba(191, 219, 254, 0.72);
+	}
+
+	.theme-btn.is-active {
+		border-color: rgba(96, 165, 250, 0.78);
+		background: rgba(37, 99, 235, 0.28);
+		color: #eff6ff;
 	}
 
 	.mode-note {
@@ -198,6 +340,75 @@
 		.ide-lab {
 			grid-template-columns: minmax(0, 1fr) 240px;
 		}
+	}
+
+	.ide-lab.theme-light {
+		background:
+			radial-gradient(circle at top left, rgba(16, 185, 129, 0.12), transparent 44%),
+			radial-gradient(circle at 82% 14%, rgba(59, 130, 246, 0.14), transparent 42%),
+			#edf4ff;
+	}
+
+	.ide-lab.theme-light .ide-toolbar {
+		background: rgba(255, 255, 255, 0.86);
+		border-color: rgba(132, 157, 194, 0.32);
+		color: #132845;
+	}
+
+	.ide-lab.theme-light .mode-btn {
+		background: rgba(237, 244, 255, 0.92);
+		border-color: rgba(138, 166, 208, 0.52);
+		color: #18365f;
+	}
+
+	.ide-lab.theme-light .mode-btn:hover {
+		border-color: rgba(86, 146, 235, 0.72);
+		background: rgba(217, 230, 250, 0.95);
+	}
+
+	.ide-lab.theme-light .mode-btn.is-active {
+		border-color: rgba(22, 163, 74, 0.72);
+		background: rgba(22, 163, 74, 0.2);
+	}
+
+	.ide-lab.theme-light .theme-toggle {
+		background: rgba(227, 238, 255, 0.8);
+		border-color: rgba(151, 178, 219, 0.46);
+	}
+
+	.ide-lab.theme-light .theme-btn {
+		background: rgba(247, 251, 255, 0.92);
+		border-color: rgba(145, 174, 218, 0.5);
+		color: #1a3d68;
+	}
+
+	.ide-lab.theme-light .theme-btn:hover {
+		border-color: rgba(92, 151, 235, 0.76);
+	}
+
+	.ide-lab.theme-light .theme-btn.is-active {
+		border-color: rgba(96, 165, 250, 0.72);
+		background: rgba(37, 99, 235, 0.2);
+		color: #143d7a;
+	}
+
+	.ide-lab.theme-light .mode-note {
+		color: #365b89;
+	}
+
+	.ide-lab.theme-light .ide-stage {
+		border-color: rgba(133, 158, 197, 0.36);
+		background: rgba(255, 255, 255, 0.82);
+	}
+
+	.ide-lab.theme-light .ad-card {
+		border-color: rgba(128, 158, 201, 0.44);
+		background: rgba(255, 255, 255, 0.78);
+		color: #18365b;
+	}
+
+	.ide-lab.theme-light .ad-card p {
+		color: #355b8a;
 	}
 
 	@media (max-width: 900px) {

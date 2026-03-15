@@ -29,6 +29,11 @@
 	});
 </script>
 
+<svelte:head>
+	<meta name="robots" content="noindex, nofollow, noarchive" />
+	<meta name="googlebot" content="noindex, nofollow, noarchive" />
+</svelte:head>
+
 <slot />
 
 <style>

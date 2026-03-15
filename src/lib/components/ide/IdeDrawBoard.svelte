@@ -61,6 +61,8 @@
 	const MAX_VIDEO_PREVIEW_HEIGHT = APP_LIMITS.board.maxVideoPreviewHeight;
 	const LOCAL_ACTION_LIMIT = APP_LIMITS.board.localActionLimit;
 	const LOCAL_ACTION_STORAGE_PREFIX = 'converse_board_local_actions_v1';
+	const IDE_BOARD_SNAPSHOT_STORAGE_PREFIX = 'converse_ide_board_snapshot_v1';
+	const IDE_BOARD_SESSION_FALLBACK_ID = 'ide-board';
 	const DUSTER_STRIPE_WIDTH = BOARD_WIDTH * 0.01;
 	const MINIMAP_WIDTH = 200;
 	const MINIMAP_HEIGHT = 150;
@@ -73,9 +75,11 @@
 	const DRAW_BOARD_LIMIT_TOAST_COOLDOWN_MS = APP_LIMITS.board.drawLimitToastCooldownMs;
 	const RICH_MESSAGE_SCHEMA = 'rich_message_v1';
 	const BOARD_STROKE_SCHEMA = 'board_stroke_v1';
+	const BOARD_ERASER_STROKE_SCHEMA = 'board_eraser_stroke_v1';
 	const BOARD_TEXT_BOX_SCHEMA = 'board_text_box_v1';
 	const BOARD_SHAPE_STYLE_SCHEMA = 'board_shape_style_v1';
 	const UTF8_ENCODER = new TextEncoder();
+	const ERASER_STROKE_COLOR = '#000000';
 	const THEME_ADAPTIVE_LIGHT_INK = '#111827';
 	const THEME_ADAPTIVE_DARK_INK = '#f8fafc';
 	const THEME_ADAPTIVE_LIGHT_INK_CANDIDATES = new Set([
@@ -196,6 +200,7 @@
 	export let currentUserId = '';
 	export let currentUsername = '';
 	export let isEphemeralRoom = true;
+	export let sessionOnly = true;
 
 	const dispatch = createEventDispatcher<{
 		close: void;
@@ -407,17 +412,21 @@
 			return;
 		}
 
-		startBoardUpdateFlushLoop();
+		if (!sessionOnly) {
+			startBoardUpdateFlushLoop();
+		}
 		registerWindowGuards();
 		registerToolbarLayoutGuards();
 		void initializeBoard();
 
-		removeMessageSubscription = globalMessages.subscribe((event) => {
-			if (!event || !boardReady || !normalizedRoomId) {
-				return;
-			}
-			handleIncomingSocketPayload(event.payload);
-		});
+		if (!sessionOnly) {
+			removeMessageSubscription = globalMessages.subscribe((event) => {
+				if (!event || !boardReady || !normalizedRoomId) {
+					return;
+				}
+				handleIncomingSocketPayload(event.payload);
+			});
+		}
 
 		return () => {
 			cleanupBoard();
@@ -965,6 +974,7 @@
 			if (
 				canModerateBoardActions &&
 				activeTool === 'eraser' &&
+				!isPartialEraserModeEnabled() &&
 				target &&
 				target !== boardBoundsRect
 			) {
@@ -986,6 +996,9 @@
 					x: drawStartPoint.x,
 					y: drawStartPoint.y
 				});
+				return;
+			}
+			if (canModerateBoardActions && activeTool === 'eraser' && isPartialEraserModeEnabled()) {
 				return;
 			}
 
@@ -1035,7 +1048,11 @@
 			if (!pathObject) {
 				return;
 			}
-			ensureObjectIdentity(pathObject, 'stroke');
+			const isEraserStroke = activeTool === 'eraser' && isPartialEraserModeEnabled();
+			if (isEraserStroke) {
+				applyEraserStrokeObject(pathObject);
+			}
+			ensureObjectIdentity(pathObject, isEraserStroke ? 'eraser_stroke' : 'stroke');
 			applyObjectPermission(pathObject);
 			emitBoardElementAdd(pathObject);
 			const addedElement = boardObjectToElement(pathObject);
@@ -1481,6 +1498,23 @@
 		applyToolMode(mode);
 	}
 
+	function isPartialEraserModeEnabled() {
+		return true;
+	}
+
+	function isEraserStrokeElementType(elementType: string) {
+		return elementType === 'eraser_stroke';
+	}
+
+	function applyEraserStrokeObject(object: FabricObjectLike) {
+		object.set?.({
+			globalCompositeOperation: 'destination-out',
+			stroke: ERASER_STROKE_COLOR,
+			fill: '',
+			objectCaching: false
+		});
+	}
+
 	function applyToolMode(mode: ToolMode, resetSelection = true) {
 		if (
 			(mode === 'eraser' && !canModerateBoardActions) ||
@@ -1499,14 +1533,19 @@
 			return;
 		}
 		applyCanvasCursorForToolMode(mode);
-		fabricCanvas.isDrawingMode = mode === 'draw' && canEdit;
-		if (mode === 'draw' && canEdit) {
+		const useFreeDrawing =
+			canEdit &&
+			(mode === 'draw' || (mode === 'eraser' && canModerateBoardActions && isPartialEraserModeEnabled()));
+		fabricCanvas.isDrawingMode = useFreeDrawing;
+		if (useFreeDrawing) {
 			const PencilBrushClass = getFabricClass('PencilBrush');
 			if (PencilBrushClass && !fabricCanvas.freeDrawingBrush) {
 				fabricCanvas.freeDrawingBrush = new PencilBrushClass(fabricCanvas);
 			}
 			if (fabricCanvas.freeDrawingBrush) {
-				fabricCanvas.freeDrawingBrush.color = resolveThemeAwareInkColor(boardInkColor);
+				const brushColor =
+					mode === 'eraser' ? ERASER_STROKE_COLOR : resolveThemeAwareInkColor(boardInkColor);
+				fabricCanvas.freeDrawingBrush.color = brushColor;
 				fabricCanvas.freeDrawingBrush.width = drawBrushWidth;
 			}
 		}
@@ -1625,8 +1664,8 @@
 		if (fabricCanvas?.freeDrawingBrush) {
 			fabricCanvas.freeDrawingBrush.width = drawBrushWidth;
 		}
-		if (activeTool === 'draw') {
-			applyToolMode('draw', false);
+		if (activeTool === 'draw' || activeTool === 'eraser') {
+			applyToolMode(activeTool, false);
 		}
 	}
 
@@ -2134,6 +2173,22 @@
 		const elementType = toStringValue((object as Record<string, unknown>).elementType)
 			.trim()
 			.toLowerCase();
+		if (isEraserStrokeElementType(elementType)) {
+			object.set?.({
+				selectable: false,
+				evented: false,
+				hasControls: false,
+				lockMovementX: true,
+				lockMovementY: true,
+				lockScalingX: true,
+				lockScalingY: true,
+				lockRotation: true,
+				perPixelTargetFind: false,
+				padding: 0
+			});
+			object.setCoords?.();
+			return;
+		}
 		const usePreciseHitTest =
 			elementType === 'stroke' ||
 			elementType === 'line' ||
@@ -2505,6 +2560,10 @@
 	}
 
 	function flushPendingBoardUpdates() {
+		if (sessionOnly) {
+			pendingBoardUpdates = [];
+			return;
+		}
 		if (pendingBoardUpdates.length === 0) {
 			return;
 		}
@@ -2542,7 +2601,7 @@
 	}
 
 	function startBoardUpdateFlushLoop() {
-		if (!browser || boardUpdateFlushInterval) {
+		if (sessionOnly || !browser || boardUpdateFlushInterval) {
 			return;
 		}
 		boardUpdateFlushInterval = setInterval(() => {
@@ -2559,6 +2618,9 @@
 	}
 
 	function sendBoardEnvelope(type: BoardEventType, payload: Record<string, unknown>) {
+		if (sessionOnly) {
+			return;
+		}
 		if (!normalizedRoomId || !canEdit) {
 			return;
 		}
@@ -2584,10 +2646,16 @@
 	}
 
 	async function encryptBoardContentField(content: string) {
+		if (sessionOnly) {
+			return content;
+		}
 		return encryptText(content, normalizeBoardPasswordValue($activeRoomPassword));
 	}
 
 	async function decryptBoardContentField(content: string) {
+		if (sessionOnly) {
+			return content;
+		}
 		return decryptText(content, normalizeBoardPasswordValue($activeRoomPassword));
 	}
 
@@ -2677,18 +2745,20 @@
 			});
 		}
 
-		if (elementType === 'stroke') {
+		if (elementType === 'stroke' || isEraserStrokeElementType(elementType)) {
 			const strokePath = (objectRecord.path as unknown[]) ?? [];
 			const path = serializePathCommands(strokePath);
 			if (!path) {
 				return baseContent;
 			}
+			const isEraserStroke = isEraserStrokeElementType(elementType);
 			return JSON.stringify({
-				schema: BOARD_STROKE_SCHEMA,
+				schema: isEraserStroke ? BOARD_ERASER_STROKE_SCHEMA : BOARD_STROKE_SCHEMA,
 				path,
 				stroke: normalizeOptionalColor(objectRecord.stroke),
 				fill: normalizeOptionalColor(objectRecord.fill),
-				strokeWidth: normalizeOptionalPositiveNumber(objectRecord.strokeWidth)
+				strokeWidth: normalizeOptionalPositiveNumber(objectRecord.strokeWidth),
+				isEraser: isEraserStroke
 			});
 		}
 
@@ -2745,18 +2815,15 @@
 		boardError = '';
 		restoreLocalActionHistory(normalizedTargetRoomId);
 		try {
-			const res = await fetch(
-				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedTargetRoomId)}/board`
-			);
-			if (!res.ok) {
-				throw new Error(`Load failed (${res.status})`);
-			}
-			const payload = (await res.json()) as unknown;
-			const elements = Array.isArray(payload) ? payload : [];
+			const elements = sessionOnly
+				? getSessionBoardElements(normalizedTargetRoomId)
+				: await fetchRoomBoardElements(normalizedTargetRoomId);
 			beginRemoteApply();
 			clearBoardElements(false);
 			for (const rawElement of elements) {
-				const parsed = await parseBoardElementRecordDecrypted(rawElement);
+				const parsed = sessionOnly
+					? parseBoardElementRecord(rawElement)
+					: await parseBoardElementRecordDecrypted(rawElement);
 				if (!parsed) {
 					continue;
 				}
@@ -2771,6 +2838,15 @@
 			endRemoteApply();
 			boardLoading = false;
 		}
+	}
+
+	async function fetchRoomBoardElements(targetRoomId: string): Promise<unknown[]> {
+		const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomId)}/board`);
+		if (!res.ok) {
+			throw new Error(`Load failed (${res.status})`);
+		}
+		const payload = (await res.json()) as unknown;
+		return Array.isArray(payload) ? payload : [];
 	}
 
 	function clearBoardElements(resetLocalActions = true) {
@@ -2900,7 +2976,7 @@
 		}
 		const schema = toStringValue(record.schema).trim().toLowerCase();
 		const hasSchema = schema !== '';
-		if (hasSchema && schema !== BOARD_STROKE_SCHEMA) {
+		if (hasSchema && schema !== BOARD_STROKE_SCHEMA && schema !== BOARD_ERASER_STROKE_SCHEMA) {
 			return null;
 		}
 		const path = toStringValue(record.path);
@@ -2908,11 +2984,17 @@
 			return null;
 		}
 		const strokeWidth = normalizeOptionalPositiveNumber(record.strokeWidth ?? record.stroke_width);
+		const isEraser =
+			schema === BOARD_ERASER_STROKE_SCHEMA ||
+			Boolean(record.isEraser ?? record.is_eraser) ||
+			toStringValue(record.compositeOperation ?? record.composite_operation).trim().toLowerCase() ===
+				'destination-out';
 		return {
 			path,
 			stroke: normalizeOptionalColor(record.stroke),
 			fill: normalizeOptionalColor(record.fill),
-			strokeWidth
+			strokeWidth,
+			isEraser
 		};
 	}
 
@@ -3003,24 +3085,33 @@
 		const fallbackFillColor = isDarkMode ? 'rgba(148, 163, 184, 0.16)' : 'rgba(30, 64, 175, 0.08)';
 		const fallbackTextColor = isDarkMode ? '#f3f4f6' : '#111827';
 
-		if (elementType === 'stroke' && element.content) {
+		if ((elementType === 'stroke' || isEraserStrokeElementType(elementType)) && element.content) {
 			const PathClass = getFabricClass('Path');
 			if (!PathClass) {
 				return null;
 			}
 			const strokeContent = parseStrokeContent(element.content);
+			const isEraserStroke = isEraserStrokeElementType(elementType) || Boolean(strokeContent?.isEraser);
 			const pathData = strokeContent?.path || element.content;
-			const strokeColor = resolveThemeAwareInkColor(strokeContent?.stroke || fallbackStrokeColor);
-			const fillColor = resolveThemeAwareInkColor(strokeContent?.fill || '');
+			const strokeColor = isEraserStroke
+				? ERASER_STROKE_COLOR
+				: resolveThemeAwareInkColor(strokeContent?.stroke || fallbackStrokeColor);
+			const fillColor = isEraserStroke
+				? ''
+				: resolveThemeAwareInkColor(strokeContent?.fill || '');
 			const strokeWidth = strokeContent?.strokeWidth || 2;
 			try {
-				return new PathClass(pathData, {
+				const pathObject = new PathClass(pathData, {
 					left: element.x,
 					top: element.y,
 					stroke: strokeColor,
 					fill: fillColor,
 					strokeWidth
 				}) as FabricObjectLike;
+				if (isEraserStroke) {
+					applyEraserStrokeObject(pathObject);
+				}
+				return pathObject;
 			} catch {
 				return null;
 			}
@@ -4176,8 +4267,70 @@
 		if (!normalizedTargetRoomId) {
 			return '';
 		}
+		if (sessionOnly) {
+			return `${LOCAL_ACTION_STORAGE_PREFIX}:ide:${normalizedTargetRoomId}`;
+		}
 		const actorId = normalizedCurrentUserID || 'guest';
 		return `${LOCAL_ACTION_STORAGE_PREFIX}:${normalizedTargetRoomId}:${actorId}`;
+	}
+
+	function getSessionBoardSnapshotStorageKey(targetRoomId = normalizedRoomId) {
+		const normalizedTargetRoomId =
+			normalizeRoomIDValue(targetRoomId) || IDE_BOARD_SESSION_FALLBACK_ID;
+		return `${IDE_BOARD_SNAPSHOT_STORAGE_PREFIX}:${normalizedTargetRoomId}`;
+	}
+
+	function getSessionBoardElements(targetRoomId = normalizedRoomId): unknown[] {
+		if (!browser || typeof window === 'undefined') {
+			return [];
+		}
+		const storageKey = getSessionBoardSnapshotStorageKey(targetRoomId);
+		if (!storageKey) {
+			return [];
+		}
+		const raw = window.sessionStorage.getItem(storageKey);
+		if (!raw) {
+			return [];
+		}
+		try {
+			const parsed = JSON.parse(raw) as unknown;
+			return Array.isArray(parsed) ? parsed : [];
+		} catch {
+			window.sessionStorage.removeItem(storageKey);
+			return [];
+		}
+	}
+
+	function serializeBoardElementsForSession() {
+		if (!fabricCanvas) {
+			return '[]';
+		}
+		const objects = fabricCanvas.getObjects?.() ?? [];
+		const elements: BoardElementWire[] = objects
+			.filter((object: unknown) => object && object !== boardBoundsRect)
+			.map((object: unknown) => boardObjectToElement(object as FabricObjectLike))
+			.filter((entry: BoardElementWire | null): entry is BoardElementWire => Boolean(entry))
+			.sort((left: BoardElementWire, right: BoardElementWire) => left.zIndex - right.zIndex);
+		return JSON.stringify(elements);
+	}
+
+	function persistSessionBoardSnapshot(targetRoomId = normalizedRoomId) {
+		if (!sessionOnly || !browser || typeof window === 'undefined') {
+			return;
+		}
+		const storageKey = getSessionBoardSnapshotStorageKey(targetRoomId);
+		if (!storageKey) {
+			return;
+		}
+		try {
+			if (!fabricCanvas || boardElementCount === 0) {
+				window.sessionStorage.removeItem(storageKey);
+				return;
+			}
+			window.sessionStorage.setItem(storageKey, serializeBoardElementsForSession());
+		} catch {
+			// Ignore sessionStorage quota and availability failures.
+		}
 	}
 
 	function parsePersistedLocalAction(value: unknown): LocalBoardAction | null {
@@ -4351,6 +4504,7 @@
 			historyStack = historyStack.slice(historyStack.length - HISTORY_LIMIT);
 		}
 		historyCursor = historyStack.length - 1;
+		persistSessionBoardSnapshot();
 	}
 
 	async function undo() {
@@ -4767,8 +4921,26 @@
 		mediaInputEl?.click();
 	}
 
+	function fileToDataURL(file: File): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const result = typeof reader.result === 'string' ? reader.result : '';
+				if (!result) {
+					reject(new Error('Failed to read media'));
+					return;
+				}
+				resolve(result);
+			};
+			reader.onerror = () => {
+				reject(reader.error ?? new Error('Failed to read media'));
+			};
+			reader.readAsDataURL(file);
+		});
+	}
+
 	async function onMediaFileSelected(event: Event) {
-		if (!canEdit || !normalizedRoomId) {
+		if (!canEdit) {
 			return;
 		}
 		const input = event.currentTarget as HTMLInputElement | null;
@@ -4795,9 +4967,8 @@
 								lastModified: file.lastModified
 							});
 			}
-			const uploaded = await uploadToR2(fileForUpload, normalizedRoomId);
 			const mediaPayload: BoardMediaContent = {
-				url: uploaded.fileUrl,
+				url: '',
 				name: fileForUpload.name || file.name || 'attachment',
 				kind: inferMediaMessageType(fileForUpload),
 				mimeType: fileForUpload.type || 'application/octet-stream',
@@ -4806,6 +4977,15 @@
 				senderName: '',
 				sentAt: 0
 			};
+			if (sessionOnly) {
+				mediaPayload.url = await fileToDataURL(fileForUpload);
+			} else {
+				if (!normalizedRoomId) {
+					throw new Error('Room context is required for media upload');
+				}
+				const uploaded = await uploadToR2(fileForUpload, normalizedRoomId);
+				mediaPayload.url = uploaded.fileUrl;
+			}
 			await insertMediaObject(mediaPayload, contextMenuPoint);
 		} catch (error) {
 			boardError = error instanceof Error ? error.message : 'Failed to upload media';
@@ -5175,7 +5355,9 @@
 	}
 </script>
 
-	<section class="board-root">
+	<section class="board-root"
+	style="height: 100%;"
+	>
 		<div class="board-toolbar" bind:this={boardToolbarEl}>
 			{#if openToolbarHintText}
 				<div class="toolbar-open-hint" role="status" aria-live="polite">{openToolbarHintText}</div>

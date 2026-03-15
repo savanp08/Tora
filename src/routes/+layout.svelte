@@ -1,13 +1,18 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { page } from '$app/stores';
 	import { onMount, onDestroy } from 'svelte';
 	import GlobalNavbar from '$lib/components/layout/GlobalNavbar.svelte';
+	import type { LayoutData } from './$types';
+	import { DEFAULT_SITE_NAME, DEFAULT_SITE_DESCRIPTION, buildCanonicalURL } from '$lib/utils/seo';
 	import { initializeAuth } from '$lib/stores/auth';
 	import { isDarkMode } from '$lib/store';
 	import './layout.css';
 
 	type ThemePreference = 'system' | 'dark' | 'light';
 	type TooltipPlacement = 'top' | 'bottom';
+
+	export let data: LayoutData;
 
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
 	const TOOLTIP_DATA_ATTR = 'data-instant-tooltip-title';
@@ -21,6 +26,8 @@
 	let tooltipY = 0;
 	let tooltipPlacement: TooltipPlacement = 'top';
 	let activeTooltipElement: HTMLElement | null = null;
+	let canonicalUrl = '';
+	let websiteSchemaJson = '';
 
 	if (browser) {
 		initializeAuth();
@@ -56,6 +63,16 @@
 		document.body.classList.toggle('theme-dark', $isDarkMode);
 		document.body.dataset.theme = $isDarkMode ? 'dark' : 'light';
 	}
+
+	$: canonicalUrl = buildCanonicalURL(data.siteOrigin, $page.url.pathname);
+	$: websiteSchemaJson = JSON.stringify({
+		'@context': 'https://schema.org',
+		'@type': 'WebSite',
+		name: DEFAULT_SITE_NAME,
+		alternateName: 'Tora Workspace',
+		url: data.siteOrigin,
+		description: DEFAULT_SITE_DESCRIPTION
+	});
 
 	function initializeThemePreference() {
 		if (!browser) {
@@ -292,6 +309,16 @@
 		updateTooltipPosition(activeTooltipElement);
 	}
 </script>
+
+<svelte:head>
+	<link rel="canonical" href={canonicalUrl} />
+	<meta property="og:url" content={canonicalUrl} />
+	<meta property="og:site_name" content={DEFAULT_SITE_NAME} />
+	<meta property="og:description" content={DEFAULT_SITE_DESCRIPTION} />
+	<script type="application/ld+json">
+		{@html websiteSchemaJson}
+	</script>
+</svelte:head>
 
 <GlobalNavbar />
 <slot />

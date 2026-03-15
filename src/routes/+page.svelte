@@ -666,10 +666,37 @@
 		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
 	// Fixed once at load — never changes as the user types
 	const backgroundSeed = 'tora-' + new Date().toISOString().slice(0, 10);
+	const landingSchemaJson = JSON.stringify({
+		'@context': 'https://schema.org',
+		'@type': 'SoftwareApplication',
+		name: 'Tora',
+		applicationCategory: 'CommunicationApplication',
+		operatingSystem: 'Web',
+		description:
+			'Tora is a collaborative workspace with disappearing chat rooms, shared tasks, draw board, and an AI-assisted online IDE.'
+	});
 </script>
 
-	<div class="container">
-		<MonochromeRoomBackground seed={backgroundSeed} />
+<svelte:head>
+	<title>Tora | Disappearing Chat, Collaborative Workspace, AI IDE</title>
+	<meta
+		name="description"
+		content="Tora is a collaborative workspace with disappearing chat rooms, shared taskboards, free draw board, and an AI-assisted online IDE."
+	/>
+	<meta property="og:title" content="Tora | Disappearing Chat, Collaborative Workspace, AI IDE" />
+	<meta
+		property="og:description"
+		content="Collaborate instantly with temporary chat rooms, project tasks, live board, and AI-assisted code execution in Tora."
+	/>
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="application-name" content="Tora" />
+	<script type="application/ld+json">
+		{@html landingSchemaJson}
+	</script>
+</svelte:head>
+
+<div class="container">
+	<MonochromeRoomBackground seed={backgroundSeed} />
 		{#if isReviveDragActive}
 			<div class="revive-dropzone-overlay" aria-live="polite" role="status">
 				<div class="revive-dropzone-panel">
