@@ -21,8 +21,11 @@ export function resolveSiteOrigin(siteOrigin: string, fallbackOrigin: string) {
 	if (!candidate) {
 		return trimTrailingSlash(fallbackOrigin);
 	}
+	const withProtocol = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(candidate)
+		? candidate
+		: `https://${candidate}`;
 	try {
-		const parsed = new URL(candidate);
+		const parsed = new URL(withProtocol);
 		return trimTrailingSlash(parsed.origin);
 	} catch {
 		return trimTrailingSlash(fallbackOrigin);

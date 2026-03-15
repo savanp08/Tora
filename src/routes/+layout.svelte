@@ -1,10 +1,9 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { page } from '$app/stores';
 	import { onMount, onDestroy } from 'svelte';
 	import GlobalNavbar from '$lib/components/layout/GlobalNavbar.svelte';
 	import type { LayoutData } from './$types';
-	import { DEFAULT_SITE_NAME, DEFAULT_SITE_DESCRIPTION, buildCanonicalURL } from '$lib/utils/seo';
+	import { DEFAULT_SITE_DESCRIPTION, DEFAULT_SITE_NAME } from '$lib/utils/seo';
 	import { initializeAuth } from '$lib/stores/auth';
 	import { isDarkMode } from '$lib/store';
 	import './layout.css';
@@ -26,8 +25,6 @@
 	let tooltipY = 0;
 	let tooltipPlacement: TooltipPlacement = 'top';
 	let activeTooltipElement: HTMLElement | null = null;
-	let canonicalUrl = '';
-	let websiteSchemaJson = '';
 
 	if (browser) {
 		initializeAuth();
@@ -63,16 +60,6 @@
 		document.body.classList.toggle('theme-dark', $isDarkMode);
 		document.body.dataset.theme = $isDarkMode ? 'dark' : 'light';
 	}
-
-	$: canonicalUrl = buildCanonicalURL(data.siteOrigin, $page.url.pathname);
-	$: websiteSchemaJson = JSON.stringify({
-		'@context': 'https://schema.org',
-		'@type': 'WebSite',
-		name: DEFAULT_SITE_NAME,
-		alternateName: 'Tora Workspace',
-		url: data.siteOrigin,
-		description: DEFAULT_SITE_DESCRIPTION
-	});
 
 	function initializeThemePreference() {
 		if (!browser) {
@@ -311,12 +298,17 @@
 </script>
 
 <svelte:head>
-	<link rel="canonical" href={canonicalUrl} />
-	<meta property="og:url" content={canonicalUrl} />
+	<link rel="canonical" href={data.canonicalUrl} />
+	<meta property="og:url" content={data.canonicalUrl} />
 	<meta property="og:site_name" content={DEFAULT_SITE_NAME} />
 	<meta property="og:description" content={DEFAULT_SITE_DESCRIPTION} />
+	<meta property="og:image" content={data.ogImageUrl} />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="630" />
+	<meta property="og:image:alt" content="Tora collaborative workspace preview" />
+	<meta name="twitter:image" content={data.ogImageUrl} />
 	<script type="application/ld+json">
-		{@html websiteSchemaJson}
+		{@html data.websiteSchemaJson}
 	</script>
 </svelte:head>
 

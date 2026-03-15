@@ -4,6 +4,7 @@ compatibility_date = "2026-03-09"
 compatibility_flags = ["nodejs_compat"]
 [vars]
 VITE_TURNSTILE_SITE_KEY = "0x4AAAAAACpOCJFN3XBVe6Ns"
+PUBLIC_SITE_URL = "https://tora.monokenos.com"
 [[headers]]
 for = "/*"
 
