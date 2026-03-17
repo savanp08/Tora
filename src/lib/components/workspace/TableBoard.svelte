@@ -45,7 +45,9 @@
 		restoreOldValue?: () => void;
 	};
 	type TabulatorInstance = {
-		replaceData: (data: TableRow[]) => Promise<unknown>;
+		updateData: (data: TableRow[]) => Promise<unknown>;
+		addData?: (data: TableRow[], addToTop?: boolean) => Promise<unknown>;
+		deleteRow?: (id: string) => Promise<unknown> | void;
 		destroy: () => void;
 		on: (event: string, callback: (cell: TabulatorCell) => void) => void;
 	};
@@ -381,10 +383,29 @@
 		});
 	}
 
+	function createRowsByID(rows: TableRow[]) {
+		return new Map(rows.map((row) => [row.id, row]));
+	}
+
+	function rowChanged(previous: TableRow, next: TableRow) {
+		return (
+			previous.title !== next.title ||
+			previous.status !== next.status ||
+			previous.type !== next.type ||
+			previous.budget !== next.budget ||
+			previous.duration !== next.duration ||
+			previous.effort !== next.effort ||
+			previous.description !== next.description ||
+			previous.roomId !== next.roomId
+		);
+	}
+
 	function tabulator(node: HTMLDivElement, data: TableRow[]) {
 		let table: TabulatorInstance | null = null;
 		let disposed = false;
 		let queuedData = data;
+		let rowsByID = createRowsByID(data);
+		let pendingPatch = Promise.resolve();
 
 		async function mount() {
 			if (!browser) {
@@ -440,15 +461,61 @@
 			});
 		}
 
+		async function applyTablePatches(nextData: TableRow[]) {
+			if (!table) {
+				rowsByID = createRowsByID(nextData);
+				return;
+			}
+
+			const nextRowsByID = createRowsByID(nextData);
+			const rowsToUpdate: TableRow[] = [];
+			const rowsToAdd: TableRow[] = [];
+			const rowsToDelete: string[] = [];
+
+			for (const nextRow of nextData) {
+				const previousRow = rowsByID.get(nextRow.id);
+				if (!previousRow) {
+					rowsToAdd.push(nextRow);
+					continue;
+				}
+				if (rowChanged(previousRow, nextRow)) {
+					rowsToUpdate.push(nextRow);
+				}
+			}
+
+			for (const existingID of rowsByID.keys()) {
+				if (!nextRowsByID.has(existingID)) {
+					rowsToDelete.push(existingID);
+				}
+			}
+
+			if (rowsToUpdate.length > 0) {
+				await table.updateData(rowsToUpdate);
+			}
+			if (rowsToAdd.length > 0) {
+				if (typeof table.addData === 'function') {
+					await table.addData(rowsToAdd, false);
+				} else {
+					await table.updateData(rowsToAdd);
+				}
+			}
+			if (rowsToDelete.length > 0 && typeof table.deleteRow === 'function') {
+				for (const rowID of rowsToDelete) {
+					await table.deleteRow(rowID);
+				}
+			}
+
+			rowsByID = nextRowsByID;
+		}
+
 		void mount();
 
 		return {
 			update(nextData: TableRow[]) {
 				queuedData = nextData;
-				if (!table) {
-					return;
-				}
-				void table.replaceData(nextData);
+				pendingPatch = pendingPatch
+					.then(() => applyTablePatches(nextData))
+					.catch(() => applyTablePatches(nextData));
 			},
 			destroy() {
 				disposed = true;

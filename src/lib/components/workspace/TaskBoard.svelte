@@ -21,6 +21,9 @@
 	export let canEdit = true;
 	export let contextAware = false;
 	export let onlineMembers: OnlineMember[] = [];
+	export let boardView: BoardView = 'table';
+	export let externalEditTaskId = '';
+	export let onExternalEditHandled: (taskId: string) => void = () => {};
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
@@ -35,6 +38,12 @@
 
 	type ColumnKey = (typeof STATUS_OPTIONS)[number]['value'];
 	type BoardView = 'table' | 'kanban' | 'support';
+	type SprintSortColumn = 'title' | 'status' | 'owner' | 'budget' | 'spent' | 'updated';
+	type SprintSortDirection = 'asc' | 'desc';
+	type SprintSortState = {
+		column: SprintSortColumn;
+		direction: SprintSortDirection;
+	};
 	type EditableField = 'title' | 'description' | 'assigneeId' | 'sprintName' | 'budget' | 'spent';
 	type EditableCellKey = EditableField | 'status';
 	type TaskSource = 'personal' | 'room';
@@ -117,6 +126,7 @@
 		name: string;
 		tasks: DisplayTask[];
 		lastUpdatedAt: number;
+		searchScore?: number;
 	};
 
 	type OwnerOption = {
@@ -144,11 +154,6 @@
 		todo: 1,
 		done: 2
 	};
-	const BOARD_VIEW_OPTIONS: Array<{ value: BoardView; label: string }> = [
-		{ value: 'table', label: 'Table' },
-		{ value: 'kanban', label: 'Kanban' },
-		{ value: 'support', label: 'Support' }
-	];
 	const KANBAN_COLUMN_ORDER: ColumnKey[] = ['todo', 'in_progress', 'done'];
 	const SUPPORT_PRIORITY_OPTIONS: Array<{ value: SupportPriority; label: string }> = [
 		{ value: 'critical', label: 'Critical' },
@@ -157,13 +162,13 @@
 		{ value: 'low', label: 'Low' }
 	];
 	const sprintNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+	const taskSortCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 	let contextTasks: DisplayTask[] = [];
 	let contextLoading = false;
 	let contextError = '';
 	let creatingTask = false;
 	let newTaskContent = '';
-	let boardView: BoardView = 'table';
 	let lastContextKey = '';
 	let contextLoadToken = 0;
 	let roomBoardError = '';
@@ -192,6 +197,9 @@
 	let sprintAddKey = '';
 	let sprintAddContent = '';
 	let sprintAddCreating = false;
+	let taskSearchQuery = '';
+	let sprintSortStateByKey: Record<string, SprintSortState | undefined> = {};
+	const sprintAddFormByKey = new Map<string, HTMLFormElement>();
 
 	let supportTicketTitle = '';
 	let supportTicketDetails = '';
@@ -211,6 +219,7 @@
 	let ownerOptions: OwnerOption[] = [];
 	let canCreateSprintTask = false;
 	const SPRINT_COMPOSER_MAX_TASKS = 25;
+	let externalEditInFlight = false;
 
 	onDestroy(() => {
 		if (boardToastTimer) {
@@ -258,8 +267,30 @@
 	).sort(compareTasksForGrid);
 	$: contextGridTasks = dedupeDisplayTasksById([...contextTasks]).sort(compareTasksForGrid);
 	$: boardTasks = contextAware ? contextGridTasks : roomTasks;
+	$: if (boardView !== 'table' && boardView !== 'kanban' && boardView !== 'support') {
+		boardView = 'table';
+	}
 	$: boardLoading = contextAware ? contextLoading : $taskStoreLoading;
 	$: boardError = contextAware ? contextError : roomBoardError || $taskStoreError;
+	$: {
+		const requestedExternalEditID = externalEditTaskId.trim();
+		if (!externalEditInFlight && requestedExternalEditID) {
+			const targetTask = boardTasks.find((task) => task.id === requestedExternalEditID);
+			if (targetTask && canEdit) {
+				externalEditInFlight = true;
+				void (async () => {
+					try {
+						await startEditing(targetTask, 'title');
+					} finally {
+						onExternalEditHandled(requestedExternalEditID);
+						externalEditInFlight = false;
+					}
+				})();
+			} else if (!boardLoading || !canEdit) {
+				onExternalEditHandled(requestedExternalEditID);
+			}
+		}
+	}
 	$: editingTask = boardTasks.find((task) => task.id === editingTaskId) ?? null;
 	$: if (!editingTaskId || !editingField) {
 		quickEditVisible = false;
@@ -268,6 +299,9 @@
 	$: canCreateSprintTask = canEdit && (!contextAware || $activeContext.type === 'room');
 	$: sprintDraftGroups = sprintDraftGroupsByContext[sprintContextKey] ?? [];
 	$: sprintComposerPreviewRows = buildSprintComposerPreviewRows(sprintComposerTaskDrafts);
+	$: normalizedTaskSearchQuery = normalizeSearchQuery(taskSearchQuery);
+	$: taskSearchTokens = buildSearchTokens(normalizedTaskSearchQuery);
+	$: hasActiveTaskSearch = normalizedTaskSearchQuery.length > 0;
 	$: hasAnyTasks = boardTasks.length > 0;
 	$: boardLastUpdatedAt = boardTasks.reduce(
 		(latest, task) => Math.max(latest, Number.isFinite(task.updatedAt) ? task.updatedAt : 0),
@@ -305,17 +339,50 @@
 			});
 		}
 
-		return [...grouped.values()]
-			.map((group) => ({
-				...group,
-				tasks: [...group.tasks].sort(compareTasksForGrid)
-			}))
-			.sort((left, right) => {
-				if (left.name === 'Backlog' && right.name !== 'Backlog') return 1;
-				if (right.name === 'Backlog' && left.name !== 'Backlog') return -1;
-				return sprintNameCollator.compare(left.name, right.name);
-			});
-	})();
+			return [...grouped.values()]
+				.map((group) => {
+					const sortState = sprintSortStateByKey[group.key];
+					const sortedTasks = sortTasksForSprintGroup(group.tasks, sortState);
+					if (!hasActiveTaskSearch) {
+						return {
+							...group,
+							tasks: sortedTasks,
+							searchScore: 0
+						};
+					}
+
+					const searchMatches = sortedTasks
+						.map((task) => ({
+							task,
+							score: scoreTaskSearchMatch(task, group.name, normalizedTaskSearchQuery, taskSearchTokens)
+						}))
+						.filter((entry) => entry.score > 0)
+						.sort(
+							(left, right) =>
+								right.score - left.score ||
+								compareTasksBySortState(left.task, right.task, sortState) ||
+								compareTasksForGrid(left.task, right.task)
+						);
+
+					return {
+						...group,
+						tasks: searchMatches.map((entry) => entry.task),
+						searchScore: searchMatches[0]?.score ?? 0
+					};
+				})
+				.filter((group) => !hasActiveTaskSearch || group.tasks.length > 0)
+				.sort((left, right) => {
+					if (hasActiveTaskSearch) {
+						const searchDiff = (right.searchScore || 0) - (left.searchScore || 0);
+						if (searchDiff !== 0) {
+							return searchDiff;
+						}
+					}
+					if (left.name === 'Backlog' && right.name !== 'Backlog') return 1;
+					if (right.name === 'Backlog' && left.name !== 'Backlog') return -1;
+					return sprintNameCollator.compare(left.name, right.name);
+				});
+		})();
 	$: hasBoardDataForView = boardView === 'table' ? sprintTaskGroups.length > 0 : hasAnyTasks;
 	$: kanbanColumns = KANBAN_COLUMN_ORDER.map<KanbanColumn>((columnKey) => ({
 		key: columnKey,
@@ -487,6 +554,190 @@
 			return updatedDiff;
 		}
 		return left.title.localeCompare(right.title);
+	}
+
+	function normalizeSearchQuery(value: string) {
+		return value.trim().toLowerCase();
+	}
+
+	function buildSearchTokens(query: string) {
+		if (!query) {
+			return [] as string[];
+		}
+		return [...new Set(query.split(/\s+/).map((token) => token.trim()).filter(Boolean))];
+	}
+
+	function scoreSearchField(value: string, token: string, weight: number) {
+		if (!value || !token) {
+			return 0;
+		}
+		if (value === token) {
+			return weight * 3;
+		}
+		if (value.startsWith(token)) {
+			return weight * 2;
+		}
+		if (value.includes(token)) {
+			return weight;
+		}
+		return 0;
+	}
+
+	function scoreTaskSearchMatch(
+		task: DisplayTask,
+		sprintName: string,
+		normalizedQuery: string,
+		tokens: string[]
+	) {
+		if (!normalizedQuery) {
+			return 1;
+		}
+		const sprintValue = normalizeSearchQuery(sprintName);
+		const titleValue = normalizeSearchQuery(task.title);
+		const statusValue = normalizeSearchQuery(statusLabel(resolveColumn(task.status)));
+		const ownerValue = normalizeSearchQuery(ownerLabel(task));
+		const budgetValue = normalizeSearchQuery(formatBudgetCell(task.budget));
+		const spentValue = normalizeSearchQuery(formatSpentCell(task.spent, task.budget));
+		const updatedValue = normalizeSearchQuery(formatCellTime(task.updatedAt));
+		const descriptionBase = parseDescriptionMetadata(task.description).base || task.description;
+		const descriptionValue = normalizeSearchQuery(descriptionBase);
+		const idValue = normalizeSearchQuery(task.id);
+
+		const weightedFields = [
+			{ value: sprintValue, weight: 120 },
+			{ value: titleValue, weight: 110 },
+			{ value: ownerValue, weight: 52 },
+			{ value: statusValue, weight: 40 },
+			{ value: descriptionValue, weight: 34 },
+			{ value: budgetValue, weight: 26 },
+			{ value: spentValue, weight: 26 },
+			{ value: updatedValue, weight: 18 },
+			{ value: idValue, weight: 14 }
+		];
+
+		let score = 0;
+		let matchedTokens = 0;
+		const searchTokens = tokens.length > 0 ? tokens : [normalizedQuery];
+		for (const token of searchTokens) {
+			const tokenScore = weightedFields.reduce((best, field) => {
+				const fieldScore = scoreSearchField(field.value, token, field.weight);
+				return fieldScore > best ? fieldScore : best;
+			}, 0);
+			if (tokenScore <= 0) {
+				continue;
+			}
+			score += tokenScore;
+			matchedTokens += 1;
+		}
+
+		if (matchedTokens === 0) {
+			return 0;
+		}
+
+		if (sprintValue.includes(normalizedQuery)) {
+			score += 220;
+		}
+		if (titleValue.includes(normalizedQuery)) {
+			score += 200;
+		}
+		if (descriptionValue.includes(normalizedQuery)) {
+			score += 44;
+		}
+		if (tokens.length > 1 && matchedTokens === tokens.length) {
+			score += 36;
+		}
+		score += matchedTokens * 8;
+		return score;
+	}
+
+	function compareTasksBySortColumn(
+		left: DisplayTask,
+		right: DisplayTask,
+		column: SprintSortColumn
+	): number {
+		if (column === 'title') {
+			return taskSortCollator.compare(left.title, right.title);
+		}
+		if (column === 'status') {
+			const statusRank = {
+				todo: 0,
+				in_progress: 1,
+				done: 2
+			} as const;
+			return statusRank[resolveColumn(left.status)] - statusRank[resolveColumn(right.status)];
+		}
+		if (column === 'owner') {
+			return taskSortCollator.compare(ownerLabel(left), ownerLabel(right));
+		}
+		if (column === 'budget') {
+			const leftBudget =
+				typeof left.budget === 'number' && Number.isFinite(left.budget) ? left.budget : -1;
+			const rightBudget =
+				typeof right.budget === 'number' && Number.isFinite(right.budget) ? right.budget : -1;
+			return leftBudget - rightBudget;
+		}
+		if (column === 'spent') {
+			const leftSpent =
+				typeof left.spent === 'number' && Number.isFinite(left.spent) ? left.spent : -1;
+			const rightSpent =
+				typeof right.spent === 'number' && Number.isFinite(right.spent) ? right.spent : -1;
+			return leftSpent - rightSpent;
+		}
+		return (left.updatedAt || 0) - (right.updatedAt || 0);
+	}
+
+	function compareTasksBySortState(
+		left: DisplayTask,
+		right: DisplayTask,
+		sortState?: SprintSortState
+	): number {
+		if (!sortState) {
+			return 0;
+		}
+		const diff = compareTasksBySortColumn(left, right, sortState.column);
+		if (diff === 0) {
+			return 0;
+		}
+		return sortState.direction === 'asc' ? diff : -diff;
+	}
+
+	function sortTasksForSprintGroup(tasks: DisplayTask[], sortState?: SprintSortState) {
+		return [...tasks].sort(
+			(left, right) =>
+				compareTasksBySortState(left, right, sortState) || compareTasksForGrid(left, right)
+		);
+	}
+
+	function toggleSprintSort(groupKey: string, column: SprintSortColumn) {
+		const current = sprintSortStateByKey[groupKey];
+		const nextDirection: SprintSortDirection =
+			current?.column === column && current.direction === 'asc' ? 'desc' : 'asc';
+		sprintSortStateByKey = {
+			...sprintSortStateByKey,
+			[groupKey]: {
+				column,
+				direction: nextDirection
+			}
+		};
+	}
+
+	function sprintSortDirection(groupKey: string, column: SprintSortColumn): SprintSortDirection | '' {
+		const current = sprintSortStateByKey[groupKey];
+		if (!current || current.column !== column) {
+			return '';
+		}
+		return current.direction;
+	}
+
+	function sprintSortIcon(groupKey: string, column: SprintSortColumn) {
+		const direction = sprintSortDirection(groupKey, column);
+		if (direction === 'asc') {
+			return '↑';
+		}
+		if (direction === 'desc') {
+			return '↓';
+		}
+		return '↕';
 	}
 
 	function dedupeDisplayTasksById(tasks: DisplayTask[]) {
@@ -2325,6 +2576,44 @@
 		}
 	}
 
+	function registerSprintAddForm(node: HTMLFormElement, sprintKey: string) {
+		let currentKey = sprintKey;
+		sprintAddFormByKey.set(currentKey, node);
+		return {
+			update(nextKey: string) {
+				if (nextKey === currentKey) {
+					return;
+				}
+				sprintAddFormByKey.delete(currentKey);
+				currentKey = nextKey;
+				sprintAddFormByKey.set(currentKey, node);
+			},
+			destroy() {
+				sprintAddFormByKey.delete(currentKey);
+			}
+		};
+	}
+
+	async function toggleSprintAddComposer(sprintKey: string) {
+		const nextKey = sprintAddKey === sprintKey ? '' : sprintKey;
+		sprintAddKey = nextKey;
+		sprintAddContent = '';
+		if (!nextKey) {
+			return;
+		}
+		await tick();
+		const targetForm = sprintAddFormByKey.get(nextKey);
+		if (!targetForm) {
+			return;
+		}
+		targetForm.scrollIntoView({
+			behavior: 'smooth',
+			block: 'center',
+			inline: 'nearest'
+		});
+		targetForm.querySelector<HTMLInputElement>("input[type='text']")?.focus();
+	}
+
 	function onWindowClick() {
 		statusMenuTaskId = '';
 	}
@@ -2343,23 +2632,28 @@
 		</div>
 		<div class="header-meta">
 			<span>Latest update {formatCellTime(boardLastUpdatedAt)}</span>
-			<nav class="board-view-switch" aria-label="Task board view options">
-				{#each BOARD_VIEW_OPTIONS as option (option.value)}
-					<button
-						type="button"
-						class="view-option"
-						class:is-active={boardView === option.value}
-						on:click={() => {
-							boardView = option.value;
-							statusMenuTaskId = '';
-						}}
-					>
-						{option.label}
-					</button>
-				{/each}
-			</nav>
 		</div>
 	</header>
+
+	{#if boardView === 'table'}
+		<section class="task-search" aria-label="Search tasks">
+			<label class="task-search-field" for="task-search-input">
+				<span>Search</span>
+				<input
+					id="task-search-input"
+					type="search"
+					bind:value={taskSearchQuery}
+					placeholder="Sprint, task, owner, status, budget, spent, updated, description…"
+					autocomplete="off"
+				/>
+			</label>
+			{#if hasActiveTaskSearch}
+				<button type="button" class="task-search-clear" on:click={() => (taskSearchQuery = '')}>
+					Clear
+				</button>
+			{/if}
+		</section>
+	{/if}
 
 	<section class="sprint-composer" aria-label="Create sprint">
 		<div class="sprint-composer-head">
@@ -2563,19 +2857,21 @@
 		</section>
 	{/if}
 
-	<div class="board-content-slot">
-		{#if boardLoading}
-			<div class="board-state">Loading tasks...</div>
-		{:else if boardError}
-			<div class="board-state error">Unable to load tasks: {boardError}</div>
-		{:else if !hasBoardDataForView}
-			<div class="board-state">
-				{#if contextAware}
-					No tasks yet. Use + Add Sprint to start planning.
-				{:else}
-					No tasks yet. Add one to start planning.
-				{/if}
-			</div>
+		<div class="board-content-slot">
+			{#if boardLoading}
+				<div class="board-state">Loading tasks...</div>
+			{:else if boardError}
+				<div class="board-state error">Unable to load tasks: {boardError}</div>
+			{:else if !hasBoardDataForView}
+				<div class="board-state">
+					{#if boardView === 'table' && hasActiveTaskSearch}
+						No tasks matched "{taskSearchQuery.trim()}".
+					{:else if contextAware}
+						No tasks yet. Use + Add Sprint to start planning.
+					{:else}
+						No tasks yet. Add one to start planning.
+					{/if}
+				</div>
 		{:else if boardView === 'support'}
 			<div class="support-view" aria-label="Support ticket board">
 				<section class="support-composer">
@@ -2905,10 +3201,7 @@
 										<button
 											type="button"
 											class="sgh-btn sgh-add"
-											on:click={() => {
-												sprintAddKey = sprintAddKey === sprintGroup.key ? '' : sprintGroup.key;
-												sprintAddContent = '';
-											}}
+											on:click={() => void toggleSprintAddComposer(sprintGroup.key)}
 										>
 											+ Add row
 										</button>
@@ -2960,15 +3253,93 @@
 													aria-label="Select all in sprint"
 												/>
 											</th>
-										{/if}
-										<th scope="col">Task</th>
-										<th scope="col">Status</th>
-										<th scope="col">Owner</th>
-										<th scope="col">Budget</th>
-										<th scope="col">Spent</th>
-										<th scope="col">Updated</th>
-									</tr>
-								</thead>
+											{/if}
+											<th scope="col" class="th-sort th-task">
+												<button
+													type="button"
+													class="th-sort-btn"
+													class:is-active={sprintSortDirection(sprintGroup.key, 'title') !== ''}
+													on:click={() => toggleSprintSort(sprintGroup.key, 'title')}
+													aria-label={`Sort ${sprintGroup.name} by task name`}
+												>
+													<span>Task</span>
+													<span class="th-sort-icon" aria-hidden="true"
+														>{sprintSortIcon(sprintGroup.key, 'title')}</span
+													>
+												</button>
+											</th>
+											<th scope="col" class="th-sort th-status">
+												<button
+													type="button"
+													class="th-sort-btn"
+													class:is-active={sprintSortDirection(sprintGroup.key, 'status') !== ''}
+													on:click={() => toggleSprintSort(sprintGroup.key, 'status')}
+													aria-label={`Sort ${sprintGroup.name} by status`}
+												>
+													<span>Status</span>
+													<span class="th-sort-icon" aria-hidden="true"
+														>{sprintSortIcon(sprintGroup.key, 'status')}</span
+													>
+												</button>
+											</th>
+											<th scope="col" class="th-sort th-owner">
+												<button
+													type="button"
+													class="th-sort-btn"
+													class:is-active={sprintSortDirection(sprintGroup.key, 'owner') !== ''}
+													on:click={() => toggleSprintSort(sprintGroup.key, 'owner')}
+													aria-label={`Sort ${sprintGroup.name} by owner`}
+												>
+													<span>Owner</span>
+													<span class="th-sort-icon" aria-hidden="true"
+														>{sprintSortIcon(sprintGroup.key, 'owner')}</span
+													>
+												</button>
+											</th>
+											<th scope="col" class="th-sort th-budget">
+												<button
+													type="button"
+													class="th-sort-btn"
+													class:is-active={sprintSortDirection(sprintGroup.key, 'budget') !== ''}
+													on:click={() => toggleSprintSort(sprintGroup.key, 'budget')}
+													aria-label={`Sort ${sprintGroup.name} by budget`}
+												>
+													<span>Budget</span>
+													<span class="th-sort-icon" aria-hidden="true"
+														>{sprintSortIcon(sprintGroup.key, 'budget')}</span
+													>
+												</button>
+											</th>
+											<th scope="col" class="th-sort th-spent">
+												<button
+													type="button"
+													class="th-sort-btn"
+													class:is-active={sprintSortDirection(sprintGroup.key, 'spent') !== ''}
+													on:click={() => toggleSprintSort(sprintGroup.key, 'spent')}
+													aria-label={`Sort ${sprintGroup.name} by spent`}
+												>
+													<span>Spent</span>
+													<span class="th-sort-icon" aria-hidden="true"
+														>{sprintSortIcon(sprintGroup.key, 'spent')}</span
+													>
+												</button>
+											</th>
+											<th scope="col" class="th-sort th-updated">
+												<button
+													type="button"
+													class="th-sort-btn"
+													class:is-active={sprintSortDirection(sprintGroup.key, 'updated') !== ''}
+													on:click={() => toggleSprintSort(sprintGroup.key, 'updated')}
+													aria-label={`Sort ${sprintGroup.name} by updated time`}
+												>
+													<span>Updated</span>
+													<span class="th-sort-icon" aria-hidden="true"
+														>{sprintSortIcon(sprintGroup.key, 'updated')}</span
+													>
+												</button>
+											</th>
+										</tr>
+									</thead>
 								<tbody>
 									{#if sprintGroup.tasks.length === 0}
 										<tr>
@@ -3136,12 +3507,13 @@
 						</div>
 
 						<!-- Per-sprint add task form -->
-						{#if sprintAddKey === sprintGroup.key}
-							<form
-								class="sprint-add-form"
-								on:submit|preventDefault={() =>
-									void handleCreateRoomTaskInSprint(sprintAddContent, sprintGroup.name)}
-							>
+							{#if sprintAddKey === sprintGroup.key}
+								<form
+									class="sprint-add-form"
+									use:registerSprintAddForm={sprintGroup.key}
+									on:submit|preventDefault={() =>
+										void handleCreateRoomTaskInSprint(sprintAddContent, sprintGroup.name)}
+								>
 								<!-- svelte-ignore a11y-autofocus -->
 								<input
 									type="text"
@@ -3329,42 +3701,56 @@
 		background: color-mix(in srgb, var(--tb-panel-bg) 82%, #ffffff 18%);
 	}
 
-	.board-view-switch {
-		display: inline-flex;
+	.task-search {
+		display: flex;
 		align-items: center;
-		gap: 0.2rem;
-		padding: 0.2rem;
-		border-radius: 999px;
-		border: 1px solid var(--tb-panel-border);
-		background: color-mix(in srgb, var(--tb-panel-bg) 88%, #ffffff 12%);
+		gap: 0.6rem;
+		padding: 0.62rem 0.72rem;
+		border-radius: 12px;
+		border: 1px solid var(--tb-form-border);
+		background: var(--tb-form-bg);
 	}
 
-	.view-option {
-		height: 1.75rem;
-		padding: 0 0.72rem;
-		border: 1px solid transparent;
-		border-radius: 999px;
-		background: transparent;
-		color: var(--tb-cell-muted);
-		font-size: 0.74rem;
+	.task-search-field {
+		display: grid;
+		gap: 0.24rem;
+		flex: 1;
+		min-width: 0;
+	}
+
+	.task-search-field span {
+		font-size: 0.72rem;
 		font-weight: 700;
-		letter-spacing: 0.01em;
-		cursor: pointer;
-		transition:
-			background 0.18s ease,
-			border-color 0.18s ease,
-			color 0.18s ease;
+		color: var(--tb-cell-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
 	}
 
-	.view-option:hover {
-		background: color-mix(in srgb, var(--tb-btn-bg) 68%, transparent);
-		color: var(--tb-cell-text);
+	.task-search-field input {
+		width: 100%;
+		height: 2.08rem;
+		border: 1px solid var(--tb-input-border);
+		border-radius: 10px;
+		background: var(--tb-input-bg);
+		color: var(--tb-input-text);
+		font-size: 0.84rem;
+		padding: 0 0.7rem;
 	}
 
-	.view-option.is-active {
-		background: var(--tb-btn-bg);
-		border-color: var(--tb-btn-border);
+	.task-search-field input::placeholder {
+		color: var(--tb-input-placeholder);
+	}
+
+	.task-search-clear {
+		height: 2.08rem;
+		border-radius: 10px;
+		border: 1px solid var(--tb-btn-border);
+		background: color-mix(in srgb, var(--tb-btn-bg) 82%, #ffffff 18%);
 		color: var(--tb-btn-text);
+		font-size: 0.76rem;
+		font-weight: 700;
+		padding: 0 0.68rem;
+		cursor: pointer;
 	}
 
 	.sprint-composer {
@@ -4474,6 +4860,43 @@
 		border-bottom: 1px solid var(--tb-grid-row-border);
 	}
 
+	.th-sort {
+		padding: 0;
+	}
+
+	.th-sort-btn {
+		width: 100%;
+		height: 100%;
+		border: none;
+		padding: 0.35rem 0.7rem;
+		background: transparent;
+		color: inherit;
+		display: inline-flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.35rem;
+		font: inherit;
+		letter-spacing: inherit;
+		text-transform: inherit;
+		cursor: pointer;
+	}
+
+	.th-sort-btn:hover {
+		background: color-mix(in srgb, #ffffff 12%, transparent);
+	}
+
+	.th-sort-btn.is-active .th-sort-icon {
+		color: #ffffff;
+		opacity: 1;
+	}
+
+	.th-sort-icon {
+		opacity: 0.72;
+		font-size: 0.76rem;
+		font-weight: 800;
+		line-height: 1;
+	}
+
 	.task-grid thead th:not(:last-child),
 	.task-grid tbody td:not(:last-child) {
 		border-right: 1px solid var(--tb-grid-col-border);
@@ -4527,8 +4950,9 @@
 		position: relative;
 	}
 
+	.th-task,
 	.task-cell {
-		width: 30%;
+		width: 38%;
 		padding-left: 0.55rem;
 		cursor: pointer;
 	}
@@ -4536,20 +4960,23 @@
 		background: color-mix(in srgb, var(--tb-grid-head-bg) 5%, transparent);
 	}
 
+	.th-status,
 	.status-cell {
-		width: 18%;
+		width: 14%;
 	}
 
+	.th-owner,
 	.owner-cell {
-		width: 18%;
+		width: 16%;
 		cursor: pointer;
 	}
 	.owner-cell:not(.is-editing):hover {
 		background: color-mix(in srgb, var(--tb-grid-head-bg) 5%, transparent);
 	}
 
+	.th-budget,
 	.budget-cell {
-		width: 12%;
+		width: 10%;
 		font-size: 0.8rem;
 		font-weight: 600;
 		white-space: nowrap;
@@ -4559,8 +4986,9 @@
 		background: color-mix(in srgb, var(--tb-grid-head-bg) 5%, transparent);
 	}
 
+	.th-spent,
 	.spent-cell {
-		width: 12%;
+		width: 10%;
 		font-size: 0.8rem;
 		font-weight: 600;
 		white-space: nowrap;
@@ -4570,8 +4998,9 @@
 		background: color-mix(in srgb, var(--tb-grid-head-bg) 5%, transparent);
 	}
 
+	.th-updated,
 	.updated-cell {
-		width: 10%;
+		width: 8%;
 		font-size: 0.78rem;
 		color: var(--tb-cell-muted);
 		white-space: nowrap;
@@ -4581,6 +5010,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.45rem;
+		width: 100%;
 		min-width: 0;
 	}
 
@@ -4611,7 +5041,9 @@
 	}
 
 	.task-title-trigger {
-		max-width: 150px;
+		flex: 1;
+		width: 100%;
+		max-width: none;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -4873,9 +5305,13 @@
 			justify-content: flex-start;
 		}
 
-		.board-view-switch {
-			width: 100%;
-			justify-content: flex-start;
+		.task-search {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.task-search-clear {
+			width: fit-content;
 		}
 
 		.sprint-composer-head {

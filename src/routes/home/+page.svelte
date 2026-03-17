@@ -93,31 +93,45 @@
 	let cycleWord = cycleWords[0];
 	let cycleVisible = true;
 
-	// Active tool tab
-	const toolTabs = ['Chat', 'Code Canvas', 'Whiteboard', 'Tasks', 'AI'];
-	let activeTab = 'Chat';
-	const tabContent: Record<string, { headline: string; body: string }> = {
-		Chat: {
-			headline: 'Full-featured chat with AI context',
-			body: 'Typing indicators, reply threads, reactions, voice messages, media, GIFs. Mention @ToraAI to pull your AI agent directly into any conversation with full room context.'
+	// Pricing tiers
+	const plans = [
+		{
+			name: 'Free',
+			price: '$0',
+			period: 'forever',
+			desc: 'For individuals exploring Tora.',
+			features: ['Unlimited ephemeral rooms', 'Chat, whiteboard & task tools', '@ToraAI (limited messages/day)', 'P2P voice & video calls', 'Community support'],
+			cta: 'Get started',
+			highlighted: false,
 		},
-		'Code Canvas': {
-			headline: 'Collaborative editor with AI autocomplete',
-			body: 'Monaco-powered simultaneous editing via Yjs CRDTs. Run Python, JavaScript, and more. AI understands your project and offers context-aware completions in real time.'
+		{
+			name: 'Plus',
+			price: '$10',
+			period: 'per month',
+			desc: 'For power users who live in Tora.',
+			features: ['Everything in Free', 'Extended @ToraAI usage', 'Persistent room history (7 days)', 'Priority room creation', 'Email support'],
+			cta: 'Start Plus',
+			highlighted: false,
 		},
-		Whiteboard: {
-			headline: 'Shared draw board with AI diagram generation',
-			body: 'Freehand drawing, shapes, annotations, and live cursors. Ask ToraAI to generate diagrams, flowcharts, or system designs directly onto the canvas.'
+		{
+			name: 'Pro',
+			price: '$20',
+			period: 'per month',
+			desc: 'For lean teams shipping fast.',
+			features: ['Everything in Plus', 'Unlimited @ToraAI messages', 'Persistent history (30 days)', 'Custom AI provider keys', 'Private AI mode for all users', 'Priority support'],
+			cta: 'Start Pro',
+			highlighted: true,
 		},
-		Tasks: {
-			headline: 'AI-powered project management',
-			body: 'Create, assign, and track tasks without leaving the session. Ask ToraAI to generate an entire sprint plan, break down features into tasks, or summarize project status.'
+		{
+			name: 'Enterprise',
+			price: '$250',
+			period: 'per month',
+			desc: 'For organisations with compliance needs.',
+			features: ['Everything in Pro', 'Self-hosted deployment', 'SAML SSO & SCIM', 'GDPR / SOC2 / ISO27001', 'SLA & dedicated support', 'Custom AI model integration'],
+			cta: 'Contact us',
+			highlighted: false,
 		},
-		AI: {
-			headline: '@ToraAI — your agentic team member',
-			body: 'ToraAI participates in your room with full context: chat history, active code, task board state. Private AI mode lets any team member ask questions only they can see.'
-		}
-	};
+	];
 
 	type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -356,6 +370,7 @@
 				<a href="https://github.com/savanp08/tora" target="_blank" rel="noopener">GitHub</a>
 				<a href="/home">Dashboard</a>
 				<a href="#tools">Tools</a>
+				<a href="#pricing">Pricing</a>
 			</div>
 			<button class="nav-cta" on:click={() => document.getElementById('room-entry')?.scrollIntoView({ behavior:'smooth' })}>
 				Open workspace
@@ -522,40 +537,214 @@
 		</div>
 	</section>
 
-	<!-- ▸ Tools section — like Thesys's "Charts|Forms|Cards" tab strip -->
+	<!-- ▸ Tools — cinematic scenes -->
 	<section class="tools-section" id="tools">
-		<div class="tools-wrap">
-			<p class="tools-label">Five tools, one room</p>
-			<h2 class="tools-h2">Experience the agentic workspace</h2>
 
-			<!-- Tab strip -->
-			<div class="tab-strip" role="tablist">
-				{#each toolTabs as tab}
-					<button
-						role="tab"
-						aria-selected={activeTab === tab}
-						class="tab-btn"
-						class:active={activeTab === tab}
-						on:click={() => (activeTab = tab)}
-					>
-						{tab}
+		<!-- Scene 1: Chat -->
+		<div class="scene">
+			<div class="scene-cards">
+				<!-- Back card -->
+				<div class="scard scard-back">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">Tora — chat</span></div>
+					<div class="scard-body">
+						<div class="sc-msg-row sc-other"><div class="sc-av" style="background:rgba(99,102,241,0.18);color:#818cf8">J</div><div class="sc-bubble sc-other-b">Let's finalize the auth flow before we push</div></div>
+						<div class="sc-msg-row sc-me"><div class="sc-bubble sc-me-b">Agreed. Should we bring ToraAI in to review?</div></div>
+						<div class="sc-typing"><span></span><span></span><span></span></div>
+					</div>
+				</div>
+				<!-- Front card -->
+				<div class="scard scard-front">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">@ToraAI</span></div>
+					<div class="scard-body">
+						<div class="sc-ai-header"><span class="sc-ai-pill">ToraAI</span><span class="sc-ai-ctx">Reading room context…</span></div>
+						<p class="sc-ai-para">I've reviewed your auth flow. Here are <strong>3 issues</strong> I found:</p>
+						<div class="sc-ai-item"><span class="sc-ai-num">01</span><span>JWT expiry not handled on the client — users get silent 401s</span></div>
+						<div class="sc-ai-item"><span class="sc-ai-num">02</span><span>Refresh token stored in localStorage — move to httpOnly cookie</span></div>
+						<div class="sc-ai-item"><span class="sc-ai-num">03</span><span>No rate-limiting on <code>/api/auth/login</code></span></div>
+						<div class="sc-ai-actions"><button class="sc-ai-btn">Apply fixes</button><button class="sc-ai-btn sc-ai-btn-ghost">Explain more</button></div>
+					</div>
+				</div>
+			</div>
+			<div class="scene-text">
+				<p class="scene-tag">Chat</p>
+				<h2 class="scene-h2">Your AI agent attends<br />every conversation.</h2>
+				<p class="scene-sub">Mention @ToraAI in any message and it reads your entire room history — chat, code, tasks — to give you answers that actually fit your context. Private AI mode lets you ask without the team seeing.</p>
+			</div>
+		</div>
+
+		<!-- Scene 2: Code Canvas -->
+		<div class="scene scene-flip">
+			<div class="scene-text scene-text-right">
+				<p class="scene-tag" style="color:#34d399">Code Canvas</p>
+				<h2 class="scene-h2">Write, run, and ship<br />code — together.</h2>
+				<p class="scene-sub">Monaco-powered editor with real-time multi-cursor sync via Yjs. Run Python, JavaScript, Go and more without leaving the room. AI sees your whole project — not just the open file.</p>
+			</div>
+			<div class="scene-cards scene-cards-left">
+				<div class="scard scard-back scard-code-back">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">terminal</span></div>
+					<div class="scard-body sc-terminal">
+						<div class="term-line"><span class="term-prompt">›</span> <span class="term-cmd">python main.py</span></div>
+						<div class="term-line term-out">Running test suite...</div>
+						<div class="term-line term-ok">✓ 24 tests passed</div>
+						<div class="term-line term-err">✗ 1 test failed: auth_flow_test.py:44</div>
+						<div class="term-cursor">▌</div>
+					</div>
+				</div>
+				<div class="scard scard-front scard-code-front">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">main.py</span><span class="sc-live-badge">● 2 editing</span></div>
+					<div class="scard-body sc-code-body">
+						<div class="cline"><span class="ln">1</span><span class="ck">async def</span> <span class="cf">authenticate</span><span class="cp">(token: </span><span class="cv">str</span><span class="cp">):</span></div>
+						<div class="cline"><span class="ln">2</span><span class="ci"></span><span class="ck">try</span><span class="cp">:</span></div>
+						<div class="cline"><span class="ln">3</span><span class="ci"></span><span class="ci"></span><span class="cv">payload</span> <span class="cp">= await</span> <span class="cf">verify_jwt</span><span class="cp">(token)</span></div>
+						<div class="cline"><span class="ln">4</span><span class="ci"></span><span class="ci"></span><span class="ck">return</span> <span class="cf">User</span><span class="cp">.</span><span class="cf">from_payload</span><span class="cp">(payload)</span></div>
+						<div class="cline"><span class="ln">5</span><span class="ci"></span><span class="ck">except</span> <span class="cv">JWTExpiredError</span><span class="cp">:</span></div>
+						<div class="cline cline-ai"><span class="ln">6</span><span class="ci"></span><span class="ci"></span><span class="cp">raise</span> <span class="cf">HTTPException</span><span class="cp">(401)</span><span class="sc-ghost"> # ← AI suggestion</span></div>
+					</div>
+					<div class="sc-ai-suggestion-bar"><span class="sc-ai-pill" style="font-size:0.65rem">ToraAI</span> Add token refresh logic here — based on your auth_flow.py</div>
+				</div>
+			</div>
+		</div>
+
+		<!-- Scene 3: Whiteboard -->
+		<div class="scene">
+			<div class="scene-cards">
+				<div class="scard scard-back scard-board-back">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">whiteboard</span></div>
+					<div class="scard-body">
+						<div class="sc-prompt-bar"><span class="sc-prompt-icon">✦</span> Generate system architecture for a real-time chat app</div>
+					</div>
+				</div>
+				<div class="scard scard-front scard-board-front">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">whiteboard — AI generated</span></div>
+					<div class="scard-body">
+						<svg viewBox="0 0 420 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+							<rect x="10" y="80" width="80" height="36" rx="6" fill="none" stroke="#f59e0b" stroke-width="1.2" opacity="0.7"/>
+							<text x="50" y="102" text-anchor="middle" fill="#f59e0b" font-size="11" font-family="inherit">Client</text>
+							<rect x="170" y="40" width="80" height="36" rx="6" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.7"/>
+							<text x="210" y="62" text-anchor="middle" fill="#6366f1" font-size="11" font-family="inherit">WebSocket</text>
+							<rect x="170" y="120" width="80" height="36" rx="6" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.7"/>
+							<text x="210" y="142" text-anchor="middle" fill="#6366f1" font-size="11" font-family="inherit">API Server</text>
+							<rect x="330" y="40" width="76" height="36" rx="6" fill="none" stroke="#34d399" stroke-width="1.2" opacity="0.7"/>
+							<text x="368" y="62" text-anchor="middle" fill="#34d399" font-size="11" font-family="inherit">Redis</text>
+							<rect x="330" y="120" width="76" height="36" rx="6" fill="none" stroke="#34d399" stroke-width="1.2" opacity="0.7"/>
+							<text x="368" y="142" text-anchor="middle" fill="#34d399" font-size="11" font-family="inherit">ScyllaDB</text>
+							<line x1="90" y1="98" x2="170" y2="58" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+							<line x1="90" y1="98" x2="170" y2="138" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+							<line x1="250" y1="58" x2="330" y2="58" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+							<line x1="250" y1="138" x2="330" y2="138" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+							<text x="210" y="205" text-anchor="middle" fill="rgba(255,255,255,0.25)" font-size="10" font-family="inherit">✦ Generated by ToraAI from your prompt</text>
+						</svg>
+					</div>
+				</div>
+			</div>
+			<div class="scene-text">
+				<p class="scene-tag" style="color:#f59e0b">Whiteboard</p>
+				<h2 class="scene-h2">From prompt to diagram<br />in seconds.</h2>
+				<p class="scene-sub">Sketch freely on a shared infinite canvas with live cursors. Or just describe what you want — ToraAI will generate the diagram, flowchart, or wireframe directly onto the board.</p>
+			</div>
+		</div>
+
+		<!-- Scene 4: Task Management -->
+		<div class="scene scene-flip">
+			<div class="scene-text scene-text-right">
+				<p class="scene-tag" style="color:#ec4899">Task Management</p>
+				<h2 class="scene-h2">A full sprint plan<br />from one prompt.</h2>
+				<p class="scene-sub">Room-scoped Kanban that lives next to your chat and code. Ask ToraAI to generate a sprint, break down an epic, or surface what's blocking the team — without opening another tool.</p>
+			</div>
+			<div class="scene-cards scene-cards-left">
+				<div class="scard scard-back">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">ToraAI — task generation</span></div>
+					<div class="scard-body">
+						<div class="sc-prompt-bar" style="border-color:rgba(236,72,153,0.3)"><span class="sc-prompt-icon" style="color:#ec4899">✦</span> Build a sprint for v1 auth feature</div>
+						<p style="font-size:0.78rem;color:var(--text-3);margin:12px 0 6px">Generated 6 tasks:</p>
+						{#each ['Design login & signup screens','Implement JWT auth backend','Add Google OAuth flow','Write auth middleware','Unit tests for token handling','QA pass + staging deploy'] as t, i}
+							<div class="sc-gen-task"><span class="sc-gen-num">{i+1}</span>{t}</div>
+						{/each}
+					</div>
+				</div>
+				<div class="scard scard-front">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">task board</span></div>
+					<div class="scard-body">
+						<div class="sc-kanban">
+							<div class="sc-col"><div class="sc-col-h">Backlog</div><div class="sc-card-item">Add Google OAuth flow</div><div class="sc-card-item">QA pass + staging</div></div>
+							<div class="sc-col"><div class="sc-col-h" style="color:#ec4899">In Progress</div><div class="sc-card-item sc-card-active" style="border-color:rgba(236,72,153,0.4)">JWT auth backend<span class="sc-card-badge" style="color:#ec4899;background:rgba(236,72,153,0.12)">AI</span></div></div>
+							<div class="sc-col"><div class="sc-col-h" style="color:#34d399">Done</div><div class="sc-card-item sc-card-done">Design screens ✓</div><div class="sc-card-item sc-card-done">Auth middleware ✓</div></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<!-- Scene 5: Dashboard -->
+		<div class="scene">
+			<div class="scene-cards">
+				<div class="scard scard-back">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">rooms</span></div>
+					<div class="scard-body">
+						{#each [['v1-auth-sprint','5 members','12 tasks'],['design-review','3 members','4 tasks'],['infra-setup','2 members','7 tasks']] as [name, m, t]}
+							<div class="sc-room-row"><div class="sc-room-dot"></div><div class="sc-room-info"><span class="sc-room-name">{name}</span><span class="sc-room-meta">{m} · {t}</span></div><span class="sc-room-live">live</span></div>
+						{/each}
+					</div>
+				</div>
+				<div class="scard scard-front">
+					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">dashboard</span></div>
+					<div class="scard-body">
+						<div class="sc-stats-row">
+							<div class="sc-stat"><span class="sc-stat-v" style="color:#38bdf8">3</span><span class="sc-stat-l">Active rooms</span></div>
+							<div class="sc-stat"><span class="sc-stat-v" style="color:#38bdf8">23</span><span class="sc-stat-l">Open tasks</span></div>
+							<div class="sc-stat"><span class="sc-stat-v" style="color:#38bdf8">8</span><span class="sc-stat-l">Members online</span></div>
+						</div>
+						<div class="sc-notice" style="border-left-color:#38bdf8;background:rgba(56,189,248,0.05)">
+							<span style="color:#38bdf8;font-weight:800">ToraAI</span> — 2 tasks in <em>v1-auth-sprint</em> are overdue and blocking the deploy.
+						</div>
+						<div class="sc-notice" style="border-left-color:rgba(255,255,255,0.1);margin-top:8px">
+							<span style="color:var(--text-2)">Jordan</span> pinned a message in <em>design-review</em>
+						</div>
+					</div>
+				</div>
+			</div>
+			<div class="scene-text">
+				<p class="scene-tag" style="color:#38bdf8">Dashboard</p>
+				<h2 class="scene-h2">Command centre for<br />every session.</h2>
+				<p class="scene-sub">See every active room, task, and member at a glance. ToraAI surfaces blockers, summarises activity, and tells you exactly where your attention is needed — so nothing slips through.</p>
+			</div>
+		</div>
+
+	</section>
+
+	<!-- ▸ Pricing -->
+	<section class="pricing-section" id="pricing">
+		<div class="pricing-intro">
+			<p class="section-label">Pricing</p>
+			<h2 class="section-h2">Simple, transparent pricing</h2>
+			<p class="section-sub">Start free. Scale when you need to. Every plan includes the full workspace — no features hidden behind paywalls at the core.</p>
+		</div>
+
+		<div class="pricing-grid">
+			{#each plans as plan}
+				<div class="plan-card" class:plan-featured={plan.highlighted}>
+					{#if plan.highlighted}
+						<div class="plan-badge">Most popular</div>
+					{/if}
+					<div class="plan-top">
+						<p class="plan-name">{plan.name}</p>
+						<div class="plan-price-row">
+							<span class="plan-price">{plan.price}</span>
+							<span class="plan-period">/{plan.period}</span>
+						</div>
+						<p class="plan-desc">{plan.desc}</p>
+					</div>
+					<div class="plan-divider"></div>
+					<ul class="plan-features">
+						{#each plan.features as f}
+							<li><span class="plan-check">✓</span>{f}</li>
+						{/each}
+					</ul>
+					<button class="plan-cta" class:plan-cta-primary={plan.highlighted}>
+						{plan.cta}
 					</button>
-				{/each}
-			</div>
-
-			<!-- Tab content card -->
-			<div class="tab-card" role="tabpanel">
-				<div class="tab-card-chrome">
-					<span class="chrome-dot" style="background:#ff5f57"></span>
-					<span class="chrome-dot" style="background:#febc2e"></span>
-					<span class="chrome-dot" style="background:#28c840"></span>
-					<span class="chrome-title">{activeTab}</span>
 				</div>
-				<div class="tab-card-body">
-					<h3>{tabContent[activeTab].headline}</h3>
-					<p>{tabContent[activeTab].body}</p>
-				</div>
-			</div>
+			{/each}
 		</div>
 	</section>
 
@@ -1084,87 +1273,445 @@
 		margin: 0;
 	}
 
-	/* ── Tools section ─────────────────────────────── */
+	/* ── Tools — cinematic scenes ────────────────────── */
 	.tools-section {
 		position: relative;
 		z-index: 1;
+	}
+
+	/* Each scene is full-width, tall, overflow hidden so cards can bleed */
+	.scene {
+		position: relative;
+		min-height: 680px;
+		overflow: hidden;
 		border-top: 1px solid var(--border);
-		padding: 100px 32px;
+		display: flex;
+		align-items: flex-end;
+		padding: 0 0 72px 80px;
 	}
-	.tools-wrap {
-		max-width: 900px;
-		margin: 0 auto;
+	.scene-flip {
+		padding: 0 80px 72px 0;
+		justify-content: flex-end;
 	}
-	.tools-label {
-		font-size: 0.72rem;
-		font-weight: 700;
+
+	/* Bold claim text — bottom-left like Thesys */
+	.scene-text {
+		position: relative;
+		z-index: 2;
+		max-width: 480px;
+		flex-shrink: 0;
+	}
+	.scene-text-right {
+		text-align: right;
+	}
+	.scene-tag {
+		font-size: 0.7rem;
+		font-weight: 800;
 		letter-spacing: 0.1em;
 		text-transform: uppercase;
-		color: var(--text-3);
-		margin: 0 0 14px;
+		color: #6366f1;
+		margin: 0 0 16px;
 	}
-	.tools-h2 {
-		font-size: clamp(1.8rem, 3.5vw, 2.8rem);
+	.scene-h2 {
+		font-size: clamp(2rem, 3.5vw, 3rem);
 		font-weight: 800;
 		letter-spacing: -0.035em;
-		color: var(--text);
-		margin: 0 0 40px;
 		line-height: 1.1;
-	}
-	.tab-strip {
-		display: flex;
-		gap: 6px;
-		flex-wrap: wrap;
-		margin-bottom: 24px;
-	}
-	.tab-btn {
-		font-family: var(--font);
-		font-size: 0.825rem;
-		font-weight: 600;
-		padding: 8px 18px;
-		border-radius: 999px;
-		background: none;
-		border: 1px solid var(--border);
-		color: var(--text-3);
-		cursor: pointer;
-		transition: all 0.15s;
-		letter-spacing: -0.01em;
-	}
-	.tab-btn:hover { border-color: var(--border-hi); color: var(--text-2); }
-	.tab-btn.active { background: var(--text); border-color: var(--text); color: var(--page-bg); }
-	.tab-card {
-		background: var(--surface);
-		border: 1px solid var(--border-hi);
-		border-radius: 16px;
-		overflow: hidden;
-	}
-	.tab-card-chrome {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		padding: 12px 18px;
-		background: var(--surface-2);
-		border-bottom: 1px solid var(--border);
-	}
-	.tab-card-body {
-		padding: 36px 40px;
-	}
-	.tab-card-body h3 {
-		font-size: 1.35rem;
-		font-weight: 800;
 		color: var(--text);
-		margin: 0 0 14px;
-		letter-spacing: -0.025em;
-		line-height: 1.2;
+		margin: 0 0 18px;
 	}
-	.tab-card-body p {
-		font-size: 1rem;
+	.scene-sub {
+		font-size: 0.95rem;
 		color: var(--text-2);
 		line-height: 1.7;
 		margin: 0;
-		max-width: 640px;
 		font-weight: 400;
 	}
+
+	/* Cards cluster — positioned to fill the right side, bleeding off */
+	.scene-cards {
+		position: absolute;
+		top: 48px;
+		right: -32px;
+		width: 62%;
+		height: calc(100% - 48px);
+		pointer-events: none;
+	}
+	.scene-cards-left {
+		right: auto;
+		left: -32px;
+	}
+
+	/* Individual floating dark card */
+	.scard {
+		position: absolute;
+		background: #141418;
+		border: 1px solid rgba(255,255,255,0.09);
+		border-radius: 14px;
+		overflow: hidden;
+		box-shadow: 0 24px 64px rgba(0,0,0,0.7), 0 0 0 0.5px rgba(255,255,255,0.05);
+	}
+	.scard-back {
+		width: 58%;
+		top: 0;
+		left: 0;
+		opacity: 0.72;
+		transform: translateY(24px) scale(0.97);
+		z-index: 1;
+	}
+	.scard-front {
+		width: 70%;
+		top: 60px;
+		right: 0;
+		z-index: 2;
+	}
+
+	/* Code canvas specific positioning */
+	.scard-code-back {
+		width: 52%;
+		top: auto;
+		bottom: 0;
+		left: 8%;
+		transform: none;
+		opacity: 0.7;
+	}
+	.scard-code-front {
+		width: 72%;
+		top: 0;
+		right: 0;
+	}
+
+	/* Board specific */
+	.scard-board-back {
+		width: 55%;
+		top: 0;
+		left: 0;
+		transform: translateY(20px) scale(0.96);
+	}
+	.scard-board-front {
+		width: 72%;
+		top: 48px;
+		right: 0;
+	}
+
+	/* Card chrome bar */
+	.scard-chrome {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 10px 14px;
+		background: rgba(255,255,255,0.025);
+		border-bottom: 1px solid rgba(255,255,255,0.06);
+	}
+	.cdot { width: 10px; height: 10px; border-radius: 50%; opacity: 0.85; flex-shrink: 0; }
+	.cdot.r { background: #ff5f57; }
+	.cdot.y { background: #febc2e; }
+	.cdot.g { background: #28c840; }
+	.ctitle {
+		margin-left: 4px;
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: rgba(255,255,255,0.3);
+		letter-spacing: 0.02em;
+	}
+	.sc-live-badge {
+		margin-left: auto;
+		font-size: 0.65rem;
+		font-weight: 700;
+		color: #34d399;
+		background: rgba(52,211,153,0.12);
+		padding: 2px 8px;
+		border-radius: 999px;
+	}
+
+	/* Card body */
+	.scard-body {
+		padding: 18px 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	/* ── Chat card internals ── */
+	.sc-msg-row {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+	}
+	.sc-me { flex-direction: row-reverse; }
+	.sc-av {
+		width: 26px; height: 26px;
+		border-radius: 50%;
+		font-size: 0.65rem; font-weight: 800;
+		display: flex; align-items: center; justify-content: center;
+		flex-shrink: 0;
+	}
+	.sc-bubble {
+		max-width: 78%;
+		padding: 8px 12px;
+		border-radius: 10px;
+		font-size: 0.78rem;
+		line-height: 1.5;
+	}
+	.sc-other-b { background: rgba(255,255,255,0.05); color: var(--text-2); border-radius: 3px 10px 10px 10px; }
+	.sc-me-b    { background: rgba(255,255,255,0.09); color: var(--text); border-radius: 10px 3px 10px 10px; }
+	.sc-typing {
+		display: flex; gap: 4px; align-items: center; padding: 4px 2px;
+	}
+	.sc-typing span {
+		width: 5px; height: 5px; border-radius: 50%;
+		background: rgba(255,255,255,0.25);
+		animation: blink 1.2s ease-in-out infinite;
+	}
+	.sc-typing span:nth-child(2) { animation-delay: 0.2s; }
+	.sc-typing span:nth-child(3) { animation-delay: 0.4s; }
+	@keyframes blink { 0%,80%,100%{opacity:0.25} 40%{opacity:1} }
+	.sc-ai-header { display: flex; align-items: center; gap: 8px; }
+	.sc-ai-pill {
+		display: inline-flex; align-items: center;
+		font-size: 0.68rem; font-weight: 800;
+		background: rgba(99,102,241,0.2); color: #a5b4fc;
+		padding: 3px 9px; border-radius: 999px;
+		letter-spacing: 0.03em;
+	}
+	.sc-ai-ctx { font-size: 0.72rem; color: var(--text-3); }
+	.sc-ai-para { font-size: 0.82rem; color: var(--text-2); margin: 0; line-height: 1.5; }
+	.sc-ai-para strong { color: var(--text); }
+	.sc-ai-item {
+		display: flex; gap: 12px; align-items: flex-start;
+		font-size: 0.78rem; color: var(--text-2); line-height: 1.5;
+	}
+	.sc-ai-num {
+		font-size: 0.65rem; font-weight: 800; color: var(--text-3);
+		padding-top: 1px; flex-shrink: 0;
+	}
+	.sc-ai-item code { font-family: ui-monospace, monospace; font-size: 0.72rem; background: rgba(255,255,255,0.07); border-radius: 3px; padding: 1px 5px; color: #c7d2fe; }
+	.sc-ai-actions { display: flex; gap: 8px; margin-top: 4px; }
+	.sc-ai-btn {
+		font-family: var(--font); font-size: 0.72rem; font-weight: 700;
+		padding: 6px 14px; border-radius: 7px;
+		background: var(--text); color: var(--page-bg);
+		border: none; cursor: pointer;
+	}
+	.sc-ai-btn-ghost {
+		background: transparent; color: var(--text-2);
+		border: 1px solid rgba(255,255,255,0.1);
+	}
+
+	/* ── Code card internals ── */
+	.sc-terminal { font-family: ui-monospace, monospace; font-size: 0.75rem; line-height: 1.9; }
+	.term-line { display: flex; gap: 8px; }
+	.term-prompt { color: rgba(255,255,255,0.3); }
+	.term-cmd { color: var(--text); }
+	.term-out { color: var(--text-3); padding-left: 16px; }
+	.term-ok  { color: #34d399; padding-left: 16px; }
+	.term-err { color: #f87171; padding-left: 16px; }
+	.term-cursor { color: rgba(255,255,255,0.6); animation: blink-cur 1s step-end infinite; }
+	@keyframes blink-cur { 0%,100%{opacity:1} 50%{opacity:0} }
+	.sc-code-body { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.76rem; line-height: 1.85; padding-bottom: 0; }
+	.cline { display: flex; gap: 14px; }
+	.cline-ai { background: rgba(52,211,153,0.06); border-radius: 3px; }
+	.ln   { color: rgba(255,255,255,0.18); min-width: 14px; }
+	.ci   { width: 18px; flex-shrink: 0; display: inline-block; }
+	.ck   { color: #818cf8; }
+	.cf   { color: #34d399; }
+	.cv   { color: #f3c67e; }
+	.cp   { color: rgba(255,255,255,0.55); }
+	.sc-ghost { color: rgba(52,211,153,0.5); font-style: italic; }
+	.sc-ai-suggestion-bar {
+		border-top: 1px solid rgba(255,255,255,0.06);
+		padding: 10px 20px;
+		font-size: 0.73rem; color: #6ee7b7;
+		background: rgba(52,211,153,0.04);
+		display: flex; align-items: center; gap: 8px;
+	}
+	.sc-prompt-bar {
+		display: flex; align-items: center; gap: 10px;
+		background: rgba(255,255,255,0.04);
+		border: 1px solid rgba(255,255,255,0.08);
+		border-radius: 8px;
+		padding: 9px 13px;
+		font-size: 0.8rem; color: var(--text-2);
+	}
+	.sc-prompt-icon { color: #6366f1; font-size: 0.85rem; }
+
+	/* ── Task card internals ── */
+	.sc-gen-task {
+		display: flex; align-items: center; gap: 10px;
+		font-size: 0.76rem; color: var(--text-2); line-height: 1.4; padding: 2px 0;
+	}
+	.sc-gen-num {
+		font-size: 0.62rem; font-weight: 800; color: var(--text-3);
+		min-width: 16px;
+	}
+	.sc-kanban { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
+	.sc-col { display: flex; flex-direction: column; gap: 7px; }
+	.sc-col-h { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); margin-bottom: 3px; }
+	.sc-card-item {
+		background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
+		border-radius: 7px; padding: 8px 9px;
+		font-size: 0.73rem; color: var(--text-2); line-height: 1.4;
+	}
+	.sc-card-active { background: rgba(236,72,153,0.06); color: var(--text); display: flex; align-items: center; justify-content: space-between; }
+	.sc-card-done { opacity: 0.4; text-decoration: line-through; }
+	.sc-card-badge { font-size: 0.6rem; font-weight: 800; padding: 2px 5px; border-radius: 4px; }
+
+	/* ── Dashboard card internals ── */
+	.sc-stats-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
+	.sc-stat { display: flex; flex-direction: column; gap: 3px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 12px 14px; }
+	.sc-stat-v { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.04em; line-height: 1; }
+	.sc-stat-l { font-size: 0.7rem; color: var(--text-3); font-weight: 500; }
+	.sc-notice {
+		border-left: 2px solid; border-radius: 0 7px 7px 0;
+		padding: 10px 12px; font-size: 0.78rem;
+		color: var(--text-2); line-height: 1.5;
+	}
+	.sc-notice em { font-style: normal; color: var(--text); }
+	.sc-room-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+	.sc-room-row:last-child { border-bottom: none; }
+	.sc-room-dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; flex-shrink: 0; }
+	.sc-room-info { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+	.sc-room-name { font-size: 0.8rem; font-weight: 600; color: var(--text); font-family: ui-monospace, monospace; }
+	.sc-room-meta { font-size: 0.7rem; color: var(--text-3); }
+	.sc-room-live { font-size: 0.62rem; font-weight: 800; color: #34d399; background: rgba(52,211,153,0.1); padding: 2px 8px; border-radius: 999px; }
+
+	/* ── Pricing section ──────────────────────────────── */
+	.pricing-section {
+		position: relative;
+		z-index: 1;
+		border-top: 1px solid var(--border);
+		padding: 100px 32px 120px;
+	}
+	.pricing-intro {
+		max-width: 640px;
+		margin: 0 auto 64px;
+		text-align: center;
+	}
+	.pricing-grid {
+		max-width: 1200px;
+		margin: 0 auto;
+		display: grid;
+		grid-template-columns: repeat(4, 1fr);
+		gap: 2px;
+		background: var(--border);
+		border: 1px solid var(--border);
+		border-radius: 20px;
+		overflow: hidden;
+	}
+	.plan-card {
+		background: var(--surface);
+		padding: 36px 32px 40px;
+		display: flex;
+		flex-direction: column;
+		gap: 0;
+		position: relative;
+		transition: background 0.2s;
+	}
+	.plan-card:hover { background: var(--surface-2); }
+	.plan-featured {
+		background: var(--surface-2);
+		box-shadow: inset 0 0 0 1px rgba(99,102,241,0.3);
+	}
+	.plan-badge {
+		position: absolute;
+		top: -1px;
+		left: 50%;
+		transform: translateX(-50%);
+		font-size: 0.68rem;
+		font-weight: 800;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		background: var(--accent);
+		color: #fff;
+		padding: 4px 12px;
+		border-radius: 0 0 8px 8px;
+	}
+	.plan-top {
+		margin-bottom: 24px;
+	}
+	.plan-name {
+		font-size: 0.75rem;
+		font-weight: 800;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-3);
+		margin: 0 0 16px;
+	}
+	.plan-price-row {
+		display: flex;
+		align-items: baseline;
+		gap: 4px;
+		margin-bottom: 10px;
+	}
+	.plan-price {
+		font-size: 2.6rem;
+		font-weight: 800;
+		color: var(--text);
+		letter-spacing: -0.04em;
+		line-height: 1;
+	}
+	.plan-period {
+		font-size: 0.8rem;
+		color: var(--text-3);
+		font-weight: 500;
+	}
+	.plan-desc {
+		font-size: 0.83rem;
+		color: var(--text-2);
+		line-height: 1.5;
+		margin: 0;
+	}
+	.plan-divider {
+		height: 1px;
+		background: var(--border);
+		margin-bottom: 22px;
+	}
+	.plan-features {
+		list-style: none;
+		padding: 0;
+		margin: 0 0 28px;
+		display: flex;
+		flex-direction: column;
+		gap: 11px;
+		flex: 1;
+	}
+	.plan-features li {
+		display: flex;
+		align-items: flex-start;
+		gap: 9px;
+		font-size: 0.83rem;
+		color: var(--text-2);
+		line-height: 1.45;
+	}
+	.plan-check {
+		color: var(--text-3);
+		font-weight: 800;
+		font-size: 0.75rem;
+		margin-top: 1px;
+		flex-shrink: 0;
+	}
+	.plan-featured .plan-check { color: var(--accent); }
+	.plan-cta {
+		font-family: var(--font);
+		width: 100%;
+		padding: 12px;
+		border-radius: 10px;
+		font-size: 0.875rem;
+		font-weight: 700;
+		letter-spacing: -0.02em;
+		cursor: pointer;
+		transition: opacity 0.15s, transform 0.15s;
+		background: transparent;
+		border: 1px solid var(--border-hi);
+		color: var(--text-2);
+	}
+	.plan-cta:hover { background: rgba(255,255,255,0.06); color: var(--text); transform: translateY(-1px); }
+	.plan-cta-primary {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
+	}
+	.plan-cta-primary:hover { opacity: 0.88; background: var(--accent); }
 
 	/* ── Footer ────────────────────────────────────── */
 	.footer {
@@ -1209,18 +1756,42 @@
 	@keyframes spin { to { transform: rotate(360deg); } }
 
 	/* ── Responsive ────────────────────────────────── */
+	@media (max-width: 900px) {
+		.pricing-grid { grid-template-columns: repeat(2, 1fr); }
+		.scene {
+			flex-direction: column;
+			align-items: flex-start;
+			padding: 320px 24px 48px;
+			min-height: auto;
+		}
+		.scene-flip { padding: 320px 24px 48px; justify-content: flex-start; }
+		.scene-text-right { text-align: left; }
+		.scene-cards { width: 90%; right: 0; }
+		.scene-cards-left { left: 0; right: auto; }
+		.scard-back { width: 54%; }
+		.scard-front { width: 80%; }
+		.scard-code-front { width: 85%; }
+		.scard-board-front { width: 85%; }
+	}
 	@media (max-width: 700px) {
 		.nav-links { display: none; }
 		.nav-wrap { padding: 0 20px; }
 		.hero { padding: 60px 20px; min-height: auto; padding-top: 80px; }
 		.entry-section { padding: 0 20px 80px; }
-		.tools-section { padding: 80px 20px; }
+		.pricing-section { padding: 80px 20px 100px; }
+		.pricing-intro { padding: 0 0 40px; }
+		.pricing-grid { grid-template-columns: 1fr; background: none; border: none; gap: 12px; }
+		.plan-card { border: 1px solid var(--border); border-radius: 16px; }
+		.plan-featured { box-shadow: inset 0 0 0 1px rgba(99,102,241,0.3), 0 0 0 1px rgba(99,102,241,0.2); }
 		.inputs-row { flex-wrap: wrap; }
 		.or-divider { width: 100%; text-align: center; margin: 0; }
 		.adv-row { flex-wrap: wrap; }
 		.adv-row .field { flex-basis: 100%; }
 		.adv-toggles { flex-wrap: wrap; }
 		.adv-toggles .field { flex-basis: 100%; }
-		.tab-card-body { padding: 24px; }
+		.scene { padding: 280px 20px 40px; }
+		.scene-flip { padding: 280px 20px 40px; }
+		.sc-kanban { grid-template-columns: 1fr; }
+		.sc-stats-row { grid-template-columns: repeat(3,1fr); }
 	}
 </style>

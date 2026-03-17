@@ -8,10 +8,12 @@
 		timelineLoading
 	} from '$lib/stores/timeline';
 	import { initializeTaskStoreForRoom } from '$lib/stores/tasks';
+	import type { OnlineMember } from '$lib/types/chat';
 	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
 
 	export let roomId = '';
 	export let contextKey = 'taskboard';
+	export let onlineMembers: OnlineMember[] = [];
 
 	type ToraMessage = {
 		id: string;
@@ -37,6 +39,7 @@
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
 	const TORA_CHAT_STORAGE_PREFIX = 'tora_ai_chat';
 	const TORA_CHAT_HISTORY_LIMIT = 80;
+	const TORA_AI_CONTEXT_USER_LIMIT = 40;
 	const TORA_PROMPT_SUGGESTIONS = [
 		'Rebalance unfinished tasks into the next sprint and keep priority order.',
 		'Identify blockers and add follow-up tasks with owners and due dates.',
@@ -50,6 +53,19 @@
 	$: isLargeProject = totalTasks > 60;
 	$: normalizedContextKey = normalizeRoomIDValue(contextKey) || 'taskboard';
 	$: conversationStorageKey = `${TORA_CHAT_STORAGE_PREFIX}:${normalizedRoomID}:${normalizedContextKey}`;
+	$: activeUsers = onlineMembers
+		.filter((member) => member?.isOnline)
+		.map((member) => {
+			const memberID = (member.id || '').trim();
+			if (!memberID) {
+				return '';
+			}
+			const memberName = (member.name || '').trim() || 'Unknown';
+			return `${memberName} (id: ${memberID})`;
+		})
+		.filter(Boolean)
+		.slice(0, TORA_AI_CONTEXT_USER_LIMIT)
+		.join(', ');
 	$: boardStatusText = currentState
 		? `${sprints.length} sprints \u00B7 ${totalTasks} tasks`
 		: 'No project loaded';
@@ -208,6 +224,12 @@
 		return 'Board updated and synced across all tabs.';
 	}
 
+	function buildAgenticEditPrompt(userPrompt: string) {
+		const validAssigneeContext =
+			activeUsers.trim() || 'none (no online members were detected for this room)';
+		return `${userPrompt}\n\n[SYSTEM CONTEXT: Valid Assignee IDs for tasks: ${validAssigneeContext}. Use only these IDs for assigneeId/assignee_id updates. If none are listed, do not modify task assignees.]`;
+	}
+
 	async function submitEditPrompt() {
 		submitError = '';
 		const prompt = draft.trim();
@@ -229,9 +251,10 @@
 		}
 
 		try {
+			const agenticPrompt = buildAgenticEditPrompt(prompt);
 			const result = await editAITimeline(
 				normalizedRoomID,
-				prompt,
+				agenticPrompt,
 				currentState,
 				conversationPayload
 			);

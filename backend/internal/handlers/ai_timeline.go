@@ -11,6 +11,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -43,7 +44,7 @@ Each task must include:
 - "budget" (numeric)
 Keep outputs realistic and implementation-oriented.`
 
-const aiTimelineEditSystemPrompt = `You are an Expert Project Program Manager acting as a JSON patcher.
+const aiTimelineEditSystemPrompt = `You are an autonomous Project and Resource Manager acting as a JSON patcher.
 You receive the current project state (each task has a database task_id) and a user request.
 Return ONLY valid JSON with keys:
 - "mode": "modify_project" or "chat"
@@ -52,9 +53,12 @@ Return ONLY valid JSON with keys:
 
 Rules:
 - "operations" must contain only task deltas, never the full project.
+- The user may provide context listing valid Assignee IDs. Only use those IDs when setting "assignee_id" or "assigneeId". Never invent assignee IDs.
+- To cut or manage costs, modify task "budget" and/or "spent" (alias "actual_cost") values.
+- Keep workload balanced when possible so one assignee is not severely overloaded.
 - Allowed operation actions:
-  1) {"action":"update_task","task_id":"uuid","changes":{"title":"...","status":"todo|in_progress|done","task_type":"...","budget":123,"actual_cost":45,"duration_unit":"hours|days","duration_value":2,"description":"...","sprint_name":"..."}}
-  2) {"action":"add_task","sprint_name":"Sprint 1","task":{"title":"...","status":"todo|in_progress|done","task_type":"...","budget":123,"actual_cost":45,"duration_unit":"hours|days","duration_value":2,"description":"..."}}
+  1) {"action":"update_task","task_id":"uuid","changes":{"title":"...","status":"todo|in_progress|done","task_type":"...","assignee_id":"uuid","budget":123,"spent":45,"actual_cost":45,"duration_unit":"hours|days","duration_value":2,"description":"...","sprint_name":"..."}}
+  2) {"action":"add_task","sprint_name":"Sprint 1","task":{"title":"...","status":"todo|in_progress|done","task_type":"...","assignee_id":"uuid","budget":123,"spent":45,"actual_cost":45,"duration_unit":"hours|days","duration_value":2,"description":"..."}}
   3) {"action":"delete_task","task_id":"uuid"}
 - If the request is clearly conversational or asks for explanation only, return mode="chat" and operations=[].
 - If details are partially missing but intent is clear, make reasonable assumptions and still return mode="modify_project".`
@@ -165,6 +169,8 @@ type aiTimelineTask struct {
 	Title         string  `json:"title"`
 	Status        string  `json:"status"`
 	Type          string  `json:"type"`
+	AssigneeID    string  `json:"assignee_id,omitempty"`
+	Assignee      string  `json:"assignee,omitempty"`
 	Budget        float64 `json:"budget,omitempty"`
 	ActualCost    float64 `json:"actual_cost,omitempty"`
 	DurationUnit  string  `json:"duration_unit,omitempty"`
@@ -192,6 +198,8 @@ type aiTimelineEditOperation struct {
 	Status        string                       `json:"status,omitempty"`
 	Type          string                       `json:"type,omitempty"`
 	TaskType      string                       `json:"task_type,omitempty"`
+	AssigneeID    string                       `json:"assignee_id,omitempty"`
+	Assignee      string                       `json:"assignee,omitempty"`
 	Budget        *float64                     `json:"budget,omitempty"`
 	ActualCost    *float64                     `json:"actual_cost,omitempty"`
 	DurationUnit  string                       `json:"duration_unit,omitempty"`
@@ -206,6 +214,8 @@ type aiTimelineEditOperationTask struct {
 	Status        string   `json:"status,omitempty"`
 	Type          string   `json:"type,omitempty"`
 	TaskType      string   `json:"task_type,omitempty"`
+	AssigneeID    string   `json:"assignee_id,omitempty"`
+	Assignee      string   `json:"assignee,omitempty"`
 	Budget        *float64 `json:"budget,omitempty"`
 	ActualCost    *float64 `json:"actual_cost,omitempty"`
 	DurationUnit  string   `json:"duration_unit,omitempty"`
@@ -226,6 +236,7 @@ type aiTimelineEditTaskSummary struct {
 	Title         string  `json:"title"`
 	Status        string  `json:"status,omitempty"`
 	Type          string  `json:"type,omitempty"`
+	AssigneeID    string  `json:"assignee_id,omitempty"`
 	Budget        float64 `json:"budget,omitempty"`
 	ActualCost    float64 `json:"actual_cost,omitempty"`
 	DurationUnit  string  `json:"duration_unit,omitempty"`
@@ -927,6 +938,16 @@ func normalizeAITimelineEditOperations(input []aiTimelineEditOperation) []aiTime
 			}
 		}
 
+		assigneeID := normalizeTimelineAssigneeID(firstNonEmpty(operation.AssigneeID, operation.Assignee))
+		if assigneeID == "" {
+			assigneeID = normalizeTimelineAssigneeID(
+				asStringValue(readChangeValue(changes, "assignee_id", "assigneeId", "assignee", "owner_id", "ownerId", "owner")),
+			)
+		}
+		if assigneeID == "" && nestedTask != nil {
+			assigneeID = normalizeTimelineAssigneeID(firstNonEmpty(nestedTask.AssigneeID, nestedTask.Assignee))
+		}
+
 		durationUnit := ""
 		if strings.TrimSpace(operation.DurationUnit) != "" {
 			durationUnit = normalizeTimelineDurationUnit(operation.DurationUnit)
@@ -1022,6 +1043,7 @@ func normalizeAITimelineEditOperations(input []aiTimelineEditOperation) []aiTime
 			if title == "" &&
 				status == "" &&
 				taskType == "" &&
+				assigneeID == "" &&
 				sprintName == "" &&
 				description == "" &&
 				budget == nil &&
@@ -1037,6 +1059,7 @@ func normalizeAITimelineEditOperations(input []aiTimelineEditOperation) []aiTime
 				Title:         title,
 				Status:        status,
 				TaskType:      taskType,
+				AssigneeID:    assigneeID,
 				Budget:        budget,
 				ActualCost:    actualCost,
 				DurationUnit:  durationUnit,
@@ -1053,6 +1076,7 @@ func normalizeAITimelineEditOperations(input []aiTimelineEditOperation) []aiTime
 				Title:         title,
 				Status:        status,
 				TaskType:      taskType,
+				AssigneeID:    assigneeID,
 				Budget:        budget,
 				ActualCost:    actualCost,
 				DurationUnit:  durationUnit,
@@ -1091,6 +1115,36 @@ func asStringValue(value any) string {
 	default:
 		return ""
 	}
+}
+
+var looseTimelineNumericPattern = regexp.MustCompile(`[+-]?(?:\d+(?:\.\d+)?|\.\d+)`)
+
+func parseLooseTimelineFloat(raw string) (float64, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, false
+	}
+	normalized := strings.ReplaceAll(trimmed, ",", "")
+	if parsed, err := strconv.ParseFloat(normalized, 64); err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0) {
+		return parsed, true
+	}
+	token := looseTimelineNumericPattern.FindString(normalized)
+	if token == "" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseFloat(token, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func normalizeTimelineAssigneeID(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	return truncateRunes(trimmed, 128)
 }
 
 func asFloatPointer(value any) *float64 {
@@ -1138,12 +1192,8 @@ func asFloatPointer(value any) *float64 {
 		copy := parsed
 		return &copy
 	case string:
-		trimmed := strings.TrimSpace(typed)
-		if trimmed == "" {
-			return nil
-		}
-		parsed, err := strconv.ParseFloat(trimmed, 64)
-		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		parsed, ok := parseLooseTimelineFloat(typed)
+		if !ok {
 			return nil
 		}
 		copy := parsed
@@ -1415,6 +1465,7 @@ func buildAITimelineEditSummaryJSON(project aiTimelineProject) (string, error) {
 				Title:         title,
 				Status:        status,
 				Type:          truncateRunes(strings.ToLower(strings.TrimSpace(task.Type)), 48),
+				AssigneeID:    normalizeTimelineAssigneeID(firstNonEmpty(task.AssigneeID, task.Assignee)),
 				Budget:        normalizeTimelineBudgetValue(task.Budget),
 				ActualCost:    normalizeTimelineBudgetValue(task.ActualCost),
 				DurationUnit:  durationUnit,
@@ -1480,6 +1531,10 @@ func applyAITimelineEditOperations(
 			}
 			if operation.TaskType != "" {
 				targetTask.Type = operation.TaskType
+			}
+			if operation.AssigneeID != "" {
+				targetTask.AssigneeID = normalizeTimelineAssigneeID(operation.AssigneeID)
+				targetTask.Assignee = targetTask.AssigneeID
 			}
 			if operation.Budget != nil {
 				targetTask.Budget = *operation.Budget
@@ -1553,6 +1608,8 @@ func applyAITimelineEditOperations(
 					Title:         operation.Title,
 					Status:        status,
 					Type:          taskType,
+					AssigneeID:    normalizeTimelineAssigneeID(operation.AssigneeID),
+					Assignee:      normalizeTimelineAssigneeID(operation.AssigneeID),
 					Budget:        budget,
 					ActualCost:    actualCost,
 					DurationUnit:  durationUnit,
@@ -1652,10 +1709,15 @@ func parseAISprintTasks(raw string) ([]aiTimelineTask, error) {
 
 	var lastErr error
 	for _, content := range candidates {
+		sanitizedContent, sanitizeErr := sanitizeAISprintTasksPayload([]byte(content))
+		if sanitizeErr != nil {
+			lastErr = sanitizeErr
+			continue
+		}
 		var parsed struct {
 			Tasks []aiTimelineTask `json:"tasks"`
 		}
-		if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		if err := json.Unmarshal(sanitizedContent, &parsed); err != nil {
 			lastErr = err
 			continue
 		}
@@ -1670,6 +1732,26 @@ func parseAISprintTasks(raw string) ([]aiTimelineTask, error) {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("ai sprint task response did not contain parsable tasks JSON")
+}
+
+func sanitizeAISprintTasksPayload(raw []byte) ([]byte, error) {
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	rawTasks, ok := readTimelineMapValue(envelope, "tasks").([]any)
+	if !ok {
+		return json.Marshal(envelope)
+	}
+	for index := range rawTasks {
+		task, ok := rawTasks[index].(map[string]any)
+		if !ok {
+			continue
+		}
+		sanitizeAITimelineTaskResourceFields(task)
+	}
+	envelope["tasks"] = rawTasks
+	return json.Marshal(envelope)
 }
 
 func parseAITimelineProject(raw string) (aiTimelineProject, error) {
@@ -1702,8 +1784,8 @@ func parseAITimelineProject(raw string) (aiTimelineProject, error) {
 func parseAITimelineProjectCandidate(content string) (aiTimelineProject, error) {
 	// Backward-compatible direct schema:
 	// { project_name, ..., sprints: [...] }
-	var direct aiTimelineProject
-	if err := json.Unmarshal([]byte(content), &direct); err == nil && len(direct.Sprints) > 0 {
+	direct, directErr := parseAITimelineProjectObjectJSON([]byte(content))
+	if directErr == nil && len(direct.Sprints) > 0 {
 		return direct, nil
 	}
 
@@ -1728,14 +1810,115 @@ func parseAITimelineProjectCandidate(content string) (aiTimelineProject, error) 
 		return aiTimelineProject{}, fmt.Errorf("missing 'timeline' object in AI response")
 	}
 
-	var nested aiTimelineProject
-	if err := json.Unmarshal(nestedPayload, &nested); err != nil {
-		return aiTimelineProject{}, err
+	nested, nestedErr := parseAITimelineProjectObjectJSON(nestedPayload)
+	if nestedErr != nil {
+		if directErr != nil {
+			return aiTimelineProject{}, fmt.Errorf("%v; %v", directErr, nestedErr)
+		}
+		return aiTimelineProject{}, nestedErr
 	}
 	if strings.TrimSpace(envelope.AssistantReply) != "" {
 		nested.AssistantReply = strings.TrimSpace(envelope.AssistantReply)
 	}
 	return nested, nil
+}
+
+func parseAITimelineProjectObjectJSON(raw []byte) (aiTimelineProject, error) {
+	sanitizedPayload, err := sanitizeAITimelineProjectResourceFields(raw)
+	if err != nil {
+		return aiTimelineProject{}, err
+	}
+	var parsed aiTimelineProject
+	if err := json.Unmarshal(sanitizedPayload, &parsed); err != nil {
+		return aiTimelineProject{}, err
+	}
+	return parsed, nil
+}
+
+func sanitizeAITimelineProjectResourceFields(raw []byte) ([]byte, error) {
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	sanitizeAITimelineProjectSprints(envelope)
+	return json.Marshal(envelope)
+}
+
+func sanitizeAITimelineProjectSprints(project map[string]any) {
+	rawSprints, ok := readTimelineMapValue(project, "sprints").([]any)
+	if !ok || len(rawSprints) == 0 {
+		return
+	}
+	for index := range rawSprints {
+		sprint, ok := rawSprints[index].(map[string]any)
+		if !ok {
+			continue
+		}
+		rawTasks, ok := readTimelineMapValue(sprint, "tasks").([]any)
+		if !ok || len(rawTasks) == 0 {
+			continue
+		}
+		for taskIndex := range rawTasks {
+			task, ok := rawTasks[taskIndex].(map[string]any)
+			if !ok {
+				continue
+			}
+			sanitizeAITimelineTaskResourceFields(task)
+		}
+		sprint["tasks"] = rawTasks
+	}
+	project["sprints"] = rawSprints
+}
+
+func sanitizeAITimelineTaskResourceFields(task map[string]any) {
+	budgetValue := 0.0
+	if parsedBudget := asFloatPointer(readTimelineMapValue(task, "budget")); parsedBudget != nil {
+		budgetValue = *parsedBudget
+	}
+	task["budget"] = normalizeTimelineBudgetValue(budgetValue)
+
+	actualCostValue := 0.0
+	if parsedActualCost := asFloatPointer(
+		readTimelineMapValue(task, "actual_cost", "actualCost", "spent", "spent_cost", "spentCost", "cost"),
+	); parsedActualCost != nil {
+		actualCostValue = *parsedActualCost
+	}
+	normalizedActualCost := normalizeTimelineBudgetValue(actualCostValue)
+	task["actual_cost"] = normalizedActualCost
+	task["spent"] = normalizedActualCost
+
+	assigneeID := normalizeTimelineAssigneeID(
+		asStringValue(readTimelineMapValue(task, "assignee_id", "assigneeId", "assignee", "owner_id", "ownerId", "owner")),
+	)
+	if assigneeID == "" {
+		delete(task, "assignee_id")
+		delete(task, "assigneeId")
+		delete(task, "assignee")
+		return
+	}
+	task["assignee_id"] = assigneeID
+	task["assignee"] = assigneeID
+}
+
+func readTimelineMapValue(record map[string]any, keys ...string) any {
+	if len(record) == 0 {
+		return nil
+	}
+	for _, key := range keys {
+		if value, ok := record[key]; ok {
+			return value
+		}
+	}
+	for existingKey, value := range record {
+		normalizedExisting := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(existingKey), "-", "_"))
+		for _, key := range keys {
+			normalizedKey := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"))
+			if normalizedExisting == normalizedKey {
+				return value
+			}
+		}
+	}
+	return nil
 }
 
 func pickFirstNonEmptyJSONRaw(values ...json.RawMessage) json.RawMessage {
@@ -1932,6 +2115,7 @@ func normalizeAITimelineTasks(tasks []aiTimelineTask) []aiTimelineTask {
 		if taskType == "" {
 			taskType = "general"
 		}
+		assigneeID := normalizeTimelineAssigneeID(firstNonEmpty(task.AssigneeID, task.Assignee))
 		budget := normalizeTimelineBudgetValue(task.Budget)
 		actualCost := normalizeTimelineBudgetValue(task.ActualCost)
 		durationUnit := normalizeTimelineDurationUnit(task.DurationUnit)
@@ -1947,6 +2131,8 @@ func normalizeAITimelineTasks(tasks []aiTimelineTask) []aiTimelineTask {
 			Title:         title,
 			Status:        status,
 			Type:          taskType,
+			AssigneeID:    assigneeID,
+			Assignee:      assigneeID,
 			Budget:        budget,
 			ActualCost:    actualCost,
 			DurationUnit:  durationUnit,
@@ -2096,6 +2282,26 @@ func parseAITimelineTaskUUID(raw string) (gocql.UUID, bool) {
 		return gocql.UUID{}, false
 	}
 	return parsed, true
+}
+
+func resolveAITimelineAssigneeUUID(raw string) *gocql.UUID {
+	normalized := normalizeTimelineAssigneeID(raw)
+	if normalized == "" {
+		return nil
+	}
+	candidates := []string{normalized}
+	if strings.Contains(normalized, "_") {
+		candidates = append(candidates, strings.ReplaceAll(normalized, "_", "-"))
+	}
+	for _, candidate := range candidates {
+		parsed, err := parseFlexibleTaskUUID(candidate)
+		if err != nil {
+			continue
+		}
+		copy := parsed
+		return &copy
+	}
+	return nil
 }
 
 func flattenAITimelineProjectTasks(project *aiTimelineProject) []aiTimelineFlatTask {
@@ -2367,6 +2573,13 @@ func (h *RoomHandler) applyAIOperations(
 				setClauses = append(setClauses, "sprint_name = ?")
 				args = append(args, nullableTrimmedText(truncateRunes(strings.TrimSpace(operation.SprintName), 160)))
 			}
+			if operation.AssigneeID != "" {
+				assigneeUUID := resolveAITimelineAssigneeUUID(operation.AssigneeID)
+				if assigneeUUID != nil {
+					setClauses = append(setClauses, "assignee_id = ?")
+					args = append(args, assigneeUUID)
+				}
+			}
 
 			if operation.Description != "" ||
 				operation.Budget != nil ||
@@ -2445,6 +2658,8 @@ func (h *RoomHandler) applyAIOperations(
 					Title:         title,
 					Status:        status,
 					Type:          taskType,
+					AssigneeID:    normalizeTimelineAssigneeID(operation.AssigneeID),
+					Assignee:      normalizeTimelineAssigneeID(operation.AssigneeID),
 					Budget:        budget,
 					ActualCost:    actualCost,
 					DurationUnit:  durationUnit,
@@ -2462,6 +2677,7 @@ func (h *RoomHandler) applyAIOperations(
 			}
 			operation.TaskID = strings.TrimSpace(newTaskID.String())
 			operation.ID = operation.TaskID
+			taskAssigneeID := resolveAITimelineAssigneeUUID(operation.AssigneeID)
 			if err := h.scylla.Session.Query(
 				insertQuery,
 				roomUUID,
@@ -2470,7 +2686,7 @@ func (h *RoomHandler) applyAIOperations(
 				taskDescription,
 				status,
 				sprintName,
-				nil,
+				taskAssigneeID,
 				nullableTrimmedText("tora_ai"),
 				nullableTrimmedText("Tora AI"),
 				now,
@@ -2710,6 +2926,10 @@ func (h *RoomHandler) persistAITimelineTasks(
 					description = truncateRunes(description+"\n\n"+meta, 4000)
 				}
 			}
+			taskAssigneeID := resolveAITimelineAssigneeUUID(firstNonEmpty(task.AssigneeID, task.Assignee))
+			if taskAssigneeID == nil {
+				taskAssigneeID = assigneeID
+			}
 
 			if err := h.scylla.Session.Query(
 				query,
@@ -2719,7 +2939,7 @@ func (h *RoomHandler) persistAITimelineTasks(
 				description,
 				status,
 				sprintName,
-				assigneeID,
+				taskAssigneeID,
 				nullableTrimmedText("tora_ai"),
 				nullableTrimmedText("Tora AI"),
 				now,
@@ -2734,6 +2954,8 @@ func (h *RoomHandler) persistAITimelineTasks(
 			task.Title = title
 			task.Description = description
 			task.Status = status
+			task.AssigneeID = normalizeTimelineAssigneeID(firstNonEmpty(task.AssigneeID, task.Assignee))
+			task.Assignee = task.AssigneeID
 			inserted++
 		}
 	}
