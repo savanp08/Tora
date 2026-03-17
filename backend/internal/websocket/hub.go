@@ -455,6 +455,9 @@ func (h *Hub) persistenceWorker() {
 			log.Printf("persistence worker unmarshal error: %v", err)
 			continue
 		}
+		if !h.shouldPersistRoomMessagesToCloud(msg.RoomID) {
+			continue
+		}
 
 		if err := h.msgService.SaveToScylla(msg); err != nil {
 			log.Printf("persistence worker save error: %v", err)
@@ -521,13 +524,16 @@ func (h *Hub) Run() {
 			if msg.CreatedAt.IsZero() {
 				msg.CreatedAt = time.Now().UTC()
 			}
+			shouldPersistToCloud := h.shouldPersistRoomMessagesToCloud(msg.RoomID)
 
 			if h.msgService != nil {
-				go func(m models.Message) {
-					if err := h.msgService.EnqueueMessage(context.Background(), m); err != nil {
-						log.Printf("enqueue message error: %v", err)
-					}
-				}(msg)
+				if shouldPersistToCloud {
+					go func(m models.Message) {
+						if err := h.msgService.EnqueueMessage(context.Background(), m); err != nil {
+							log.Printf("enqueue message error: %v", err)
+						}
+					}(msg)
+				}
 
 				go func(m models.Message) {
 					if err := h.msgService.CacheRecentMessage(context.Background(), m); err != nil {
@@ -2037,6 +2043,10 @@ func (h *Hub) isRoomAIEnabled(roomID string) bool {
 func (h *Hub) isRoomE2EEEnabled(roomID string) bool {
 	_, e2eEnabled := h.getRoomFeatureFlags(roomID)
 	return e2eEnabled
+}
+
+func (h *Hub) shouldPersistRoomMessagesToCloud(roomID string) bool {
+	return !h.isRoomE2EEEnabled(roomID)
 }
 
 func (h *Hub) getRoomMemberJoinedAt(userID, roomID string) time.Time {

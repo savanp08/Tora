@@ -57,6 +57,10 @@
 	const ROOM_NAME_MAX_LENGTH = APP_LIMITS.room.nameMaxLength;
 	const ROOM_PASSWORD_MAX_LENGTH = APP_LIMITS.room.passwordMaxLength;
 	const INCOMPLETE_CODE_MESSAGE = `Enter all ${ROOM_CODE_DIGITS} digits or set a room name.`;
+	const ROOM_ACTION_GUARD_STORAGE_KEY = 'tora_room_action_guard';
+	const ROOM_ACTION_FAILURE_LIMIT = 3;
+	const ROOM_ACTION_LOCKOUT_MS = 30_000;
+	const ROOM_ACTION_LOCKOUT_TICK_MS = 250;
 
 	type RoomInputSource = 'name' | 'code';
 
@@ -80,6 +84,10 @@
 	let subtleInputError = '';
 	let canCreate = false;
 	let canJoinExisting = false;
+	let failedRoomActionAttempts = 0;
+	let roomActionLockoutUntilMs = 0;
+	let roomActionNowMs = Date.now();
+	let roomActionLockoutTimer: ReturnType<typeof setInterval> | null = null;
 
 	let isReviveDragActive = false;
 	let isRevivingRoom = false;
@@ -172,6 +180,114 @@
 
 	function getTurnstileHostWindow() {
 		return window as TurnstileHostWindow;
+	}
+
+	function persistRoomActionGuard() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		try {
+			window.sessionStorage.setItem(
+				ROOM_ACTION_GUARD_STORAGE_KEY,
+				JSON.stringify({
+					failedAttempts: failedRoomActionAttempts,
+					lockoutUntilMs: roomActionLockoutUntilMs
+				})
+			);
+		} catch {
+			// Ignore storage write errors.
+		}
+	}
+
+	function syncRoomActionLockoutTimer() {
+		const isLocked = roomActionLockoutUntilMs > Date.now();
+		if (isLocked && roomActionLockoutTimer === null) {
+			roomActionLockoutTimer = setInterval(() => {
+				roomActionNowMs = Date.now();
+				if (roomActionLockoutUntilMs <= roomActionNowMs) {
+					failedRoomActionAttempts = 0;
+					roomActionLockoutUntilMs = 0;
+					persistRoomActionGuard();
+					if (roomActionLockoutTimer) {
+						clearInterval(roomActionLockoutTimer);
+						roomActionLockoutTimer = null;
+					}
+				}
+			}, ROOM_ACTION_LOCKOUT_TICK_MS);
+			return;
+		}
+		if (!isLocked && roomActionLockoutTimer) {
+			clearInterval(roomActionLockoutTimer);
+			roomActionLockoutTimer = null;
+		}
+	}
+
+	function hydrateRoomActionGuard() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		try {
+			const raw = window.sessionStorage.getItem(ROOM_ACTION_GUARD_STORAGE_KEY);
+			if (!raw) {
+				return;
+			}
+			const parsed = JSON.parse(raw) as {
+				failedAttempts?: unknown;
+				lockoutUntilMs?: unknown;
+			};
+			const parsedFailedAttempts = Number(parsed.failedAttempts);
+			const parsedLockoutUntil = Number(parsed.lockoutUntilMs);
+			failedRoomActionAttempts =
+				Number.isFinite(parsedFailedAttempts) && parsedFailedAttempts > 0
+					? Math.floor(parsedFailedAttempts)
+					: 0;
+			roomActionLockoutUntilMs =
+				Number.isFinite(parsedLockoutUntil) && parsedLockoutUntil > Date.now()
+					? Math.floor(parsedLockoutUntil)
+					: 0;
+			if (roomActionLockoutUntilMs === 0) {
+				failedRoomActionAttempts = 0;
+				persistRoomActionGuard();
+			}
+			roomActionNowMs = Date.now();
+			syncRoomActionLockoutTimer();
+		} catch {
+			failedRoomActionAttempts = 0;
+			roomActionLockoutUntilMs = 0;
+		}
+	}
+
+	function roomActionLockoutRemainingSeconds() {
+		const remainingMs = roomActionLockoutUntilMs - Date.now();
+		if (remainingMs <= 0) {
+			return 0;
+		}
+		return Math.ceil(remainingMs / 1000);
+	}
+
+	function isRoomActionLocked() {
+		return roomActionLockoutUntilMs > Date.now();
+	}
+
+	function registerRoomActionFailure() {
+		roomActionNowMs = Date.now();
+		if (isRoomActionLocked()) {
+			return;
+		}
+		failedRoomActionAttempts += 1;
+		if (failedRoomActionAttempts >= ROOM_ACTION_FAILURE_LIMIT) {
+			failedRoomActionAttempts = 0;
+			roomActionLockoutUntilMs = Date.now() + ROOM_ACTION_LOCKOUT_MS;
+		}
+		persistRoomActionGuard();
+		syncRoomActionLockoutTimer();
+	}
+
+	function clearRoomActionGuard() {
+		failedRoomActionAttempts = 0;
+		roomActionLockoutUntilMs = 0;
+		persistRoomActionGuard();
+		syncRoomActionLockoutTimer();
 	}
 
 	function clearTurnstilePendingState() {
@@ -380,6 +496,7 @@
 		e2eEnabled = preferences.e2eEnabled;
 		sessionAIEnabled.set(preferences.aiEnabled);
 		sessionE2EEnabled.set(preferences.e2eEnabled);
+		hydrateRoomActionGuard();
 
 		window.addEventListener('dragenter', onWindowDragEnter);
 		window.addEventListener('dragover', onWindowDragOver);
@@ -405,6 +522,10 @@
 				cleanupWindow.onTurnstileSuccess = previousTurnstileCallback;
 			} else {
 				delete cleanupWindow.onTurnstileSuccess;
+			}
+			if (roomActionLockoutTimer) {
+				clearInterval(roomActionLockoutTimer);
+				roomActionLockoutTimer = null;
 			}
 		};
 	});
@@ -549,6 +670,11 @@
 	}
 
 	async function handleRoomAction(mode: JoinMode) {
+		roomActionNowMs = Date.now();
+		if (isRoomActionLocked()) {
+			joinError = `Too many unsuccessful attempts. Try again in ${roomActionLockoutRemainingSeconds()}s.`;
+			return;
+		}
 		const nextNormalizedRoomName = normalizeRoomNameInput(roomName);
 		const nextNormalizedRoomCode = normalizeRoomCodeInput(roomCode);
 		let requestRoomName = nextNormalizedRoomName;
@@ -581,12 +707,11 @@
 		const userIdentity = requestedUsername ? updateUsername(requestedUsername) : identity;
 		const userToJoin = userIdentity.username;
 		guestUsername = userToJoin;
-		const normalizedRoomPassword = (roomPassword || '')
-			.trim()
-			.slice(0, ROOM_PASSWORD_MAX_LENGTH);
+		const normalizedRoomPassword = (roomPassword || '').trim().slice(0, ROOM_PASSWORD_MAX_LENGTH);
 		activeRoomPassword.set(normalizedRoomPassword);
 		const sessionPreferences = persistSessionRoomPreferences();
 		let requestTurnstileTokenValue = '';
+		let attemptedRoomRequest = false;
 
 		try {
 			if (mode === 'create') {
@@ -601,12 +726,14 @@
 				aiEnabled: sessionPreferences.aiEnabled,
 				e2eEnabled: sessionPreferences.e2eEnabled
 			});
+			attemptedRoomRequest = true;
 			const res = await fetch(`${API_BASE}/api/rooms/join`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					roomName: requestRoomName,
 					roomCode: requestRoomCode,
+					roomPassword: normalizedRoomPassword,
 					username: userToJoin,
 					userId: userIdentity.id,
 					type: 'ephemeral',
@@ -641,9 +768,17 @@
 			goto(
 				`/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${roomPasswordHash}`
 			);
+			clearRoomActionGuard();
 		} catch (e: any) {
 			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
-			joinError = e.message;
+			if (attemptedRoomRequest) {
+				registerRoomActionFailure();
+			}
+			if (isRoomActionLocked()) {
+				joinError = `Too many unsuccessful attempts. Try again in ${roomActionLockoutRemainingSeconds()}s.`;
+			} else {
+				joinError = e?.message || 'Failed to complete room action';
+			}
 		} finally {
 			if (mode === 'create') {
 				resetTurnstile();
@@ -659,11 +794,16 @@
 	$: if (lastRoomInputSource === 'code' && partialRoomCode !== '' && roomName !== '') {
 		roomName = '';
 	}
-	$: subtleInputError = lastRoomInputSource === 'code' && !normalizedRoomCode ? INCOMPLETE_CODE_MESSAGE : '';
+	$: subtleInputError =
+		lastRoomInputSource === 'code' && !normalizedRoomCode ? INCOMPLETE_CODE_MESSAGE : '';
 	$: canCreate =
 		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
 	$: canJoinExisting =
 		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
+	$: isRoomActionLockoutActive = roomActionLockoutUntilMs > roomActionNowMs;
+	$: roomActionLockoutSeconds = isRoomActionLockoutActive
+		? Math.max(1, Math.ceil((roomActionLockoutUntilMs - roomActionNowMs) / 1000))
+		: 0;
 	// Fixed once at load — never changes as the user types
 	const backgroundSeed = 'tora-' + new Date().toISOString().slice(0, 10);
 	const landingSchemaJson = JSON.stringify({
@@ -697,26 +837,26 @@
 
 <div class="container">
 	<MonochromeRoomBackground seed={backgroundSeed} />
-		{#if isReviveDragActive}
-			<div class="revive-dropzone-overlay" aria-live="polite" role="status">
-				<div class="revive-dropzone-panel">
-					<strong>Drop Room Archive To Revive</strong>
-					<p>Accepted formats: <code>.tora</code> or <code>application/json</code></p>
-					{#if isRevivingRoom}
-						<p class="revive-dropzone-loading">Reviving room...</p>
-					{/if}
-				</div>
+	{#if isReviveDragActive}
+		<div class="revive-dropzone-overlay" aria-live="polite" role="status">
+			<div class="revive-dropzone-panel">
+				<strong>Drop Room Archive To Revive</strong>
+				<p>Accepted formats: <code>.tora</code> or <code>application/json</code></p>
+				{#if isRevivingRoom}
+					<p class="revive-dropzone-loading">Reviving room...</p>
+				{/if}
 			</div>
-		{/if}
+		</div>
+	{/if}
 
-		<header>
-			<div class="logo">
-				<div class="logo-mark-wrap">
-					<img src={toraLogo} alt="Tora logo" class="logo-mark" />
-				</div>
-				<span>Tora</span>
+	<header>
+		<div class="logo">
+			<div class="logo-mark-wrap">
+				<img src={toraLogo} alt="Tora logo" class="logo-mark" />
 			</div>
-		</header>
+			<span>Tora</span>
+		</div>
+	</header>
 
 	<main>
 		<div class="hero-box">
@@ -741,8 +881,7 @@
 							on:focus={onRoomNameFocus}
 						/>
 						<small>
-							Used as display name (max {ROOM_NAME_MAX_LENGTH} chars). Spaces are converted to
-							underscores.
+							Used as display name (max {ROOM_NAME_MAX_LENGTH} chars). Spaces are converted to underscores.
 						</small>
 					</div>
 					<div class="or-divider" aria-hidden="true">or</div>
@@ -756,18 +895,18 @@
 					</div>
 				</div>
 
-					<button
-						type="button"
-						class="advanced-toggle"
-						class:is-open={showAdvancedOptions}
-						on:click={() => (showAdvancedOptions = !showAdvancedOptions)}
-						aria-expanded={showAdvancedOptions}
-					>
-						<span class="advanced-toggle-label">
-							{showAdvancedOptions ? 'Hide advanced options' : 'Advanced options'}
-						</span>
-						<span class="advanced-toggle-icon" aria-hidden="true"></span>
-					</button>
+				<button
+					type="button"
+					class="advanced-toggle"
+					class:is-open={showAdvancedOptions}
+					on:click={() => (showAdvancedOptions = !showAdvancedOptions)}
+					aria-expanded={showAdvancedOptions}
+				>
+					<span class="advanced-toggle-label">
+						{showAdvancedOptions ? 'Hide advanced options' : 'Advanced options'}
+					</span>
+					<span class="advanced-toggle-icon" aria-hidden="true"></span>
+				</button>
 
 				{#if showAdvancedOptions}
 					<div class="advanced-panel">
@@ -885,18 +1024,23 @@
 					<button
 						class="btn-primary-action"
 						on:click={() => void handleRoomAction('create')}
-						disabled={isJoining || !canCreate}
+						disabled={isJoining || !canCreate || isRoomActionLockoutActive}
 					>
 						{isJoining && activeActionMode === 'create' ? 'Creating...' : 'New'}
 					</button>
 					<button
 						class="btn-secondary-action"
 						on:click={() => void handleRoomAction('join')}
-						disabled={isJoining || !canJoinExisting}
+						disabled={isJoining || !canJoinExisting || isRoomActionLockoutActive}
 					>
 						{isJoining && activeActionMode === 'join' ? 'Joining...' : 'Existing'}
 					</button>
 				</div>
+				{#if isRoomActionLockoutActive}
+					<small class="action-lockout-note" aria-live="polite">
+						Too many unsuccessful attempts. Retry in {roomActionLockoutSeconds}s.
+					</small>
+				{/if}
 			</div>
 
 			<p class="hint">No signup required for ephemeral rooms.</p>
@@ -940,7 +1084,7 @@
 	.container {
 		margin: 0 auto;
 		width: 100%;
-		
+
 		min-height: 100svh;
 		min-height: 100dvh;
 		height: auto;
@@ -1010,7 +1154,8 @@
 	}
 
 	.revive-dropzone-panel code {
-		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+		font-family:
+			ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
 		font-size: 0.78rem;
 		background: rgba(148, 163, 184, 0.24);
 		border-radius: 5px;
@@ -1061,7 +1206,6 @@
 		justify-content: center;
 		align-items: center;
 		padding: 15px;
-		
 	}
 
 	.hero-box {
@@ -1268,6 +1412,14 @@
 		grid-template-columns: 1fr 1fr;
 		gap: 10px;
 	}
+
+	.action-lockout-note {
+		display: block;
+		margin-top: 0.45rem;
+		font-size: 0.76rem;
+		color: color-mix(in srgb, var(--accent-danger) 74%, var(--text-secondary));
+	}
+
 	input {
 		background: var(--surface-primary);
 		color: var(--text-primary);

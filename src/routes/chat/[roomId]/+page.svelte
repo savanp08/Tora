@@ -5252,6 +5252,9 @@
 				if (roomMode === 'create') {
 					payload.aiEnabled = sessionPreferences.aiEnabled;
 					payload.e2eEnabled = sessionPreferences.e2eEnabled;
+					if (roomPassword) {
+						payload.roomPassword = roomPassword;
+					}
 				}
 				if (roomMode === 'join' && roomAccessPassword) {
 					payload.roomPassword = roomAccessPassword;

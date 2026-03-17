@@ -6,6 +6,8 @@
 	import TaskBoard from '$lib/components/workspace/TaskBoard.svelte';
 	import ToraAIPanel from '$lib/components/workspace/ToraAIPanel.svelte';
 	import TimelineBoard from '$lib/components/workspace/TimelineBoard.svelte';
+	import CostManagement from '$lib/components/workspace/CostManagement.svelte';
+	import PeopleManagement from '$lib/components/workspace/PeopleManagement.svelte';
 	import TableBoard from './TableBoard.svelte';
 	import ActivityFeedPanel from './ActivityFeedPanel.svelte';
 	import { currentUser } from '$lib/store';
@@ -80,6 +82,8 @@
 	let lastWorkspaceRoomID = '';
 	let workspaceLoadToken = 0;
 	let clearingTaskboard = false;
+	let rightPanelMode: 'activity' | 'ai' | 'resources' = 'activity';
+	let resourceTab: 'cost' | 'people' = 'cost';
 
 	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: normalizedWorkspaceRoomID = normalizeRoomIDValue(roomId);
@@ -88,6 +92,12 @@
 		: WORKSPACE_TABS.filter((tab) => tab.key !== 'tora_ai');
 	$: if (!aiEnabled && $activeProjectTab === 'tora_ai') {
 		activeProjectTab.set('overview');
+	}
+	$: if (!aiEnabled && rightPanelMode === 'ai') {
+		rightPanelMode = 'activity';
+	}
+	$: if (aiEnabled && $activeProjectTab === 'tora_ai' && rightPanelMode === 'activity') {
+		rightPanelMode = 'ai';
 	}
 	$: if (normalizedWorkspaceRoomID !== lastWorkspaceRoomID) {
 		lastWorkspaceRoomID = normalizedWorkspaceRoomID;
@@ -107,6 +117,22 @@
 
 	function activateTab(tab: ProjectTab) {
 		activeProjectTab.set(tab);
+	}
+
+	function showActivitySidebar() {
+		rightPanelMode = 'activity';
+	}
+
+	function showAISidebar() {
+		if (!aiEnabled) {
+			return;
+		}
+		rightPanelMode = 'ai';
+	}
+
+	function showResourceSidebar(nextTab: 'cost' | 'people' = 'cost') {
+		rightPanelMode = 'resources';
+		resourceTab = nextTab;
 	}
 
 	async function parseWorkspaceError(response: Response) {
@@ -249,33 +275,108 @@
 		</nav>
 
 		<div class="workspace-content">
-			<aside class="activity-feed-sidebar">
-				<ActivityFeedPanel />
-			</aside>
+			<header class="workspace-header">
+				<div class="workspace-header-copy">
+					<h2>Workspace</h2>
+					<p>{totalTasks} total · {inProgressTasks} in progress · {completionRate}% done</p>
+				</div>
+				<div class="workspace-top-actions">
+					<button
+						type="button"
+						class="sidebar-mode-btn"
+						class:is-active={rightPanelMode === 'activity'}
+						on:click={showActivitySidebar}
+					>
+						Activity
+					</button>
+					{#if aiEnabled}
+						<button
+							type="button"
+							class="sidebar-mode-btn"
+							class:is-active={rightPanelMode === 'ai'}
+							on:click={showAISidebar}
+						>
+							Tora AI
+						</button>
+					{/if}
+					<button
+						type="button"
+						class="sidebar-mode-btn"
+						class:is-active={rightPanelMode === 'resources'}
+						on:click={() => showResourceSidebar('cost')}
+					>
+						Manage Resources
+					</button>
+				</div>
+			</header>
 
-			<main class="workspace-canvas">
-				{#if $timelineLoading && !$projectTimeline}
-					<div class="canvas-loading">
-						<span class="loading-spinner" aria-hidden="true"></span>
-						<p>Loading workspace…</p>
-					</div>
-				{:else if $isProjectNew || !$projectTimeline}
-					<ProjectOnboarding {roomId} {aiEnabled} />
-				{:else if $activeProjectTab === 'overview'}
-					<TimelineBoard />
-				{:else if $activeProjectTab === 'tasks'}
-					<TaskBoard {roomId} {canEdit} {onlineMembers} />
-				{:else if $activeProjectTab === 'progress'}
-					<ProgressGanttTab {onlineMembers} />
-				{:else if $activeProjectTab === 'table'}
-					<TableBoard />
-				{:else if aiEnabled && $activeProjectTab === 'tora_ai'}
-					<!-- tora_ai -->
-					<ToraAIPanel {roomId} contextKey="taskboard" />
-				{:else}
-					<TimelineBoard />
-				{/if}
-			</main>
+			<div class="workspace-main">
+				<aside class="activity-feed-sidebar">
+					{#if rightPanelMode === 'resources'}
+						<section class="resource-sidebar" aria-label="Resource management">
+							<nav class="resource-tab-nav" aria-label="Resource tabs">
+								<button
+									type="button"
+									class="resource-tab-btn"
+									class:is-active={resourceTab === 'cost'}
+									on:click={() => showResourceSidebar('cost')}
+									aria-current={resourceTab === 'cost' ? 'page' : undefined}
+								>
+									Cost
+								</button>
+								<button
+									type="button"
+									class="resource-tab-btn"
+									class:is-active={resourceTab === 'people'}
+									on:click={() => showResourceSidebar('people')}
+									aria-current={resourceTab === 'people' ? 'page' : undefined}
+								>
+									People
+								</button>
+							</nav>
+							<div class="resource-tab-panel">
+								{#if resourceTab === 'cost'}
+									<CostManagement />
+								{:else}
+									<PeopleManagement {onlineMembers} />
+								{/if}
+							</div>
+						</section>
+					{:else if rightPanelMode === 'ai' && aiEnabled}
+						<div class="sidebar-panel">
+							<ToraAIPanel {roomId} contextKey="taskboard-sidebar" />
+						</div>
+					{:else}
+						<div class="sidebar-panel">
+							<ActivityFeedPanel />
+						</div>
+					{/if}
+				</aside>
+
+				<main class="workspace-canvas">
+					{#if $timelineLoading && !$projectTimeline && !$isProjectNew}
+						<div class="canvas-loading">
+							<span class="loading-spinner" aria-hidden="true"></span>
+							<p>Loading workspace…</p>
+						</div>
+					{:else if $isProjectNew || !$projectTimeline}
+						<ProjectOnboarding {roomId} {aiEnabled} />
+					{:else if $activeProjectTab === 'overview'}
+						<TimelineBoard />
+					{:else if $activeProjectTab === 'tasks'}
+						<TaskBoard {roomId} {canEdit} {onlineMembers} />
+					{:else if $activeProjectTab === 'progress'}
+						<ProgressGanttTab {onlineMembers} />
+					{:else if $activeProjectTab === 'table'}
+						<TableBoard />
+					{:else if aiEnabled && $activeProjectTab === 'tora_ai'}
+						<!-- tora_ai -->
+						<ToraAIPanel {roomId} contextKey="taskboard" />
+					{:else}
+						<TimelineBoard />
+					{/if}
+				</main>
+			</div>
 		</div>
 	</div>
 </section>
@@ -446,6 +547,67 @@
 	.workspace-content {
 		min-height: 0;
 		display: grid;
+		grid-template-rows: auto minmax(0, 1fr);
+	}
+
+	.workspace-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.9rem;
+		padding: 0.72rem 1rem;
+		border-bottom: 1px solid var(--ws-border);
+		background: color-mix(in srgb, var(--ws-surface) 80%, var(--ws-surface-soft));
+	}
+
+	.workspace-header-copy h2 {
+		margin: 0;
+		font-size: 0.95rem;
+		font-weight: 700;
+	}
+
+	.workspace-header-copy p {
+		margin: 0.2rem 0 0;
+		font-size: 0.78rem;
+		color: var(--ws-muted);
+	}
+
+	.workspace-top-actions {
+		display: flex;
+		gap: 0.48rem;
+		align-items: center;
+	}
+
+	.sidebar-mode-btn {
+		border: 1px solid var(--ws-border);
+		background: var(--ws-surface);
+		color: var(--ws-muted);
+		border-radius: 999px;
+		padding: 0.32rem 0.7rem;
+		font-size: 0.76rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			border-color 0.2s ease,
+			background 0.2s ease,
+			color 0.2s ease;
+	}
+
+	.sidebar-mode-btn:hover {
+		color: var(--ws-text);
+		border-color: color-mix(in srgb, var(--ws-accent) 45%, var(--ws-border));
+		background: color-mix(in srgb, var(--ws-accent-soft) 62%, var(--ws-surface));
+	}
+
+	.sidebar-mode-btn.is-active {
+		color: var(--ws-accent);
+		border-color: color-mix(in srgb, var(--ws-accent) 60%, var(--ws-border));
+		background: color-mix(in srgb, var(--ws-accent-soft) 75%, var(--ws-surface));
+	}
+
+	.workspace-main {
+		min-height: 0;
+		display: grid;
 		grid-template-columns: var(--ws-feed-w) minmax(0, 1fr);
 	}
 
@@ -454,6 +616,58 @@
 		overflow: hidden;
 		border-right: 1px solid var(--ws-border);
 		background: var(--workspace-taskboard-bg, var(--ws-bg));
+	}
+
+	.sidebar-panel {
+		height: 100%;
+		min-height: 0;
+	}
+
+	.resource-sidebar {
+		height: 100%;
+		min-height: 0;
+		display: grid;
+		grid-template-rows: auto minmax(0, 1fr);
+	}
+
+	.resource-tab-nav {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.42rem;
+		padding: 0.68rem 0.72rem 0.5rem;
+		border-bottom: 1px solid color-mix(in srgb, var(--ws-border) 80%, transparent);
+	}
+
+	.resource-tab-btn {
+		border: 1px solid var(--ws-border);
+		background: var(--ws-surface);
+		color: var(--ws-muted);
+		border-radius: 999px;
+		padding: 0.34rem 0.58rem;
+		font-size: 0.76rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			border-color 0.2s ease,
+			background 0.2s ease,
+			color 0.2s ease;
+	}
+
+	.resource-tab-btn:hover {
+		color: var(--ws-text);
+		border-color: color-mix(in srgb, var(--ws-accent) 40%, var(--ws-border));
+	}
+
+	.resource-tab-btn.is-active {
+		color: var(--ws-accent);
+		border-color: color-mix(in srgb, var(--ws-accent) 60%, var(--ws-border));
+		background: color-mix(in srgb, var(--ws-accent-soft) 80%, var(--ws-surface));
+	}
+
+	.resource-tab-panel {
+		min-height: 0;
+		overflow: hidden;
+		padding: 0.68rem 0.72rem 0.72rem;
 	}
 
 	.workspace-canvas {
@@ -493,7 +707,7 @@
 	}
 
 	@media (max-width: 1100px) {
-		.workspace-content {
+		.workspace-main {
 			grid-template-columns: minmax(0, 1fr);
 		}
 
@@ -520,6 +734,17 @@
 		.act-btn svg {
 			width: 0.9rem;
 			height: 0.9rem;
+		}
+
+		.workspace-header {
+			flex-direction: column;
+			align-items: flex-start;
+			padding: 0.62rem 0.72rem;
+		}
+
+		.workspace-top-actions {
+			width: 100%;
+			flex-wrap: wrap;
 		}
 	}
 </style>

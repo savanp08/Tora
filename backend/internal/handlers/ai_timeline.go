@@ -16,18 +16,91 @@ import (
 	"time"
 )
 
-const aiBlueprintSystemPrompt = "You are an Expert Project Architect. Return ONLY valid JSON with keys: 'assistant_reply' and 'timeline'. 'assistant_reply' must be a short plain-language update in a professional, friendly, lightly witty tone (never dismissive or arrogant). 'timeline' must include 'project_name', 'tech_stack' (array), 'target_audience', 'estimated_cost', 'roles_needed', and 'sprints' (array of objects with 'name', 'duration_days'). DO NOT generate tasks in this step."
+const aiBlueprintSystemPrompt = `You are an Expert Project Architect.
+Return ONLY valid JSON with keys: "assistant_reply" and "timeline".
+"assistant_reply" must be concise, professional, friendly, and never dismissive.
+"timeline" must include:
+- "project_name"
+- "tech_stack" (array)
+- "target_audience"
+- "estimated_cost"
+- "roles_needed" (array)
+- "sprints" (array of objects with "name" and "duration_days")
 
-const aiTaskFillSystemPrompt = "You are an Expert Agile Manager. Given a project blueprint and a Sprint name, generate strict JSON containing an array of 'tasks'. Each task needs 'title', 'duration_unit' (hours/days), 'duration_value' (number), 'status', 'type', and 'budget' (numeric task budget allocation). Keep it realistic."
+Important behavior:
+- If some details are missing but reasonable assumptions are possible, proceed and generate using practical assumptions.
+- Do not ask follow-up questions in this step (clarification is handled by a separate intent gate).
+- Do NOT generate sprint tasks in this step.`
 
-const aiTimelineEditSystemPrompt = "You are an Expert Project Program Manager acting as a JSON patcher. You receive the current project state (each task has a database task_id) and an edit request. Return ONLY valid JSON with keys: 'assistant_reply' and 'operations'. 'operations' must contain only task deltas, never the full project. Each operation must be one of: {\"action\":\"update_task\",\"task_id\":\"uuid\",\"changes\":{\"title\":\"...\",\"status\":\"todo|in_progress|done\",\"task_type\":\"...\",\"budget\":123,\"actual_cost\":45,\"duration_unit\":\"hours|days\",\"duration_value\":2,\"description\":\"...\",\"sprint_name\":\"...\"}}, {\"action\":\"add_task\",\"sprint_name\":\"Sprint 1\",\"task\":{\"title\":\"...\",\"status\":\"todo|in_progress|done\",\"task_type\":\"...\",\"budget\":123,\"actual_cost\":45,\"duration_unit\":\"hours|days\",\"duration_value\":2,\"description\":\"...\"}}, {\"action\":\"delete_task\",\"task_id\":\"uuid\"}. Keep assistant_reply concise, professional, friendly, and never dismissive."
+const aiTaskFillSystemPrompt = `You are an Expert Agile Manager.
+Given a project blueprint and a sprint name, return strict JSON with key "tasks" (array).
+Each task must include:
+- "title"
+- "duration_unit" ("hours" or "days")
+- "duration_value" (number)
+- "status"
+- "type"
+- "budget" (numeric)
+Keep outputs realistic and implementation-oriented.`
 
-const aiTimelineIntentSystemPrompt = "You are an AI Project Manager. The user will ask a question or request an edit to their project board. Decide whether the request requires modifying the project tasks, or if it only needs a conversational reply. Return ONLY valid JSON with keys: 'intent' and 'assistant_reply'. 'intent' must be either 'chat' or 'modify_project'. 'assistant_reply' must be concise, professional, friendly, and never dismissive."
+const aiTimelineEditSystemPrompt = `You are an Expert Project Program Manager acting as a JSON patcher.
+You receive the current project state (each task has a database task_id) and a user request.
+Return ONLY valid JSON with keys:
+- "mode": "modify_project" or "chat"
+- "assistant_reply": concise, professional, friendly, never dismissive
+- "operations": array (required when mode="modify_project", should be empty when mode="chat")
+
+Rules:
+- "operations" must contain only task deltas, never the full project.
+- Allowed operation actions:
+  1) {"action":"update_task","task_id":"uuid","changes":{"title":"...","status":"todo|in_progress|done","task_type":"...","budget":123,"actual_cost":45,"duration_unit":"hours|days","duration_value":2,"description":"...","sprint_name":"..."}}
+  2) {"action":"add_task","sprint_name":"Sprint 1","task":{"title":"...","status":"todo|in_progress|done","task_type":"...","budget":123,"actual_cost":45,"duration_unit":"hours|days","duration_value":2,"description":"..."}}
+  3) {"action":"delete_task","task_id":"uuid"}
+- If the request is clearly conversational or asks for explanation only, return mode="chat" and operations=[].
+- If details are partially missing but intent is clear, make reasonable assumptions and still return mode="modify_project".`
+
+const aiTimelineIntentSystemPrompt = `You are an AI Project Manager triage assistant.
+Classify the next user request into one of these intents:
+- "modify_project": apply concrete board/task changes now
+- "chat": explanation/discussion only, no board changes
+- "clarify": ask ONE concise follow-up question only when critical details are missing and assumptions would likely be wrong
+
+Return ONLY valid JSON with keys:
+- "intent"
+- "assistant_reply"
+
+Hard constraints:
+- Ask at most ONE clarification question total in the conversation.
+- If a clarification was already asked earlier, do NOT ask another; choose "modify_project" (using assumptions) or "chat".
+- Keep "assistant_reply" concise, professional, friendly, and never dismissive.`
+
+const aiTimelineGenerateIntentSystemPrompt = `You are an AI project-planning intake assistant.
+Classify the next request into one of these intents:
+- "generate_project": enough information to generate a project timeline now
+- "chat": the user is asking for discussion/advice only, not generation
+- "clarify": ask ONE concise follow-up question only when critical details are missing and assumptions would likely be wrong
+
+Return ONLY valid JSON with keys:
+- "intent"
+- "assistant_reply"
+
+Hard constraints:
+- Ask at most ONE clarification question total in the conversation.
+- If a clarification was already asked earlier, do NOT ask another; choose "generate_project" using reasonable assumptions, or "chat" if the user explicitly asked for discussion only.
+- Keep "assistant_reply" concise, professional, friendly, and never dismissive.`
+
+const (
+	aiIntentChat            = "chat"
+	aiIntentModifyProject   = "modify_project"
+	aiIntentGenerateProject = "generate_project"
+	aiIntentClarify         = "clarify"
+)
 
 type aiTimelineGenerateRequest struct {
-	Prompt   string `json:"prompt"`
-	UserID   string `json:"userId,omitempty"`
-	DeviceID string `json:"deviceId,omitempty"`
+	Prompt              string                        `json:"prompt"`
+	UserID              string                        `json:"userId,omitempty"`
+	DeviceID            string                        `json:"deviceId,omitempty"`
+	ConversationHistory []aiTimelineConversationEntry `json:"conversation_history,omitempty"`
 }
 
 type AIIntentResponse struct {
@@ -36,10 +109,17 @@ type AIIntentResponse struct {
 }
 
 type aiTimelineEditRequest struct {
-	Prompt       string          `json:"prompt"`
-	CurrentState json.RawMessage `json:"current_state"`
-	UserID       string          `json:"userId,omitempty"`
-	DeviceID     string          `json:"deviceId,omitempty"`
+	Prompt              string                        `json:"prompt"`
+	CurrentState        json.RawMessage               `json:"current_state"`
+	UserID              string                        `json:"userId,omitempty"`
+	DeviceID            string                        `json:"deviceId,omitempty"`
+	ConversationHistory []aiTimelineConversationEntry `json:"conversation_history,omitempty"`
+}
+
+type aiTimelineConversationEntry struct {
+	Role   string `json:"role"`
+	Text   string `json:"text"`
+	Intent string `json:"intent,omitempty"`
 }
 
 type aiTimelineGenerateResponse struct {
@@ -135,6 +215,7 @@ type aiTimelineEditOperationTask struct {
 }
 
 type aiTimelineEditOperationsResponse struct {
+	Mode           string                    `json:"mode,omitempty"`
 	AssistantReply string                    `json:"assistant_reply,omitempty"`
 	ProjectPatch   aiTimelineProjectPatch    `json:"project_patch,omitempty"`
 	Operations     []aiTimelineEditOperation `json:"operations"`
@@ -232,6 +313,7 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		writeAITimelineError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
+	conversationHistory := normalizeAITimelineConversationHistory(req.ConversationHistory)
 
 	userID := normalizeIdentifier(
 		firstNonEmpty(
@@ -267,10 +349,45 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 	}
 
 	limits := getAIOrganizeLimits()
+	intentCtx, cancelIntent := context.WithTimeout(r.Context(), limits.RequestTimeout)
+	generateIntent, intentErr := classifyAITimelineGenerateIntent(
+		intentCtx,
+		roomID,
+		prompt,
+		conversationHistory,
+		limits,
+	)
+	cancelIntent()
+	if intentErr != nil {
+		log.Printf("[ai_timeline] generation intent classification failed room_id=%q user_id=%q err=%v", roomID, userID, intentErr)
+	} else if generateIntent.Intent == aiIntentChat || generateIntent.Intent == aiIntentClarify {
+		assistantReply := strings.TrimSpace(generateIntent.AssistantReply)
+		if assistantReply == "" {
+			if generateIntent.Intent == aiIntentClarify {
+				assistantReply = "Before I generate the board, share one key constraint (deadline, sprint count, or budget cap)."
+			} else {
+				assistantReply = "I can answer questions about planning approach without generating the board yet."
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(AIIntentResponse{
+			Intent:         generateIntent.Intent,
+			AssistantReply: assistantReply,
+		})
+		return
+	}
+
 	blueprintCtx, cancelBlueprint := context.WithTimeout(r.Context(), limits.RequestTimeout)
 	defer cancelBlueprint()
 
-	generated, generateErr := generateAIProjectBlueprint(blueprintCtx, roomID, prompt, limits)
+	generated, generateErr := generateAIProjectBlueprint(
+		blueprintCtx,
+		roomID,
+		prompt,
+		conversationHistory,
+		limits,
+	)
 	if generateErr != nil {
 		switch {
 		case errors.Is(generateErr, context.Canceled), errors.Is(generateErr, context.DeadlineExceeded):
@@ -380,6 +497,7 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 		writeAITimelineError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
+	conversationHistory := normalizeAITimelineConversationHistory(req.ConversationHistory)
 	if len(req.CurrentState) == 0 || strings.TrimSpace(string(req.CurrentState)) == "" || strings.TrimSpace(string(req.CurrentState)) == "null" {
 		writeAITimelineError(w, http.StatusBadRequest, "current_state is required")
 		return
@@ -449,20 +567,25 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 		roomID,
 		prompt,
 		intentSummaryJSON,
+		conversationHistory,
 		limits,
 	)
 	cancelIntent()
 	if intentErr != nil {
 		log.Printf("[ai_timeline] intent classification failed room_id=%q user_id=%q err=%v", roomID, userID, intentErr)
-	} else if intentResult.Intent == "chat" {
+	} else if intentResult.Intent == aiIntentChat || intentResult.Intent == aiIntentClarify {
 		assistantReply := strings.TrimSpace(intentResult.AssistantReply)
 		if assistantReply == "" {
-			assistantReply = "I can explain the current board and answer questions without editing it."
+			if intentResult.Intent == aiIntentClarify {
+				assistantReply = "I can make the change once you confirm one key detail."
+			} else {
+				assistantReply = "I can explain the current board and answer questions without editing it."
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(AIIntentResponse{
-			Intent:         "chat",
+			Intent:         intentResult.Intent,
 			AssistantReply: assistantReply,
 		})
 		return
@@ -479,6 +602,7 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 		roomID,
 		prompt,
 		editSummaryJSON,
+		conversationHistory,
 		limits,
 	)
 	cancelEdit()
@@ -491,6 +615,23 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 		default:
 			writeAITimelineError(w, http.StatusBadGateway, "Failed to generate timeline edit operations from AI")
 		}
+		return
+	}
+	if editOps.Mode == aiIntentChat || editOps.Mode == aiIntentClarify {
+		assistantReply := strings.TrimSpace(editOps.AssistantReply)
+		if assistantReply == "" {
+			if editOps.Mode == aiIntentClarify {
+				assistantReply = "I can apply the change once you confirm one key detail."
+			} else {
+				assistantReply = "I can discuss the board without changing it."
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(AIIntentResponse{
+			Intent:         editOps.Mode,
+			AssistantReply: assistantReply,
+		})
 		return
 	}
 	persistedCount, persistErr := h.applyAIOperations(r.Context(), roomID, editOps.Operations)
@@ -537,11 +678,15 @@ func generateAIProjectBlueprint(
 	ctx context.Context,
 	roomID string,
 	prompt string,
+	conversationHistory []aiTimelineConversationEntry,
 	limits aiOrganizeLimits,
 ) (aiTimelineProject, error) {
+	conversationJSON, _ := json.Marshal(conversationHistory)
 	userPrompt := fmt.Sprintf(
-		"Room ID: %s\nUser request: %s\nGenerate a detailed project blueprint now.",
+		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nUser request:\n%s\n\nGenerate a detailed project blueprint now.",
 		roomID,
+		hasAssistantClarificationRequest(conversationHistory),
+		string(conversationJSON),
 		strings.TrimSpace(prompt),
 	)
 	raw, err := generateAIOrganizeStructuredJSON(ctx, aiBlueprintSystemPrompt, userPrompt, limits)
@@ -556,11 +701,15 @@ func generateAITimelineEditOperations(
 	roomID string,
 	prompt string,
 	currentSummaryJSON string,
+	conversationHistory []aiTimelineConversationEntry,
 	limits aiOrganizeLimits,
 ) (aiTimelineEditOperationsResponse, error) {
+	conversationJSON, _ := json.Marshal(conversationHistory)
 	userPrompt := fmt.Sprintf(
-		"Room ID: %s\nCurrent project summary JSON:\n%s\n\nUser edit request:\n%s\n\nReturn ONLY the operations JSON.",
+		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nCurrent project summary JSON:\n%s\n\nUser edit request:\n%s\n\nReturn ONLY the edit response JSON.",
 		roomID,
+		hasAssistantClarificationRequest(conversationHistory),
+		string(conversationJSON),
 		strings.TrimSpace(currentSummaryJSON),
 		strings.TrimSpace(prompt),
 	)
@@ -606,6 +755,17 @@ func parseAITimelineEditOperationsCandidate(content string) (aiTimelineEditOpera
 			envelope["message"],
 		),
 	)
+	mode := normalizeAIIntent(
+		decodeJSONString(
+			pickFirstNonEmptyJSONRaw(
+				envelope["mode"],
+				envelope["intent"],
+			),
+		),
+	)
+	if mode != aiIntentChat && mode != aiIntentClarify {
+		mode = aiIntentModifyProject
+	}
 	patch := parseAITimelineProjectPatch(
 		pickFirstNonEmptyJSONRaw(
 			envelope["project_patch"],
@@ -627,11 +787,12 @@ func parseAITimelineEditOperationsCandidate(content string) (aiTimelineEditOpera
 	}
 
 	operations := normalizeAITimelineEditOperations(rawOperations)
-	if len(operations) == 0 && !hasAITimelineProjectPatch(patch) {
+	if len(operations) == 0 && !hasAITimelineProjectPatch(patch) && mode == aiIntentModifyProject {
 		return aiTimelineEditOperationsResponse{}, fmt.Errorf("ai edit operations response returned no valid edits")
 	}
 
 	return aiTimelineEditOperationsResponse{
+		Mode:           mode,
 		AssistantReply: truncateRunes(strings.TrimSpace(assistantReply), 2000),
 		ProjectPatch:   patch,
 		Operations:     operations,
@@ -1002,16 +1163,42 @@ func decodeJSONString(raw json.RawMessage) string {
 	return strings.TrimSpace(decoded)
 }
 
+func classifyAITimelineGenerateIntent(
+	ctx context.Context,
+	roomID string,
+	prompt string,
+	conversationHistory []aiTimelineConversationEntry,
+	limits aiOrganizeLimits,
+) (AIIntentResponse, error) {
+	conversationJSON, _ := json.Marshal(conversationHistory)
+	userPrompt := fmt.Sprintf(
+		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nUser request:\n%s\n\nReturn only the intent classification JSON.",
+		roomID,
+		hasAssistantClarificationRequest(conversationHistory),
+		string(conversationJSON),
+		strings.TrimSpace(prompt),
+	)
+	raw, err := generateAIOrganizeStructuredJSON(ctx, aiTimelineGenerateIntentSystemPrompt, userPrompt, limits)
+	if err != nil {
+		return AIIntentResponse{}, err
+	}
+	return parseAIIntentResponse(raw)
+}
+
 func classifyAITimelineEditIntent(
 	ctx context.Context,
 	roomID string,
 	prompt string,
 	projectSummaryJSON string,
+	conversationHistory []aiTimelineConversationEntry,
 	limits aiOrganizeLimits,
 ) (AIIntentResponse, error) {
+	conversationJSON, _ := json.Marshal(conversationHistory)
 	userPrompt := fmt.Sprintf(
-		"Room ID: %s\nCurrent project summary JSON:\n%s\n\nUser request:\n%s\n\nReturn only the intent classification JSON.",
+		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nCurrent project summary JSON:\n%s\n\nUser request:\n%s\n\nReturn only the intent classification JSON.",
 		roomID,
+		hasAssistantClarificationRequest(conversationHistory),
+		string(conversationJSON),
 		strings.TrimSpace(projectSummaryJSON),
 		strings.TrimSpace(prompt),
 	)
@@ -1055,12 +1242,74 @@ func normalizeAIIntent(raw string) string {
 	normalized := strings.ToLower(strings.TrimSpace(raw))
 	switch normalized {
 	case "chat":
-		return "chat"
-	case "modify_project":
-		return "modify_project"
+		return aiIntentChat
+	case "modify_project", "modify":
+		return aiIntentModifyProject
+	case "generate_project", "generate", "create_project", "create":
+		return aiIntentGenerateProject
+	case "clarify", "clarification":
+		return aiIntentClarify
 	default:
 		return ""
 	}
+}
+
+func normalizeAITimelineConversationHistory(
+	rawEntries []aiTimelineConversationEntry,
+) []aiTimelineConversationEntry {
+	if len(rawEntries) == 0 {
+		return nil
+	}
+	const maxEntries = 40
+	trimStart := 0
+	if len(rawEntries) > maxEntries {
+		trimStart = len(rawEntries) - maxEntries
+	}
+
+	normalized := make([]aiTimelineConversationEntry, 0, len(rawEntries)-trimStart)
+	for _, entry := range rawEntries[trimStart:] {
+		role := strings.ToLower(strings.TrimSpace(entry.Role))
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		text := truncateRunes(strings.TrimSpace(entry.Text), 1800)
+		if text == "" {
+			continue
+		}
+		intent := normalizeAIIntent(entry.Intent)
+		normalized = append(normalized, aiTimelineConversationEntry{
+			Role:   role,
+			Text:   text,
+			Intent: intent,
+		})
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func hasAssistantClarificationRequest(history []aiTimelineConversationEntry) bool {
+	for _, entry := range history {
+		if entry.Role != "assistant" {
+			continue
+		}
+		if normalizeAIIntent(entry.Intent) == aiIntentClarify {
+			return true
+		}
+		text := strings.ToLower(strings.TrimSpace(entry.Text))
+		if text == "" || !strings.Contains(text, "?") {
+			continue
+		}
+		if strings.Contains(text, "can you clarify") ||
+			strings.Contains(text, "could you clarify") ||
+			strings.Contains(text, "need one detail") ||
+			strings.Contains(text, "before i") ||
+			strings.Contains(text, "to proceed") {
+			return true
+		}
+	}
+	return false
 }
 
 func buildAITimelineIntentSummaryJSON(project aiTimelineProject) (string, error) {

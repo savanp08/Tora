@@ -59,10 +59,16 @@ type TimelineSprintAccumulator = {
 };
 
 export type ProjectTab = 'overview' | 'tasks' | 'progress' | 'table' | 'tora_ai';
+export type AITimelineIntent = 'chat' | 'modify_project' | 'generate_project' | 'clarify';
+export type AITimelineConversationMessage = {
+	role: 'user' | 'assistant';
+	text: string;
+	intent?: AITimelineIntent;
+};
 export type AITimelineResult = {
-	timeline: ProjectTimeline;
+	timeline: ProjectTimeline | null;
 	assistantReply: string;
-	intent?: 'chat' | 'modify_project';
+	intent?: AITimelineIntent;
 };
 
 // ─── AI Output Format Schema (injected into every AI prompt) ─────────────────
@@ -368,6 +374,38 @@ function withTimelineUserHeaders(userID: string, headers: Record<string, string>
 	};
 }
 
+function buildTimelineConversationHistoryPayload(
+	history: AITimelineConversationMessage[] | null | undefined
+) {
+	if (!Array.isArray(history) || history.length === 0) {
+		return [];
+	}
+	const normalized = history
+		.filter((entry) => entry && typeof entry === 'object')
+		.map((entry) => {
+			const role = entry.role === 'assistant' ? 'assistant' : 'user';
+			const text = toStringValue(entry.text).slice(0, 1800);
+			const intent = toStringValue(entry.intent).toLowerCase();
+			if (!text) {
+				return null;
+			}
+			if (
+				intent !== 'chat' &&
+				intent !== 'modify_project' &&
+				intent !== 'generate_project' &&
+				intent !== 'clarify'
+			) {
+				return { role, text };
+			}
+			return { role, text, intent };
+		})
+		.filter(
+			(entry): entry is { role: 'user' | 'assistant'; text: string; intent?: AITimelineIntent } =>
+				Boolean(entry)
+		);
+	return normalized.slice(-40);
+}
+
 function parseTaskTimestamp(value: unknown) {
 	if (typeof value === 'number' && Number.isFinite(value)) {
 		return value;
@@ -574,7 +612,9 @@ function buildTimelineFromRoomTasks(
 		}
 		existing.earliestCreatedAt = Math.min(existing.earliestCreatedAt, taskRecord.createdAt);
 		const resolvedBudget =
-			typeof taskRecord.budget === 'number' && Number.isFinite(taskRecord.budget) && taskRecord.budget > 0
+			typeof taskRecord.budget === 'number' &&
+			Number.isFinite(taskRecord.budget) &&
+			taskRecord.budget > 0
 				? taskRecord.budget
 				: metadata.budget;
 		const resolvedActualCost =
@@ -822,13 +862,18 @@ function extractAssistantReplyFromAIResponse(payload: unknown) {
 	return toStringValue(source.assistant_reply ?? source.assistantReply);
 }
 
-function extractIntentFromAIResponse(payload: unknown): 'chat' | 'modify_project' | '' {
+function extractIntentFromAIResponse(payload: unknown): AITimelineIntent | '' {
 	const source = toRecord(payload);
 	if (!source) {
 		return '';
 	}
 	const intent = toStringValue(source.intent).toLowerCase();
-	if (intent === 'chat' || intent === 'modify_project') {
+	if (
+		intent === 'chat' ||
+		intent === 'modify_project' ||
+		intent === 'generate_project' ||
+		intent === 'clarify'
+	) {
 		return intent;
 	}
 	return '';
@@ -1004,9 +1049,7 @@ function compressTimelineForAI(timeline: ProjectTimeline): ProjectTimeline {
 function buildClientTimeContext() {
 	const now = new Date();
 	const timezone =
-		typeof Intl !== 'undefined'
-			? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-			: 'UTC';
+		typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' : 'UTC';
 	const offsetMinutes = -now.getTimezoneOffset();
 	const offsetSign = offsetMinutes >= 0 ? '+' : '-';
 	const absOffset = Math.abs(offsetMinutes);
@@ -1035,7 +1078,11 @@ function buildClientTimeContext() {
 	].join('\n');
 }
 
-export async function generateAITimeline(roomId: string, prompt: string): Promise<AITimelineResult> {
+export async function generateAITimeline(
+	roomId: string,
+	prompt: string,
+	conversationHistory: AITimelineConversationMessage[] = []
+): Promise<AITimelineResult> {
 	const normalizedRoomID = roomId.trim();
 	const normalizedPrompt = prompt.trim();
 	const sessionUserID = (get(currentUser)?.id ?? '').trim();
@@ -1047,6 +1094,8 @@ export async function generateAITimeline(roomId: string, prompt: string): Promis
 	}
 
 	const enrichedPrompt = `${AI_TIMELINE_FORMAT_HINT}\n\n${buildClientTimeContext()}\n\nUSER REQUEST:\n${normalizedPrompt}`;
+	const normalizedConversationHistory =
+		buildTimelineConversationHistoryPayload(conversationHistory);
 
 	timelineLoading.set(true);
 	timelineError.set('');
@@ -1061,7 +1110,8 @@ export async function generateAITimeline(roomId: string, prompt: string): Promis
 				credentials: 'include',
 				body: JSON.stringify({
 					prompt: enrichedPrompt,
-					userId: sessionUserID
+					userId: sessionUserID,
+					conversation_history: normalizedConversationHistory
 				})
 			}
 		);
@@ -1070,8 +1120,18 @@ export async function generateAITimeline(roomId: string, prompt: string): Promis
 		}
 
 		const payload = (await response.json().catch(() => null)) as unknown;
-		const normalized = applyTimelinePayload(payload);
+		const intent = extractIntentFromAIResponse(payload);
 		const assistantReply = extractAssistantReplyFromAIResponse(payload);
+		if (intent === 'chat' || intent === 'clarify') {
+			lastAIAssistantReply.set(assistantReply);
+			return {
+				timeline: get(projectTimeline),
+				assistantReply,
+				intent
+			};
+		}
+
+		const normalized = applyTimelinePayload(payload);
 		lastAIAssistantReply.set(assistantReply);
 		const boardActivityEvent = addBoardActivity({
 			type: 'board_generated',
@@ -1081,7 +1141,8 @@ export async function generateAITimeline(roomId: string, prompt: string): Promis
 		sendSocketPayload(buildBoardActivitySocketPayload(normalizedRoomID, boardActivityEvent));
 		return {
 			timeline: normalized,
-			assistantReply
+			assistantReply,
+			intent: intent || 'generate_project'
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : 'Failed to generate project timeline';
@@ -1095,7 +1156,8 @@ export async function generateAITimeline(roomId: string, prompt: string): Promis
 export async function editAITimeline(
 	roomId: string,
 	prompt: string,
-	currentState: ProjectTimeline | null
+	currentState: ProjectTimeline | null,
+	conversationHistory: AITimelineConversationMessage[] = []
 ): Promise<AITimelineResult> {
 	const normalizedRoomID = roomId.trim();
 	const normalizedPrompt = prompt.trim();
@@ -1108,6 +1170,8 @@ export async function editAITimeline(
 	}
 
 	const enrichedEditPrompt = `${buildClientTimeContext()}\n\nEDIT REQUEST:\n${normalizedPrompt}`;
+	const normalizedConversationHistory =
+		buildTimelineConversationHistoryPayload(conversationHistory);
 
 	timelineLoading.set(true);
 	timelineError.set('');
@@ -1123,7 +1187,8 @@ export async function editAITimeline(
 				body: JSON.stringify({
 					prompt: enrichedEditPrompt,
 					current_state: currentState ? compressTimelineForAI(currentState) : null,
-					userId: sessionUserID
+					userId: sessionUserID,
+					conversation_history: normalizedConversationHistory
 				})
 			}
 		);
@@ -1134,7 +1199,7 @@ export async function editAITimeline(
 		const payload = (await response.json().catch(() => null)) as unknown;
 		const intent = extractIntentFromAIResponse(payload);
 		const assistantReply = extractAssistantReplyFromAIResponse(payload);
-		if (intent === 'chat') {
+		if (intent === 'chat' || intent === 'clarify') {
 			const fallbackTimeline = currentState ?? get(projectTimeline);
 			if (!fallbackTimeline) {
 				throw new Error('AI returned a chat response but no active timeline is available.');

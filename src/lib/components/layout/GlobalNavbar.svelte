@@ -8,7 +8,6 @@
 	import { isDarkMode } from '$lib/store';
 
 	export let isHighContrast = false;
-	export let scrollY = 0;
 
 	type NavLink = { label: string; href: string };
 	type BoardQuickAction =
@@ -61,7 +60,6 @@
 		{ label: 'Code Board', action: 'open-board-code' }
 	];
 
-	let isHovered = false;
 	let innerWidth = 0;
 	let innerHeight = 0;
 	let navLinks: NavLink[] = APP_NAV_LINKS;
@@ -70,7 +68,6 @@
 	let chatQuickState: ChatQuickState | null = null;
 
 	$: pathname = $page.url.pathname;
-	$: isGhostMode = scrollY < 50 && !isHovered;
 	$: navLinks = buildNavLinks(pathname, $authState.isAuthenticated);
 	$: isIdeRoute = pathname === '/ide' || pathname.startsWith('/ide/');
 	$: hideDesktopNavForRoute = pathname.startsWith('/chat/') || pathname === '/rooms' || pathname.startsWith('/rooms/');
@@ -476,9 +473,6 @@
 	<nav
 		class="desktop-nav"
 		class:high-contrast={isHighContrast}
-		class:ghost-mode={isGhostMode}
-		on:mouseenter={() => (isHovered = true)}
-		on:mouseleave={() => (isHovered = false)}
 	>
 		<div class="glass-pill">
 			{#each navLinks as link}
@@ -742,17 +736,18 @@
 		left: 50%;
 		transform: translateX(-50%);
 		z-index: 1000;
-		width: 24vw;
-		min-width: 300px;
+		width: max-content;
 		max-width: 500px;
 		transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 	}
 
 	.glass-pill {
-		display: flex;
-		justify-content: space-between;
+		display: inline-flex;
+		justify-content: center;
 		align-items: center;
-		width: 100%;
+		width: auto;
+		max-width: calc(100vw - 1.5rem);
+		gap: clamp(0.2rem, 0.8vw, 0.7rem);
 		padding: 0.6vw 1vw;
 		background: var(--navbar-pill-bg);
 		backdrop-filter: blur(20px) saturate(180%);
@@ -762,14 +757,7 @@
 		transition: all 0.5s ease;
 	}
 
-	.ghost-mode .glass-pill {
-		background: transparent;
-		border-color: transparent;
-		backdrop-filter: none;
-		box-shadow: none;
-	}
-
-	.high-contrast:not(.ghost-mode) .glass-pill {
+	.high-contrast .glass-pill {
 		background: rgba(0, 0, 0, 0.9);
 		border-color: #5227ff;
 	}

@@ -178,6 +178,15 @@
 	let hoveredTaskId = '';
 	let newTaskInput: HTMLInputElement | null = null;
 	let editingTask: DisplayTask | null = null;
+	let sprintComposerNameInput: HTMLInputElement | null = null;
+	let sprintComposerTaskInput: HTMLInputElement | null = null;
+	let sprintComposerOpen = false;
+	let sprintComposerName = '';
+	let sprintComposerTaskDrafts: string[] = [];
+	let sprintComposerTaskInputValue = '';
+	let sprintComposerActiveTaskIndex = -1;
+	let sprintComposerSaving = false;
+	let sprintDraftGroupsByContext: Record<string, string[]> = {};
 
 	// Sprint add task state
 	let sprintAddKey = '';
@@ -201,6 +210,7 @@
 	let deletingTaskIds: string[] = [];
 	let ownerOptions: OwnerOption[] = [];
 	let canCreateSprintTask = false;
+	const SPRINT_COMPOSER_MAX_TASKS = 25;
 
 	onDestroy(() => {
 		if (boardToastTimer) {
@@ -214,29 +224,37 @@
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: boardTitle = contextAware ? $activeContext.name.trim() || 'Workspace Tasks' : 'Room Tasks';
 	$: contextKey = `${$activeContext.type}:${$activeContext.id}`;
+	$: sprintContextKey = contextAware ? contextKey : `room:${normalizedRoomId}`;
 	$: if (contextAware && contextKey !== lastContextKey) {
 		lastContextKey = contextKey;
+		sprintComposerOpen = false;
+		sprintComposerName = '';
+		sprintComposerTaskDrafts = [];
+		sprintComposerTaskInputValue = '';
+		sprintComposerActiveTaskIndex = -1;
 		void loadContextTasks();
 	}
 
 	$: roomTasks = dedupeDisplayTasksById(
-		[...$taskStore].map((task): DisplayTask => ({
-			id: task.id,
-			roomId: task.roomId,
-			title: task.title,
-			description: task.description,
-			status: task.status,
-			budget: task.budget,
-			spent: task.spent,
-			sprintName: task.sprintName || '',
-			assigneeId: task.assigneeId,
-			statusActorId: task.statusActorId,
-			statusActorName: task.statusActorName,
-			statusChangedAt: task.statusChangedAt,
-			createdAt: task.createdAt,
-			updatedAt: task.updatedAt,
-			source: 'room'
-		}))
+		[...$taskStore].map(
+			(task): DisplayTask => ({
+				id: task.id,
+				roomId: task.roomId,
+				title: task.title,
+				description: task.description,
+				status: task.status,
+				budget: task.budget,
+				spent: task.spent,
+				sprintName: task.sprintName || '',
+				assigneeId: task.assigneeId,
+				statusActorId: task.statusActorId,
+				statusActorName: task.statusActorName,
+				statusChangedAt: task.statusChangedAt,
+				createdAt: task.createdAt,
+				updatedAt: task.updatedAt,
+				source: 'room'
+			})
+		)
 	).sort(compareTasksForGrid);
 	$: contextGridTasks = dedupeDisplayTasksById([...contextTasks]).sort(compareTasksForGrid);
 	$: boardTasks = contextAware ? contextGridTasks : roomTasks;
@@ -248,6 +266,8 @@
 	}
 	$: ownerOptions = buildOwnerOptions(onlineMembers, boardTasks);
 	$: canCreateSprintTask = canEdit && (!contextAware || $activeContext.type === 'room');
+	$: sprintDraftGroups = sprintDraftGroupsByContext[sprintContextKey] ?? [];
+	$: sprintComposerPreviewRows = buildSprintComposerPreviewRows(sprintComposerTaskDrafts);
 	$: hasAnyTasks = boardTasks.length > 0;
 	$: boardLastUpdatedAt = boardTasks.reduce(
 		(latest, task) => Math.max(latest, Number.isFinite(task.updatedAt) ? task.updatedAt : 0),
@@ -271,6 +291,19 @@
 				lastUpdatedAt: task.updatedAt || 0
 			});
 		}
+		for (const draftSprintName of sprintDraftGroups) {
+			const trimmedDraftName = draftSprintName.trim();
+			const key = sprintGroupKey(trimmedDraftName);
+			if (!trimmedDraftName || grouped.has(key)) {
+				continue;
+			}
+			grouped.set(key, {
+				key,
+				name: trimmedDraftName,
+				tasks: [],
+				lastUpdatedAt: 0
+			});
+		}
 
 		return [...grouped.values()]
 			.map((group) => ({
@@ -282,7 +315,8 @@
 				if (right.name === 'Backlog' && left.name !== 'Backlog') return -1;
 				return sprintNameCollator.compare(left.name, right.name);
 			});
-		})();
+	})();
+	$: hasBoardDataForView = boardView === 'table' ? sprintTaskGroups.length > 0 : hasAnyTasks;
 	$: kanbanColumns = KANBAN_COLUMN_ORDER.map<KanbanColumn>((columnKey) => ({
 		key: columnKey,
 		label: statusLabel(columnKey),
@@ -301,7 +335,11 @@
 	$: supportTicketCards = supportTickets
 		.filter((task) => sprintGroupKey(task.sprintName) === supportCurrentSprintKey)
 		.map((task) => buildSupportTicketCard(task))
-		.sort((left, right) => supportPriorityRank(left.priority) - supportPriorityRank(right.priority) || right.task.updatedAt - left.task.updatedAt);
+		.sort(
+			(left, right) =>
+				supportPriorityRank(left.priority) - supportPriorityRank(right.priority) ||
+				right.task.updatedAt - left.task.updatedAt
+		);
 	$: {
 		const validTaskIds = new Set(supportSourceTasksForSprint.map((task) => task.id));
 		const nextSelectedTaskIds = selectedSupportTaskIds.filter((taskId) => validTaskIds.has(taskId));
@@ -372,7 +410,9 @@
 		if (!normalizedOwnerId) {
 			return null;
 		}
-		return ownerOptions.find((option) => normalizeMemberId(option.id) === normalizedOwnerId) ?? null;
+		return (
+			ownerOptions.find((option) => normalizeMemberId(option.id) === normalizedOwnerId) ?? null
+		);
 	}
 
 	function ownerOptionsForTask(task: DisplayTask) {
@@ -437,7 +477,8 @@
 	}
 
 	function compareTasksForGrid(left: DisplayTask, right: DisplayTask) {
-		const statusDiff = STATUS_ORDER[resolveColumn(left.status)] - STATUS_ORDER[resolveColumn(right.status)];
+		const statusDiff =
+			STATUS_ORDER[resolveColumn(left.status)] - STATUS_ORDER[resolveColumn(right.status)];
 		if (statusDiff !== 0) {
 			return statusDiff;
 		}
@@ -608,6 +649,199 @@
 		return trimmed.toLowerCase();
 	}
 
+	function setSprintDraftGroupsForContext(contextValue: string, nextGroups: string[]) {
+		const contextLabel = contextValue.trim();
+		if (!contextLabel) {
+			return;
+		}
+		const seen = new Set<string>();
+		const sanitizedGroups: string[] = [];
+		for (const groupName of nextGroups) {
+			const trimmedGroupName = groupName.trim();
+			if (!trimmedGroupName) {
+				continue;
+			}
+			const key = sprintGroupKey(trimmedGroupName);
+			if (key === 'backlog' || seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			sanitizedGroups.push(trimmedGroupName);
+		}
+		const currentGroups = sprintDraftGroupsByContext[contextLabel] ?? [];
+		if (
+			currentGroups.length === sanitizedGroups.length &&
+			currentGroups.every((groupName, index) => groupName === sanitizedGroups[index])
+		) {
+			return;
+		}
+		sprintDraftGroupsByContext = {
+			...sprintDraftGroupsByContext,
+			[contextLabel]: sanitizedGroups
+		};
+	}
+
+	function rememberSprintDraftGroup(sprintName: string) {
+		const trimmedSprintName = sprintName.trim();
+		if (!trimmedSprintName || sprintGroupKey(trimmedSprintName) === 'backlog') {
+			return;
+		}
+		const key = sprintGroupKey(trimmedSprintName);
+		const alreadyExists = sprintTaskGroups.some((group) => group.key === key);
+		if (alreadyExists) {
+			return;
+		}
+		setSprintDraftGroupsForContext(sprintContextKey, [...sprintDraftGroups, trimmedSprintName]);
+	}
+
+	function parseSprintComposerTasks(input: string | string[]) {
+		const seen = new Set<string>();
+		const next: string[] = [];
+		const lines = Array.isArray(input) ? input : input.split(/\r?\n/);
+		for (const line of lines) {
+			const fragments = line.split('|');
+			for (const fragment of fragments) {
+				const cleaned = fragment
+					.replace(/^[\-*•]\s*/, '')
+					.replace(/^\d+[.)]\s*/, '')
+					.trim();
+				if (!cleaned) {
+					continue;
+				}
+				const key = cleaned.toLowerCase();
+				if (seen.has(key)) {
+					continue;
+				}
+				seen.add(key);
+				next.push(cleaned);
+				if (next.length >= SPRINT_COMPOSER_MAX_TASKS) {
+					return next;
+				}
+			}
+		}
+		return next;
+	}
+
+	function buildSprintComposerPreviewRows(taskDrafts: string[]) {
+		const normalizedDrafts = parseSprintComposerTasks(taskDrafts);
+		const maxRows = Math.min(
+			SPRINT_COMPOSER_MAX_TASKS,
+			Math.max(
+				3,
+				normalizedDrafts.length + (normalizedDrafts.length < SPRINT_COMPOSER_MAX_TASKS ? 1 : 0)
+			)
+		);
+		return Array.from({ length: maxRows }, (_, index) => ({
+			index,
+			title: normalizedDrafts[index] ?? ''
+		}));
+	}
+
+	async function startSprintComposerTaskEdit(index: number, prefill = '') {
+		if (sprintComposerSaving) {
+			return;
+		}
+		if (index < 0 || index >= SPRINT_COMPOSER_MAX_TASKS) {
+			return;
+		}
+		const normalizedDrafts = parseSprintComposerTasks(sprintComposerTaskDrafts);
+		if (index > normalizedDrafts.length) {
+			return;
+		}
+		const existingValue = normalizedDrafts[index] ?? '';
+		sprintComposerActiveTaskIndex = index;
+		sprintComposerTaskInputValue = prefill || existingValue;
+		await tick();
+		sprintComposerTaskInput?.focus();
+		sprintComposerTaskInput?.setSelectionRange(
+			sprintComposerTaskInputValue.length,
+			sprintComposerTaskInputValue.length
+		);
+	}
+
+	function cancelSprintComposerTaskEdit() {
+		sprintComposerActiveTaskIndex = -1;
+		sprintComposerTaskInputValue = '';
+	}
+
+	function commitSprintComposerTaskEdit() {
+		if (sprintComposerActiveTaskIndex < 0) {
+			return;
+		}
+		const normalizedDrafts = parseSprintComposerTasks(sprintComposerTaskDrafts);
+		const nextDrafts = [...normalizedDrafts];
+		const normalizedInput = parseSprintComposerTasks([sprintComposerTaskInputValue])[0] ?? '';
+		if (sprintComposerActiveTaskIndex < nextDrafts.length) {
+			if (normalizedInput) {
+				nextDrafts[sprintComposerActiveTaskIndex] = normalizedInput;
+			} else {
+				nextDrafts.splice(sprintComposerActiveTaskIndex, 1);
+			}
+		} else if (normalizedInput && nextDrafts.length < SPRINT_COMPOSER_MAX_TASKS) {
+			nextDrafts.push(normalizedInput);
+		}
+		sprintComposerTaskDrafts = parseSprintComposerTasks(nextDrafts);
+		cancelSprintComposerTaskEdit();
+	}
+
+	function onSprintComposerTaskInputKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			commitSprintComposerTaskEdit();
+			return;
+		}
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelSprintComposerTaskEdit();
+		}
+	}
+
+	async function openSprintComposer(prefill?: { sprintName?: string; taskLine?: string }) {
+		if (!canEdit || !canCreateSprintTask || sprintComposerSaving) {
+			return;
+		}
+		let prefillTaskEditIndex = -1;
+		let prefillTaskValue = '';
+		const nextSprintName = prefill?.sprintName?.trim();
+		if (nextSprintName) {
+			sprintComposerName = nextSprintName;
+		}
+		const taskLine = prefill?.taskLine?.trim();
+		if (taskLine) {
+			const normalizedTaskLine = parseSprintComposerTasks([taskLine])[0] ?? '';
+			if (normalizedTaskLine) {
+				const existingDrafts = parseSprintComposerTasks(sprintComposerTaskDrafts);
+				if (existingDrafts.length < SPRINT_COMPOSER_MAX_TASKS) {
+					prefillTaskEditIndex = existingDrafts.length;
+					prefillTaskValue = normalizedTaskLine;
+				}
+			}
+		}
+		sprintComposerOpen = true;
+		clearBoardError();
+		await tick();
+		if (prefillTaskEditIndex >= 0) {
+			await startSprintComposerTaskEdit(prefillTaskEditIndex, prefillTaskValue);
+			return;
+		}
+		sprintComposerNameInput?.focus();
+		sprintComposerNameInput?.setSelectionRange(
+			sprintComposerName.length,
+			sprintComposerName.length
+		);
+	}
+
+	function closeSprintComposer() {
+		if (sprintComposerSaving) {
+			return;
+		}
+		sprintComposerOpen = false;
+		sprintComposerName = '';
+		sprintComposerTaskDrafts = [];
+		sprintComposerTaskInputValue = '';
+		sprintComposerActiveTaskIndex = -1;
+	}
+
 	function readSupportMetadataValue(task: DisplayTask, keys: string[]) {
 		for (const key of keys) {
 			const value = readDescriptionMetadataValue(task.description, key).trim();
@@ -659,7 +893,11 @@
 
 	function isSupportTicket(task: DisplayTask) {
 		const ticketType = readSupportMetadataValue(task, ['ticket', 'type']).toLowerCase();
-		if (ticketType === 'support' || ticketType === 'support_ticket' || ticketType === 'support ticket') {
+		if (
+			ticketType === 'support' ||
+			ticketType === 'support_ticket' ||
+			ticketType === 'support ticket'
+		) {
 			return true;
 		}
 		return task.title.trim().toLowerCase().startsWith('support:');
@@ -667,7 +905,9 @@
 
 	function resolveSupportCurrentSprintName(tasks: DisplayTask[]) {
 		const activeSprintTask = tasks.find(
-			(task) => resolveColumn(task.status) === 'in_progress' && sprintGroupKey(task.sprintName) !== 'backlog'
+			(task) =>
+				resolveColumn(task.status) === 'in_progress' &&
+				sprintGroupKey(task.sprintName) !== 'backlog'
 		);
 		if (activeSprintTask) {
 			return activeSprintTask.sprintName.trim() || 'Backlog';
@@ -683,7 +923,9 @@
 
 	function buildSupportTicketCard(task: DisplayTask): SupportTicketCard {
 		const priority = parseSupportPriority(readSupportMetadataValue(task, ['priority']));
-		const concernedIds = splitMetadataList(readSupportMetadataValue(task, ['concerned', 'concerned users']));
+		const concernedIds = splitMetadataList(
+			readSupportMetadataValue(task, ['concerned', 'concerned users'])
+		);
 		const linkedTaskIds = splitMetadataList(
 			readSupportMetadataValue(task, ['linked tasks', 'linked_tasks', 'linked task ids'])
 		);
@@ -799,7 +1041,8 @@
 			sprintName: toStringValue(source.sprint_name ?? source.sprintName),
 			assigneeId: toStringValue(source.assignee_id ?? source.assigneeId),
 			statusActorId: toStringValue(source.status_actor_id ?? source.statusActorId) || undefined,
-			statusActorName: toStringValue(source.status_actor_name ?? source.statusActorName) || undefined,
+			statusActorName:
+				toStringValue(source.status_actor_name ?? source.statusActorName) || undefined,
 			statusChangedAt: parseTimestamp(source.status_changed_at ?? source.statusChangedAt),
 			createdAt,
 			updatedAt: parseTimestamp(source.updated_at ?? source.updatedAt) || createdAt,
@@ -1005,8 +1248,7 @@
 						...task,
 						status: statusMeta?.status || columnKey,
 						statusActorId: statusMeta?.statusActorId || sessionUserID || task.statusActorId,
-						statusActorName:
-							statusMeta?.statusActorName || sessionUsername || task.statusActorName,
+						statusActorName: statusMeta?.statusActorName || sessionUsername || task.statusActorName,
 						statusChangedAt: statusMeta?.statusChangedAt || Date.now(),
 						updatedAt: statusMeta?.updatedAt || Date.now()
 					} satisfies DisplayTask;
@@ -1016,14 +1258,9 @@
 					publishRoomBoardActivity(normalizedWorkspaceRoomID, {
 						type: columnKey === 'done' ? 'task_completed' : 'task_moved',
 						title:
-							columnKey === 'done'
-								? `Completed ${targetTask.title}`
-								: `Moved ${targetTask.title}`,
+							columnKey === 'done' ? `Completed ${targetTask.title}` : `Moved ${targetTask.title}`,
 						subtitle: `${statusLabel(previousColumn)} → ${statusLabel(columnKey)}`,
-						actor:
-							nextTaskForSocket.statusActorName ||
-							nextTaskForSocket.statusActorId ||
-							'Unknown'
+						actor: nextTaskForSocket.statusActorName || nextTaskForSocket.statusActorId || 'Unknown'
 					});
 					sendSocketPayload(
 						buildTaskSocketPayload('task_move', normalizedWorkspaceRoomID, nextTaskForSocket)
@@ -1345,7 +1582,11 @@
 		return 'sprint';
 	}
 
-	async function updateContextRoomTaskField(task: DisplayTask, field: EditableField, nextValue: string) {
+	async function updateContextRoomTaskField(
+		task: DisplayTask,
+		field: EditableField,
+		nextValue: string
+	) {
 		const normalizedWorkspaceRoomID = normalizeRoomIDValue($activeContext.id);
 		if (!normalizedWorkspaceRoomID) {
 			throw new Error('Invalid workspace room id');
@@ -1409,7 +1650,11 @@
 		});
 	}
 
-	function updateContextPersonalTaskField(task: DisplayTask, field: EditableField, nextValue: string) {
+	function updateContextPersonalTaskField(
+		task: DisplayTask,
+		field: EditableField,
+		nextValue: string
+	) {
 		contextTasks = contextTasks.map((entry) => {
 			if (entry.id !== task.id) {
 				return entry;
@@ -1543,7 +1788,11 @@
 			setBoardError('Task name cannot be empty');
 			return;
 		}
-		if ((field === 'budget' || field === 'spent') && nextValue && isNaN(Number(nextValue.replace(/[$,]/g, '')))) {
+		if (
+			(field === 'budget' || field === 'spent') &&
+			nextValue &&
+			isNaN(Number(nextValue.replace(/[$,]/g, '')))
+		) {
 			setBoardError(`${fieldLabel(field)} must be a number`);
 			return;
 		}
@@ -1739,8 +1988,7 @@
 	function formatSpentCell(spent?: number, budget?: number) {
 		const normalizedBudget =
 			typeof budget === 'number' && Number.isFinite(budget) && budget > 0 ? budget : 0;
-		const hasSpent =
-			typeof spent === 'number' && Number.isFinite(spent) && spent >= 0;
+		const hasSpent = typeof spent === 'number' && Number.isFinite(spent) && spent >= 0;
 		if (!hasSpent && normalizedBudget <= 0) {
 			return '--';
 		}
@@ -1765,10 +2013,10 @@
 		if (!canEdit) {
 			return;
 		}
-		newTaskContent = `Follow up: ${task.title}`;
-		void tick().then(() => {
-			newTaskInput?.focus();
-			newTaskInput?.setSelectionRange(newTaskContent.length, newTaskContent.length);
+		const followUpLine = `Follow up: ${task.title}`;
+		void openSprintComposer({
+			sprintName: task.sprintName.trim(),
+			taskLine: followUpLine
 		});
 	}
 
@@ -1820,7 +2068,9 @@
 		}
 
 		const linkedTaskIds = [...selectedSupportTaskIds];
-		const linkedTaskTitleList = linkedTaskIds.map((linkedTaskId) => supportLinkedTaskTitle(linkedTaskId));
+		const linkedTaskTitleList = linkedTaskIds.map((linkedTaskId) =>
+			supportLinkedTaskTitle(linkedTaskId)
+		);
 		const concernedMemberIds = [...selectedConcernedMemberIds];
 		const descriptionBody = supportTicketDetails.trim();
 		const metadataSegments = [
@@ -1972,53 +2222,100 @@
 		}
 	}
 
-	async function handleCreateRoomTaskInSprint(content: string, sprintName: string) {
-		if (sprintAddCreating || !content.trim()) return;
+	async function createRoomTaskInSprint(content: string, sprintName: string) {
+		const normalizedContent = content.trim();
+		if (!normalizedContent) {
+			return;
+		}
 		const targetRoomId = normalizeRoomIDValue(
 			contextAware ? ($activeContext.type === 'room' ? $activeContext.id : '') : normalizedRoomId
 		);
 		if (!targetRoomId) {
-			setBoardError('Invalid room id');
+			throw new Error('Invalid room id');
+		}
+		const normalizedSprintName = sprintName.trim();
+		const response = await fetch(
+			`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomId)}/tasks`,
+			{
+				method: 'POST',
+				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+				credentials: 'include',
+				body: JSON.stringify({ content: normalizedContent, sprint_name: normalizedSprintName })
+			}
+		);
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+		const payload = await response.json().catch(() => null);
+		if (contextAware) {
+			const created = normalizeRoomTask(payload);
+			if (!created) {
+				throw new Error('Invalid task response');
+			}
+			contextTasks = [created, ...contextTasks];
+			sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, created));
+			publishRoomBoardActivity(targetRoomId, {
+				type: 'task_added',
+				title: `Added ${created.title}`,
+				subtitle: normalizedSprintName ? `Added to ${normalizedSprintName}` : 'Created task',
+				actor: sessionUsername || sessionUserID || 'Unknown'
+			});
 			return;
 		}
+		const created = upsertTaskStoreEntry(payload, targetRoomId);
+		if (!created) {
+			throw new Error('Invalid task response');
+		}
+		sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, created));
+		publishRoomBoardActivity(targetRoomId, {
+			type: 'task_added',
+			title: `Added ${created.title}`,
+			subtitle: normalizedSprintName ? `Added to ${normalizedSprintName}` : 'Created task',
+			actor: sessionUsername || sessionUserID || 'Unknown'
+		});
+	}
+
+	async function submitSprintComposer() {
+		if (sprintComposerSaving || !canCreateSprintTask || !canEdit) {
+			return;
+		}
+		if (sprintComposerActiveTaskIndex >= 0) {
+			commitSprintComposerTaskEdit();
+		}
+		const normalizedSprintName = sprintComposerName.trim();
+		if (!normalizedSprintName) {
+			setBoardError('Sprint name is required');
+			await tick();
+			sprintComposerNameInput?.focus();
+			return;
+		}
+
+		const taskTitles = parseSprintComposerTasks(sprintComposerTaskDrafts);
+		sprintComposerSaving = true;
+		clearBoardError();
+		try {
+			rememberSprintDraftGroup(normalizedSprintName);
+			for (const taskTitle of taskTitles) {
+				await createRoomTaskInSprint(taskTitle, normalizedSprintName);
+			}
+			sprintComposerOpen = false;
+			sprintComposerName = '';
+			sprintComposerTaskDrafts = [];
+			sprintComposerTaskInputValue = '';
+			sprintComposerActiveTaskIndex = -1;
+		} catch (error) {
+			setBoardError(error instanceof Error ? error.message : 'Failed to create sprint');
+		} finally {
+			sprintComposerSaving = false;
+		}
+	}
+
+	async function handleCreateRoomTaskInSprint(content: string, sprintName: string) {
+		if (sprintAddCreating || !content.trim()) return;
 		sprintAddCreating = true;
 		clearBoardError();
 		try {
-			const response = await fetch(
-				`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomId)}/tasks`,
-				{
-					method: 'POST',
-					headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
-					credentials: 'include',
-					body: JSON.stringify({ content: content.trim(), sprint_name: sprintName })
-				}
-			);
-			if (!response.ok) throw new Error(await parseErrorMessage(response));
-			const payload = await response.json().catch(() => null);
-			if (contextAware) {
-				const created = normalizeRoomTask(payload);
-				if (!created) {
-					throw new Error('Invalid task response');
-				}
-				contextTasks = [created, ...contextTasks];
-				sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, created));
-				publishRoomBoardActivity(targetRoomId, {
-					type: 'task_added',
-					title: `Added ${created.title}`,
-					subtitle: sprintName.trim() ? `Added to ${sprintName.trim()}` : 'Created task',
-					actor: sessionUsername || sessionUserID || 'Unknown'
-				});
-			} else {
-				const created = upsertTaskStoreEntry(payload, targetRoomId);
-				if (!created) throw new Error('Invalid task response');
-				sendSocketPayload(buildTaskSocketPayload('task_create', targetRoomId, created));
-				publishRoomBoardActivity(targetRoomId, {
-					type: 'task_added',
-					title: `Added ${created.title}`,
-					subtitle: sprintName.trim() ? `Added to ${sprintName.trim()}` : 'Created task',
-					actor: sessionUsername || sessionUserID || 'Unknown'
-				});
-			}
+			await createRoomTaskInSprint(content, sprintName);
 			sprintAddContent = '';
 			sprintAddKey = '';
 		} catch (error) {
@@ -2064,31 +2361,141 @@
 		</div>
 	</header>
 
-	<form
-		class="new-task-form"
-		on:submit|preventDefault={() => {
-			if (contextAware) {
-				void handleCreateTask(newTaskContent);
-				return;
-			}
-			void handleCreateRoomTask(newTaskContent);
-		}}
-	>
-		<input
-			bind:this={newTaskInput}
-			type="text"
-			bind:value={newTaskContent}
-			placeholder="Add a task..."
-			autocomplete="off"
-			disabled={creatingTask}
-		/>
-		<button type="submit" disabled={creatingTask || !newTaskContent.trim() || !canEdit}>
-			{creatingTask ? 'Adding...' : 'Add task'}
-		</button>
-	</form>
+	<section class="sprint-composer" aria-label="Create sprint">
+		<div class="sprint-composer-head">
+			<button
+				type="button"
+				class="sprint-composer-trigger"
+				on:click={() => void openSprintComposer()}
+				disabled={!canEdit || !canCreateSprintTask || sprintComposerSaving}
+			>
+				+ Add Sprint
+			</button>
+			<p>
+				{#if canCreateSprintTask}
+					Set a sprint name and optionally add task titles on separate lines.
+				{:else}
+					Select a room workspace to create sprint tasks.
+				{/if}
+			</p>
+		</div>
+		{#if sprintComposerOpen}
+			<form
+				class="sprint-composer-form"
+				on:submit|preventDefault={() => void submitSprintComposer()}
+			>
+				<label class="sprint-composer-field">
+					<span>Sprint name</span>
+					<input
+						bind:this={sprintComposerNameInput}
+						type="text"
+						bind:value={sprintComposerName}
+						placeholder="Sprint 5 - Stabilization"
+						autocomplete="off"
+						disabled={sprintComposerSaving}
+						maxlength="160"
+					/>
+				</label>
+				<section class="sprint-preview-grid" aria-label="Sprint task preview">
+					<div class="sprint-preview-head">
+						<span>Task</span>
+						<span>Status</span>
+						<span>Owner</span>
+						<span>Budget</span>
+						<span>Spent</span>
+						<span>Updated</span>
+					</div>
+					<div class="sprint-preview-body">
+						{#each sprintComposerPreviewRows as previewRow (previewRow.index)}
+							<div class="sprint-preview-row">
+								<div class="sprint-preview-cell sprint-preview-task-cell">
+									{#if sprintComposerActiveTaskIndex === previewRow.index}
+										<input
+											bind:this={sprintComposerTaskInput}
+											type="text"
+											class="sprint-preview-task-input"
+											bind:value={sprintComposerTaskInputValue}
+											on:keydown={onSprintComposerTaskInputKeydown}
+											on:blur={commitSprintComposerTaskEdit}
+											placeholder="Task title..."
+											autocomplete="off"
+											maxlength="220"
+										/>
+									{:else}
+										<button
+											type="button"
+											class="sprint-preview-task-btn"
+											class:is-empty={!previewRow.title}
+											on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+											disabled={sprintComposerSaving || !canCreateSprintTask}
+										>
+											{previewRow.title || 'Click any cell in this row to add task'}
+										</button>
+									{/if}
+								</div>
+								<button
+									type="button"
+									class="sprint-preview-cell sprint-preview-meta-cell"
+									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+									disabled={sprintComposerSaving || !canCreateSprintTask}
+								>
+									To Do
+								</button>
+								<button
+									type="button"
+									class="sprint-preview-cell sprint-preview-meta-cell"
+									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+									disabled={sprintComposerSaving || !canCreateSprintTask}
+								>
+									Unassigned
+								</button>
+								<button
+									type="button"
+									class="sprint-preview-cell sprint-preview-meta-cell"
+									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+									disabled={sprintComposerSaving || !canCreateSprintTask}
+								>
+									$0
+								</button>
+								<button
+									type="button"
+									class="sprint-preview-cell sprint-preview-meta-cell"
+									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+									disabled={sprintComposerSaving || !canCreateSprintTask}
+								>
+									$0
+								</button>
+								<button
+									type="button"
+									class="sprint-preview-cell sprint-preview-meta-cell"
+									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+									disabled={sprintComposerSaving || !canCreateSprintTask}
+								>
+									--
+								</button>
+							</div>
+						{/each}
+					</div>
+				</section>
+				<p class="sprint-composer-hint">
+					Click any preview row cell to add tasks. Press Enter to save a cell.
+				</p>
+				<div class="sprint-composer-actions">
+					<button
+						type="submit"
+						class="sprint-composer-submit"
+						disabled={sprintComposerSaving || !sprintComposerName.trim()}
+					>
+						{sprintComposerSaving ? 'Creating…' : 'Create sprint'}
+					</button>
+					<button type="button" class="sprint-composer-cancel" on:click={closeSprintComposer}>
+						Cancel
+					</button>
+				</div>
+			</form>
+		{/if}
+	</section>
 
-
-t
 	{#if quickEditVisible && editingTask && editingField}
 		<section class="quick-edit-panel" aria-label="Task quick editor">
 			<div class="quick-edit-head">
@@ -2156,445 +2563,243 @@ t
 		</section>
 	{/if}
 
-		<div class="board-content-slot">
-			{#if boardLoading}
-				<div class="board-state">Loading tasks...</div>
-			{:else if boardError}
-				<div class="board-state error">Unable to load tasks: {boardError}</div>
-			{:else if !hasAnyTasks}
-				<div class="board-state">No tasks yet. Add one to start planning.</div>
+	<div class="board-content-slot">
+		{#if boardLoading}
+			<div class="board-state">Loading tasks...</div>
+		{:else if boardError}
+			<div class="board-state error">Unable to load tasks: {boardError}</div>
+		{:else if !hasBoardDataForView}
+			<div class="board-state">
+				{#if contextAware}
+					No tasks yet. Use + Add Sprint to start planning.
 				{:else}
-					{#if boardView === 'support'}
-						<div class="support-view" aria-label="Support ticket board">
-							<section class="support-composer">
-								<header class="support-composer-head">
-									<div>
-										<h3>Support Tickets</h3>
-										<p>Current sprint: {supportCurrentSprintName}</p>
-									</div>
-									<span>{supportTicketCards.length} tickets</span>
-								</header>
-
-								<div class="support-form-grid">
-									<label class="support-field">
-										<span>Ticket title</span>
-										<input
-											type="text"
-											bind:value={supportTicketTitle}
-											placeholder="Payment failure on checkout"
-											disabled={!canEdit || supportTicketCreating}
-										/>
-									</label>
-									<label class="support-field">
-										<span>Priority</span>
-										<select bind:value={supportTicketPriority} disabled={!canEdit || supportTicketCreating}>
-											{#each SUPPORT_PRIORITY_OPTIONS as priorityOption (priorityOption.value)}
-												<option value={priorityOption.value}>{priorityOption.label}</option>
-											{/each}
-										</select>
-									</label>
-									<label class="support-field support-field-wide">
-										<span>Details</span>
-										<textarea
-											bind:value={supportTicketDetails}
-											placeholder="Add context for support engineers"
-											maxlength="1200"
-											disabled={!canEdit || supportTicketCreating}
-										></textarea>
-									</label>
-								</div>
-
-								<div class="support-pickers">
-									<div class="support-picker">
-										<div class="support-picker-head">
-											<h4>Choose task(s)</h4>
-											<span>{selectedSupportTaskIds.length} selected</span>
-										</div>
-										{#if supportSourceTasksForSprint.length === 0}
-											<div class="support-empty-inline">No tasks in {supportCurrentSprintName}.</div>
-										{:else}
-											<div class="support-task-list">
-												{#each supportSourceTasksForSprint as sourceTask (sourceTask.id)}
-													<label class="support-check-row">
-														<input
-															type="checkbox"
-															checked={selectedSupportTaskIds.includes(sourceTask.id)}
-															on:change={() => toggleSupportTask(sourceTask.id)}
-															disabled={!canEdit || supportTicketCreating}
-														/>
-														<span>{sourceTask.title}</span>
-													</label>
-												{/each}
-											</div>
-										{/if}
-									</div>
-
-									<div class="support-picker">
-										<div class="support-picker-head">
-											<h4>Concerned (online)</h4>
-											<span>{selectedConcernedMemberIds.length} selected</span>
-										</div>
-										{#if onlineConcernedOptions.length === 0}
-											<div class="support-empty-inline">No online members right now.</div>
-										{:else}
-											<div class="support-member-grid">
-												{#each onlineConcernedOptions as memberOption (memberOption.id)}
-													<button
-														type="button"
-														class="support-member-option"
-														class:is-selected={selectedConcernedMemberIds.includes(memberOption.id)}
-														on:click={() => toggleConcernedMember(memberOption.id)}
-														disabled={!canEdit || supportTicketCreating}
-													>
-														<span
-															class="owner-avatar"
-															style={`--owner-hue:${hueFromSeed(memberOption.label)};`}
-														>
-															{initials(memberOption.label)}
-														</span>
-														<span>{memberOption.label}</span>
-													</button>
-												{/each}
-											</div>
-										{/if}
-									</div>
-								</div>
-
-								<div class="support-composer-actions">
-									<button
-										type="button"
-										class="support-create-btn"
-										on:click={() => void createSupportTicket()}
-										disabled={!canEdit || supportTicketCreating || !supportTicketTitle.trim() || selectedSupportTaskIds.length === 0}
-									>
-										{supportTicketCreating ? 'Creating...' : 'Create support ticket'}
-									</button>
-									<button
-										type="button"
-										class="support-clear-btn"
-										on:click={resetSupportComposer}
-										disabled={!canEdit || supportTicketCreating}
-									>
-										Clear
-									</button>
-								</div>
-							</section>
-
-							<section class="support-ticket-board">
-								<header class="support-ticket-head">
-									<h3>Tickets in {supportCurrentSprintName}</h3>
-									<span>{supportTicketCards.length}</span>
-								</header>
-								{#if supportTicketCards.length === 0}
-									<div class="support-empty">No support tickets yet for this sprint.</div>
-								{:else}
-									<div class="support-card-grid">
-										{#each supportTicketCards as supportCard (supportCard.task.id)}
-											<article class="support-ticket-card">
-												<div class="support-ticket-top">
-													<span class={`support-priority priority-${supportCard.priority}`}>
-														{supportPriorityLabel(supportCard.priority)}
-													</span>
-													<time>{formatCellTime(supportCard.task.updatedAt)}</time>
-												</div>
-												<h4>{supportCard.task.title}</h4>
-												<p>{supportCard.details}</p>
-												<div class="support-linked-meta">
-													{supportCard.linkedTaskIds.length} linked task{supportCard.linkedTaskIds.length === 1 ? '' : 's'}
-												</div>
-												<div class="support-card-footer">
-													<div class="support-avatar-stack" aria-label="Concerned members">
-														{#if supportCard.concernedIds.length === 0}
-															<span class="support-avatar support-avatar-empty">--</span>
-														{:else}
-															{#each supportCard.concernedIds.slice(0, 4) as concernedMemberId, memberIndex (`${concernedMemberId}-${memberIndex}`)}
-																{@const concernedMemberName = concernedMemberLabel(concernedMemberId)}
-																<span
-																	class="support-avatar"
-																	style={`--owner-hue:${hueFromSeed(concernedMemberName)}; --avatar-index:${memberIndex};`}
-																	title={concernedMemberName}
-																>
-																	{initials(concernedMemberName)}
-																</span>
-															{/each}
-															{#if supportCard.concernedIds.length > 4}
-																<span class="support-avatar support-avatar-more" style="--avatar-index:4;">
-																	+{supportCard.concernedIds.length - 4}
-																</span>
-															{/if}
-														{/if}
-													</div>
-													<span class="support-sprint-chip">{supportCard.task.sprintName.trim() || 'Backlog'}</span>
-												</div>
-											</article>
-										{/each}
-									</div>
-								{/if}
-							</section>
+					No tasks yet. Add one to start planning.
+				{/if}
+			</div>
+		{:else if boardView === 'support'}
+			<div class="support-view" aria-label="Support ticket board">
+				<section class="support-composer">
+					<header class="support-composer-head">
+						<div>
+							<h3>Support Tickets</h3>
+							<p>Current sprint: {supportCurrentSprintName}</p>
 						</div>
-					{:else if boardView === 'kanban'}
-						<div class="kanban-board" role="list" aria-label="Kanban task board">
-						{#each kanbanColumns as column (column.key)}
-							<section class="kanban-column" role="listitem" aria-label={`${column.label} lane`}>
-								<header class="kanban-column-head">
-									<div class="kanban-column-title-wrap">
-										<h3>{column.label}</h3>
-										<span>{column.tasks.length}</span>
-									</div>
-								</header>
-								<div class="kanban-column-body" role="list" aria-label={`${column.label} tasks`}>
-									{#if column.tasks.length === 0}
-										<div class="kanban-empty">No tasks</div>
-									{:else}
-										{#each column.tasks as task (task.id)}
-											<article class="kanban-card" role="listitem">
-												<div class="kanban-card-top">
-													<button
-														type="button"
-														class="kanban-card-title"
-														on:click|stopPropagation={() => void startEditing(task, 'title')}
-														on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
-													>
-														{task.title}
-													</button>
-													<button
-														type="button"
-														class="kanban-mini-btn"
-														on:click|stopPropagation={() => queueFollowUp(task)}
-														disabled={!canEdit}
-														title="Follow-up"
-													>
-														+
-													</button>
-												</div>
-
-												<div class="kanban-status-row">
-													<div class="status-wrap">
-														<button
-															type="button"
-															class={`status-pill status-${resolveColumn(task.status)}`}
-															on:click|stopPropagation={(event) => toggleStatusMenu(event, task)}
-															disabled={!canEditTaskStatus(task) || isSaving(task.id, 'status')}
-														>
-															{statusLabel(resolveColumn(task.status))}
-														</button>
-														{#if statusMenuTaskId === task.id}
-															<div class="status-menu">
-																{#each STATUS_OPTIONS as option}
-																	<button
-																		type="button"
-																		class={`status-option status-${option.value}`}
-																		class:is-active={resolveColumn(task.status) === option.value}
-																		on:click|stopPropagation={() => void applyStatus(task, option.value)}
-																	>
-																		{option.label}
-																	</button>
-																{/each}
-															</div>
-														{/if}
-													</div>
-												</div>
-
-												<div class="kanban-meta-grid">
-													<button
-														type="button"
-														class="kanban-meta-btn kanban-owner-btn"
-														on:click|stopPropagation={() => void startEditing(task, 'assigneeId')}
-														on:dblclick|stopPropagation={() => void startEditing(task, 'assigneeId')}
-													>
-														<span class="meta-label">Owner</span>
-														<span class="owner-chip">
-															<span class="owner-avatar" style={`--owner-hue:${ownerHue(task)};`}>
-																{initials(ownerLabel(task))}
-															</span>
-															<span class="owner-name">{ownerLabel(task)}</span>
-														</span>
-													</button>
-
-													<button
-														type="button"
-														class="kanban-meta-btn"
-														on:click|stopPropagation={() => void startEditing(task, 'budget')}
-														on:dblclick|stopPropagation={() => void startEditing(task, 'budget')}
-													>
-														<span class="meta-label">Budget</span>
-														<span class="meta-value budget-val">{formatBudgetCell(task.budget)}</span>
-													</button>
-
-													<button
-														type="button"
-														class="kanban-meta-btn"
-														on:click|stopPropagation={() => void startEditing(task, 'spent')}
-														on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
-													>
-														<span class="meta-label">Spent</span>
-														<span class="meta-value budget-val">{formatSpentCell(task.spent, task.budget)}</span>
-													</button>
-												</div>
-
-												<footer class="kanban-card-footer">
-													<span>{task.sprintName.trim() || 'Backlog'}</span>
-													<time datetime={new Date(task.updatedAt).toISOString()}>
-														{formatCellTime(task.updatedAt)}
-													</time>
-												</footer>
-											</article>
-										{/each}
-									{/if}
-								</div>
-							</section>
-						{/each}
-					</div>
-				{:else}
-					<div class="sprint-groups" role="list" aria-label="Sprint task groups">
-				{#each sprintTaskGroups as sprintGroup (sprintGroup.key)}
-					{@const selCount = sprintSelectedCount(sprintGroup)}
-					{@const isEditMode = sprintEditKeys.has(sprintGroup.key)}
-					<section class="sprint-group" role="listitem" aria-label={`${sprintGroup.name} task grid`}>
-					<header class="sprint-group-header">
-						<div class="sgh-left">
-							<h3>{sprintGroup.name}</h3>
-							<p>{sprintGroup.tasks.length} tasks · {formatCellTime(sprintGroup.lastUpdatedAt)}</p>
-						</div>
-						<div class="sgh-actions">
-							{#if isEditMode}
-								<button
-									type="button"
-									class="sgh-btn sgh-delete"
-									on:click={() => void deleteSelectedInSprint(sprintGroup)}
-									disabled={!canEdit || deletingTaskIds.length > 0}
-								>
-									Delete selected{selCount > 0 ? ` (${selCount})` : ''}
-								</button>
-								{#if canCreateSprintTask}
-									<button
-										type="button"
-										class="sgh-btn sgh-add"
-										on:click={() => {
-											sprintAddKey = sprintAddKey === sprintGroup.key ? '' : sprintGroup.key;
-											sprintAddContent = '';
-										}}
-									>
-										+ Add row
-									</button>
-								{/if}
-								<button
-									type="button"
-									class="sgh-btn sgh-done"
-									on:click={() => {
-										const nextSprintEditKeys = new Set(sprintEditKeys);
-										nextSprintEditKeys.delete(sprintGroup.key);
-										sprintEditKeys = nextSprintEditKeys;
-										sprintAddKey = '';
-										sprintAddContent = '';
-										const nextSelectedTaskIds = new Set(selectedTaskIds);
-										sprintGroup.tasks.forEach((t) => nextSelectedTaskIds.delete(t.id));
-										selectedTaskIds = Array.from(nextSelectedTaskIds);
-									}}
-								>
-									Done
-								</button>
-								<span class="sgh-hint">Select rows to delete.</span>
-							{:else if canEdit}
-								<button
-									type="button"
-									class="sgh-btn sgh-edit"
-									on:click={() => {
-										const nextSprintEditKeys = new Set(sprintEditKeys);
-										nextSprintEditKeys.add(sprintGroup.key);
-										sprintEditKeys = nextSprintEditKeys;
-									}}
-								>
-									Edit
-								</button>
-							{/if}
-						</div>
+						<span>{supportTicketCards.length} tickets</span>
 					</header>
 
-					<div class="grid-shell">
-						<table class="task-grid" role="grid" aria-label={`${sprintGroup.name} tasks`}>
-							<thead>
-								<tr>
-									{#if isEditMode}
-									<th scope="col" class="th-check">
-										<input
-											type="checkbox"
-											checked={isSprintAllSelected(sprintGroup)}
-											indeterminate={selCount > 0 && !isSprintAllSelected(sprintGroup)}
-											on:change={() => toggleSprintSelection(sprintGroup)}
-											aria-label="Select all in sprint"
-										/>
-									</th>
-									{/if}
-									<th scope="col">Task</th>
-									<th scope="col">Status</th>
-									<th scope="col">Owner</th>
-									<th scope="col">Budget</th>
-									<th scope="col">Spent</th>
-									<th scope="col">Updated</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each sprintGroup.tasks as task (task.id)}
-									<tr
-										class:row-done={resolveColumn(task.status) === 'done'}
-										class:row-selected={isEditMode && isTaskSelected(task.id)}
-										on:mouseenter={() => { hoveredTaskId = task.id; }}
-										on:mouseleave={() => { hoveredTaskId = ''; }}
-									>
-										<!-- Checkbox -->
-										{#if isEditMode}
-										<td class="cell check-cell" on:click|stopPropagation>
+					<div class="support-form-grid">
+						<label class="support-field">
+							<span>Ticket title</span>
+							<input
+								type="text"
+								bind:value={supportTicketTitle}
+								placeholder="Payment failure on checkout"
+								disabled={!canEdit || supportTicketCreating}
+							/>
+						</label>
+						<label class="support-field">
+							<span>Priority</span>
+							<select
+								bind:value={supportTicketPriority}
+								disabled={!canEdit || supportTicketCreating}
+							>
+								{#each SUPPORT_PRIORITY_OPTIONS as priorityOption (priorityOption.value)}
+									<option value={priorityOption.value}>{priorityOption.label}</option>
+								{/each}
+							</select>
+						</label>
+						<label class="support-field support-field-wide">
+							<span>Details</span>
+							<textarea
+								bind:value={supportTicketDetails}
+								placeholder="Add context for support engineers"
+								maxlength="1200"
+								disabled={!canEdit || supportTicketCreating}
+							></textarea>
+						</label>
+					</div>
+
+					<div class="support-pickers">
+						<div class="support-picker">
+							<div class="support-picker-head">
+								<h4>Choose task(s)</h4>
+								<span>{selectedSupportTaskIds.length} selected</span>
+							</div>
+							{#if supportSourceTasksForSprint.length === 0}
+								<div class="support-empty-inline">No tasks in {supportCurrentSprintName}.</div>
+							{:else}
+								<div class="support-task-list">
+									{#each supportSourceTasksForSprint as sourceTask (sourceTask.id)}
+										<label class="support-check-row">
 											<input
 												type="checkbox"
-												checked={isTaskSelected(task.id)}
-												on:change={() => toggleTaskSelection(task.id)}
-												disabled={isTaskDeleting(task.id)}
-												aria-label={`Select ${task.title}`}
+												checked={selectedSupportTaskIds.includes(sourceTask.id)}
+												on:change={() => toggleSupportTask(sourceTask.id)}
+												disabled={!canEdit || supportTicketCreating}
 											/>
-										</td>
-										{/if}
+											<span>{sourceTask.title}</span>
+										</label>
+									{/each}
+								</div>
+							{/if}
+						</div>
 
-										<!-- Task name -->
-										<td
-											class="cell task-cell"
-											on:click={() => void startEditing(task, 'title')}
-											on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
+						<div class="support-picker">
+							<div class="support-picker-head">
+								<h4>Concerned (online)</h4>
+								<span>{selectedConcernedMemberIds.length} selected</span>
+							</div>
+							{#if onlineConcernedOptions.length === 0}
+								<div class="support-empty-inline">No online members right now.</div>
+							{:else}
+								<div class="support-member-grid">
+									{#each onlineConcernedOptions as memberOption (memberOption.id)}
+										<button
+											type="button"
+											class="support-member-option"
+											class:is-selected={selectedConcernedMemberIds.includes(memberOption.id)}
+											on:click={() => toggleConcernedMember(memberOption.id)}
+											disabled={!canEdit || supportTicketCreating}
 										>
+											<span
+												class="owner-avatar"
+												style={`--owner-hue:${hueFromSeed(memberOption.label)};`}
+											>
+												{initials(memberOption.label)}
+											</span>
+											<span>{memberOption.label}</span>
+										</button>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					</div>
+
+					<div class="support-composer-actions">
+						<button
+							type="button"
+							class="support-create-btn"
+							on:click={() => void createSupportTicket()}
+							disabled={!canEdit ||
+								supportTicketCreating ||
+								!supportTicketTitle.trim() ||
+								selectedSupportTaskIds.length === 0}
+						>
+							{supportTicketCreating ? 'Creating...' : 'Create support ticket'}
+						</button>
+						<button
+							type="button"
+							class="support-clear-btn"
+							on:click={resetSupportComposer}
+							disabled={!canEdit || supportTicketCreating}
+						>
+							Clear
+						</button>
+					</div>
+				</section>
+
+				<section class="support-ticket-board">
+					<header class="support-ticket-head">
+						<h3>Tickets in {supportCurrentSprintName}</h3>
+						<span>{supportTicketCards.length}</span>
+					</header>
+					{#if supportTicketCards.length === 0}
+						<div class="support-empty">No support tickets yet for this sprint.</div>
+					{:else}
+						<div class="support-card-grid">
+							{#each supportTicketCards as supportCard (supportCard.task.id)}
+								<article class="support-ticket-card">
+									<div class="support-ticket-top">
+										<span class={`support-priority priority-${supportCard.priority}`}>
+											{supportPriorityLabel(supportCard.priority)}
+										</span>
+										<time>{formatCellTime(supportCard.task.updatedAt)}</time>
+									</div>
+									<h4>{supportCard.task.title}</h4>
+									<p>{supportCard.details}</p>
+									<div class="support-linked-meta">
+										{supportCard.linkedTaskIds.length} linked task{supportCard.linkedTaskIds
+											.length === 1
+											? ''
+											: 's'}
+									</div>
+									<div class="support-card-footer">
+										<div class="support-avatar-stack" aria-label="Concerned members">
+											{#if supportCard.concernedIds.length === 0}
+												<span class="support-avatar support-avatar-empty">--</span>
+											{:else}
+												{#each supportCard.concernedIds.slice(0, 4) as concernedMemberId, memberIndex (`${concernedMemberId}-${memberIndex}`)}
+													{@const concernedMemberName = concernedMemberLabel(concernedMemberId)}
+													<span
+														class="support-avatar"
+														style={`--owner-hue:${hueFromSeed(concernedMemberName)}; --avatar-index:${memberIndex};`}
+														title={concernedMemberName}
+													>
+														{initials(concernedMemberName)}
+													</span>
+												{/each}
+												{#if supportCard.concernedIds.length > 4}
+													<span
+														class="support-avatar support-avatar-more"
+														style="--avatar-index:4;"
+													>
+														+{supportCard.concernedIds.length - 4}
+													</span>
+												{/if}
+											{/if}
+										</div>
+										<span class="support-sprint-chip"
+											>{supportCard.task.sprintName.trim() || 'Backlog'}</span
+										>
+									</div>
+								</article>
+							{/each}
+						</div>
+					{/if}
+				</section>
+			</div>
+		{:else if boardView === 'kanban'}
+			<div class="kanban-board" role="list" aria-label="Kanban task board">
+				{#each kanbanColumns as column (column.key)}
+					<section class="kanban-column" role="listitem" aria-label={`${column.label} lane`}>
+						<header class="kanban-column-head">
+							<div class="kanban-column-title-wrap">
+								<h3>{column.label}</h3>
+								<span>{column.tasks.length}</span>
+							</div>
+						</header>
+						<div class="kanban-column-body" role="list" aria-label={`${column.label} tasks`}>
+							{#if column.tasks.length === 0}
+								<div class="kanban-empty">No tasks</div>
+							{:else}
+								{#each column.tasks as task (task.id)}
+									<article class="kanban-card" role="listitem">
+										<div class="kanban-card-top">
 											<button
 												type="button"
-												class="row-check"
-												class:is-visible={hoveredTaskId === task.id || resolveColumn(task.status) === 'done'}
-												on:click|stopPropagation={() => void toggleDone(task)}
-												disabled={!canEdit}
-												aria-label={resolveColumn(task.status) === 'done' ? 'Mark as to do' : 'Mark as done'}
+												class="kanban-card-title"
+												on:click|stopPropagation={() => void startEditing(task, 'title')}
+												on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
 											>
-												<svg viewBox="0 0 24 24" aria-hidden="true">
-													<path d="m6 12 4 4 8-8"></path>
-												</svg>
+												{task.title}
 											</button>
-											<div class="task-content">
-												<button
-													type="button"
-													class="cell-trigger task-title-trigger"
-													on:click|stopPropagation={() => void startEditing(task, 'title')}
-													on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
-												>
-													{task.title}
-												</button>
-												<div class="task-actions">
-													<button type="button" on:click|stopPropagation={() => queueFollowUp(task)} disabled={!canEdit} title="Follow-up">+</button>
-												</div>
-											</div>
-										</td>
+											<button
+												type="button"
+												class="kanban-mini-btn"
+												on:click|stopPropagation={() => queueFollowUp(task)}
+												disabled={!canEdit || (contextAware && !canCreateSprintTask)}
+												title="Follow-up"
+											>
+												+
+											</button>
+										</div>
 
-										<!-- Status -->
-										<td class="cell status-cell">
+										<div class="kanban-status-row">
 											<div class="status-wrap">
 												<button
 													type="button"
 													class={`status-pill status-${resolveColumn(task.status)}`}
-													on:click|stopPropagation={(e) => toggleStatusMenu(e, task)}
+													on:click|stopPropagation={(event) => toggleStatusMenu(event, task)}
 													disabled={!canEditTaskStatus(task) || isSaving(task.id, 'status')}
 												>
 													{statusLabel(resolveColumn(task.status))}
@@ -2606,102 +2811,364 @@ t
 																type="button"
 																class={`status-option status-${option.value}`}
 																class:is-active={resolveColumn(task.status) === option.value}
-																on:click|stopPropagation={() => void applyStatus(task, option.value)}
-															>{option.label}</button>
+																on:click|stopPropagation={() =>
+																	void applyStatus(task, option.value)}
+															>
+																{option.label}
+															</button>
 														{/each}
 													</div>
 												{/if}
 											</div>
-										</td>
+										</div>
 
-										<!-- Owner -->
-										<td
-											class="cell owner-cell"
-											on:click={() => void startEditing(task, 'assigneeId')}
-											on:dblclick|stopPropagation={() => void startEditing(task, 'assigneeId')}
-										>
+										<div class="kanban-meta-grid">
 											<button
 												type="button"
-												class="cell-trigger owner-trigger"
+												class="kanban-meta-btn kanban-owner-btn"
 												on:click|stopPropagation={() => void startEditing(task, 'assigneeId')}
 												on:dblclick|stopPropagation={() => void startEditing(task, 'assigneeId')}
 											>
-												<div class="owner-chip">
-													<span class="owner-avatar" style={`--owner-hue:${ownerHue(task)};`}>{initials(ownerLabel(task))}</span>
+												<span class="meta-label">Owner</span>
+												<span class="owner-chip">
+													<span class="owner-avatar" style={`--owner-hue:${ownerHue(task)};`}>
+														{initials(ownerLabel(task))}
+													</span>
 													<span class="owner-name">{ownerLabel(task)}</span>
-												</div>
+												</span>
 											</button>
-										</td>
 
-										<!-- Budget (editable) -->
-										<td
-											class="cell budget-cell"
-											on:click={() => void startEditing(task, 'budget')}
-											on:dblclick|stopPropagation={() => void startEditing(task, 'budget')}
-										>
 											<button
 												type="button"
-												class="cell-trigger budget-trigger"
+												class="kanban-meta-btn"
 												on:click|stopPropagation={() => void startEditing(task, 'budget')}
 												on:dblclick|stopPropagation={() => void startEditing(task, 'budget')}
-												title="Click to edit budget"
 											>
-											<span class="budget-val">{formatBudgetCell(task.budget)}</span>
-										</button>
-									</td>
+												<span class="meta-label">Budget</span>
+												<span class="meta-value budget-val">{formatBudgetCell(task.budget)}</span>
+											</button>
 
-										<!-- Spent (editable) -->
-										<td
-											class="cell spent-cell"
-											on:click={() => void startEditing(task, 'spent')}
-											on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
-										>
 											<button
 												type="button"
-												class="cell-trigger spent-trigger"
+												class="kanban-meta-btn"
 												on:click|stopPropagation={() => void startEditing(task, 'spent')}
 												on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
-												title="Click to edit spent amount"
 											>
-												<span class="budget-val">{formatSpentCell(task.spent, task.budget)}</span>
+												<span class="meta-label">Spent</span>
+												<span class="meta-value budget-val"
+													>{formatSpentCell(task.spent, task.budget)}</span
+												>
 											</button>
-										</td>
+										</div>
 
-										<td class="cell updated-cell">{formatCellTime(task.updatedAt)}</td>
-									</tr>
+										<footer class="kanban-card-footer">
+											<span>{task.sprintName.trim() || 'Backlog'}</span>
+											<time datetime={new Date(task.updatedAt).toISOString()}>
+												{formatCellTime(task.updatedAt)}
+											</time>
+										</footer>
+									</article>
 								{/each}
-							</tbody>
-						</table>
-					</div>
-
-					<!-- Per-sprint add task form -->
-					{#if sprintAddKey === sprintGroup.key}
-						<form
-							class="sprint-add-form"
-							on:submit|preventDefault={() => void handleCreateRoomTaskInSprint(sprintAddContent, sprintGroup.name)}
-						>
-							<!-- svelte-ignore a11y-autofocus -->
-							<input
-								type="text"
-								bind:value={sprintAddContent}
-								placeholder="Task name…"
-								autocomplete="off"
-								disabled={sprintAddCreating}
-								autofocus
-							/>
-							<button type="submit" disabled={sprintAddCreating || !sprintAddContent.trim()}>
-								{sprintAddCreating ? 'Adding…' : 'Add'}
-							</button>
-							<button type="button" on:click={() => { sprintAddKey = ''; sprintAddContent = ''; }}>Cancel</button>
-						</form>
-					{/if}
+							{/if}
+						</div>
 					</section>
 				{/each}
-					</div>
-				{/if}
-			{/if}
-		</div>
-	</section>
+			</div>
+		{:else}
+			<div class="sprint-groups" role="list" aria-label="Sprint task groups">
+				{#each sprintTaskGroups as sprintGroup (sprintGroup.key)}
+					{@const selCount = sprintSelectedCount(sprintGroup)}
+					{@const isEditMode = sprintEditKeys.has(sprintGroup.key)}
+					<section
+						class="sprint-group"
+						role="listitem"
+						aria-label={`${sprintGroup.name} task grid`}
+					>
+						<header class="sprint-group-header">
+							<div class="sgh-left">
+								<h3>{sprintGroup.name}</h3>
+								<p>
+									{sprintGroup.tasks.length} tasks · {formatCellTime(sprintGroup.lastUpdatedAt)}
+								</p>
+							</div>
+							<div class="sgh-actions">
+								{#if isEditMode}
+									<button
+										type="button"
+										class="sgh-btn sgh-delete"
+										on:click={() => void deleteSelectedInSprint(sprintGroup)}
+										disabled={!canEdit || deletingTaskIds.length > 0}
+									>
+										Delete selected{selCount > 0 ? ` (${selCount})` : ''}
+									</button>
+									{#if canCreateSprintTask}
+										<button
+											type="button"
+											class="sgh-btn sgh-add"
+											on:click={() => {
+												sprintAddKey = sprintAddKey === sprintGroup.key ? '' : sprintGroup.key;
+												sprintAddContent = '';
+											}}
+										>
+											+ Add row
+										</button>
+									{/if}
+									<button
+										type="button"
+										class="sgh-btn sgh-done"
+										on:click={() => {
+											const nextSprintEditKeys = new Set(sprintEditKeys);
+											nextSprintEditKeys.delete(sprintGroup.key);
+											sprintEditKeys = nextSprintEditKeys;
+											sprintAddKey = '';
+											sprintAddContent = '';
+											const nextSelectedTaskIds = new Set(selectedTaskIds);
+											sprintGroup.tasks.forEach((t) => nextSelectedTaskIds.delete(t.id));
+											selectedTaskIds = Array.from(nextSelectedTaskIds);
+										}}
+									>
+										Done
+									</button>
+									<span class="sgh-hint">Select rows to delete.</span>
+								{:else if canEdit}
+									<button
+										type="button"
+										class="sgh-btn sgh-edit"
+										on:click={() => {
+											const nextSprintEditKeys = new Set(sprintEditKeys);
+											nextSprintEditKeys.add(sprintGroup.key);
+											sprintEditKeys = nextSprintEditKeys;
+										}}
+									>
+										Edit
+									</button>
+								{/if}
+							</div>
+						</header>
+
+						<div class="grid-shell">
+							<table class="task-grid" role="grid" aria-label={`${sprintGroup.name} tasks`}>
+								<thead>
+									<tr>
+										{#if isEditMode}
+											<th scope="col" class="th-check">
+												<input
+													type="checkbox"
+													checked={isSprintAllSelected(sprintGroup)}
+													indeterminate={selCount > 0 && !isSprintAllSelected(sprintGroup)}
+													on:change={() => toggleSprintSelection(sprintGroup)}
+													aria-label="Select all in sprint"
+												/>
+											</th>
+										{/if}
+										<th scope="col">Task</th>
+										<th scope="col">Status</th>
+										<th scope="col">Owner</th>
+										<th scope="col">Budget</th>
+										<th scope="col">Spent</th>
+										<th scope="col">Updated</th>
+									</tr>
+								</thead>
+								<tbody>
+									{#if sprintGroup.tasks.length === 0}
+										<tr>
+											<td class="cell empty-sprint-row" colspan={isEditMode ? 8 : 7}>
+												No tasks in this sprint yet. Use + Add row or + Add Sprint.
+											</td>
+										</tr>
+									{:else}
+										{#each sprintGroup.tasks as task (task.id)}
+											<tr
+												class:row-done={resolveColumn(task.status) === 'done'}
+												class:row-selected={isEditMode && isTaskSelected(task.id)}
+												on:mouseenter={() => {
+													hoveredTaskId = task.id;
+												}}
+												on:mouseleave={() => {
+													hoveredTaskId = '';
+												}}
+											>
+												<!-- Checkbox -->
+												{#if isEditMode}
+													<td class="cell check-cell" on:click|stopPropagation>
+														<input
+															type="checkbox"
+															checked={isTaskSelected(task.id)}
+															on:change={() => toggleTaskSelection(task.id)}
+															disabled={isTaskDeleting(task.id)}
+															aria-label={`Select ${task.title}`}
+														/>
+													</td>
+												{/if}
+
+												<!-- Task name -->
+												<td
+													class="cell task-cell"
+													on:click={() => void startEditing(task, 'title')}
+													on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
+												>
+													<button
+														type="button"
+														class="row-check"
+														class:is-visible={hoveredTaskId === task.id ||
+															resolveColumn(task.status) === 'done'}
+														on:click|stopPropagation={() => void toggleDone(task)}
+														disabled={!canEdit}
+														aria-label={resolveColumn(task.status) === 'done'
+															? 'Mark as to do'
+															: 'Mark as done'}
+													>
+														<svg viewBox="0 0 24 24" aria-hidden="true">
+															<path d="m6 12 4 4 8-8"></path>
+														</svg>
+													</button>
+													<div class="task-content">
+														<button
+															type="button"
+															class="cell-trigger task-title-trigger"
+															on:click|stopPropagation={() => void startEditing(task, 'title')}
+															on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
+														>
+															{task.title}
+														</button>
+														<div class="task-actions">
+															<button
+																type="button"
+																on:click|stopPropagation={() => queueFollowUp(task)}
+																disabled={!canEdit || (contextAware && !canCreateSprintTask)}
+																title="Follow-up">+</button
+															>
+														</div>
+													</div>
+												</td>
+
+												<!-- Status -->
+												<td class="cell status-cell">
+													<div class="status-wrap">
+														<button
+															type="button"
+															class={`status-pill status-${resolveColumn(task.status)}`}
+															on:click|stopPropagation={(e) => toggleStatusMenu(e, task)}
+															disabled={!canEditTaskStatus(task) || isSaving(task.id, 'status')}
+														>
+															{statusLabel(resolveColumn(task.status))}
+														</button>
+														{#if statusMenuTaskId === task.id}
+															<div class="status-menu">
+																{#each STATUS_OPTIONS as option}
+																	<button
+																		type="button"
+																		class={`status-option status-${option.value}`}
+																		class:is-active={resolveColumn(task.status) === option.value}
+																		on:click|stopPropagation={() =>
+																			void applyStatus(task, option.value)}>{option.label}</button
+																	>
+																{/each}
+															</div>
+														{/if}
+													</div>
+												</td>
+
+												<!-- Owner -->
+												<td
+													class="cell owner-cell"
+													on:click={() => void startEditing(task, 'assigneeId')}
+													on:dblclick|stopPropagation={() => void startEditing(task, 'assigneeId')}
+												>
+													<button
+														type="button"
+														class="cell-trigger owner-trigger"
+														on:click|stopPropagation={() => void startEditing(task, 'assigneeId')}
+														on:dblclick|stopPropagation={() =>
+															void startEditing(task, 'assigneeId')}
+													>
+														<div class="owner-chip">
+															<span class="owner-avatar" style={`--owner-hue:${ownerHue(task)};`}
+																>{initials(ownerLabel(task))}</span
+															>
+															<span class="owner-name">{ownerLabel(task)}</span>
+														</div>
+													</button>
+												</td>
+
+												<!-- Budget (editable) -->
+												<td
+													class="cell budget-cell"
+													on:click={() => void startEditing(task, 'budget')}
+													on:dblclick|stopPropagation={() => void startEditing(task, 'budget')}
+												>
+													<button
+														type="button"
+														class="cell-trigger budget-trigger"
+														on:click|stopPropagation={() => void startEditing(task, 'budget')}
+														on:dblclick|stopPropagation={() => void startEditing(task, 'budget')}
+														title="Click to edit budget"
+													>
+														<span class="budget-val">{formatBudgetCell(task.budget)}</span>
+													</button>
+												</td>
+
+												<!-- Spent (editable) -->
+												<td
+													class="cell spent-cell"
+													on:click={() => void startEditing(task, 'spent')}
+													on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
+												>
+													<button
+														type="button"
+														class="cell-trigger spent-trigger"
+														on:click|stopPropagation={() => void startEditing(task, 'spent')}
+														on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
+														title="Click to edit spent amount"
+													>
+														<span class="budget-val"
+															>{formatSpentCell(task.spent, task.budget)}</span
+														>
+													</button>
+												</td>
+
+												<td class="cell updated-cell">{formatCellTime(task.updatedAt)}</td>
+											</tr>
+										{/each}
+									{/if}
+								</tbody>
+							</table>
+						</div>
+
+						<!-- Per-sprint add task form -->
+						{#if sprintAddKey === sprintGroup.key}
+							<form
+								class="sprint-add-form"
+								on:submit|preventDefault={() =>
+									void handleCreateRoomTaskInSprint(sprintAddContent, sprintGroup.name)}
+							>
+								<!-- svelte-ignore a11y-autofocus -->
+								<input
+									type="text"
+									bind:value={sprintAddContent}
+									placeholder="Task name…"
+									autocomplete="off"
+									disabled={sprintAddCreating}
+									autofocus
+								/>
+								<button type="submit" disabled={sprintAddCreating || !sprintAddContent.trim()}>
+									{sprintAddCreating ? 'Adding…' : 'Add'}
+								</button>
+								<button
+									type="button"
+									on:click={() => {
+										sprintAddKey = '';
+										sprintAddContent = '';
+									}}>Cancel</button
+								>
+							</form>
+						{/if}
+					</section>
+				{/each}
+			</div>
+		{/if}
+	</div>
+</section>
 
 <style>
 	:global(:root) {
@@ -2900,53 +3367,247 @@ t
 		color: var(--tb-btn-text);
 	}
 
-	.new-task-form {
-		display: flex;
-		align-items: center;
-		gap: 0.58rem;
-		padding: 0.65rem;
+	.sprint-composer {
+		display: grid;
+		gap: 0.62rem;
+		padding: 0.7rem;
 		border-radius: 14px;
-		background: var(--tb-form-bg);
 		border: 1px solid var(--tb-form-border);
+		background: var(--tb-form-bg);
 	}
 
-	.new-task-form input {
-		flex: 1;
-		min-width: 0;
-		height: 2.2rem;
+	.sprint-composer-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.sprint-composer-head p {
+		margin: 0.18rem 0 0;
+		font-size: 0.76rem;
+		color: var(--tb-cell-muted);
+	}
+
+	.sprint-composer-trigger {
+		height: 2.1rem;
+		padding: 0 0.82rem;
 		border-radius: 10px;
+		border: 1px solid var(--tb-btn-border);
+		background: color-mix(in srgb, var(--tb-btn-bg) 66%, #ffffff 34%);
+		color: var(--tb-btn-text);
+		font-size: 0.8rem;
+		font-weight: 700;
+		cursor: pointer;
+		transition: background 0.18s ease;
+	}
+
+	.sprint-composer-trigger:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--tb-btn-bg) 50%, #ffffff 50%);
+	}
+
+	.sprint-composer-trigger:disabled {
+		opacity: 0.52;
+		cursor: not-allowed;
+	}
+
+	.sprint-composer-form {
+		display: grid;
+		gap: 0.55rem;
+		padding-top: 0.4rem;
+		border-top: 1px solid var(--tb-grid-col-border);
+	}
+
+	.sprint-composer-field {
+		display: grid;
+		gap: 0.28rem;
+	}
+
+	.sprint-composer-field span {
+		font-size: 0.69rem;
+		font-weight: 700;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--tb-cell-muted);
+	}
+
+	.sprint-composer-field input {
+		width: 100%;
+		height: 2.25rem;
 		border: 1px solid var(--tb-input-border);
 		background: var(--tb-input-bg);
 		color: var(--tb-input-text);
-		padding: 0 0.75rem;
-		font-size: 0.88rem;
+		border-radius: 9px;
+		padding: 0 0.58rem;
+		font-size: 0.8rem;
 	}
 
-	.new-task-form input::placeholder {
-		color: var(--tb-input-placeholder);
+	.sprint-composer-field input:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 3px var(--tb-editor-ring);
 	}
 
-	.new-task-form button {
-		height: 2.2rem;
-		padding: 0 0.85rem;
-		border-radius: 10px;
+	.sprint-preview-grid {
+		display: grid;
+		gap: 0;
+		border: 1px solid var(--tb-grid-border);
+		border-radius: 12px;
+		overflow: auto;
+		background: var(--tb-grid-bg);
+	}
+
+	.sprint-preview-head,
+	.sprint-preview-row {
+		min-width: 760px;
+		display: grid;
+		grid-template-columns: minmax(240px, 2.2fr) repeat(5, minmax(96px, 1fr));
+	}
+
+	.sprint-preview-head {
+		height: 2rem;
+		background: var(--tb-grid-head-bg);
+		color: var(--tb-grid-head-text);
+		border-bottom: 1px solid var(--tb-grid-row-border);
+	}
+
+	.sprint-preview-head span {
+		display: flex;
+		align-items: center;
+		padding: 0 0.6rem;
+		font-size: 0.67rem;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		white-space: nowrap;
+	}
+
+	.sprint-preview-head span:not(:last-child),
+	.sprint-preview-row > *:not(:last-child) {
+		border-right: 1px solid var(--tb-grid-col-border);
+	}
+
+	.sprint-preview-body {
+		display: grid;
+	}
+
+	.sprint-preview-row {
+		border-top: 1px solid var(--tb-grid-row-border);
+	}
+
+	.sprint-preview-row:first-child {
+		border-top: none;
+	}
+
+	.sprint-preview-cell {
+		min-height: 2.15rem;
+		padding: 0.24rem 0.34rem;
+		display: flex;
+		align-items: center;
+	}
+
+	.sprint-preview-task-btn,
+	.sprint-preview-meta-cell {
+		width: 100%;
+		height: 100%;
+		border-radius: 8px;
+		border: 1px solid transparent;
+		background: transparent;
+		color: var(--tb-cell-text);
+		font-size: 0.74rem;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.sprint-preview-task-btn {
+		padding: 0 0.5rem;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.sprint-preview-task-btn.is-empty {
+		color: var(--tb-cell-muted);
+		border-style: dashed;
+		border-color: var(--tb-grid-col-border);
+	}
+
+	.sprint-preview-task-btn:hover:not(:disabled),
+	.sprint-preview-meta-cell:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--tb-btn-bg) 58%, transparent);
+		border-color: var(--tb-grid-col-border);
+	}
+
+	.sprint-preview-task-btn:disabled,
+	.sprint-preview-meta-cell:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
+
+	.sprint-preview-meta-cell {
+		padding: 0 0.48rem;
+		font-size: 0.7rem;
+		font-weight: 600;
+		color: var(--tb-cell-muted);
+	}
+
+	.sprint-preview-task-input {
+		width: 100%;
+		height: 100%;
+		min-height: 1.65rem;
+		border: 1px solid var(--tb-editor-border);
+		background: var(--tb-editor-bg);
+		color: var(--tb-cell-text);
+		border-radius: 8px;
+		padding: 0 0.5rem;
+		font-size: 0.76rem;
+	}
+
+	.sprint-preview-task-input:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 3px var(--tb-editor-ring);
+	}
+
+	.sprint-composer-hint {
+		margin: 0;
+		font-size: 0.72rem;
+		color: var(--tb-cell-muted);
+	}
+
+	.sprint-composer-actions {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.45rem;
+		flex-wrap: wrap;
+	}
+
+	.sprint-composer-submit,
+	.sprint-composer-cancel {
+		height: 2rem;
+		padding: 0 0.72rem;
+		border-radius: 9px;
 		border: 1px solid var(--tb-btn-border);
 		background: var(--tb-btn-bg);
 		color: var(--tb-btn-text);
-		font-size: 0.82rem;
-		font-weight: 650;
+		font-size: 0.78rem;
+		font-weight: 700;
 		cursor: pointer;
-		transition:
-			background 0.2s ease,
-			border-color 0.2s ease;
 	}
 
-	.new-task-form button:hover:not(:disabled) {
-		background: color-mix(in srgb, var(--tb-btn-bg) 72%, #ffffff 28%);
+	.sprint-composer-submit {
+		background: color-mix(in srgb, var(--tb-btn-bg) 66%, #ffffff 34%);
 	}
 
-	.new-task-form button:disabled {
-		opacity: 0.58;
+	.sprint-composer-cancel {
+		background: transparent;
+		color: var(--tb-cell-muted);
+		border-color: var(--tb-grid-col-border);
+	}
+
+	.sprint-composer-submit:disabled,
+	.sprint-composer-cancel:disabled {
+		opacity: 0.52;
 		cursor: not-allowed;
 	}
 
@@ -2966,13 +3627,13 @@ t
 		display: grid;
 	}
 
-		.board-content-slot > .sprint-groups,
-		.board-content-slot > .kanban-board,
-		.board-content-slot > .support-view,
-		.board-content-slot > .board-state {
-			min-height: 0;
-			height: 100%;
-		}
+	.board-content-slot > .sprint-groups,
+	.board-content-slot > .kanban-board,
+	.board-content-slot > .support-view,
+	.board-content-slot > .board-state {
+		min-height: 0;
+		height: 100%;
+	}
 
 	.quick-edit-head strong {
 		font-size: 0.8rem;
@@ -3212,413 +3873,415 @@ t
 		color: var(--tb-cell-text);
 	}
 
-		.kanban-card-footer {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 0.5rem;
-			font-size: 0.71rem;
-			color: var(--tb-cell-muted);
-		}
+	.kanban-card-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		font-size: 0.71rem;
+		color: var(--tb-cell-muted);
+	}
 
-		.support-view {
-			height: 100%;
-			min-height: 0;
-			display: grid;
-			grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.05fr);
-			gap: 0.85rem;
-			overflow: hidden;
-		}
+	.support-view {
+		height: 100%;
+		min-height: 0;
+		display: grid;
+		grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.05fr);
+		gap: 0.85rem;
+		overflow: hidden;
+	}
 
-		.support-composer,
-		.support-ticket-board {
-			min-height: 0;
-			display: grid;
-			align-content: start;
-			gap: 0.65rem;
-			border: 1px solid var(--tb-grid-border);
-			border-radius: 14px;
-			background: var(--tb-panel-bg);
-			padding: 0.72rem;
-		}
+	.support-composer,
+	.support-ticket-board {
+		min-height: 0;
+		display: grid;
+		align-content: start;
+		gap: 0.65rem;
+		border: 1px solid var(--tb-grid-border);
+		border-radius: 14px;
+		background: var(--tb-panel-bg);
+		padding: 0.72rem;
+	}
 
-		.support-composer {
-			overflow: auto;
-		}
+	.support-composer {
+		overflow: auto;
+	}
 
-		.support-ticket-board {
-			overflow: hidden;
-		}
+	.support-ticket-board {
+		overflow: hidden;
+	}
 
-		.support-composer-head,
-		.support-ticket-head {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 0.6rem;
-		}
+	.support-composer-head,
+	.support-ticket-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.6rem;
+	}
 
-		.support-composer-head h3,
-		.support-ticket-head h3 {
-			margin: 0;
-			font-size: 0.9rem;
-			color: var(--tb-cell-text);
-		}
+	.support-composer-head h3,
+	.support-ticket-head h3 {
+		margin: 0;
+		font-size: 0.9rem;
+		color: var(--tb-cell-text);
+	}
 
-		.support-composer-head p {
-			margin: 0.12rem 0 0;
-			font-size: 0.74rem;
-			color: var(--tb-cell-muted);
-		}
+	.support-composer-head p {
+		margin: 0.12rem 0 0;
+		font-size: 0.74rem;
+		color: var(--tb-cell-muted);
+	}
 
-		.support-composer-head span,
-		.support-ticket-head span {
-			height: 1.45rem;
-			padding: 0 0.56rem;
-			border-radius: 999px;
-			border: 1px solid var(--tb-grid-col-border);
-			background: color-mix(in srgb, var(--tb-btn-bg) 74%, transparent);
-			display: inline-grid;
-			place-items: center;
-			font-size: 0.72rem;
-			font-weight: 700;
-			color: var(--tb-cell-muted);
-			font-variant-numeric: tabular-nums;
-		}
+	.support-composer-head span,
+	.support-ticket-head span {
+		height: 1.45rem;
+		padding: 0 0.56rem;
+		border-radius: 999px;
+		border: 1px solid var(--tb-grid-col-border);
+		background: color-mix(in srgb, var(--tb-btn-bg) 74%, transparent);
+		display: inline-grid;
+		place-items: center;
+		font-size: 0.72rem;
+		font-weight: 700;
+		color: var(--tb-cell-muted);
+		font-variant-numeric: tabular-nums;
+	}
 
-		.support-form-grid {
-			display: grid;
-			grid-template-columns: minmax(0, 1fr) 142px;
-			gap: 0.55rem;
-		}
+	.support-form-grid {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) 142px;
+		gap: 0.55rem;
+	}
 
-		.support-field {
-			display: grid;
-			gap: 0.3rem;
-		}
+	.support-field {
+		display: grid;
+		gap: 0.3rem;
+	}
 
-		.support-field-wide {
-			grid-column: 1 / -1;
-		}
+	.support-field-wide {
+		grid-column: 1 / -1;
+	}
 
-		.support-field span {
-			font-size: 0.69rem;
-			font-weight: 700;
-			text-transform: uppercase;
-			letter-spacing: 0.06em;
-			color: var(--tb-cell-muted);
-		}
+	.support-field span {
+		font-size: 0.69rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--tb-cell-muted);
+	}
 
-		.support-field input,
-		.support-field select,
-		.support-field textarea {
-			width: 100%;
-			border: 1px solid var(--tb-input-border);
-			background: var(--tb-input-bg);
-			color: var(--tb-input-text);
-			border-radius: 9px;
-			padding: 0.48rem 0.58rem;
-			font-size: 0.8rem;
-		}
+	.support-field input,
+	.support-field select,
+	.support-field textarea {
+		width: 100%;
+		border: 1px solid var(--tb-input-border);
+		background: var(--tb-input-bg);
+		color: var(--tb-input-text);
+		border-radius: 9px;
+		padding: 0.48rem 0.58rem;
+		font-size: 0.8rem;
+	}
 
-		.support-field textarea {
-			min-height: 4.8rem;
-			resize: vertical;
-		}
+	.support-field textarea {
+		min-height: 4.8rem;
+		resize: vertical;
+	}
 
-		.support-field input:focus-visible,
-		.support-field select:focus-visible,
-		.support-field textarea:focus-visible {
-			outline: none;
-			box-shadow: 0 0 0 3px var(--tb-editor-ring);
-		}
+	.support-field input:focus-visible,
+	.support-field select:focus-visible,
+	.support-field textarea:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 3px var(--tb-editor-ring);
+	}
 
-		.support-pickers {
-			display: grid;
-			grid-template-columns: minmax(0, 1fr);
-			gap: 0.6rem;
-		}
+	.support-pickers {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 0.6rem;
+	}
 
-		.support-picker {
-			border: 1px solid var(--tb-grid-col-border);
-			border-radius: 11px;
-			padding: 0.55rem;
-			display: grid;
-			gap: 0.45rem;
-			background: color-mix(in srgb, var(--tb-grid-bg) 86%, transparent);
-		}
+	.support-picker {
+		border: 1px solid var(--tb-grid-col-border);
+		border-radius: 11px;
+		padding: 0.55rem;
+		display: grid;
+		gap: 0.45rem;
+		background: color-mix(in srgb, var(--tb-grid-bg) 86%, transparent);
+	}
 
-		.support-picker-head {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 0.5rem;
-		}
+	.support-picker-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
 
-		.support-picker-head h4 {
-			margin: 0;
-			font-size: 0.78rem;
-			color: var(--tb-cell-text);
-		}
+	.support-picker-head h4 {
+		margin: 0;
+		font-size: 0.78rem;
+		color: var(--tb-cell-text);
+	}
 
-		.support-picker-head span {
-			font-size: 0.68rem;
-			color: var(--tb-cell-muted);
-			font-weight: 700;
-		}
+	.support-picker-head span {
+		font-size: 0.68rem;
+		color: var(--tb-cell-muted);
+		font-weight: 700;
+	}
 
-		.support-task-list {
-			display: grid;
-			gap: 0.34rem;
-			max-height: 180px;
-			overflow: auto;
-			padding-right: 0.1rem;
-		}
+	.support-task-list {
+		display: grid;
+		gap: 0.34rem;
+		max-height: 180px;
+		overflow: auto;
+		padding-right: 0.1rem;
+	}
 
-		.support-check-row {
-			display: flex;
-			align-items: center;
-			gap: 0.42rem;
-			padding: 0.34rem 0.42rem;
-			border-radius: 8px;
-			border: 1px solid transparent;
-			background: transparent;
-			color: var(--tb-cell-text);
-			font-size: 0.76rem;
-		}
+	.support-check-row {
+		display: flex;
+		align-items: center;
+		gap: 0.42rem;
+		padding: 0.34rem 0.42rem;
+		border-radius: 8px;
+		border: 1px solid transparent;
+		background: transparent;
+		color: var(--tb-cell-text);
+		font-size: 0.76rem;
+	}
 
-		.support-check-row:hover {
-			background: color-mix(in srgb, var(--tb-btn-bg) 56%, transparent);
-			border-color: var(--tb-grid-col-border);
-		}
+	.support-check-row:hover {
+		background: color-mix(in srgb, var(--tb-btn-bg) 56%, transparent);
+		border-color: var(--tb-grid-col-border);
+	}
 
-		.support-check-row input[type='checkbox'] {
-			width: 14px;
-			height: 14px;
-			cursor: pointer;
-		}
+	.support-check-row input[type='checkbox'] {
+		width: 14px;
+		height: 14px;
+		cursor: pointer;
+	}
 
-		.support-member-grid {
-			display: grid;
-			grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-			gap: 0.34rem;
-		}
+	.support-member-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+		gap: 0.34rem;
+	}
 
-		.support-member-option {
-			border: 1px solid var(--tb-grid-col-border);
-			background: var(--tb-grid-bg);
-			color: var(--tb-cell-text);
-			border-radius: 9px;
-			padding: 0.36rem 0.44rem;
-			display: flex;
-			align-items: center;
-			gap: 0.36rem;
-			font-size: 0.72rem;
-			cursor: pointer;
-			transition: border-color 0.16s ease, background 0.16s ease;
-		}
+	.support-member-option {
+		border: 1px solid var(--tb-grid-col-border);
+		background: var(--tb-grid-bg);
+		color: var(--tb-cell-text);
+		border-radius: 9px;
+		padding: 0.36rem 0.44rem;
+		display: flex;
+		align-items: center;
+		gap: 0.36rem;
+		font-size: 0.72rem;
+		cursor: pointer;
+		transition:
+			border-color 0.16s ease,
+			background 0.16s ease;
+	}
 
-		.support-member-option:hover {
-			border-color: var(--tb-grid-head-bg);
-		}
+	.support-member-option:hover {
+		border-color: var(--tb-grid-head-bg);
+	}
 
-		.support-member-option.is-selected {
-			border-color: color-mix(in srgb, var(--tb-grid-head-bg) 48%, transparent);
-			background: color-mix(in srgb, var(--tb-btn-bg) 65%, transparent);
-		}
+	.support-member-option.is-selected {
+		border-color: color-mix(in srgb, var(--tb-grid-head-bg) 48%, transparent);
+		background: color-mix(in srgb, var(--tb-btn-bg) 65%, transparent);
+	}
 
-		.support-empty-inline {
-			border: 1px dashed var(--tb-grid-col-border);
-			border-radius: 8px;
-			padding: 0.5rem;
-			font-size: 0.73rem;
-			color: var(--tb-cell-muted);
-		}
+	.support-empty-inline {
+		border: 1px dashed var(--tb-grid-col-border);
+		border-radius: 8px;
+		padding: 0.5rem;
+		font-size: 0.73rem;
+		color: var(--tb-cell-muted);
+	}
 
-		.support-composer-actions {
-			display: flex;
-			align-items: center;
-			gap: 0.45rem;
-			justify-content: flex-end;
-		}
+	.support-composer-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		justify-content: flex-end;
+	}
 
-		.support-create-btn,
-		.support-clear-btn {
-			height: 2rem;
-			border-radius: 9px;
-			border: 1px solid var(--tb-btn-border);
-			background: var(--tb-btn-bg);
-			color: var(--tb-btn-text);
-			font-size: 0.78rem;
-			font-weight: 700;
-			padding: 0 0.74rem;
-			cursor: pointer;
-		}
+	.support-create-btn,
+	.support-clear-btn {
+		height: 2rem;
+		border-radius: 9px;
+		border: 1px solid var(--tb-btn-border);
+		background: var(--tb-btn-bg);
+		color: var(--tb-btn-text);
+		font-size: 0.78rem;
+		font-weight: 700;
+		padding: 0 0.74rem;
+		cursor: pointer;
+	}
 
-		.support-create-btn {
-			background: color-mix(in srgb, var(--tb-btn-bg) 66%, #ffffff 34%);
-		}
+	.support-create-btn {
+		background: color-mix(in srgb, var(--tb-btn-bg) 66%, #ffffff 34%);
+	}
 
-		.support-create-btn:disabled,
-		.support-clear-btn:disabled {
-			opacity: 0.55;
-			cursor: not-allowed;
-		}
+	.support-create-btn:disabled,
+	.support-clear-btn:disabled {
+		opacity: 0.55;
+		cursor: not-allowed;
+	}
 
-		.support-card-grid {
-			min-height: 0;
-			overflow: auto;
-			display: grid;
-			grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-			gap: 0.6rem;
-			padding-right: 0.12rem;
-		}
+	.support-card-grid {
+		min-height: 0;
+		overflow: auto;
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+		gap: 0.6rem;
+		padding-right: 0.12rem;
+	}
 
-		.support-ticket-card {
-			display: grid;
-			grid-template-rows: auto auto 1fr auto auto;
-			gap: 0.42rem;
-			border: 1px solid var(--tb-grid-col-border);
-			border-radius: 12px;
-			background: var(--tb-grid-bg);
-			padding: 0.58rem;
-			aspect-ratio: 1 / 1;
-			min-height: 170px;
-		}
+	.support-ticket-card {
+		display: grid;
+		grid-template-rows: auto auto 1fr auto auto;
+		gap: 0.42rem;
+		border: 1px solid var(--tb-grid-col-border);
+		border-radius: 12px;
+		background: var(--tb-grid-bg);
+		padding: 0.58rem;
+		aspect-ratio: 1 / 1;
+		min-height: 170px;
+	}
 
-		.support-ticket-top {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 0.4rem;
-		}
+	.support-ticket-top {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.4rem;
+	}
 
-		.support-priority {
-			height: 1.32rem;
-			padding: 0 0.44rem;
-			border-radius: 999px;
-			display: inline-grid;
-			place-items: center;
-			font-size: 0.62rem;
-			font-weight: 800;
-			text-transform: uppercase;
-			letter-spacing: 0.05em;
-		}
+	.support-priority {
+		height: 1.32rem;
+		padding: 0 0.44rem;
+		border-radius: 999px;
+		display: inline-grid;
+		place-items: center;
+		font-size: 0.62rem;
+		font-weight: 800;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
 
-		.priority-critical {
-			background: rgba(181, 35, 56, 0.16);
-			color: #b52338;
-		}
+	.priority-critical {
+		background: rgba(181, 35, 56, 0.16);
+		color: #b52338;
+	}
 
-		.priority-high {
-			background: rgba(194, 110, 24, 0.18);
-			color: #b96618;
-		}
+	.priority-high {
+		background: rgba(194, 110, 24, 0.18);
+		color: #b96618;
+	}
 
-		.priority-medium {
-			background: rgba(46, 97, 178, 0.16);
-			color: #2e61b2;
-		}
+	.priority-medium {
+		background: rgba(46, 97, 178, 0.16);
+		color: #2e61b2;
+	}
 
-		.priority-low {
-			background: rgba(23, 132, 88, 0.16);
-			color: #178458;
-		}
+	.priority-low {
+		background: rgba(23, 132, 88, 0.16);
+		color: #178458;
+	}
 
-		.support-ticket-top time {
-			font-size: 0.66rem;
-			color: var(--tb-cell-muted);
-		}
+	.support-ticket-top time {
+		font-size: 0.66rem;
+		color: var(--tb-cell-muted);
+	}
 
-		.support-ticket-card h4 {
-			margin: 0;
-			font-size: 0.81rem;
-			line-height: 1.28;
-			color: var(--tb-cell-text);
-			overflow: hidden;
-			display: -webkit-box;
-			line-clamp: 2;
-			-webkit-line-clamp: 2;
-			-webkit-box-orient: vertical;
-		}
+	.support-ticket-card h4 {
+		margin: 0;
+		font-size: 0.81rem;
+		line-height: 1.28;
+		color: var(--tb-cell-text);
+		overflow: hidden;
+		display: -webkit-box;
+		line-clamp: 2;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+	}
 
-		.support-ticket-card p {
-			margin: 0;
-			font-size: 0.72rem;
-			line-height: 1.35;
-			color: var(--tb-cell-muted);
-			overflow: hidden;
-			display: -webkit-box;
-			line-clamp: 4;
-			-webkit-line-clamp: 4;
-			-webkit-box-orient: vertical;
-		}
+	.support-ticket-card p {
+		margin: 0;
+		font-size: 0.72rem;
+		line-height: 1.35;
+		color: var(--tb-cell-muted);
+		overflow: hidden;
+		display: -webkit-box;
+		line-clamp: 4;
+		-webkit-line-clamp: 4;
+		-webkit-box-orient: vertical;
+	}
 
-		.support-linked-meta {
-			font-size: 0.67rem;
-			color: var(--tb-cell-muted);
-		}
+	.support-linked-meta {
+		font-size: 0.67rem;
+		color: var(--tb-cell-muted);
+	}
 
-		.support-card-footer {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 0.38rem;
-		}
+	.support-card-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.38rem;
+	}
 
-		.support-avatar-stack {
-			display: inline-flex;
-			align-items: center;
-			padding-left: 0.08rem;
-		}
+	.support-avatar-stack {
+		display: inline-flex;
+		align-items: center;
+		padding-left: 0.08rem;
+	}
 
-		.support-avatar {
-			width: 1.3rem;
-			height: 1.3rem;
-			border-radius: 999px;
-			border: 2px solid var(--tb-grid-bg);
-			background: hsl(var(--owner-hue) 62% 47%);
-			color: var(--tb-avatar-text);
-			display: inline-grid;
-			place-items: center;
-			font-size: 0.53rem;
-			font-weight: 800;
-			margin-left: calc(-0.34rem + (var(--avatar-index, 0) * 0rem));
-			text-transform: uppercase;
-		}
+	.support-avatar {
+		width: 1.3rem;
+		height: 1.3rem;
+		border-radius: 999px;
+		border: 2px solid var(--tb-grid-bg);
+		background: hsl(var(--owner-hue) 62% 47%);
+		color: var(--tb-avatar-text);
+		display: inline-grid;
+		place-items: center;
+		font-size: 0.53rem;
+		font-weight: 800;
+		margin-left: calc(-0.34rem + (var(--avatar-index, 0) * 0rem));
+		text-transform: uppercase;
+	}
 
-		.support-avatar-stack .support-avatar:first-child {
-			margin-left: 0;
-		}
+	.support-avatar-stack .support-avatar:first-child {
+		margin-left: 0;
+	}
 
-		.support-avatar-more {
-			background: var(--tb-btn-bg);
-			color: var(--tb-btn-text);
-		}
+	.support-avatar-more {
+		background: var(--tb-btn-bg);
+		color: var(--tb-btn-text);
+	}
 
-		.support-avatar-empty {
-			margin-left: 0;
-			background: var(--tb-btn-bg);
-			color: var(--tb-btn-text);
-		}
+	.support-avatar-empty {
+		margin-left: 0;
+		background: var(--tb-btn-bg);
+		color: var(--tb-btn-text);
+	}
 
-		.support-sprint-chip {
-			font-size: 0.62rem;
-			font-weight: 700;
-			color: var(--tb-cell-muted);
-		}
+	.support-sprint-chip {
+		font-size: 0.62rem;
+		font-weight: 700;
+		color: var(--tb-cell-muted);
+	}
 
-		.support-empty {
-			border: 1px dashed var(--tb-grid-col-border);
-			border-radius: 10px;
-			padding: 0.72rem;
-			font-size: 0.78rem;
-			color: var(--tb-cell-muted);
-			text-align: center;
-		}
+	.support-empty {
+		border: 1px dashed var(--tb-grid-col-border);
+		border-radius: 10px;
+		padding: 0.72rem;
+		font-size: 0.78rem;
+		color: var(--tb-cell-muted);
+		text-align: center;
+	}
 
-		.sprint-groups {
-			min-height: 0;
+	.sprint-groups {
+		min-height: 0;
 		overflow: auto;
 		display: grid;
 		align-content: start;
@@ -3639,7 +4302,9 @@ t
 		padding: 0 0.2rem;
 	}
 
-	.sgh-left { min-width: 0; }
+	.sgh-left {
+		min-width: 0;
+	}
 
 	.sprint-group-header h3 {
 		margin: 0;
@@ -3676,10 +4341,15 @@ t
 		font-weight: 600;
 		cursor: pointer;
 		border: 1px solid;
-		transition: background 0.15s, border-color 0.15s;
+		transition:
+			background 0.15s,
+			border-color 0.15s;
 	}
 
-	.sgh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+	.sgh-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
 
 	.sgh-edit {
 		color: var(--tb-btn-text);
@@ -3753,11 +4423,21 @@ t
 		font-weight: 600;
 		cursor: pointer;
 	}
-	.sprint-add-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+	.sprint-add-form button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
 	.sprint-add-form button[type='button'] {
 		background: transparent;
 		border-color: var(--tb-grid-border);
 		color: var(--tb-cell-muted);
+	}
+
+	.empty-sprint-row {
+		height: 2.6rem;
+		text-align: center;
+		color: var(--tb-cell-muted);
+		font-size: 0.8rem;
 	}
 
 	.grid-shell {
@@ -4178,11 +4858,11 @@ t
 		box-shadow: 0 0 0 3px var(--tb-editor-ring);
 	}
 
-		@media (max-width: 920px) {
-			.task-board {
-				padding: 0.72rem;
-				gap: 0.65rem;
-			}
+	@media (max-width: 920px) {
+		.task-board {
+			padding: 0.72rem;
+			gap: 0.65rem;
+		}
 
 		.board-header {
 			flex-direction: column;
@@ -4198,34 +4878,42 @@ t
 			justify-content: flex-start;
 		}
 
-			.kanban-board {
-				grid-template-columns: repeat(3, minmax(250px, 1fr));
-			}
-
-			.support-view {
-				grid-template-columns: minmax(0, 1fr);
-				overflow: auto;
-			}
-
-			.support-composer,
-			.support-ticket-board {
-				overflow: visible;
-			}
-
-			.support-form-grid {
-				grid-template-columns: minmax(0, 1fr);
-			}
-
-			.support-member-grid {
-				grid-template-columns: repeat(2, minmax(0, 1fr));
-			}
-
-			.support-card-grid {
-				grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-			}
-
-			.task-grid {
-				min-width: 980px;
-			}
+		.sprint-composer-head {
+			flex-direction: column;
 		}
+
+		.sprint-composer-actions {
+			justify-content: flex-start;
+		}
+
+		.kanban-board {
+			grid-template-columns: repeat(3, minmax(250px, 1fr));
+		}
+
+		.support-view {
+			grid-template-columns: minmax(0, 1fr);
+			overflow: auto;
+		}
+
+		.support-composer,
+		.support-ticket-board {
+			overflow: visible;
+		}
+
+		.support-form-grid {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.support-member-grid {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.support-card-grid {
+			grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+		}
+
+		.task-grid {
+			min-width: 980px;
+		}
+	}
 </style>

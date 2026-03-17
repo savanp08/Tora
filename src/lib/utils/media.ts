@@ -37,71 +37,7 @@ export async function uploadToR2(
 	file: File,
 	roomId = ''
 ): Promise<{ fileUrl: string; fileId: string }> {
-	let presignedData:
-		| (Partial<PresignedUploadResponse> & Record<string, unknown>)
-		| null = null;
-	let presignedError = '';
-
-	try {
-		const presignedRes = await fetch(`${API_BASE}/api/upload/presigned`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				filename: file.name,
-				filetype: file.type || 'application/octet-stream',
-				filesize: file.size,
-				roomId
-			})
-		});
-		presignedData = (await presignedRes
-			.json()
-			.catch(() => ({}))) as Partial<PresignedUploadResponse> & Record<string, unknown>;
-		if (presignedRes.status === 507) {
-			throw new Error(STORAGE_FULL_UPLOAD_MESSAGE);
-		}
-		if (
-			!presignedRes.ok ||
-			!presignedData.uploadUrl ||
-			!presignedData.fileUrl ||
-			!presignedData.fileId
-		) {
-			presignedError =
-				typeof presignedData.error === 'string' ? presignedData.error : 'Failed to request upload URL';
-		}
-	} catch (error) {
-		presignedError = error instanceof Error ? error.message : 'Failed to request upload URL';
-		if (presignedError === STORAGE_FULL_UPLOAD_MESSAGE) {
-			throw new Error(STORAGE_FULL_UPLOAD_MESSAGE);
-		}
-	}
-
-	if (presignedData?.uploadUrl && presignedData.fileUrl && presignedData.fileId) {
-		try {
-			const uploadRes = await fetch(presignedData.uploadUrl, {
-				method: 'PUT',
-				body: file,
-				headers: file.type ? { 'Content-Type': file.type } : undefined
-			});
-			if (!uploadRes.ok) {
-				throw new Error(`Upload failed (${uploadRes.status})`);
-			}
-			return {
-				fileUrl: toAbsoluteAPIURL(String(presignedData.fileUrl)),
-				fileId: String(presignedData.fileId)
-			};
-		} catch {
-			return uploadViaProxy(file, roomId, true);
-		}
-	}
-
-	try {
-		return await uploadViaProxy(file, roomId, false);
-	} catch (proxyError) {
-		if (presignedError) {
-			throw new Error(`${presignedError}. Proxy upload failed.`);
-		}
-		throw proxyError;
-	}
+	return uploadViaProxy(file, roomId, false);
 }
 
 export function inferMediaMessageType(file: File): MediaMessageType {

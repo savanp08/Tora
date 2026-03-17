@@ -212,6 +212,16 @@
 		void tick().then(() => composerTextarea?.focus());
 	}
 
+	function clearPrivateChatContext() {
+		requestAbortController?.abort();
+		requestAbortController = null;
+		isSending = false;
+		errorText = '';
+		draft = '';
+		messages = [];
+		void scrollToBottom();
+	}
+
 	function formatMessageTime(timestamp: number) {
 		return new Date(timestamp).toLocaleTimeString([], {
 			hour: '2-digit',
@@ -238,6 +248,14 @@
 						<span class="model-dot" aria-hidden="true"></span>
 						ToraAI
 					</span>
+					<button
+						type="button"
+						class="clear-chat-btn"
+						on:click={clearPrivateChatContext}
+						disabled={isSending || messages.length === 0}
+					>
+						Clear chat
+					</button>
 					<button type="button" class="close-btn" on:click={() => dispatch('close')} aria-label="Close">
 						<svg viewBox="0 0 12 12" aria-hidden="true">
 							<path d="M2 2l8 8M10 2 2 10"></path>
@@ -408,6 +426,26 @@
 		height: 10px;
 		border-radius: 999px;
 		background: linear-gradient(135deg, #1a73e8, #34a853);
+	}
+
+	.clear-chat-btn {
+		border-radius: 8px;
+		border: 1px solid rgba(255, 255, 255, 0.16);
+		background: rgba(255, 255, 255, 0.08);
+		color: #bdc1c6;
+		padding: 0.28rem 0.54rem;
+		font-size: 0.68rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.clear-chat-btn:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.14);
+	}
+
+	.clear-chat-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 
 	.close-btn {

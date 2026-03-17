@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import {
+		type AITimelineConversationMessage,
+		type AITimelineIntent,
 		editAITimeline,
 		projectTimeline,
 		timelineLoading
@@ -16,6 +18,7 @@
 		role: 'user' | 'assistant';
 		text: string;
 		timestamp: number;
+		intent?: AITimelineIntent;
 	};
 
 	type PersistedToraConversation = {
@@ -81,27 +84,40 @@
 		if (!Array.isArray(candidate)) {
 			return [] as ToraMessage[];
 		}
-		const sanitized = candidate
-			.filter((entry) => entry && typeof entry === 'object')
-			.map((entry) => {
-				const source = entry as Partial<ToraMessage>;
-				const role = source.role === 'assistant' ? 'assistant' : 'user';
-				const text = typeof source.text === 'string' ? source.text.trim() : '';
-				const timestamp =
-					typeof source.timestamp === 'number' && Number.isFinite(source.timestamp)
-						? source.timestamp
-						: Date.now();
-				if (!text) {
-					return null;
-				}
-				return {
-					id: createMessageID(),
-					role,
-					text,
-					timestamp
-				} satisfies ToraMessage;
-			})
-			.filter((entry): entry is ToraMessage => Boolean(entry));
+		const sanitized: ToraMessage[] = [];
+		for (const entry of candidate) {
+			if (!entry || typeof entry !== 'object') {
+				continue;
+			}
+			const source = entry as Partial<ToraMessage>;
+			const role = source.role === 'assistant' ? 'assistant' : 'user';
+			const text = typeof source.text === 'string' ? source.text.trim() : '';
+			if (!text) {
+				continue;
+			}
+			const timestamp =
+				typeof source.timestamp === 'number' && Number.isFinite(source.timestamp)
+					? source.timestamp
+					: Date.now();
+			const rawIntent = typeof source.intent === 'string' ? source.intent.trim().toLowerCase() : '';
+			const intent =
+				rawIntent === 'chat' ||
+				rawIntent === 'modify_project' ||
+				rawIntent === 'generate_project' ||
+				rawIntent === 'clarify'
+					? (rawIntent as AITimelineIntent)
+					: undefined;
+			const message: ToraMessage = {
+				id: createMessageID(),
+				role,
+				text,
+				timestamp
+			};
+			if (intent) {
+				message.intent = intent;
+			}
+			sanitized.push(message);
+		}
 		return sanitized.slice(-TORA_CHAT_HISTORY_LIMIT);
 	}
 
@@ -142,17 +158,43 @@
 		}
 	}
 
-	function appendMessage(role: ToraMessage['role'], text: string) {
+	function clearConversationForKey(storageKey: string) {
+		if (!isBrowser() || !storageKey) {
+			messages = [];
+			submitError = '';
+			draft = '';
+			return;
+		}
+		messages = [];
+		submitError = '';
+		draft = '';
+		try {
+			window.localStorage.removeItem(storageKey);
+		} catch {
+			// Best-effort clearing only.
+		}
+		scrollThreadToBottom();
+	}
+
+	function appendMessage(role: ToraMessage['role'], text: string, intent?: AITimelineIntent) {
 		const normalizedText = String(text || '').trim();
 		if (!normalizedText) {
 			return;
 		}
 		messages = [
 			...messages,
-			{ id: createMessageID(), role, text: normalizedText, timestamp: Date.now() }
+			{ id: createMessageID(), role, text: normalizedText, timestamp: Date.now(), intent }
 		].slice(-TORA_CHAT_HISTORY_LIMIT);
 		persistConversationForKey(conversationStorageKey);
 		scrollThreadToBottom();
+	}
+
+	function buildConversationPayload(source: ToraMessage[]): AITimelineConversationMessage[] {
+		return source.map((message) => ({
+			role: message.role,
+			text: message.text,
+			intent: message.intent
+		}));
 	}
 
 	function formatSuccessMessage() {
@@ -174,6 +216,7 @@
 		}
 
 		appendMessage('user', prompt);
+		const conversationPayload = buildConversationPayload(messages);
 		draft = '';
 
 		if (!normalizedRoomID) {
@@ -186,11 +229,16 @@
 		}
 
 		try {
-			const result = await editAITimeline(normalizedRoomID, prompt, currentState);
-			if (result.intent !== 'chat') {
+			const result = await editAITimeline(
+				normalizedRoomID,
+				prompt,
+				currentState,
+				conversationPayload
+			);
+			if (result.intent !== 'chat' && result.intent !== 'clarify') {
 				await initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE });
 			}
-			appendMessage('assistant', result.assistantReply || formatSuccessMessage());
+			appendMessage('assistant', result.assistantReply || formatSuccessMessage(), result.intent);
 		} catch (error) {
 			submitError = error instanceof Error ? error.message : 'Failed to apply Tora AI edit.';
 			appendMessage('assistant', `Error: ${submitError}`);
@@ -229,6 +277,14 @@
 			</div>
 		</div>
 		<div class="tora-meta">
+			<button
+				type="button"
+				class="tora-clear-btn"
+				on:click={() => clearConversationForKey(conversationStorageKey)}
+				disabled={$timelineLoading || messages.length === 0}
+			>
+				Clear chat
+			</button>
 			<span>{boardStatusText}</span>
 			{#if isLargeProject}
 				<span class="tora-meta-badge">Large project</span>
@@ -255,6 +311,11 @@
 							<span class="ai-response-dot" aria-hidden="true"></span>
 							<div class="ai-response-title">
 								Tora AI
+								{#if message.intent === 'clarify'}
+									<span class="ai-intent-chip">Needs detail</span>
+								{:else if message.intent === 'chat'}
+									<span class="ai-intent-chip">Discussion</span>
+								{/if}
 								<span class="ai-time-chip">{formatMessageTime(message.timestamp)}</span>
 							</div>
 						</div>
@@ -405,6 +466,26 @@
 		white-space: nowrap;
 	}
 
+	.tora-clear-btn {
+		border-radius: 999px;
+		border: 1px solid rgba(255, 255, 255, 0.16);
+		background: rgba(255, 255, 255, 0.08);
+		color: #bdc1c6;
+		padding: 0.14rem 0.48rem;
+		font-size: 0.6rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.tora-clear-btn:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.14);
+	}
+
+	.tora-clear-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
 	.tora-meta-badge {
 		border: 1px solid rgba(255, 255, 255, 0.12);
 		background: rgba(255, 255, 255, 0.07);
@@ -504,6 +585,15 @@
 		border: 1px solid rgba(255, 255, 255, 0.1);
 		background: rgba(255, 255, 255, 0.06);
 		color: #9aa0a6;
+	}
+
+	.ai-intent-chip {
+		border-radius: 999px;
+		padding: 0.1rem 0.42rem;
+		font-size: 0.6rem;
+		border: 1px solid rgba(255, 255, 255, 0.16);
+		background: rgba(255, 255, 255, 0.08);
+		color: #bdc1c6;
 	}
 
 	.ai-response-body {

@@ -1,7 +1,16 @@
 import type { RequestHandler } from './$types';
 import { resolveSiteOrigin } from '$lib/utils/seo';
 
-const INDEXABLE_PATHS = ['/', '/home', '/ide'] as const;
+const IDE_LANGUAGE_PATHS = [
+	'/ide?lang=javascript',
+	'/ide?lang=python',
+	'/ide?lang=cpp',
+	'/ide?lang=c',
+	'/ide?lang=java',
+	'/ide?lang=go',
+	'/ide?lang=rust'
+] as const;
+const INDEXABLE_PATHS = ['/', '/home', '/ide', ...IDE_LANGUAGE_PATHS] as const;
 const PUBLIC_SITE_URL_ENV = (process.env.PUBLIC_SITE_URL || '').trim();
 
 function resolvePlatformSiteURL(platform: unknown) {
@@ -13,6 +22,7 @@ function resolvePlatformSiteURL(platform: unknown) {
 	if (!env || typeof env !== 'object') {
 		return '';
 	}
+
 	const envRecord = env as Record<string, unknown>;
 	return typeof envRecord.PUBLIC_SITE_URL === 'string' ? envRecord.PUBLIC_SITE_URL.trim() : '';
 }
@@ -34,11 +44,13 @@ export const GET: RequestHandler = async ({ url, platform }) => {
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 ${INDEXABLE_PATHS.map((pathname) => {
 	const absolute = `${siteOrigin}${pathname === '/' ? '' : pathname}`;
+	const priority =
+		pathname === '/' ? '1.0' : pathname === '/ide' ? '0.9' : pathname.startsWith('/ide?lang=') ? '0.85' : '0.8';
 	return `  <url>
     <loc>${escapeXml(absolute)}</loc>
     <lastmod>${lastModifiedDate}</lastmod>
     <changefreq>daily</changefreq>
-    <priority>${pathname === '/' ? '1.0' : '0.8'}</priority>
+    <priority>${priority}</priority>
   </url>`;
 }).join('\n')}
 </urlset>`;

@@ -22,7 +22,7 @@
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white" alt="TypeScript"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
   <a href="https://redis.io/"><img src="https://img.shields.io/badge/Redis-7.x-dc382d?logo=redis&logoColor=white" alt="Redis"></a>
-  <a href="https://www.scylladb.com/"><img src="https://img.shields.io/badge/ScyllaDB-supported-6cd4ff" alt="ScyllaDB"></a>
+  <a href="https://cassandra.apache.org/"><img src="https://img.shields.io/badge/Cassandra-supported-1287B1" alt="Cassandra"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
 </p>
 
@@ -109,7 +109,7 @@ To collaborate privately, create a dedicated room and share that URL over your p
 ## Encryptions
 
 - **WebRTC End-to-End Encryption** — All real-time audio and video streams are end-to-end encrypted natively via WebRTC protocols, ensuring media remains private between participants and never reaches the server unencrypted.
-- **Server-side AES-GCM Encryption Before DB Write** — Chat/discussion content is encrypted on the Go backend using AES-GCM before being persisted to ScyllaDB/Redis.
+- **Server-side AES-GCM Encryption Before DB Write** — Chat/discussion content is encrypted on the Go backend using AES-GCM before being persisted to Cassandra/Redis.
 - **Versioned Ciphertext + Key Rotation** — Encrypted payloads are stored with a version prefix (for example `v1:<ciphertext>`) and support key rotation through `APP_SECRET_KEYS` and `APP_SECRET_KEY_VERSION`.
 - **Transport Layer Security (TLS)** — All data in transit, including real-time WebSocket signals for chat and drawings, is protected via Secure WebSockets (WSS) and HTTPS orchestrated through Caddy.
 - **JWT Integrity (HS256)** — User sessions are secured using JSON Web Tokens (JWT) signed with the HMAC SHA-256 algorithm, utilizing a server-side secret to prevent token tampering.
@@ -184,7 +184,7 @@ An overview of rooms, recent sessions, and activity. Create rooms, resume sessio
 
 ## Architecture
 
-Tora is built for low-latency collaboration. The real-time path runs through WebSockets and Redis pub/sub; durable metadata lives in ScyllaDB; media and canvas snapshots are stored in object storage.
+Tora is built for low-latency collaboration. The real-time path runs through WebSockets and Redis pub/sub; durable metadata lives in Cassandra; media and canvas snapshots are stored in object storage.
 
 ```text
 Browser (SvelteKit + Yjs + Monaco + xterm.js)
@@ -195,7 +195,7 @@ Browser (SvelteKit + Yjs + Monaco + xterm.js)
          │
     ┌────┴──────────────┐
     ▼                   ▼
-  Redis             ScyllaDB
+  Redis             Cassandra
 (ephemeral state,   (rooms, messages,
  pub/sub, AI cache)  user metadata)
          │
@@ -211,7 +211,7 @@ Browser (SvelteKit + Yjs + Monaco + xterm.js)
 ### Stack
 
 - **Frontend:** SvelteKit, TypeScript, Tailwind CSS, Monaco Editor, Yjs, y-websocket, xterm.js, Pyodide, WebContainers
-- **Backend:** Go, chi, gorilla/websocket, go-redis, gocql (ScyllaDB), Prometheus, JWT auth, OAuth
+- **Backend:** Go, chi, gorilla/websocket, go-redis, gocql (Cassandra-compatible), Prometheus, JWT auth, OAuth
 - **Infrastructure:** Docker Compose, Caddy (TLS), Prometheus, Cloudflare Workers (optional edge deployment via Wrangler)
 
 ## Getting Started
@@ -279,8 +279,8 @@ At minimum, set `APP_SECRET_KEY`. Most other values have defaults for local Dock
 | `PORT` | No | `8080` | Backend HTTP port. |
 | `REDIS_ADDR` | No | `127.0.0.1:6379` | Redis address for ephemeral/session state. |
 | `REDIS_PASS` | No | empty | Redis password (if enabled). |
-| `SCYLLA_HOSTS` | No | `127.0.0.1` | Comma-separated Scylla hosts. |
-| `SCYLLA_KEYSPACE` | No | `converse` | Scylla keyspace. (`KEYSPACE_NAME` alias also supported). |
+| `SCYLLA_HOSTS` | No | `127.0.0.1` | Comma-separated Cassandra hosts. |
+| `SCYLLA_KEYSPACE` | No | `converse` | Cassandra keyspace. (`KEYSPACE_NAME` alias also supported). |
 | `PISTON_ENDPOINT` | No | `http://127.0.0.1:2000/api/v2/execute` | Remote execution endpoint for compiled languages. |
 | `TRUSTED_PROXIES` | No | empty | Comma-separated trusted proxy CIDRs/IPs. |
 | `AUTH_COOKIE_SECURE` | No | auto (`false` on localhost, otherwise `true`) | Forces secure auth cookies when set to `true`. |
@@ -301,14 +301,17 @@ At minimum, set `APP_SECRET_KEY`. Most other values have defaults for local Dock
 | `R2_S3_bucket_name` / `R2_BUCKET` | Optional | — | Bucket name for media/snapshots. |
 | `R2_S3_endpoint_url` | Optional | — | S3-compatible endpoint URL (Cloudflare R2 or S3). |
 | `R2_PUBLIC_BASE_URL` | Optional | — | Public base URL for serving uploaded assets. |
-| `ASTRA_DB_ENDPOINT` / `ASTRA_API_URL` | Optional | — | Astra endpoint (if using Astra instead of local Scylla). |
+| `ASTRA_DB_ENDPOINT` / `ASTRA_API_URL` | Optional | — | Astra endpoint (if using Astra instead of local Cassandra). |
 | `ASTRA_DB_ID` | Optional | — | Astra database ID. |
 | `ASTRA_DB_REGION` | Optional | — | Astra database region. |
 | `ASTRA_TOKEN` / `APPLICATION_TOKEN` | Optional | — | Astra API/application token. |
+| `GOOGLE_VERTEX_API_KEY` | Optional | — | Preferred AI provider key (Vertex Gemini is tried first when set). |
 | `OPENAI_API_KEY` | Optional | — | Enables OpenAI-backed AI flows. |
 | `GEMINI_API_KEY` | Optional | — | Enables Gemini-backed AI flows. |
 | `MISTRAL_API_KEY` | Optional | — | Enables Mistral provider fallback. |
 | `GROQ_API_KEY` | Optional | — | Enables Groq provider fallback. |
+| `GOOGLE_VERTEX_MODEL` | No | `gemini-2.5-flash-lite` | Single preferred Vertex model for organize/summarize flows. |
+| `GOOGLE_VERTEX_MODELS` | No | provider defaults | Comma-separated Vertex model cascade for fallback attempts. |
 | `OPENAI_MODEL` | No | provider default | Override OpenAI model for organize/summarize flows. |
 | `GEMINI_MODEL` | No | provider default | Override Gemini model for organize/summarize flows. |
 | `MAX_DAILY_REQUESTS` | No | `50000` | Request cap for app-level limiting. |
@@ -346,7 +349,7 @@ SvelteKit Frontend   ←→   Go API Server
                                │
                     ┌──────────┼──────────┐
                     ▼          ▼          ▼
-                  Redis    ScyllaDB   R2 / S3
+                  Redis    Cassandra   R2 / S3
 ```
 
 Everything can be orchestrated with Docker Compose. Caddy handles automatic TLS. Configure your domain in `Caddyfile` before startup.

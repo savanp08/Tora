@@ -19,6 +19,7 @@
 	export let remoteSyncEnabled = true;
 	export let initialTerminalHeight = 200;
 	export let requestScope: 'default' | 'ide' = 'default';
+	export let initialExecutionLanguage = '';
 
 	type ProjectFileEntry = {
 		path: string;
@@ -496,6 +497,8 @@ Rules:
 	let periodicSnapshotInterval: number | null = null;
 	let snapshotDirty = false;
 	let ideWorkspaceStateReady = false;
+	let initialExecutionLanguageApplyInFlight = false;
+	let lastAppliedInitialExecutionLanguage = '';
 	let executionManager: ExecutionManager | null = null;
 	let activeExecutionHandle: ExecutionRunHandle | null = null;
 	let removeExecutionOutputSubscription: (() => void) | null = null;
@@ -5703,6 +5706,25 @@ ${previewItems.join('\n')}${overflowLabel}`;
 		canvasAIAbortController = null;
 	}
 
+	async function clearCanvasAIConversation() {
+		if (isCanvasAIGenerating) {
+			canvasAIAbortController?.abort();
+		}
+		isCanvasAIGenerating = false;
+		canvasAIAbortController = null;
+		canvasAIPrompt = '';
+		canvasAIError = '';
+		canvasAILastSuggestedMessageId = '';
+		canvasAIChatMessages = [];
+		const diffTabPaths = Object.keys(canvasAITempDiffFiles);
+		canvasAITempDiffFiles = {};
+		for (const tabPath of diffTabPaths) {
+			await closeCanvasAIDiffPreview(tabPath);
+		}
+		resizeCanvasAIPromptInput();
+		scrollCanvasAIThreadToBottom();
+	}
+
 	async function buildCanvasAICodePrompt(
 		instruction: string,
 		targetFilePath: string,
@@ -6870,6 +6892,30 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		}
 	}
 
+	async function applyRequestedIdeLanguageIfNeeded() {
+		const normalizedRequestedLanguage = normalizeExecutionLanguageId(initialExecutionLanguage);
+		if (requestScope !== 'ide' || !ideWorkspaceStateReady) {
+			return;
+		}
+		if (!normalizedRequestedLanguage) {
+			lastAppliedInitialExecutionLanguage = '';
+			return;
+		}
+		if (
+			initialExecutionLanguageApplyInFlight ||
+			normalizedRequestedLanguage === lastAppliedInitialExecutionLanguage
+		) {
+			return;
+		}
+		initialExecutionLanguageApplyInFlight = true;
+		lastAppliedInitialExecutionLanguage = normalizedRequestedLanguage;
+		try {
+			await applyExecutionLanguageToCurrentFile(normalizedRequestedLanguage);
+		} finally {
+			initialExecutionLanguageApplyInFlight = false;
+		}
+	}
+
 	async function renameEntry(entry: ProjectFileEntry) {
 		await startInlineRenameAction(entry);
 	}
@@ -7258,6 +7304,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		expandedDirectories;
 		fileTree.length;
 		persistIdeWorkspaceSessionState();
+	}
+
+	$: if (requestScope === 'ide' && ideWorkspaceStateReady) {
+		initialExecutionLanguage;
+		void applyRequestedIdeLanguageIfNeeded();
 	}
 
 	$: if (activeTerminalPanelTab === 'smart') {
@@ -8437,7 +8488,19 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 							}}
 							disabled={isCanvasAIGenerating || (!canvasAIPrompt.trim() && !canvasAIError)}
 						>
-							Clear
+							Clear Input
+						</button>
+						<button
+							type="button"
+							class="canvas-ai-action secondary"
+							on:click={() => void clearCanvasAIConversation()}
+							disabled={
+								isCanvasAIGenerating ||
+								(canvasAIChatMessages.length === 0 &&
+									Object.keys(canvasAITempDiffFiles).length === 0)
+							}
+						>
+							Clear Chat
 						</button>
 						<button
 							type="button"
@@ -8719,6 +8782,18 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 										disabled={isCanvasAIGenerating}
 									>
 										Cancel
+									</button>
+									<button
+										type="button"
+										class="canvas-ai-action secondary"
+										on:click={() => void clearCanvasAIConversation()}
+										disabled={
+											isCanvasAIGenerating ||
+											(canvasAIChatMessages.length === 0 &&
+												Object.keys(canvasAITempDiffFiles).length === 0)
+										}
+									>
+										Clear Chat
 									</button>
 									<button
 										type="button"

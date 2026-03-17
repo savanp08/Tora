@@ -5562,6 +5562,25 @@ ${previewItems.join('\n')}${overflowLabel}`;
 		canvasAIAbortController = null;
 	}
 
+	async function clearCanvasAIConversation() {
+		if (isCanvasAIGenerating) {
+			canvasAIAbortController?.abort();
+		}
+		isCanvasAIGenerating = false;
+		canvasAIAbortController = null;
+		canvasAIPrompt = '';
+		canvasAIError = '';
+		canvasAILastSuggestedMessageId = '';
+		canvasAIChatMessages = [];
+		const diffTabPaths = Object.keys(canvasAITempDiffFiles);
+		canvasAITempDiffFiles = {};
+		for (const tabPath of diffTabPaths) {
+			await closeCanvasAIDiffPreview(tabPath);
+		}
+		resizeCanvasAIPromptInput();
+		scrollCanvasAIThreadToBottom();
+	}
+
 	async function buildCanvasAICodePrompt(
 		instruction: string,
 		targetFilePath: string,
@@ -8280,7 +8299,19 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 							}}
 							disabled={isCanvasAIGenerating || (!canvasAIPrompt.trim() && !canvasAIError)}
 						>
-							Clear
+							Clear Input
+						</button>
+						<button
+							type="button"
+							class="canvas-ai-action secondary"
+							on:click={() => void clearCanvasAIConversation()}
+							disabled={
+								isCanvasAIGenerating ||
+								(canvasAIChatMessages.length === 0 &&
+									Object.keys(canvasAITempDiffFiles).length === 0)
+							}
+						>
+							Clear Chat
 						</button>
 						<button
 							type="button"
@@ -8562,6 +8593,18 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 										disabled={isCanvasAIGenerating}
 									>
 										Cancel
+									</button>
+									<button
+										type="button"
+										class="canvas-ai-action secondary"
+										on:click={() => void clearCanvasAIConversation()}
+										disabled={
+											isCanvasAIGenerating ||
+											(canvasAIChatMessages.length === 0 &&
+												Object.keys(canvasAITempDiffFiles).length === 0)
+										}
+									>
+										Clear Chat
 									</button>
 									<button
 										type="button"

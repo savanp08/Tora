@@ -443,6 +443,11 @@ func generateAIOrganizeStructuredJSON(
 	systemPrompt, userPrompt string,
 	limits aiOrganizeLimits,
 ) (string, error) {
+	if vertexKey := strings.TrimSpace(os.Getenv("GOOGLE_VERTEX_API_KEY")); vertexKey != "" {
+		if content, err := generateAIOrganizeWithVertex(ctx, vertexKey, systemPrompt, userPrompt, limits); err == nil {
+			return content, nil
+		}
+	}
 	if openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); openAIKey != "" {
 		if content, err := generateAIOrganizeWithOpenAI(ctx, openAIKey, systemPrompt, userPrompt, limits); err == nil {
 			return content, nil
@@ -457,6 +462,79 @@ func generateAIOrganizeStructuredJSON(
 		ctx,
 		systemPrompt+"\n\nUser request:\n"+userPrompt,
 	)
+}
+
+func generateAIOrganizeWithVertex(
+	ctx context.Context,
+	apiKey, systemPrompt, userPrompt string,
+	limits aiOrganizeLimits,
+) (string, error) {
+	models := aiOrganizeModelCascade(
+		os.Getenv("GOOGLE_VERTEX_MODELS"),
+		os.Getenv("GOOGLE_VERTEX_MODEL"),
+	)
+	if len(models) == 0 {
+		models = []string{"gemini-2.5-flash-lite", "gemini-2.5-flash"}
+	}
+
+	var lastErr error
+	for _, model := range models {
+		endpoint := fmt.Sprintf(
+			"https://aiplatform.googleapis.com/v1/publishers/google/models/%s:streamGenerateContent?key=%s",
+			url.PathEscape(model),
+			url.QueryEscape(strings.TrimSpace(apiKey)),
+		)
+		payload := map[string]interface{}{
+			"system_instruction": map[string]interface{}{
+				"parts": []map[string]string{
+					{"text": systemPrompt},
+				},
+			},
+			"contents": []map[string]interface{}{
+				{
+					"role": "user",
+					"parts": []map[string]string{
+						{"text": userPrompt},
+					},
+				},
+			},
+			"generationConfig": map[string]interface{}{
+				"temperature":      0.1,
+				"responseMimeType": "application/json",
+			},
+		}
+
+		status, body, err := aiOrganizePostJSON(ctx, endpoint, map[string]string{}, payload, limits)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if status < http.StatusOK || status >= http.StatusMultipleChoices {
+			lastErr = fmt.Errorf(
+				"vertex ai-organize failed: model=%s status=%d msg=%s",
+				model,
+				status,
+				aiOrganizeErrorMessageFromBody(body),
+			)
+			continue
+		}
+
+		content, parseErr := aiOrganizeExtractGeminiText(body)
+		if parseErr != nil {
+			lastErr = fmt.Errorf("vertex ai-organize parse failed: model=%s err=%w", model, parseErr)
+			continue
+		}
+		if strings.TrimSpace(content) == "" {
+			lastErr = fmt.Errorf("vertex ai-organize returned empty text for model=%s", model)
+			continue
+		}
+		return strings.TrimSpace(content), nil
+	}
+
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("vertex ai-organize failed for all configured models")
 }
 
 func generateAIOrganizeWithOpenAI(
@@ -565,6 +643,112 @@ func generateAIOrganizeWithGemini(
 		return "", fmt.Errorf("gemini ai-organize returned empty candidates")
 	}
 	return strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text), nil
+}
+
+func aiOrganizeModelCascade(values ...string) []string {
+	cascade := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(token)
+			if trimmed == "" {
+				continue
+			}
+			if _, exists := seen[trimmed]; exists {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			cascade = append(cascade, trimmed)
+		}
+	}
+	return cascade
+}
+
+type aiOrganizeGeminiCandidate struct {
+	Content struct {
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	} `json:"content"`
+}
+
+type aiOrganizeGeminiEnvelope struct {
+	Candidates []aiOrganizeGeminiCandidate `json:"candidates"`
+	Error      struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func aiOrganizeExtractGeminiText(body []byte) (string, error) {
+	var single aiOrganizeGeminiEnvelope
+	if err := json.Unmarshal(body, &single); err == nil {
+		text := aiOrganizeCandidateText(single.Candidates)
+		if text != "" {
+			return text, nil
+		}
+		if message := strings.TrimSpace(single.Error.Message); message != "" {
+			return "", fmt.Errorf("%s", message)
+		}
+	}
+
+	var stream []aiOrganizeGeminiEnvelope
+	if err := json.Unmarshal(body, &stream); err == nil && len(stream) > 0 {
+		chunks := make([]string, 0, len(stream))
+		for _, entry := range stream {
+			if chunk := aiOrganizeCandidateText(entry.Candidates); chunk != "" {
+				chunks = append(chunks, chunk)
+			}
+		}
+		if merged := aiOrganizeMergeChunks(chunks); merged != "" {
+			return merged, nil
+		}
+	}
+
+	message := aiOrganizeErrorMessageFromBody(body)
+	if message == "" {
+		message = "gemini payload did not include response text"
+	}
+	return "", fmt.Errorf("%s", message)
+}
+
+func aiOrganizeCandidateText(candidates []aiOrganizeGeminiCandidate) string {
+	for _, candidate := range candidates {
+		var builder strings.Builder
+		for _, part := range candidate.Content.Parts {
+			text := strings.TrimSpace(part.Text)
+			if text == "" {
+				continue
+			}
+			builder.WriteString(text)
+		}
+		if built := strings.TrimSpace(builder.String()); built != "" {
+			return built
+		}
+	}
+	return ""
+}
+
+func aiOrganizeMergeChunks(chunks []string) string {
+	merged := ""
+	for _, chunk := range chunks {
+		normalized := strings.TrimSpace(chunk)
+		if normalized == "" {
+			continue
+		}
+		if merged == "" {
+			merged = normalized
+			continue
+		}
+		if strings.HasPrefix(normalized, merged) {
+			merged = normalized
+			continue
+		}
+		if strings.HasPrefix(merged, normalized) {
+			continue
+		}
+		merged += normalized
+	}
+	return strings.TrimSpace(merged)
 }
 
 func aiOrganizePostJSON(

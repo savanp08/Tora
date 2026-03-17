@@ -34,6 +34,7 @@ import (
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/websocket"
 	namegen "github.com/savanp08/converse/utils"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -496,6 +497,10 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	requestedAIEnabled := resolveOptionalBool(req.AIEnabled, req.AIEnabledAlt)
 	requestedE2EEnabled := resolveOptionalBool(req.E2EEnabled, req.E2EEnabledAlt, req.E2EEEnabledAlt)
 	requestedRoomFeatures := normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE)
+	roomPasswordHash := ""
+	if mode == "create" {
+		roomPasswordHash = hashRoomPassword(req.RoomPassword)
+	}
 	if mode == "create" {
 		resolvedRoomFeatures, featureErr := resolveRequestedRoomFeatureFlags(
 			requestedAIEnabled,
@@ -678,7 +683,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			"",
 			"",
 			initialRoomTTL,
-			"",
+			roomPasswordHash,
 			roomFeatures.AIEnabled,
 			roomFeatures.E2EEnabled,
 		)
@@ -708,27 +713,19 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mode == "join" && requiresPassword {
-		isMember, memberErr := h.redis.Client.SIsMember(ctx, roomMembersKey(finalRoomID), userID).Result()
-		if memberErr != nil {
+		storedPasswordHash, hashErr := h.getRoomPasswordHash(ctx, finalRoomID)
+		if hashErr != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room membership"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room access settings"})
 			return
 		}
-		if !isMember {
-			storedPasswordHash, hashErr := h.getRoomPasswordHash(ctx, finalRoomID)
-			if hashErr != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify room access settings"})
-				return
-			}
-			if !h.verifyRoomPassword(req.RoomPassword, storedPasswordHash) {
-				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error":            "Room password is required",
-					"requiresPassword": true,
-				})
-				return
-			}
+		if !h.verifyRoomPassword(req.RoomPassword, storedPasswordHash) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "Wrong room password",
+				"requiresPassword": true,
+			})
+			return
 		}
 	}
 
@@ -2212,7 +2209,7 @@ func normalizeRoomPassword(raw string) string {
 }
 
 func normalizeRoomPasswordHash(raw string) string {
-	return strings.ToLower(strings.TrimSpace(raw))
+	return strings.TrimSpace(raw)
 }
 
 func boolToFlagString(value bool) string {
@@ -2297,6 +2294,19 @@ func parseRoomFeatureFlagsFromMeta(meta map[string]string) roomFeatureFlags {
 }
 
 func hashRoomPassword(password string) string {
+	normalized := normalizeRoomPassword(password)
+	if normalized == "" {
+		return ""
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(normalized), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("[room] failed to hash room password: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(string(hashedPassword))
+}
+
+func hashLegacyRoomPassword(password string) string {
 	normalized := normalizeRoomPassword(password)
 	if normalized == "" {
 		return ""
@@ -3077,11 +3087,19 @@ func (h *RoomHandler) verifyRoomPassword(submittedPassword string, storedHash st
 	if normalizedHash == "" {
 		return true
 	}
-	submittedHash := hashRoomPassword(submittedPassword)
+	normalizedPassword := normalizeRoomPassword(submittedPassword)
+	if normalizedPassword == "" {
+		return false
+	}
+	if strings.HasPrefix(normalizedHash, "$2") {
+		return bcrypt.CompareHashAndPassword([]byte(normalizedHash), []byte(normalizedPassword)) == nil
+	}
+	// Backward compatibility for older rooms hashed with SHA-256 before bcrypt migration.
+	submittedHash := hashLegacyRoomPassword(normalizedPassword)
 	if submittedHash == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(submittedHash), []byte(normalizedHash)) == 1
+	return subtle.ConstantTimeCompare([]byte(submittedHash), []byte(strings.ToLower(normalizedHash))) == 1
 }
 
 func (h *RoomHandler) getRoomCreatedAt(ctx context.Context, roomID string) (int64, error) {

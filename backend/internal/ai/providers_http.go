@@ -18,12 +18,18 @@ import (
 )
 
 const (
+	defaultVertexModel  = "gemini-2.5-flash-lite"
 	defaultOpenAIModel  = "gpt-4o-mini"
 	defaultCohereModel  = "command-r"
 	defaultMistralModel = "codestral-latest"
 )
 
 var (
+	defaultVertexModels = []string{
+		defaultVertexModel,
+		"gemini-2.5-flash",
+		"gemini-2.5-pro",
+	}
 	defaultGeminiModels = []string{
 		"gemini-3.1-pro",
 		"gemini-3.1-flash",
@@ -44,31 +50,117 @@ var (
 )
 
 // buildDefaultProvidersFromEnv returns providers in fixed fallback order:
-// Gemini -> Mistral -> Groq.
+// Vertex Gemini -> Gemini -> Mistral -> Groq.
 func buildDefaultProvidersFromEnv() []Summarizer {
-	providers := make([]Summarizer, 0, 3)
+	providers := make([]Summarizer, 0, 4)
+
+	if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_VERTEX_API_KEY")); apiKey != "" {
+		providers = append(providers, NewVertexGeminiProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("GOOGLE_VERTEX_MODELS"),
+			os.Getenv("GOOGLE_VERTEX_MODEL"),
+		)))
+	}
 
 	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewGeminiProvider(apiKey, []string{
-			"gemini-3.1-pro",
-			"gemini-3.1-flash",
-			"gemini-3.1-flash-lite",
-		}))
+		providers = append(providers, NewGeminiProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("GEMINI_MODELS"),
+			os.Getenv("GEMINI_MODEL"),
+		)))
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")); apiKey != "" {
-		providers = append(providers, NewMistralProvider(apiKey, []string{
-			"codestral-latest",
-			"mistral-small-latest",
-		}))
+		providers = append(providers, NewMistralProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("MISTRAL_MODELS"),
+			os.Getenv("MISTRAL_MODEL"),
+		)))
 	}
 	if apiKey := strings.TrimSpace(os.Getenv("GROQ_API_KEY")); apiKey != "" {
-		providers = append(providers, NewGroqProvider(apiKey, []string{
-			"llama-3.3-70b-versatile",
-			"llama-3.1-8b-instant",
-		}))
+		providers = append(providers, NewGroqProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("GROQ_MODELS"),
+			os.Getenv("GROQ_MODEL"),
+		)))
 	}
 
 	return providers
+}
+
+type VertexGeminiProvider struct {
+	apiKey string
+	models []string
+	client *http.Client
+}
+
+func NewVertexGeminiProvider(apiKey string, models []string) *VertexGeminiProvider {
+	return &VertexGeminiProvider{
+		apiKey: strings.TrimSpace(apiKey),
+		models: mergeModelCascade(models, defaultVertexModels),
+		client: newProviderHTTPClient(),
+	}
+}
+
+func (p *VertexGeminiProvider) GenerateRollingSummary(
+	ctx context.Context,
+	previousState []byte,
+	newMessages []Message,
+) ([]byte, error) {
+	response, err := p.GenerateChatResponse(ctx, buildRollingSummaryPrompt(previousState, newMessages))
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSpace(response)), nil
+}
+
+func (p *VertexGeminiProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "", fmt.Errorf("vertex prompt is empty")
+	}
+
+	providerLabel := "google_vertex"
+	for _, model := range p.models {
+		endpoint := fmt.Sprintf(
+			"https://aiplatform.googleapis.com/v1/publishers/google/models/%s:streamGenerateContent?key=%s",
+			url.PathEscape(model),
+			url.QueryEscape(strings.TrimSpace(p.apiKey)),
+		)
+
+		payload := map[string]any{
+			"contents": []map[string]any{
+				{
+					"role": "user",
+					"parts": []map[string]string{
+						{"text": prompt},
+					},
+				},
+			},
+			"generationConfig": map[string]any{
+				"temperature": 0.2,
+			},
+		}
+
+		statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
+		if err != nil {
+			recordAIRequest(providerLabel, "error")
+			return "", err
+		}
+
+		text, statusMessage := extractGeminiTextFromBody(body)
+		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				recordAIRequest(providerLabel, "rate_limit")
+				continue
+			}
+			recordAIRequest(providerLabel, "error")
+			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+		}
+		if strings.TrimSpace(text) == "" {
+			recordAIRequest(providerLabel, "error")
+			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+		}
+		recordAIRequest(providerLabel, "success")
+		return strings.TrimSpace(text), nil
+	}
+	return "", newModelCascadeExhaustedError(providerLabel, p.models)
 }
 
 type GeminiProvider struct {
@@ -131,22 +223,9 @@ func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string
 			return "", err
 		}
 
-		var parsed struct {
-			Candidates []struct {
-				Content struct {
-					Parts []struct {
-						Text string `json:"text"`
-					} `json:"parts"`
-				} `json:"content"`
-			} `json:"candidates"`
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		_ = json.Unmarshal(body, &parsed)
+		text, statusMessage := extractGeminiTextFromBody(body)
 
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
 			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				recordAIRequest(providerLabel, "rate_limit")
@@ -155,18 +234,12 @@ func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string
 			recordAIRequest(providerLabel, "error")
 			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
-		if len(parsed.Candidates) == 0 || len(parsed.Candidates[0].Content.Parts) == 0 {
-			recordAIRequest(providerLabel, "error")
-			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
-		}
-
-		text := strings.TrimSpace(parsed.Candidates[0].Content.Parts[0].Text)
-		if text == "" {
+		if strings.TrimSpace(text) == "" {
 			recordAIRequest(providerLabel, "error")
 			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
 		recordAIRequest(providerLabel, "success")
-		return text, nil
+		return strings.TrimSpace(text), nil
 	}
 	return "", newModelCascadeExhaustedError(providerLabel, p.models)
 }
@@ -676,6 +749,96 @@ func toProviderStatusError(provider string, statusCode int, message string) erro
 		Provider: provider,
 		Err:      errors.New(normalizedMessage),
 	}
+}
+
+type geminiResponseCandidate struct {
+	Content struct {
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	} `json:"content"`
+}
+
+type geminiResponseEnvelope struct {
+	Candidates []geminiResponseCandidate `json:"candidates"`
+	Error      struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func extractGeminiTextFromBody(body []byte) (string, string) {
+	var single geminiResponseEnvelope
+	if err := json.Unmarshal(body, &single); err == nil {
+		text := collectGeminiCandidateText(single.Candidates)
+		if text != "" {
+			return text, ""
+		}
+		if strings.TrimSpace(single.Error.Message) != "" {
+			return "", strings.TrimSpace(single.Error.Message)
+		}
+	}
+
+	var stream []geminiResponseEnvelope
+	if err := json.Unmarshal(body, &stream); err == nil && len(stream) > 0 {
+		chunks := make([]string, 0, len(stream))
+		errorMessage := ""
+		for _, entry := range stream {
+			if errorMessage == "" && strings.TrimSpace(entry.Error.Message) != "" {
+				errorMessage = strings.TrimSpace(entry.Error.Message)
+			}
+			if chunkText := collectGeminiCandidateText(entry.Candidates); chunkText != "" {
+				chunks = append(chunks, chunkText)
+			}
+		}
+		if merged := mergeStreamingTextChunks(chunks); merged != "" {
+			return merged, ""
+		}
+		if errorMessage != "" {
+			return "", errorMessage
+		}
+	}
+
+	return "", extractMessageFromBody(body)
+}
+
+func collectGeminiCandidateText(candidates []geminiResponseCandidate) string {
+	for _, candidate := range candidates {
+		var builder strings.Builder
+		for _, part := range candidate.Content.Parts {
+			text := strings.TrimSpace(part.Text)
+			if text == "" {
+				continue
+			}
+			builder.WriteString(text)
+		}
+		if built := strings.TrimSpace(builder.String()); built != "" {
+			return built
+		}
+	}
+	return ""
+}
+
+func mergeStreamingTextChunks(chunks []string) string {
+	merged := ""
+	for _, chunk := range chunks {
+		normalized := strings.TrimSpace(chunk)
+		if normalized == "" {
+			continue
+		}
+		if merged == "" {
+			merged = normalized
+			continue
+		}
+		if strings.HasPrefix(normalized, merged) {
+			merged = normalized
+			continue
+		}
+		if strings.HasPrefix(merged, normalized) {
+			continue
+		}
+		merged += normalized
+	}
+	return strings.TrimSpace(merged)
 }
 
 func parseModelCascadeFromEnv(values ...string) []string {

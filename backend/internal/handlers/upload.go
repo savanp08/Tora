@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/minio/minio-go/v7"
+	"github.com/redis/go-redis/v9"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/monitor"
@@ -145,9 +146,15 @@ type GenerateUploadURLRequest struct {
 }
 
 type GenerateUploadURLResponse struct {
-	UploadURL string `json:"uploadUrl"`
-	FileURL   string `json:"fileUrl"`
-	FileID    string `json:"fileId"`
+	UploadURL         string                          `json:"uploadUrl"`
+	FileURL           string                          `json:"fileUrl"`
+	FileID            string                          `json:"fileId"`
+	MessageEncryption *UploadMessageEncryptionDetails `json:"messageEncryption,omitempty"`
+}
+
+type UploadMessageEncryptionDetails struct {
+	Algorithm  string `json:"algorithm"`
+	KeyVersion string `json:"keyVersion"`
 }
 
 func NewUploadHandler(
@@ -170,6 +177,14 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": "Server is in safety sleep mode",
+		})
+		return
+	}
+	if isDirectUploadDisabled() {
+		w.WriteHeader(http.StatusGone)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":               "Direct uploads are disabled. Use /api/upload proxy so files are encrypted before storage.",
+			"requiresProxyUpload": true,
 		})
 		return
 	}
@@ -274,9 +289,10 @@ func (h *UploadHandler) GenerateUploadURL(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(GenerateUploadURLResponse{
-		UploadURL: uploadURL,
-		FileURL:   fileURL,
-		FileID:    fileID,
+		UploadURL:         uploadURL,
+		FileURL:           fileURL,
+		FileID:            fileID,
+		MessageEncryption: h.resolveUploadMessageEncryptionDetails(r.Context(), normalizedRoomID),
 	})
 
 	if normalizedRoomID != "" {
@@ -440,6 +456,42 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+			plainPayload, payloadErr := readUploadPayloadBytes(fileReader, maxUploadFileSize())
+			if payloadErr != nil {
+				_ = part.Close()
+				monitor.TotalUploads.WithLabelValues("error").Inc()
+				switch {
+				case errors.Is(payloadErr, storage.ErrUploadTooLarge):
+					w.WriteHeader(http.StatusRequestEntityTooLarge)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error": uploadLimitExceededMessage("File", maxUploadFileSize()),
+					})
+				case errors.Is(payloadErr, storage.ErrEmptyUpload):
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "file must not be empty"})
+				default:
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid upload payload"})
+				}
+				return
+			}
+			if strings.HasPrefix(fileType, "image/") && int64(len(plainPayload)) > maxImageFileSize() {
+				_ = part.Close()
+				monitor.TotalUploads.WithLabelValues("error").Inc()
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": uploadLimitExceededMessage("Image", maxImageFileSize()),
+				})
+				return
+			}
+			encryptedPayload, encryptErr := security.EncryptFilePayload(plainPayload)
+			if encryptErr != nil {
+				_ = part.Close()
+				monitor.TotalUploads.WithLabelValues("error").Inc()
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to encrypt file"})
+				return
+			}
 
 			uploadRoomID := normalizeRoomID(firstNonEmpty(roomIDFromQuery, roomIDFromForm))
 			if err := h.enforceR2StorageCapacity(r.Context()); err != nil {
@@ -460,9 +512,9 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 				r.Context(),
 				filename,
 				uploadRoomID,
-				fileReader,
+				bytes.NewReader(encryptedPayload),
 				fileType,
-				maxUploadFileSize(),
+				security.EncryptedFilePayloadMaxBytes(maxUploadFileSize()),
 			)
 			_ = part.Close()
 			if uploadErr != nil {
@@ -484,15 +536,6 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if strings.HasPrefix(fileType, "image/") && fileSize > maxImageFileSize() {
-				_ = h.r2.DeleteObjects(r.Context(), []string{h.resolveObjectKeyFromFileURL(fileURL)})
-				monitor.TotalUploads.WithLabelValues("error").Inc()
-				w.WriteHeader(http.StatusRequestEntityTooLarge)
-				_ = json.NewEncoder(w).Encode(map[string]string{
-					"error": uploadLimitExceededMessage("Image", maxImageFileSize()),
-				})
-				return
-			}
 			uploaded = true
 		default:
 			_ = part.Close()
@@ -519,13 +562,15 @@ func (h *UploadHandler) UploadProxy(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	responseRoomID := normalizeRoomID(firstNonEmpty(r.URL.Query().Get("roomId"), roomIDFromForm))
 	_ = json.NewEncoder(w).Encode(GenerateUploadURLResponse{
-		UploadURL: "",
-		FileURL:   fileURL,
-		FileID:    fileID,
+		UploadURL:         "",
+		FileURL:           fileURL,
+		FileID:            fileID,
+		MessageEncryption: h.resolveUploadMessageEncryptionDetails(r.Context(), responseRoomID),
 	})
 
-	normalizedRoomID := normalizeRoomID(firstNonEmpty(r.URL.Query().Get("roomId"), roomIDFromForm))
+	normalizedRoomID := responseRoomID
 	if normalizedRoomID != "" {
 		objectKey := h.resolveObjectKeyFromFileURL(fileURL)
 		h.trackUploadedFile(r.Context(), normalizedRoomID, objectKey)
@@ -591,9 +636,31 @@ func (h *UploadHandler) ServeObject(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
-	if info.Size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
+	objectPayload, readErr := io.ReadAll(obj)
+	if readErr != nil {
+		log.Printf("[upload] failed to read object key=%s err=%v", keyUsed, readErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to read file"})
+		return
 	}
+
+	decryptedPayload, decryptErr := security.DecryptFilePayload(objectPayload)
+	switch {
+	case decryptErr == nil:
+		objectPayload = decryptedPayload
+	case errors.Is(decryptErr, security.ErrFilePayloadNotEncrypted):
+		// Legacy object not encrypted; serve as-is.
+	default:
+		log.Printf("[upload] failed to decrypt object key=%s err=%v", keyUsed, decryptErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to decrypt file"})
+		return
+	}
+
+	if strings.TrimSpace(info.ContentType) == "" && len(objectPayload) > 0 {
+		w.Header().Set("Content-Type", http.DetectContentType(objectPayload))
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(int64(len(objectPayload)), 10))
 	if !info.LastModified.IsZero() {
 		w.Header().Set("Last-Modified", info.LastModified.UTC().Format(http.TimeFormat))
 	}
@@ -601,12 +668,12 @@ func (h *UploadHandler) ServeObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, filename))
 	w.Header().Set("Cache-Control", "private, max-age=600")
 
-	written, copyErr := io.Copy(w, obj)
-	if copyErr != nil {
+	written, writeErr := w.Write(objectPayload)
+	if writeErr != nil {
 		return
 	}
 	if h.tracker != nil {
-		h.tracker.RecordDownload(written)
+		h.tracker.RecordDownload(int64(written))
 	}
 }
 
@@ -830,6 +897,31 @@ func (h *UploadHandler) enforceR2StorageCapacity(ctx context.Context) error {
 	return storage.EnsureR2WriteAllowed(ctx, h.redis, storage.R2HardCapBytes)
 }
 
+func isDirectUploadDisabled() bool {
+	return true
+}
+
+func readUploadPayloadBytes(reader io.Reader, maxBytes int64) ([]byte, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("reader is required")
+	}
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("max bytes must be positive")
+	}
+	limited := io.LimitReader(reader, maxBytes+1)
+	payload, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > maxBytes {
+		return nil, storage.ErrUploadTooLarge
+	}
+	if len(payload) == 0 {
+		return nil, storage.ErrEmptyUpload
+	}
+	return payload, nil
+}
+
 func writeR2StorageFullError(w http.ResponseWriter) {
 	if w == nil {
 		return
@@ -940,6 +1032,58 @@ func buildUploadRateLimitRules(limit config.TimeWindowLimit) []uploadRateLimitRu
 		})
 	}
 	return rules
+}
+
+func (h *UploadHandler) resolveUploadMessageEncryptionDetails(
+	ctx context.Context,
+	roomID string,
+) *UploadMessageEncryptionDetails {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" || h.isRoomE2EEEnabled(ctx, normalizedRoomID) {
+		return nil
+	}
+
+	keyVersion, err := security.ActiveMessageEncryptionKeyVersion()
+	if err != nil {
+		log.Printf("[upload] failed to resolve message encryption key version room=%s err=%v", normalizedRoomID, err)
+		return nil
+	}
+	keyVersion = strings.TrimSpace(keyVersion)
+	if keyVersion == "" {
+		return nil
+	}
+
+	return &UploadMessageEncryptionDetails{
+		Algorithm:  security.MessageEncryptionAlgorithm(),
+		KeyVersion: keyVersion,
+	}
+}
+
+func (h *UploadHandler) isRoomE2EEEnabled(ctx context.Context, roomID string) bool {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" || h == nil || h.redis == nil || h.redis.Client == nil {
+		return false
+	}
+
+	values, err := h.redis.Client.HMGet(
+		ctx,
+		roomKey(normalizedRoomID),
+		"e2ee_enabled",
+		"e2e_enabled",
+	).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		log.Printf("[upload] room e2e lookup failed room=%s err=%v", normalizedRoomID, err)
+		return false
+	}
+
+	rawE2E := ""
+	if len(values) > 0 {
+		rawE2E = strings.TrimSpace(toString(values[0]))
+	}
+	if rawE2E == "" && len(values) > 1 {
+		rawE2E = strings.TrimSpace(toString(values[1]))
+	}
+	return parseFlagString(rawE2E, false)
 }
 
 func extractUploadRateLimitUserID(r *http.Request) string {

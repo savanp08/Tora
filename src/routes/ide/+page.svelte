@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
 	import { isDarkMode } from '$lib/store';
 	import IdeCodeCanvas from '$lib/components/ide/IdeCodeCanvas.svelte';
@@ -7,9 +8,38 @@
 	import { buildSoftwareApplicationSchema } from '$lib/utils/seo';
 
 	type WorkspaceMode = 'ide' | 'draw';
+	type IdeLanguageLink = { id: string; label: string; query: string };
 
 	const IDE_SESSION_STORAGE_KEY = 'canvasIdeSessionId';
 	const IDE_WORKSPACE_MODE_STORAGE_KEY = 'converse_ide_workspace_mode';
+	const IDE_LANGUAGE_LINKS: IdeLanguageLink[] = [
+		{ id: 'javascript', label: 'JavaScript', query: 'javascript' },
+		{ id: 'python', label: 'Python', query: 'python' },
+		{ id: 'cpp', label: 'C++', query: 'cpp' },
+		{ id: 'c', label: 'C', query: 'c' },
+		{ id: 'java', label: 'Java', query: 'java' },
+		{ id: 'go', label: 'Go', query: 'go' },
+		{ id: 'rust', label: 'Rust', query: 'rust' }
+	];
+	const DEFAULT_IDE_TITLE = 'AI IDE Online | Run C++ and Other Languages | Tora';
+	const DEFAULT_IDE_DESCRIPTION =
+		'AI-assisted online IDE to run C++, Python, JavaScript and more with code canvas, terminal, and free draw board.';
+
+	function buildLanguageQueryAliases() {
+		const map: Record<string, string> = {};
+		for (const language of IDE_LANGUAGE_LINKS) {
+			map[language.query] = language.id;
+		}
+		map.js = 'javascript';
+		map.py = 'python';
+		map['c++'] = 'cpp';
+		map.cc = 'cpp';
+		map.golang = 'go';
+		map.rs = 'rust';
+		return map;
+	}
+
+	const IDE_LANGUAGE_QUERY_ALIASES = buildLanguageQueryAliases();
 
 	function resolveIdeSessionId() {
 		if (!browser) {
@@ -53,8 +83,18 @@
 
 	let workspaceMode: WorkspaceMode = 'ide';
 	let workspaceModeReady = false;
+	let requestedExecutionLanguage = '';
+	let selectedExecutionLanguage: IdeLanguageLink | null = null;
+	let lastRequestedExecutionLanguage = '';
+	let ideSeoTitle = DEFAULT_IDE_TITLE;
+	let ideSeoDescription = DEFAULT_IDE_DESCRIPTION;
 
 	const THEME_PREFERENCE_KEY = 'converse_theme_preference';
+
+	function normalizeRequestedExecutionLanguage(value: string | null) {
+		const normalized = (value || '').trim().toLowerCase();
+		return IDE_LANGUAGE_QUERY_ALIASES[normalized] || '';
+	}
 
 	function applyTheme(preference: 'light' | 'dark') {
 		const nextDarkMode = preference === 'dark';
@@ -79,19 +119,35 @@
 	$: if (browser && workspaceModeReady) {
 		window.sessionStorage.setItem(IDE_WORKSPACE_MODE_STORAGE_KEY, workspaceMode);
 	}
+
+	$: requestedExecutionLanguage = normalizeRequestedExecutionLanguage(
+		$page.url.searchParams.get('lang') || $page.url.searchParams.get('language')
+	);
+
+	$: selectedExecutionLanguage =
+		IDE_LANGUAGE_LINKS.find((language) => language.id === requestedExecutionLanguage) || null;
+
+	$: if (requestedExecutionLanguage !== lastRequestedExecutionLanguage) {
+		lastRequestedExecutionLanguage = requestedExecutionLanguage;
+		if (requestedExecutionLanguage && workspaceMode !== 'ide') {
+			workspaceMode = 'ide';
+		}
+	}
+
+	$: ideSeoTitle = selectedExecutionLanguage
+		? `${selectedExecutionLanguage.label} Online IDE | Run ${selectedExecutionLanguage.label} in Browser | Tora`
+		: DEFAULT_IDE_TITLE;
+
+	$: ideSeoDescription = selectedExecutionLanguage
+		? `AI-assisted online ${selectedExecutionLanguage.label} IDE with code canvas, terminal execution, and free draw board.`
+		: DEFAULT_IDE_DESCRIPTION;
 </script>
 
 <svelte:head>
-	<title>AI IDE Online | Run C++ and Other Languages | Tora</title>
-	<meta
-		name="description"
-		content="AI-assisted online IDE to run C++, Python, JavaScript and more with code canvas, terminal, and free draw board."
-	/>
-	<meta property="og:title" content="AI IDE Online | Run C++ and Other Languages | Tora" />
-	<meta
-		property="og:description"
-		content="Execute code online with AI assistance, collaborative tools, and a full-screen IDE workflow."
-	/>
+	<title>{ideSeoTitle}</title>
+	<meta name="description" content={ideSeoDescription} />
+	<meta property="og:title" content={ideSeoTitle} />
+	<meta property="og:description" content={ideSeoDescription} />
 	<meta name="twitter:card" content="summary_large_image" />
 	<script type="application/ld+json">
 		{@html ideSchemaJson}
@@ -145,6 +201,12 @@
 				Local-only session. No backend save or sync.
 			</p>
 		</header>
+		<nav class="ide-language-links" aria-label="Open IDE by language">
+			<span>Open Tora IDE as:</span>
+			{#each IDE_LANGUAGE_LINKS as language}
+				<a href={`/ide?lang=${language.query}`}>{language.label} online IDE</a>
+			{/each}
+		</nav>
 
 		<div class="ide-stage">
 			{#if workspaceMode === 'ide'}
@@ -155,6 +217,7 @@
 					requestScope="ide"
 					remoteSyncEnabled={false}
 					initialTerminalHeight={320}
+					initialExecutionLanguage={requestedExecutionLanguage}
 				/>
 			{:else}
 				<IdeDrawBoard
@@ -200,7 +263,7 @@
 		min-width: 0;
 		min-height: 0;
 		display: grid;
-		grid-template-rows: auto minmax(0, 1fr);
+		grid-template-rows: auto auto minmax(0, 1fr);
 		gap: 0.65rem;
 		padding: 0.7rem;
 	}
@@ -284,6 +347,38 @@
 		margin: 0;
 		font-size: 0.78rem;
 		color: #cbd5e1;
+	}
+
+	.ide-language-links {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem 0.48rem;
+		align-items: center;
+		padding: 0.48rem 0.6rem;
+		border: 1px solid rgba(148, 163, 184, 0.28);
+		border-radius: 0.72rem;
+		background: rgba(15, 23, 42, 0.58);
+	}
+
+	.ide-language-links span {
+		font-size: 0.73rem;
+		font-weight: 600;
+		color: #cbd5e1;
+	}
+
+	.ide-language-links a {
+		font-size: 0.72rem;
+		color: #dbeafe;
+		text-decoration: none;
+		padding: 0.2rem 0.42rem;
+		border-radius: 999px;
+		border: 1px solid rgba(147, 197, 253, 0.28);
+		background: rgba(30, 64, 175, 0.18);
+	}
+
+	.ide-language-links a:hover {
+		border-color: rgba(147, 197, 253, 0.58);
+		background: rgba(30, 64, 175, 0.3);
 	}
 
 	.ide-stage {
@@ -396,6 +491,26 @@
 		color: #365b89;
 	}
 
+	.ide-lab.theme-light .ide-language-links {
+		border-color: rgba(133, 158, 197, 0.42);
+		background: rgba(255, 255, 255, 0.82);
+	}
+
+	.ide-lab.theme-light .ide-language-links span {
+		color: #375a87;
+	}
+
+	.ide-lab.theme-light .ide-language-links a {
+		color: #1f4f88;
+		border-color: rgba(118, 157, 212, 0.52);
+		background: rgba(210, 226, 249, 0.72);
+	}
+
+	.ide-lab.theme-light .ide-language-links a:hover {
+		border-color: rgba(78, 136, 224, 0.68);
+		background: rgba(190, 214, 248, 0.84);
+	}
+
 	.ide-lab.theme-light .ide-stage {
 		border-color: rgba(133, 158, 197, 0.36);
 		background: rgba(255, 255, 255, 0.82);
@@ -431,6 +546,10 @@
 		.ide-toolbar {
 			flex-direction: column;
 			align-items: flex-start;
+		}
+
+		.ide-language-links {
+			padding: 0.5rem;
 		}
 	}
 </style>

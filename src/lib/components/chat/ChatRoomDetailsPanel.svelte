@@ -288,7 +288,7 @@
 				>
 					{isExtendingRoom ? 'Extending...' : 'Extend Room (24h)'}
 				</button>
-				<p>Manually extends this room and its messages for 24 hours (Max 14 extensions).</p>
+				<p>Manually extends this room and its messages for 24 hours (Max 15 days from creation)</p>
 			</div>
 
 			<h4 class="members-title">Members</h4>
