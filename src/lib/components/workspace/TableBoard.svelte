@@ -60,6 +60,8 @@
 	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: sessionUsername = ($currentUser?.username || '').trim();
 	$: tableRows = $taskStore.map((task) => mapTaskToRow(task));
+	$: taskRows = tableRows.filter((r) => r.type !== 'support');
+	$: supportRows = tableRows.filter((r) => r.type === 'support');
 	$: activeRoomID = normalizeRoomIDValue(getActiveTaskRoomId() || tableRows[0]?.roomId || '');
 
 	// keep editingRow in sync with store updates
@@ -233,12 +235,14 @@
 	function mapTaskToRow(task: Task): TableRow {
 		const meta = parseDescriptionMetadata(task.description || '');
 		const customFields = { ...(task.customFields ?? {}) };
+		// Prefer the explicit taskType field; fall back to description metadata for legacy tasks
+		const resolvedType = task.taskType?.trim() || readMetadataValue(meta.entries, 'type') || 'sprint';
 		const row: TableRow = {
 			id: task.id,
 			roomId: task.roomId,
 			title: task.title,
 			status: normalizeTaskStatus(task.status),
-			type: readMetadataValue(meta.entries, 'type') || 'general',
+			type: resolvedType,
 			budget: Number.isFinite(task.budget) ? Number(task.budget) : 0,
 			duration: readMetadataValue(meta.entries, 'duration'),
 			effort: parseNumericInput(readMetadataValue(meta.entries, 'effort')) ?? '',
@@ -409,7 +413,7 @@
 	<header class="table-header">
 		<div>
 			<h2>Task Grid</h2>
-			<p>{tableRows.length} task{tableRows.length === 1 ? '' : 's'} · click any row to edit</p>
+			<p>{taskRows.length} task{taskRows.length === 1 ? '' : 's'}{supportRows.length > 0 ? ` · ${supportRows.length} support ticket${supportRows.length === 1 ? '' : 's'}` : ''} · click any row to edit</p>
 		</div>
 		<div class="table-header-actions">
 			<button
@@ -451,10 +455,10 @@
 				</tr>
 			</thead>
 			<tbody>
-				{#if tableRows.length === 0}
+				{#if taskRows.length === 0}
 					<tr><td class="empty-cell" colspan={7 + $fieldSchemaStore.length}>No tasks available yet.</td></tr>
 				{/if}
-				{#each tableRows as row (row.id)}
+				{#each taskRows as row (row.id)}
 					<tr
 						class="grid-row"
 						class:row-active={editingRowId === row.id}
@@ -477,6 +481,48 @@
 			</tbody>
 		</table>
 	</div>
+
+	{#if supportRows.length > 0}
+		<div class="support-section">
+			<header class="support-section-header">
+				<span class="support-section-icon">🎫</span>
+				<h3>Support Tickets</h3>
+				<span class="support-section-count">{supportRows.length}</span>
+			</header>
+			<div class="table-surface">
+				<table class="grid-table">
+					<thead>
+						<tr>
+							<th class="col-title">Title</th>
+							<th class="col-status">Status</th>
+							<th class="col-budget">Budget</th>
+							<th class="col-dur">Duration</th>
+							<th class="col-effort">Effort</th>
+							<th class="col-assignee">Assignee</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each supportRows as row (row.id)}
+							<tr
+								class="grid-row support-row"
+								class:row-active={editingRowId === row.id}
+								on:click={(e) => openPopup(row, e)}
+							>
+								<td class="col-title"><span class="cell-text">{row.title}</span></td>
+								<td class="col-status">
+									<span class="status-badge status-{row.status}">{STATUS_LABELS[row.status] ?? row.status}</span>
+								</td>
+								<td class="col-budget"><span class="cell-text">{formatBudget(row.budget)}</span></td>
+								<td class="col-dur"><span class="cell-text">{row.duration || '—'}</span></td>
+								<td class="col-effort"><span class="cell-text">{row.effort !== '' ? row.effort : '—'}</span></td>
+								<td class="col-assignee"><span class="cell-text">{resolveAssigneeName(row.assigneeId)}</span></td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Edit popup -->
 	{#if editingRowId && editingRow}
@@ -941,5 +987,51 @@
 
 		.popup-fields { grid-template-columns: 1fr; }
 		.popup-field:first-child { grid-column: 1; }
+	}
+
+	/* ── Support tickets section ──────────────────────────────── */
+	.support-section {
+		margin-top: 28px;
+		display: flex;
+		flex-direction: column;
+		gap: 0;
+	}
+
+	.support-section-header {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 16px 8px;
+		border-bottom: 2px solid rgba(99,102,241,0.3);
+		margin-bottom: 0;
+	}
+
+	.support-section-icon {
+		font-size: 1.1em;
+	}
+
+	.support-section-header h3 {
+		margin: 0;
+		font-size: 0.9em;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		color: #818cf8;
+	}
+
+	.support-section-count {
+		font-size: 0.72em;
+		font-weight: 700;
+		padding: 1px 7px;
+		border-radius: 20px;
+		background: rgba(99,102,241,0.15);
+		color: #818cf8;
+		border: 1px solid rgba(99,102,241,0.3);
+	}
+
+	.support-row {
+		background: rgba(99,102,241,0.03);
+	}
+	.support-row:hover {
+		background: rgba(99,102,241,0.07);
 	}
 </style>

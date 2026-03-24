@@ -19,12 +19,16 @@ import (
 )
 
 const (
-	toraPrimaryMentionToken = "@ToraAI"
-	toraLegacyMentionToken  = "@Tora"
-	toraBotSenderID         = "Tora-Bot"
-	toraBotSenderName       = "Tora-Bot"
-	toraRequestTimeout      = 25 * time.Second
-	toraSummaryTimeout      = 20 * time.Second
+	toraPrimaryMentionToken    = "@ToraAI"
+	toraLegacyMentionToken     = "@Tora"
+	toraProjectToken           = "@project" // matched case-insensitively
+	toraCanvasToken            = "@canvas"  // matched case-insensitively
+	toraBotSenderID            = "Tora-Bot"
+	toraBotSenderName          = "Tora-Bot"
+	toraRequestTimeout         = 25 * time.Second
+	toraRequestTimeoutMutation = 75 * time.Second // 3 turns × ~20s each
+	toraSummaryTimeout         = 20 * time.Second
+	toraMutationMaxTurns       = 3
 )
 
 // Commenting to try a different version — do not delete the commented version
@@ -97,6 +101,19 @@ Both sources can contain project-relevant information. Use the user's wording to
 - "whats the project" with no qualifier, when chat also contains project discussion → describe the task board project AND briefly note "there's also discussion in the chat about [topic] — did you mean that instead?"
 - When asked about people or team workload, use assignee names from the board data, not chat.
 
+DO NOT ECHO CONTEXT — CRITICAL:
+Never describe, recap, or summarize the conversation history, rolling summary, or task board data in your response.
+Those sections are private reference data for you — never repeat or paraphrase them back.
+Do not say "the current conversation shows...", "based on the chat...", "I can see from the board...", or any equivalent.
+If a section is irrelevant to the question, ignore it silently.
+
+EDIT TAGS — @Project and @Canvas:
+Users can prefix their message with @Project to apply task board changes, or @Canvas for code/canvas edits.
+- If @Project or @Canvas is NOT present and the user's message implies they want to make a change (e.g. "merge tasks", "create a ticket", "reorganize sprints", "add a task"), assume they want a text-only response — do NOT fabricate changes.
+  At the very end of your response, on its own line, add exactly: "Tip: mention @Project to apply task changes, or @Canvas for code edits."
+- Only add this tip when the message clearly implies a desire to make changes. For general questions, reports, or summaries, omit it.
+- Never add the tip when @Project or @Canvas was already included.
+
 FORMATTING:
 - Use - or • for lists. No heavy markdown (no **, #, ---).
 - Plain prose for paragraphs. Readable, not bureaucratic.`
@@ -108,7 +125,6 @@ FORMATTING:
 // Intent classification controls which data sources are fetched per query,
 // keeping token usage proportional to what the question actually needs.
 //
-// INDUSTRY PATTERN — how companies solve this at scale:
 //
 //  1. Keyword/heuristic router (this implementation):
 //       Zero cost, <1ms, handles ~75-80% of queries correctly.
@@ -135,7 +151,6 @@ FORMATTING:
 //       Requires training data (~500+ labelled examples) and a hosted
 //       inference endpoint.
 //
-// For Converse today: approach 1. The plan struct supports approach 3 later.
 // ============================================================
 
 // toraContextFlags is a bitmask of data sources to load for a given query.
@@ -148,15 +163,16 @@ const (
 	toraFlagSubtasks                               // fetch subtask relations per task
 	toraFlagBlockers                               // fetch blocked_by dependency relations
 	toraFlagChatOnly                               // skip board data entirely — chat context is enough
+	toraFlagMutation                               // @Project tag present — apply task mutations
 )
 
 // toraLoadPlan describes what to fetch, the token budget, and the model tier
 // to use for this query.
 type toraLoadPlan struct {
-	flags      toraContextFlags
-	maxTasks   int    // row cap on the task list — directly controls token spend
-	modelTier  string // ai.AIModelTierLight / Standard / Heavy
-	reason     string // debug label logged with each request
+	flags     toraContextFlags
+	maxTasks  int    // row cap on the task list — directly controls token spend
+	modelTier string // ai.AIModelTierLight / Standard / Heavy
+	reason    string // debug label logged with each request
 }
 
 func (p toraLoadPlan) has(f toraContextFlags) bool { return p.flags&f != 0 }
@@ -224,14 +240,14 @@ func toraScoreKeywords(q string, keywords []string) int {
 func classifyToraIntent(query string) toraLoadPlan {
 	q := strings.ToLower(strings.TrimSpace(query))
 
-	sTask    := toraScoreKeywords(q, toraKwTask)
-	sSprint  := toraScoreKeywords(q, toraKwSprint)
-	sTeam    := toraScoreKeywords(q, toraKwTeam)
+	sTask := toraScoreKeywords(q, toraKwTask)
+	sSprint := toraScoreKeywords(q, toraKwSprint)
+	sTeam := toraScoreKeywords(q, toraKwTeam)
 	sBlocker := toraScoreKeywords(q, toraKwBlocker)
 	sSubtask := toraScoreKeywords(q, toraKwSubtask)
-	sReport  := toraScoreKeywords(q, toraKwReport)
-	sChat    := toraScoreKeywords(q, toraKwChat)
-	sCode    := toraScoreKeywords(q, toraKwCode)
+	sReport := toraScoreKeywords(q, toraKwReport)
+	sChat := toraScoreKeywords(q, toraKwChat)
+	sCode := toraScoreKeywords(q, toraKwCode)
 
 	totalProject := sTask + sSprint + sTeam + sBlocker + sReport
 
@@ -334,22 +350,55 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, _ string, _ st
 	}
 	prompt = stripToraMentionTokens(prompt)
 
+	// Detect explicit edit tags BEFORE intent classification so the classifier
+	// sees clean text, and the plan can be overridden below.
+	hasProjectTag := containsEditTag(prompt, toraProjectToken)
+	hasCanvasTag := containsEditTag(prompt, toraCanvasToken)
+	if hasProjectTag {
+		prompt = stripEditTag(prompt, toraProjectToken)
+	}
+	if hasCanvasTag {
+		prompt = stripEditTag(prompt, toraCanvasToken)
+	}
+
 	// Classify intent before anything else — determines which data sources to
 	// load and the token budget. Zero cost, <1ms.
 	plan := classifyToraIntent(prompt)
+
+	// @Project overrides the plan: force task list + sprint context + mutation
+	// instructions so the AI produces an accept/reject action block.
+	// maxTasks is set to a high value so ALL tasks are visible — partial context
+	// causes incomplete deletes and duplicate creates on repeated runs.
+	if hasProjectTag {
+		plan.flags |= toraFlagTaskList | toraFlagSprints | toraFlagMutation
+		plan.maxTasks = 500 // show every task so the AI has full context
+		if plan.modelTier == ai.AIModelTierLight {
+			plan.modelTier = ai.AIModelTierStandard
+		}
+		plan.reason += "+@project"
+	}
+	// @Canvas is reserved for code edits — noted in plan for future use.
+	if hasCanvasTag {
+		plan.reason += "+@canvas"
+	}
 	log.Printf("[ws] tora intent: plan=%s maxTasks=%d", plan.reason, plan.maxTasks)
 
 	releaseTyping := h.beginToraTyping(roomID)
 	defer releaseTyping()
 
-	ctx, cancel := context.WithTimeout(context.Background(), toraRequestTimeout)
+	// Mutation requests may require multiple AI turns — use the longer timeout.
+	requestTimeout := toraRequestTimeout
+	if plan.has(toraFlagMutation) {
+		requestTimeout = toraRequestTimeoutMutation
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
 	rollingSummary := h.loadRoomRollingSummary(ctx, roomID)
 	contextMessages := h.loadRecentMessagesFromRedis(ctx, roomID, toraContextMsgLimit())
 	workspaceCtx := h.fetchToraWorkspaceContext(ctx, roomID, plan)
-	aiPrompt := buildToraPrompt(rollingSummary, contextMessages, workspaceCtx, prompt)
-	aiResponse, err := ai.DefaultRouter.GenerateChatResponseWithHint(ctx, aiPrompt, plan.modelTier)
+	aiPrompt := buildToraPrompt(rollingSummary, contextMessages, workspaceCtx, prompt, plan.has(toraFlagMutation))
+	aiResponse, err := callToraWithCompletion(ctx, aiPrompt, plan)
 	if err != nil {
 		log.Printf("[ws] tora mention ai response failed: %v", err)
 		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(err))
@@ -361,6 +410,17 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, _ string, _ st
 		fallbackError := errors.New("empty ai response")
 		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(fallbackError))
 		return
+	}
+
+	// If the response contains a structured action block, broadcast it as a
+	// tora_action message so the frontend can render accept/reject cards.
+	if plan.has(toraFlagMutation) {
+		textPart, actionsJSON := parseToraMutationResponse(responseText)
+		if actionsJSON != "" {
+			h.broadcast <- newToraBotActionMessage(roomID, textPart, actionsJSON)
+			go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+			return
+		}
 	}
 
 	h.broadcast <- newToraBotMessage(roomID, responseText)
@@ -376,6 +436,356 @@ func newToraBotMessage(roomID, content string) models.Message {
 		SenderName: toraBotSenderName,
 		Content:    strings.TrimSpace(content),
 		Type:       "text",
+		CreatedAt:  time.Now().UTC(),
+	}
+}
+
+// toraResponseIsRefusal returns true when the AI clearly stated it cannot or
+// will not perform the requested operation. Used to decide whether to re-ask.
+func toraResponseIsRefusal(response string) bool {
+	lower := strings.ToLower(response)
+	for _, pat := range []string{
+		"cannot", "can't", "unable to", "not possible", "not able to",
+		"don't have", "do not have", "insufficient", "no task ids",
+		"no ids available", "couldn't find", "could not find",
+		"no tasks found", "i don't see any", "i do not see any",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// toraResponseIsPlan returns true when the AI described what it will do but
+// did not yet produce the <<<TORA_ACTIONS>>> block.
+func toraResponseIsPlan(response string) bool {
+	lower := strings.ToLower(response)
+	for _, pat := range []string{
+		"i'll ", "i will ", "i would ", "i'm going to ", "i am going to ",
+		"here's my plan", "here is my plan", "here's what i'll",
+		"my proposal", "my approach", "i propose",
+		"i'll merge", "i'll combine", "i'll consolidate", "i'll create",
+		"i'll delete", "i'll update", "let me ", "i suggest",
+		"this would reduce", "this will reduce",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// callToraWithCompletion runs the AI call and, when a mutation was requested,
+// automatically retries up to toraMutationMaxTurns times if the AI described
+// its plan but forgot to emit the <<<TORA_ACTIONS>>> block.
+//
+// Each follow-up turn appends the previous AI response to the prompt and asks
+// the AI to now produce the action block it described. The loop stops when:
+//   - a valid action block is found
+//   - the AI signals it cannot do the task (refusal)
+//   - toraMutationMaxTurns is exhausted
+func callToraWithCompletion(ctx context.Context, basePrompt string, plan toraLoadPlan) (string, error) {
+	prompt := basePrompt
+	var lastResponse string
+
+	// Extract the current task count from the workspace context block so we can
+	// verify the arithmetic in the action block matches the user's target.
+	currentTaskCount := extractTotalTaskCount(basePrompt)
+	targetTaskCount := extractTargetTaskCount(basePrompt)
+
+	for turn := 0; turn < toraMutationMaxTurns; turn++ {
+		response, err := ai.DefaultRouter.GenerateChatResponseWithHint(ctx, prompt, plan.modelTier)
+		if err != nil {
+			return "", err
+		}
+		response = strings.TrimSpace(response)
+		if response == "" {
+			return "", errors.New("empty ai response")
+		}
+		lastResponse = response
+
+		// Non-mutation requests are always complete after the first turn.
+		if !plan.has(toraFlagMutation) {
+			return response, nil
+		}
+
+		// Mutation request: check for a valid action block.
+		_, actionsJSON := parseToraMutationResponse(response)
+		if actionsJSON != "" {
+			// If the user specified a target count, verify the arithmetic
+			// in the action block is correct before accepting the response.
+			if targetTaskCount > 0 && currentTaskCount > 0 && turn < toraMutationMaxTurns-1 {
+				if note := verifyActionCountArithmetic(actionsJSON, currentTaskCount, targetTaskCount); note != "" {
+					// Arithmetic is wrong — ask the AI to fix the block.
+					fixupNote := "\n\n=== ARITHMETIC VERIFICATION FAILED ===\n" + note +
+						"\n\nPlease re-emit the <<<TORA_ACTIONS>>> block with the correct number of " +
+						"task_create and task_delete entries so that the final count equals exactly " +
+						fmt.Sprintf("%d tasks. Show your corrected count arithmetic first.", targetTaskCount)
+					prompt = basePrompt + "\n\n=== YOUR PREVIOUS RESPONSE ===\n" + response + "\n=== END ===" + fixupNote
+					continue
+				}
+			}
+			return response, nil // arithmetic OK or no target specified
+		}
+
+		// AI said it can't — stop retrying.
+		if toraResponseIsRefusal(response) {
+			return response, nil
+		}
+
+		// Last turn — return whatever we have.
+		if turn == toraMutationMaxTurns-1 {
+			break
+		}
+
+		// AI seems to have described a plan without emitting the action block.
+		followUpNote := "\n\n=== YOUR PREVIOUS RESPONSE ===\n" + response +
+			"\n=== END ===\n\n" +
+			"You described the changes above but did not output the <<<TORA_ACTIONS>>> block. " +
+			"Please output it now — start directly with <<<TORA_ACTIONS>>> and list every " +
+			"task_create and task_delete entry you described. Do not repeat the explanation."
+		prompt = basePrompt + followUpNote
+	}
+
+	return lastResponse, nil
+}
+
+// extractTotalTaskCount reads "Total tasks (excluding support tickets): N" from
+// the workspace context block embedded in the prompt, so support tickets are
+// never included in arithmetic verification.
+func extractTotalTaskCount(prompt string) int {
+	// Try the new label first (excludes support tickets)
+	const marker = "Total tasks (excluding support tickets): "
+	idx := strings.Index(prompt, marker)
+	if idx < 0 {
+		// Fallback for older context format
+		const fallback = "Total tasks: "
+		idx = strings.Index(prompt, fallback)
+		if idx < 0 {
+			return 0
+		}
+		idx += len(fallback)
+	} else {
+		idx += len(marker)
+	}
+	rest := prompt[idx:]
+	n := 0
+	for _, ch := range rest {
+		if ch >= '0' && ch <= '9' {
+			n = n*10 + int(ch-'0')
+		} else {
+			break
+		}
+	}
+	return n
+}
+
+// extractTargetTaskCount looks for a target count in the user's query portion of
+// the prompt. We scan for patterns like "to 17 tasks", "total tasks to 17",
+// "make it 17", "reduce to 17", etc.
+func extractTargetTaskCount(prompt string) int {
+	// The user's query is at the very end of the prompt (after all context sections).
+	// We look in the last 400 chars to avoid false matches in task titles.
+	search := prompt
+	if len(search) > 400 {
+		search = search[len(search)-400:]
+	}
+	lower := strings.ToLower(search)
+	// Common patterns: "to 17 tasks", "total.*17", "make.*17 tasks", "exactly 17"
+	patterns := []string{
+		"total tasks to ", "tasks to ", "to exactly ", "make.*to ", "reduce to ",
+		"to ", "exactly ", "total of ", "total to ",
+	}
+	for _, pat := range patterns {
+		idx := strings.LastIndex(lower, pat)
+		if idx < 0 {
+			continue
+		}
+		rest := lower[idx+len(pat):]
+		n := 0
+		found := false
+		for _, ch := range rest {
+			if ch >= '0' && ch <= '9' {
+				n = n*10 + int(ch-'0')
+				found = true
+			} else if found {
+				break
+			}
+		}
+		if found && n > 0 && n < 10000 {
+			return n
+		}
+	}
+	return 0
+}
+
+// verifyActionCountArithmetic counts creates and deletes in the actions JSON and
+// returns a non-empty correction note if current + creates - deletes ≠ target.
+func verifyActionCountArithmetic(actionsJSON string, current, target int) string {
+	var actions []map[string]any
+	if err := json.Unmarshal([]byte(actionsJSON), &actions); err != nil {
+		return "" // can't parse; leave it
+	}
+	creates, deletes := 0, 0
+	for _, a := range actions {
+		switch a["kind"] {
+		case "task_create":
+			creates++
+		case "task_delete":
+			deletes++
+		}
+	}
+	result := current + creates - deletes
+	if result == target {
+		return "" // correct
+	}
+	return fmt.Sprintf(
+		"Current tasks: %d. Your block has %d creates and %d deletes → %d + %d − %d = %d tasks. Target is %d tasks. Difference: %+d. Adjust your task_delete or task_create entries to fix this.",
+		current, creates, deletes, current, creates, deletes, result, target, target-result,
+	)
+}
+
+// toraMutationInstructions is appended to the prompt when the intent plan
+// includes toraFlagMutation. It instructs the AI to produce a structured JSON
+// action block that the frontend can present as an accept/reject card.
+const toraMutationInstructions = `
+TASK MUTATIONS — you may propose task changes when the user asks you to.
+When proposing any task creation, update, or deletion you MUST output a structured
+block at the very END of your response, after your explanation:
+
+<<<TORA_ACTIONS>>>
+[
+  {
+    "kind": "task_create",
+    "title": "Task title",
+    "description": "optional description",
+    "status": "Todo",
+    "sprint": "Sprint name (required — always include the sprint this task belongs to)",
+    "task_type": "sprint",
+    "budget": 2000,
+    "start_date": "2024-03-01T00:00:00Z",
+    "due_date": "2024-04-01T00:00:00Z",
+    "roles": [
+      { "role": "Backend Developer", "responsibilities": "Implement API endpoints and database schema" },
+      { "role": "Frontend Developer", "responsibilities": "Build UI components and integrate API" }
+    ]
+  },
+  {
+    "kind": "task_update",
+    "task_id": "exact-uuid-from-task-board-data",
+    "task_title": "Current task title",
+    "task_sprint": "Sprint the task currently belongs to",
+    "task_parent": "Parent task title if this is a subtask, omit if top-level",
+    "changes": {
+      "title": "New title",
+      "status": "In Progress",
+      "sprint": "Sprint 2",
+      "description": "New description",
+      "budget": 1500,
+      "due_date": "2024-05-01T00:00:00Z",
+      "roles": [{ "role": "QA Engineer", "responsibilities": "Write and run test cases" }]
+    },
+    "change_details": {
+      "title": { "from": "Current task title", "to": "New title" },
+      "status": { "from": "Todo", "to": "In Progress" },
+      "sprint": { "from": "Sprint 1", "to": "Sprint 2" }
+    }
+  },
+  {
+    "kind": "task_delete",
+    "task_id": "exact-uuid-from-task-board-data",
+    "task_title": "Task title",
+    "task_sprint": "Sprint the task belongs to",
+    "task_parent": "Parent task title if subtask, omit if top-level"
+  }
+]
+<<<END_TORA_ACTIONS>>>
+
+Rules:
+- Only include actions you are confident about.
+- For task_update / task_delete: task_id MUST be an exact ID from the {id:...} tags in the task board data above. Never invent IDs.
+- Always populate task_sprint and task_parent (when applicable) so the user can identify which task is being changed without seeing internal IDs.
+- For task_update: only include fields in "changes" that should actually change.
+- For task_update: keep "changes" API-safe and include only the new values to apply.
+- You MAY include "change_details" as optional display metadata for the UI. When the current value is visible in the task board data above, include {from, to} for each changed field. Never invent old values; if you cannot verify the previous value, omit that field from "change_details" or include only "to".
+- For task_create: ALWAYS include budget (estimated cost in USD as a number), start_date, due_date, and roles. Estimate reasonable values based on task complexity, sprint timeline, and team structure. Roles must reflect which team functions are needed for the task and what each is responsible for.
+- When editing or merging tasks (task_update), preserve and update budget/dates/roles in the "changes" object to reflect the merged scope.
+- budget is a plain number (no currency symbol), dates are ISO 8601 strings (e.g. "2024-04-15T00:00:00Z"), roles is an array of {role, responsibilities} objects.
+
+SUPPORT TICKETS vs TASKS — CRITICAL DISTINCTION:
+- Support tickets (task_type="support") are a completely separate entity from tasks.
+- They are NEVER counted in task totals. "Make 13 tasks" means 13 tasks PLUS however many support tickets already exist or are requested separately.
+- When creating support tickets, use task_type="support" in the action block.
+- COUNT ARITHMETIC must only count tasks (task_type="sprint"). Count support tickets separately if the user asks for them.
+- Support ticket counts are listed separately in the task board data under "Support Tickets" — do not include them in your task arithmetic.
+
+MERGE STRATEGY — when consolidating or merging tasks:
+- Prefer UPDATE + DELETE over CREATE + DELETE. Pick one existing task to become the merged result, update all its fields (title, description, budget, dates, roles, sprint) via task_update, then delete all the others being merged away.
+- Only use task_create for genuinely new tasks that have no suitable existing task to update into.
+- This preserves task history and reduces API calls. Example: merging 5 tasks → 1 means 1 task_update (on the task you choose to keep) + 4 task_deletes (for the ones being merged away).
+
+COUNT ARITHMETIC — CRITICAL:
+Before emitting any action block that involves a target task count (e.g. "reduce to 12", "make it 31"), always calculate explicitly:
+  current_count = number of TASKS (task_type=sprint/general) currently on the board — read from "Total tasks (excluding support tickets): N" in the board data above. NEVER include support tickets in this count.
+  creates = number of task_create entries with task_type != "support"
+  updates_that_add = 0 (updates don't change the count)
+  deletes = number of task_delete entries for tasks (NOT support tickets)
+  final_count = current_count + creates - deletes
+Verify that final_count equals the requested target BEFORE emitting the block.
+If final_count ≠ target, adjust your creates or deletes until it does.
+State this calculation in your plain-text explanation so the user can verify it.
+Example: "Currently 21 tasks (support tickets excluded). To reach 13: I will update 13 existing tasks (keeping them) and delete 8 → 21 + 0 − 8 = 13. ✓"
+Support ticket arithmetic is separate: "User also wants 2 new support tickets → task_create ×2 with task_type=support."
+
+IDEMPOTENCY — CRITICAL:
+Before proposing a task_create, scan the full task board data for a task with the same title (case-insensitive). If one already exists, do NOT create a duplicate. Instead, prefer a task_update on the existing task. If extra duplicates exist, emit task_delete for those. Prefer UPDATE+DELETE over CREATE+DELETE whenever an existing task can serve as the merge target.
+
+- Precede the block with a brief plain-text explanation including the count arithmetic above.
+- If you cannot complete the request (e.g. task not found, or no IDs available), explain why in plain text and do NOT emit the block.
+- NEVER partially emit a block. Either include all required actions or none.
+`
+
+// parseToraMutationResponse splits an AI response into a human-readable text
+// part and the raw JSON actions string. Returns ("", "") for the actions if no
+// valid action block is present.
+func parseToraMutationResponse(response string) (text string, actionsJSON string) {
+	const startMarker = "<<<TORA_ACTIONS>>>"
+	const endMarker = "<<<END_TORA_ACTIONS>>>"
+
+	startIdx := strings.Index(response, startMarker)
+	if startIdx < 0 {
+		return strings.TrimSpace(response), ""
+	}
+	endIdx := strings.Index(response, endMarker)
+	if endIdx < 0 || endIdx <= startIdx {
+		return strings.TrimSpace(response), ""
+	}
+
+	rawText := strings.TrimSpace(response[:startIdx])
+	rawJSON := strings.TrimSpace(response[startIdx+len(startMarker) : endIdx])
+
+	// Validate: must be a non-empty JSON array
+	var parsed []any
+	if err := json.Unmarshal([]byte(rawJSON), &parsed); err != nil || len(parsed) == 0 {
+		return strings.TrimSpace(response), ""
+	}
+
+	return rawText, rawJSON
+}
+
+func newToraBotActionMessage(roomID, text, actionsJSON string) models.Message {
+	payload, _ := json.Marshal(map[string]any{
+		"text":        text,
+		"actionsJson": actionsJSON,
+	})
+	return models.Message{
+		ID:         fmt.Sprintf("%s_tora_%d", roomID, time.Now().UTC().UnixNano()),
+		RoomID:     roomID,
+		SenderID:   toraBotSenderID,
+		SenderName: toraBotSenderName,
+		Content:    string(payload),
+		Type:       "tora_action",
 		CreatedAt:  time.Now().UTC(),
 	}
 }
@@ -472,6 +882,29 @@ func (h *Hub) emitToraTyping(roomID string, isTyping bool) {
 		return
 	}
 	_ = h.msgService.Redis.Client.Publish(context.Background(), chatTypingChannel, payload).Err()
+}
+
+// containsEditTag checks for @project or @canvas (case-insensitive) in a prompt.
+func containsEditTag(prompt, tag string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(prompt)), strings.ToLower(tag))
+}
+
+// stripEditTag removes all occurrences of tag (case-insensitive) from prompt.
+func stripEditTag(prompt, tag string) string {
+	lower := strings.ToLower(prompt)
+	lowerTag := strings.ToLower(tag)
+	var out strings.Builder
+	for {
+		idx := strings.Index(lower, lowerTag)
+		if idx < 0 {
+			out.WriteString(prompt)
+			break
+		}
+		out.WriteString(prompt[:idx])
+		prompt = prompt[idx+len(tag):]
+		lower = lower[idx+len(tag):]
+	}
+	return strings.TrimSpace(out.String())
 }
 
 func containsToraMention(content string) bool {
@@ -620,14 +1053,18 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 		id              string
 		title           string
 		status          string
+		taskType        string
 		description     string
 		sprint          string
 		assigneeID      string
 		statusActorName string
+		dueDate         *time.Time
+		startDate       *time.Time
+		rolesRaw        *string
 	}
 
 	tasksQuery := fmt.Sprintf(
-		`SELECT id, title, status, description, sprint_name, assignee_id, status_actor_name FROM %s WHERE room_id = ?`,
+		`SELECT id, title, status, task_type, description, sprint_name, assignee_id, status_actor_name, due_date, start_date, roles FROM %s WHERE room_id = ?`,
 		h.msgService.Scylla.Table("tasks"),
 	)
 	tasksIter := h.msgService.Scylla.Session.Query(tasksQuery, roomUUID).WithContext(ctx).Iter()
@@ -642,28 +1079,38 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 		taskID          gocql.UUID
 		title           string
 		status          string
+		taskType        string
 		description     string
 		sprint          string
 		assigneeUUIDPtr *gocql.UUID
 		statusActorName string
+		toraDueDate     *time.Time
+		toraStartDate   *time.Time
+		toraRolesRaw    *string
 	)
-	for tasksIter.Scan(&taskID, &title, &status, &description, &sprint, &assigneeUUIDPtr, &statusActorName) {
+	for tasksIter.Scan(&taskID, &title, &status, &taskType, &description, &sprint, &assigneeUUIDPtr, &statusActorName, &toraDueDate, &toraStartDate, &toraRolesRaw) {
 		row := taskRow{
 			id:              strings.TrimSpace(taskID.String()),
 			title:           strings.TrimSpace(title),
 			status:          strings.TrimSpace(status),
+			taskType:        strings.ToLower(strings.TrimSpace(taskType)),
 			description:     strings.TrimSpace(description),
 			sprint:          strings.TrimSpace(sprint),
 			statusActorName: strings.TrimSpace(statusActorName),
+			dueDate:         toraDueDate,
+			startDate:       toraStartDate,
+			rolesRaw:        toraRolesRaw,
 		}
 		if assigneeUUIDPtr != nil {
 			row.assigneeID = strings.TrimSpace(assigneeUUIDPtr.String())
 			assigneeIDSet[row.assigneeID] = struct{}{}
 		}
 		all = append(all, row)
-		counts[row.status]++
-		if row.sprint != "" {
-			sprints[row.sprint] = append(sprints[row.sprint], row.title)
+		if row.taskType != "support" {
+			counts[row.status]++
+			if row.sprint != "" {
+				sprints[row.sprint] = append(sprints[row.sprint], row.title)
+			}
 		}
 		taskTitleByID[row.id] = row.title
 	}
@@ -760,22 +1207,33 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 		cap = 60
 	}
 
+	// Separate tasks from support tickets
+	var regularTasks, supportTickets []taskRow
+	for _, t := range all {
+		if t.taskType == "support" {
+			supportTickets = append(supportTickets, t)
+		} else {
+			regularTasks = append(regularTasks, t)
+		}
+	}
+
 	var sb strings.Builder
 	sb.WriteString("=== TASK BOARD DATA ===\n")
-	sb.WriteString(fmt.Sprintf("Total tasks: %d\n", len(all)))
+	sb.WriteString(fmt.Sprintf("Total tasks (excluding support tickets): %d\n", len(regularTasks)))
+	sb.WriteString(fmt.Sprintf("Total support tickets (separate — NOT counted as tasks): %d\n", len(supportTickets)))
 
-	// Status breakdown — always included; compact and low-token
+	// Status breakdown — only regular tasks
 	if len(counts) > 0 {
 		parts := make([]string, 0, len(counts))
 		for s, n := range counts {
 			parts = append(parts, fmt.Sprintf("%s=%d", s, n))
 		}
-		sb.WriteString("Status breakdown: " + strings.Join(parts, ", ") + "\n")
+		sb.WriteString("Task status breakdown: " + strings.Join(parts, ", ") + "\n")
 	}
 
-	// Sprint groupings — only when plan includes sprint context
+	// Sprint groupings — only regular tasks
 	if plan.has(toraFlagSprints) && len(sprints) > 0 {
-		sb.WriteString("Sprints/phases:\n")
+		sb.WriteString("Sprints/phases (tasks only):\n")
 		for sprintName, tasks := range sprints {
 			sb.WriteString(fmt.Sprintf("  Sprint \"%s\" (%d tasks): %s\n",
 				sprintName, len(tasks), strings.Join(tasks, ", ")))
@@ -784,12 +1242,20 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 
 	// Per-task lines — richness scales with what the plan loaded
 	sb.WriteString("Tasks:\n")
-	for i, t := range all {
+	for i, t := range regularTasks {
 		if i >= cap {
-			sb.WriteString(fmt.Sprintf("  ... and %d more tasks (token budget reached)\n", len(all)-i))
+			sb.WriteString(fmt.Sprintf("  ... and %d more tasks (token budget reached)\n", len(regularTasks)-i))
 			break
 		}
-		line := fmt.Sprintf("  - [%s] %s", t.status, t.title)
+		// Always include the full task ID — the AI needs it to produce valid
+		// task_update / task_delete action payloads.
+		// Include sprint so the AI can distinguish duplicate-named tasks.
+		var line string
+		if t.sprint != "" {
+			line = fmt.Sprintf("  - [%s] %s  {id:%s}  sprint:%q", t.status, t.title, t.id, t.sprint)
+		} else {
+			line = fmt.Sprintf("  - [%s] %s  {id:%s}  sprint:(none)", t.status, t.title, t.id)
+		}
 
 		// Assignee — show resolved name when available, fall back to status actor
 		if name, ok := assigneeNameByID[t.assigneeID]; ok && name != "" {
@@ -837,6 +1303,32 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 			}
 		}
 
+		// Dates — include when present so AI can reason about timeline
+		if t.startDate != nil && !t.startDate.IsZero() {
+			line += fmt.Sprintf(" | start:%s", t.startDate.UTC().Format("2006-01-02"))
+		}
+		if t.dueDate != nil && !t.dueDate.IsZero() {
+			line += fmt.Sprintf(" | due:%s", t.dueDate.UTC().Format("2006-01-02"))
+		}
+
+		// Roles — list role names so AI knows who owns what
+		if t.rolesRaw != nil && strings.TrimSpace(*t.rolesRaw) != "" {
+			var roles []struct {
+				Role string `json:"role"`
+			}
+			if json.Unmarshal([]byte(*t.rolesRaw), &roles) == nil && len(roles) > 0 {
+				roleNames := make([]string, 0, len(roles))
+				for _, r := range roles {
+					if r.Role != "" {
+						roleNames = append(roleNames, r.Role)
+					}
+				}
+				if len(roleNames) > 0 {
+					line += " | roles: " + strings.Join(roleNames, ", ")
+				}
+			}
+		}
+
 		// Description excerpt — always included for task context
 		desc := t.description
 		if len(desc) > 100 {
@@ -847,6 +1339,23 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 		}
 
 		sb.WriteString(line + "\n")
+	}
+
+	// Support tickets — listed separately so AI never conflates them with tasks
+	if len(supportTickets) > 0 {
+		sb.WriteString("Support Tickets (SEPARATE from tasks — do NOT count these in task totals):\n")
+		for _, t := range supportTickets {
+			var line string
+			if t.sprint != "" {
+				line = fmt.Sprintf("  - [%s] %s  {id:%s}  sprint:%q  type:support", t.status, t.title, t.id, t.sprint)
+			} else {
+				line = fmt.Sprintf("  - [%s] %s  {id:%s}  sprint:(none)  type:support", t.status, t.title, t.id)
+			}
+			if t.dueDate != nil && !t.dueDate.IsZero() {
+				line += fmt.Sprintf(" | due:%s", t.dueDate.UTC().Format("2006-01-02"))
+			}
+			sb.WriteString(line + "\n")
+		}
 	}
 
 	sb.WriteString("=== END TASK BOARD DATA ===\n")
@@ -865,7 +1374,7 @@ func toraResolveRoomUUID(roomID string) gocql.UUID {
 	return u
 }
 
-func buildToraPrompt(rollingSummary string, contextMessages []models.Message, workspaceCtx string, prompt string) string {
+func buildToraPrompt(rollingSummary string, contextMessages []models.Message, workspaceCtx string, prompt string, includeMutations bool) string {
 	// Format recent chat messages as readable lines, not raw JSON
 	chatLines := ""
 	if len(contextMessages) > 0 {
@@ -901,6 +1410,9 @@ func buildToraPrompt(rollingSummary string, contextMessages []models.Message, wo
 	}
 	if chatLines != "" {
 		parts = append(parts, "--- RECENT CHAT MESSAGES (live, current conversation — ground truth for what was actually said) ---\n"+chatLines+"\n--- END CHAT ---")
+	}
+	if includeMutations {
+		parts = append(parts, strings.TrimSpace(toraMutationInstructions))
 	}
 	parts = append(parts, "--- USER MESSAGE ---\n"+strings.TrimSpace(prompt))
 

@@ -2,6 +2,7 @@
 	import { createEventDispatcher, onMount, tick } from 'svelte';
 	import type { FieldSchema } from '$lib/stores/fieldSchema';
 	import type { OnlineMember } from '$lib/types/chat';
+	import { parseFlexibleDateValue } from '$lib/utils/dateParsing';
 
 	type TaskLike = {
 		id: string;
@@ -81,7 +82,7 @@
 
 	$: todayKey = toDateKey(new Date());
 	$: startDateFieldId = resolveDateFieldId(fieldSchemas, ['startdate']);
-	$: dueDateFieldId = resolveDateFieldId(fieldSchemas, ['duedate']);
+	$: dueDateFieldId = resolveDateFieldId(fieldSchemas, ['duedate', 'enddate', 'deadline']);
 	$: memberNameByKey = buildMemberNameByKey(onlineMembers);
 	$: parsedTasks = parseTasksForTimeline(tasks, startDateFieldId, dueDateFieldId, memberNameByKey);
 	$: datedTasks = parsedTasks.datedTasks;
@@ -92,14 +93,22 @@
 	$: timelineStartDate = addDays(weekStartDate, -PREVIOUS_DAYS);
 	$: timelineDays = buildTimelineDays(timelineStartDate, TOTAL_TIMELINE_DAYS, todayKey);
 	$: memberRows = buildMemberRows(onlineMembers, tasks, memberNameByKey);
-	$: rowMetricsByKey = buildRowMetrics(memberRows, datedTasks, timelineStartDate, timelineDays.length);
+	$: rowMetricsByKey = buildRowMetrics(
+		memberRows,
+		datedTasks,
+		timelineStartDate,
+		timelineDays.length
+	);
 
 	onMount(() => {
 		void centerVisibleWeek('auto');
 	});
 
 	function normalizeSchemaName(value: string) {
-		return value.trim().toLowerCase().replace(/[\s_-]+/g, '');
+		return value
+			.trim()
+			.toLowerCase()
+			.replace(/[\s_-]+/g, '');
 	}
 
 	function resolveDateFieldId(schemas: FieldSchema[], aliases: string[]) {
@@ -129,37 +138,6 @@
 			return 'in_progress';
 		}
 		return 'todo';
-	}
-
-	function parseDateValue(value: unknown): Date | null {
-		if (value instanceof Date && Number.isFinite(value.getTime())) {
-			return new Date(value.getTime());
-		}
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			const parsedFromNumber = new Date(value);
-			return Number.isFinite(parsedFromNumber.getTime()) ? parsedFromNumber : null;
-		}
-		if (typeof value !== 'string') {
-			return null;
-		}
-		const trimmed = value.trim();
-		if (!trimmed) {
-			return null;
-		}
-		const dateOnlyMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-		if (dateOnlyMatch) {
-			const year = Number.parseInt(dateOnlyMatch[1], 10);
-			const month = Number.parseInt(dateOnlyMatch[2], 10);
-			const day = Number.parseInt(dateOnlyMatch[3], 10);
-			if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-				return new Date(year, month - 1, day);
-			}
-		}
-		const parsed = new Date(trimmed);
-		if (!Number.isFinite(parsed.getTime())) {
-			return null;
-		}
-		return parsed;
 	}
 
 	function normalizeMemberKey(value: string) {
@@ -194,15 +172,15 @@
 		directField?: number | string | null
 	) {
 		if (directField != null) {
-			return parseDateValue(directField);
+			return parseFlexibleDateValue(directField);
 		}
 		const fields = task.customFields ?? {};
 		if (preferredFieldId && preferredFieldId in fields) {
-			return parseDateValue(fields[preferredFieldId]);
+			return parseFlexibleDateValue(fields[preferredFieldId]);
 		}
 		for (const key of fallbackKeys) {
 			if (key in fields) {
-				return parseDateValue(fields[key]);
+				return parseFlexibleDateValue(fields[key]);
 			}
 		}
 		return null;
@@ -225,9 +203,19 @@
 			const assigneeLabel =
 				assigneeKey === UNASSIGNED_KEY
 					? 'Unassigned'
-					: memberMap.get(assigneeKey) ?? readableName(assigneeRaw);
-			const startDate = readCustomDate(task, startFieldId, ['start_date', 'startDate', 'startdate'], task.startDate);
-			const dueDate = readCustomDate(task, dueFieldId, ['due_date', 'dueDate', 'duedate'], task.dueDate);
+					: (memberMap.get(assigneeKey) ?? readableName(assigneeRaw));
+			const startDate = readCustomDate(
+				task,
+				startFieldId,
+				['start_date', 'startDate', 'startdate'],
+				task.startDate
+			);
+			const dueDate = readCustomDate(
+				task,
+				dueFieldId,
+				['due_date', 'dueDate', 'duedate', 'end_date', 'endDate', 'enddate', 'deadline'],
+				task.dueDate
+			);
 
 			if (!startDate && !dueDate) {
 				undatedTasks.push({
@@ -451,11 +439,7 @@
 	}
 
 	function avatarInitials(name: string) {
-		const parts = name
-			.trim()
-			.split(/\s+/)
-			.filter(Boolean)
-			.slice(0, 2);
+		const parts = name.trim().split(/\s+/).filter(Boolean).slice(0, 2);
 		if (parts.length === 0) {
 			return 'U';
 		}
@@ -511,9 +495,7 @@
 				Previous week
 			</button>
 			<h3>{weekLabel}</h3>
-			<button type="button" class="toolbar-btn" on:click={() => shiftWeek(1)}>
-				Next week
-			</button>
+			<button type="button" class="toolbar-btn" on:click={() => shiftWeek(1)}> Next week </button>
 		</div>
 		<button type="button" class="toolbar-btn today" on:click={jumpToCurrentWeek}>Today</button>
 	</header>
@@ -543,7 +525,10 @@
 					overloadedDayIndices: new Set<number>(),
 					rowHeight: 44
 				}}
-				<div class="timeline-row" style={`--day-count:${timelineDays.length}; --row-height:${safeMetrics.rowHeight}px;`}>
+				<div
+					class="timeline-row"
+					style={`--day-count:${timelineDays.length}; --row-height:${safeMetrics.rowHeight}px;`}
+				>
 					<div class="member-cell">
 						<span class="member-avatar">{avatarInitials(row.name)}</span>
 						<div class="member-copy">

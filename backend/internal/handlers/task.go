@@ -17,6 +17,12 @@ import (
 	"github.com/gocql/gocql"
 )
 
+// TaskRole describes which team role is responsible for a portion of a task.
+type TaskRole struct {
+	Role            string `json:"role"`
+	Responsibilities string `json:"responsibilities"`
+}
+
 type TaskRecordResponse struct {
 	ID              string                 `json:"id"`
 	RoomID          string                 `json:"room_id"`
@@ -34,6 +40,7 @@ type TaskRecordResponse struct {
 	AssigneeID      string                 `json:"assignee_id,omitempty"`
 	DueDate         *time.Time             `json:"due_date,omitempty"`
 	StartDate       *time.Time             `json:"start_date,omitempty"`
+	Roles           []TaskRole             `json:"roles,omitempty"`
 	StatusActorID   string                 `json:"status_actor_id,omitempty"`
 	StatusActorName string                 `json:"status_actor_name,omitempty"`
 	StatusChangedAt *time.Time             `json:"status_changed_at,omitempty"`
@@ -65,6 +72,7 @@ type TaskCreateRequest struct {
 	SpentCostAlt    *float64               `json:"spentCost,omitempty"`
 	DueDate         *time.Time             `json:"due_date,omitempty"`
 	StartDate       *time.Time             `json:"start_date,omitempty"`
+	Roles           []TaskRole             `json:"roles,omitempty"`
 }
 
 type TaskStatusUpdateRequest struct {
@@ -89,6 +97,7 @@ type TaskUpdateRequest struct {
 	AssigneeIDAlt   *string                 `json:"assigneeId"`
 	DueDate         *time.Time              `json:"due_date,omitempty"`
 	StartDate       *time.Time              `json:"start_date,omitempty"`
+	Roles           []TaskRole              `json:"roles,omitempty"`
 }
 
 type taskMetadataEntry struct {
@@ -350,6 +359,29 @@ func nullableTaskCustomFieldsJSON(raw string) interface{} {
 	return trimmed
 }
 
+func marshalTaskRoles(roles []TaskRole) *string {
+	if len(roles) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(roles)
+	if err != nil {
+		return nil
+	}
+	s := string(encoded)
+	return &s
+}
+
+func parseTaskRoles(raw *string) []TaskRole {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil
+	}
+	var roles []TaskRole
+	if err := json.Unmarshal([]byte(*raw), &roles); err != nil {
+		return nil
+	}
+	return roles
+}
+
 func applyTaskFinancialsToDescription(description string, budget *float64, actualCost *float64) string {
 	baseDescription, entries := parseTaskMetadataEntries(description)
 	metadataParts := make([]string, 0, len(entries)+2)
@@ -503,6 +535,7 @@ func (h *RoomHandler) ensureTaskSchema() {
 		fmt.Sprintf(`ALTER TABLE %s ADD task_type text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD due_date timestamp`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD start_date timestamp`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD roles text`, tasksTable),
 	}
 	for _, alterQuery := range alterQueries {
 		if err := h.scylla.Session.Query(alterQuery).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
@@ -527,7 +560,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date FROM %s WHERE room_id = ?`,
+		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	iter := h.scylla.Session.Query(query, roomUUID).WithContext(r.Context()).Iter()
@@ -549,6 +582,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 		taskType        string
 		dueDate         *time.Time
 		startDate       *time.Time
+		rolesRaw        *string
 	)
 	for iter.Scan(
 		&taskID,
@@ -566,6 +600,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 		&taskType,
 		&dueDate,
 		&startDate,
+		&rolesRaw,
 	) {
 		task := TaskRecordResponse{
 			ID:              strings.TrimSpace(taskID.String()),
@@ -580,6 +615,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 			StatusActorName: strings.TrimSpace(statusActorName),
 			CreatedAt:       createdAt.UTC(),
 			UpdatedAt:       updatedAt.UTC(),
+			Roles:           parseTaskRoles(rolesRaw),
 		}
 		task.Budget = extractTaskBudget(task.Description)
 		task.ActualCost = extractTaskActualCost(task.Description)
@@ -715,7 +751,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	statusActorName := resolveTaskRequesterName(r)
 
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		h.scylla.Table("tasks"),
 	)
 	if err := h.scylla.Session.Query(
@@ -736,6 +772,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		nullableTrimmedText(taskType),
 		req.DueDate,
 		req.StartDate,
+		marshalTaskRoles(req.Roles),
 	).WithContext(r.Context()).Exec(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create room task"})
@@ -758,6 +795,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:       now,
 		DueDate:         req.DueDate,
 		StartDate:       req.StartDate,
+		Roles:           req.Roles,
 	}
 	response.Budget = extractTaskBudget(response.Description)
 	response.ActualCost = extractTaskActualCost(response.Description)
@@ -978,6 +1016,10 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		setClauses = append(setClauses, "start_date = ?")
 		args = append(args, req.StartDate)
 	}
+	if len(req.Roles) > 0 {
+		setClauses = append(setClauses, "roles = ?")
+		args = append(args, marshalTaskRoles(req.Roles))
+	}
 
 	if len(setClauses) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
@@ -1002,7 +1044,7 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	selectQuery := fmt.Sprintf(
-		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date FROM %s WHERE room_id = ? AND id = ?`,
+		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ? AND id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	var (
@@ -1021,6 +1063,7 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		taskType        string
 		dueDate         *time.Time
 		startDate       *time.Time
+		rolesRaw        *string
 	)
 	if err := h.scylla.Session.Query(selectQuery, roomUUID, taskID).WithContext(r.Context()).Scan(
 		&foundTaskID,
@@ -1038,6 +1081,7 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		&taskType,
 		&dueDate,
 		&startDate,
+		&rolesRaw,
 	); err != nil {
 		if err == gocql.ErrNotFound {
 			w.WriteHeader(http.StatusNotFound)
@@ -1062,6 +1106,7 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		StatusActorName: strings.TrimSpace(statusActorName),
 		CreatedAt:       createdAt.UTC(),
 		UpdatedAt:       updatedAt.UTC(),
+		Roles:           parseTaskRoles(rolesRaw),
 	}
 	response.Budget = extractTaskBudget(response.Description)
 	response.ActualCost = extractTaskActualCost(response.Description)
@@ -1258,13 +1303,29 @@ func (h *RoomHandler) DeleteRoomTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ? AND id = ?`, h.scylla.Table("tasks"))
+	// ScyllaDB DELETE is always silent (returns no error even when the row
+	// doesn't exist). Check first so the frontend can distinguish a real
+	// delete from a stale/wrong ID.
+	var foundID gocql.UUID
+	checkQuery := fmt.Sprintf(`SELECT id FROM %s WHERE room_id = ? AND id = ? LIMIT 1`, h.scylla.Table("tasks"))
+	if scanErr := h.scylla.Session.Query(checkQuery, roomUUID, taskID).WithContext(r.Context()).Scan(&foundID); scanErr != nil {
+		if scanErr == gocql.ErrNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Task not found"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify task"})
+		return
+	}
+
+	deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ? AND id = ?`, h.scylla.Table("tasks"))
 	if err := h.deleteTaskRelationsForTask(r.Context(), normalizedRoomID, strings.TrimSpace(taskID.String())); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete task relations"})
 		return
 	}
-	if err := h.scylla.Session.Query(query, roomUUID, taskID).WithContext(r.Context()).Exec(); err != nil {
+	if err := h.scylla.Session.Query(deleteQuery, roomUUID, taskID).WithContext(r.Context()).Exec(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete room task"})
 		return
@@ -1343,10 +1404,14 @@ func deterministicTaskRoomUUID(normalizedRoomID string) gocql.UUID {
 
 func normalizeTaskTypeValue(taskType string) string {
 	normalized := strings.ToLower(strings.TrimSpace(taskType))
-	if normalized == "support" {
+	switch normalized {
+	case "support":
 		return "support"
+	case "sprint", "general", "":
+		return "sprint"
+	default:
+		return normalized // preserve custom types
 	}
-	return "sprint"
 }
 
 func normalizeTaskStatusValue(raw string) string {

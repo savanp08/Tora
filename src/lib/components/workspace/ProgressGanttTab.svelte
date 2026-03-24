@@ -3,6 +3,7 @@
 	import type { OnlineMember } from '$lib/types/chat';
 	import type { TimelineTask, TimelineTaskDurationUnit } from '$lib/types/timeline';
 	import { projectTimeline, recalculateGanttDates, setProjectTimeline } from '$lib/stores/timeline';
+	import { parseFlexibleDateValue } from '$lib/utils/dateParsing';
 
 	export let onlineMembers: OnlineMember[] = [];
 
@@ -82,6 +83,7 @@
 	let editingField: EditableRowField | '' = '';
 	let editingValue = '';
 	let ownerOptions: OwnerOption[] = [];
+	let isTimelineFullscreen = false;
 
 	$: timeline = $projectTimeline;
 	$: sprints = timeline?.sprints ?? [];
@@ -151,7 +153,9 @@
 		if (!owner) {
 			return options;
 		}
-		const exists = options.some((option) => normalizeOwnerKey(option.value) === normalizeOwnerKey(owner));
+		const exists = options.some(
+			(option) => normalizeOwnerKey(option.value) === normalizeOwnerKey(owner)
+		);
 		if (exists) {
 			return options;
 		}
@@ -168,6 +172,54 @@
 
 	function toDayString(value: Date) {
 		return value.toISOString().slice(0, 10);
+	}
+
+	function formatReadableDate(value: string | Date, includeYear = false) {
+		const parsed = parseFlexibleDateValue(value);
+		if (!parsed) {
+			return typeof value === 'string' ? value : '';
+		}
+		return parsed.toLocaleDateString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			...(includeYear ? { year: 'numeric' } : {})
+		});
+	}
+
+	function formatReadableDateRange(startValue: string, endValue: string, includeYear = false) {
+		const start = parseFlexibleDateValue(startValue);
+		const end = parseFlexibleDateValue(endValue);
+		if (!start || !end) {
+			return [startValue, endValue].filter(Boolean).join(' - ');
+		}
+
+		const rangeStart = start.getTime() <= end.getTime() ? start : end;
+		const rangeEnd = start.getTime() <= end.getTime() ? end : start;
+		const sameDay = rangeStart.toDateString() === rangeEnd.toDateString();
+		const sameMonth =
+			rangeStart.getFullYear() === rangeEnd.getFullYear() &&
+			rangeStart.getMonth() === rangeEnd.getMonth();
+		const sameYear = rangeStart.getFullYear() === rangeEnd.getFullYear();
+
+		if (sameDay) {
+			return formatReadableDate(rangeStart, includeYear);
+		}
+		if (sameMonth) {
+			const monthLabel = rangeStart.toLocaleDateString(undefined, { month: 'short' });
+			const startDay = rangeStart.getDate();
+			const endDay = rangeEnd.getDate();
+			if (includeYear) {
+				return `${monthLabel} ${startDay} - ${endDay}, ${rangeStart.getFullYear()}`;
+			}
+			return `${monthLabel} ${startDay} - ${endDay}`;
+		}
+		if (sameYear && includeYear) {
+			return `${formatReadableDate(rangeStart)} - ${formatReadableDate(rangeEnd)}, ${rangeStart.getFullYear()}`;
+		}
+		return `${formatReadableDate(rangeStart, !sameYear || includeYear)} - ${formatReadableDate(
+			rangeEnd,
+			!sameYear || includeYear
+		)}`;
 	}
 
 	function startOfDay(value: Date) {
@@ -439,7 +491,10 @@
 			(max, row) => (row.end.getTime() > max.getTime() ? row.end : max),
 			parsedRows[0].end
 		);
-		const totalColumns = Math.max(1, Math.ceil((maxEnd.getTime() - minStart.getTime()) / DAY_MS) + 1);
+		const totalColumns = Math.max(
+			1,
+			Math.ceil((maxEnd.getTime() - minStart.getTime()) / DAY_MS) + 1
+		);
 		const todayISO = toDayString(startOfDay(new Date()));
 
 		const dayCells: DayCell[] = Array.from({ length: totalColumns }, (_, columnIndex) => {
@@ -579,16 +634,30 @@
 	function priorityLabel(priority: string) {
 		return PRIORITY_LABELS[priority] || 'Medium';
 	}
+
+	function toggleTimelineFullscreen() {
+		isTimelineFullscreen = !isTimelineFullscreen;
+	}
+
+	function closeTimelineFullscreen() {
+		isTimelineFullscreen = false;
+	}
+
+	function handleWindowKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape' && isTimelineFullscreen) {
+			closeTimelineFullscreen();
+		}
+	}
 </script>
 
-<section class="gantt-tab" aria-label="Progress Gantt timeline">
-		<section class="toolbar-card">
-			<div class="toolbar-copy">
-				<h2>Sprint Gantt</h2>
-				<p>Jira-style timeline for this sprint with a horizontal date header.</p>
-			</div>
+<svelte:window on:keydown={handleWindowKeydown} />
 
-		
+<section class="gantt-tab" aria-label="Progress Gantt timeline">
+	<section class="toolbar-card">
+		<div class="toolbar-copy">
+			<h2>Sprint Gantt</h2>
+			<p>Jira-style timeline for this sprint with a horizontal date header.</p>
+		</div>
 
 		<div class="toolbar-meta">
 			{#if sprints.length > 1}
@@ -616,21 +685,52 @@
 	{#if !activeSprint}
 		<section class="timeline-empty">No sprint data available yet.</section>
 	{:else}
-		<section class="timeline-card">
+		{#if isTimelineFullscreen}
+			<div
+				class="timeline-fullscreen-backdrop"
+				aria-hidden="true"
+				on:click={closeTimelineFullscreen}
+			></div>
+		{/if}
+		<section class="timeline-card" class:is-fullscreen={isTimelineFullscreen}>
 			<header class="timeline-head">
-				<div>
+				<div class="timeline-head-copy">
 					<h3>{activeSprint.name}</h3>
-					<p>{activeSprint.start_date} to {activeSprint.end_date}</p>
+					<p>{formatReadableDateRange(activeSprint.start_date, activeSprint.end_date, true)}</p>
 				</div>
-				{#if ganttModel.hasOverlap}
-					<span class="overlap-warning">Overlapping dates detected</span>
-				{/if}
+				<div class="timeline-head-actions">
+					{#if ganttModel.hasOverlap}
+						<span class="overlap-warning">Overlapping dates detected</span>
+					{/if}
+					<button
+						type="button"
+						class="timeline-expand-btn"
+						aria-pressed={isTimelineFullscreen}
+						aria-label={isTimelineFullscreen
+							? 'Exit full screen Gantt view'
+							: 'Open full screen Gantt view'}
+						title={isTimelineFullscreen ? 'Exit full screen' : 'Open full screen'}
+						on:click={toggleTimelineFullscreen}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							{#if isTimelineFullscreen}
+								<path d="M9 4H4v5M15 4h5v5M4 15v5h5M20 15v5h-5"></path>
+							{:else}
+								<path d="M9 4H4v5M15 4h5v5M4 15v5h5M20 15v5h-5"></path>
+								<path d="M9 9 4 4M15 9l5-5M9 15l-5 5M15 15l5 5"></path>
+							{/if}
+						</svg>
+					</button>
+				</div>
 			</header>
 
 			{#if ganttModel.rows.length === 0}
 				<div class="timeline-empty">No tasks in this sprint yet.</div>
 			{:else}
-				<div class="gantt-scroll" style={`--left-col:${LEFT_COLUMN_WIDTH_PX}px; --day-col:${DAY_COLUMN_WIDTH_PX}px;`}>
+				<div
+					class="gantt-scroll"
+					style={`--left-col:${LEFT_COLUMN_WIDTH_PX}px; --day-col:${DAY_COLUMN_WIDTH_PX}px;`}
+				>
 					<div
 						class="gantt-grid"
 						style={`grid-template-columns: var(--left-col) repeat(${ganttModel.totalColumns}, var(--day-col));`}
@@ -638,14 +738,16 @@
 						<div class="gantt-top-left">
 							<span>Task</span>
 						</div>
-						<div
-							class="gantt-top-right"
-							style={`--date-cols:${ganttModel.totalColumns};`}
-						>
+						<div class="gantt-top-right" style={`--date-cols:${ganttModel.totalColumns};`}>
 							<div class="date-strip">
 								{#each ganttModel.dayCells as day (day.iso)}
-									<span class="date-cell" class:is-today={day.isToday} class:is-weekend={day.isWeekend}>
-										{day.weekLabel} {day.dayLabel}
+									<span
+										class="date-cell"
+										class:is-today={day.isToday}
+										class:is-weekend={day.isWeekend}
+									>
+										{day.weekLabel}
+										{day.dayLabel}
 									</span>
 								{/each}
 							</div>
@@ -675,7 +777,17 @@
 											{row.title}
 										</button>
 									{/if}
-									<small>{row.startDate} -> {row.endDate}</small>
+									<div class="task-date-range" title={`${row.startDate} to ${row.endDate}`}>
+										<span class="task-date-chip">
+											<span class="task-date-label">Start</span>
+											<strong>{formatReadableDate(row.startDate)}</strong>
+										</span>
+										<span class="task-date-separator" aria-hidden="true">to</span>
+										<span class="task-date-chip">
+											<span class="task-date-label">End</span>
+											<strong>{formatReadableDate(row.endDate)}</strong>
+										</span>
+									</div>
 								</div>
 								<div class="task-tags">
 									<span class={`tag status-${row.status}`}>{statusLabel(row.status)}</span>
@@ -797,6 +909,8 @@
 		--gantt-btn-bg: #edf2fb;
 		--gantt-btn-text: #1f2c42;
 		--gantt-btn-border: #c8d4e7;
+		--gantt-accent: #5578ff;
+		--gantt-accent-soft: rgba(85, 120, 255, 0.16);
 	}
 
 	:global(:root[data-theme='dark']),
@@ -820,6 +934,8 @@
 		--gantt-btn-bg: #2a2f3a;
 		--gantt-btn-text: #eef2ff;
 		--gantt-btn-border: rgba(255, 255, 255, 0.18);
+		--gantt-accent: #7b93ff;
+		--gantt-accent-soft: rgba(123, 147, 255, 0.18);
 	}
 
 	.gantt-tab {
@@ -866,16 +982,10 @@
 		color: var(--gantt-muted);
 	}
 
-	.smart-form {
-		min-width: 0;
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
-		gap: 0.52rem;
-		align-self: center;
-	}
-
-	.smart-form input,
 	.sprint-picker select {
+		width: 100%;
+		min-width: 0;
+		max-width: 100%;
 		height: 2.18rem;
 		border: 1px solid var(--gantt-input-border);
 		border-radius: 9px;
@@ -883,23 +993,6 @@
 		color: var(--gantt-input-text);
 		padding: 0 0.62rem;
 		font-size: 0.84rem;
-	}
-
-	.smart-form button {
-		height: 2.18rem;
-		border: 1px solid var(--gantt-btn-border);
-		border-radius: 9px;
-		background: var(--gantt-btn-bg);
-		color: var(--gantt-btn-text);
-		padding: 0 0.72rem;
-		font-size: 0.8rem;
-		font-weight: 650;
-		cursor: pointer;
-	}
-
-	.smart-form button:disabled {
-		opacity: 0.6;
-		cursor: not-allowed;
 	}
 
 	.toolbar-meta {
@@ -915,6 +1008,9 @@
 	.sprint-picker {
 		display: grid;
 		gap: 0.24rem;
+		flex: 1 1 220px;
+		min-width: 0;
+		max-width: min(100%, 18rem);
 	}
 
 	.sprint-picker span {
@@ -975,29 +1071,62 @@
 		overflow: hidden;
 	}
 
+	.timeline-card.is-fullscreen {
+		position: fixed;
+		inset: 1rem;
+		z-index: 61;
+		border-radius: 22px;
+		padding: 1.1rem;
+		box-shadow: 0 28px 80px rgba(9, 14, 28, 0.32);
+	}
+
+	.timeline-fullscreen-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 60;
+		background: rgba(11, 16, 30, 0.5);
+		backdrop-filter: blur(10px);
+	}
+
 	.timeline-head {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		flex-wrap: wrap;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
 		gap: 0.62rem 0.9rem;
 	}
 
-	.timeline-head > div {
+	.timeline-head-copy {
 		min-width: 0;
 		flex: 1 1 240px;
+	}
+
+	.timeline-head-actions {
+		display: inline-flex;
+		flex-wrap: nowrap;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.45rem;
+		min-width: 0;
+		flex-shrink: 0;
+		justify-self: end;
 	}
 
 	.timeline-head h3 {
 		margin: 0;
 		font-size: 1rem;
 		color: var(--gantt-text);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.timeline-head p {
 		margin: 0.18rem 0 0;
 		font-size: 0.8rem;
 		color: var(--gantt-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.overlap-warning {
@@ -1011,6 +1140,53 @@
 		color: #ffaaaa;
 		font-size: 0.69rem;
 		font-weight: 700;
+		min-width: 0;
+		max-width: clamp(7.5rem, 28vw, 12rem);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.timeline-expand-btn {
+		width: 2.2rem;
+		height: 2.2rem;
+		min-width: 2.2rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		border-radius: 12px;
+		border: 1px solid color-mix(in srgb, var(--gantt-accent) 42%, var(--gantt-btn-border));
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--gantt-accent-soft) 90%, var(--gantt-surface) 10%),
+			color-mix(in srgb, var(--gantt-btn-bg) 92%, var(--gantt-surface) 8%)
+		);
+		color: color-mix(in srgb, var(--gantt-accent) 74%, var(--gantt-text) 26%);
+		font-size: 0.74rem;
+		font-weight: 700;
+		cursor: pointer;
+		flex: 0 0 auto;
+		transition:
+			transform 0.18s ease,
+			border-color 0.18s ease,
+			box-shadow 0.18s ease;
+	}
+
+	.timeline-expand-btn:hover {
+		transform: translateY(-1px);
+		border-color: color-mix(in srgb, var(--gantt-accent) 58%, var(--gantt-btn-border));
+		box-shadow: 0 10px 24px color-mix(in srgb, var(--gantt-accent-soft) 78%, transparent);
+	}
+
+	.timeline-expand-btn svg {
+		width: 0.98rem;
+		height: 0.98rem;
+		stroke: currentColor;
+		stroke-width: 1.9;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.gantt-scroll {
@@ -1024,6 +1200,10 @@
 		background: var(--gantt-surface-soft);
 		scrollbar-width: thin;
 		overscroll-behavior: contain;
+	}
+
+	.timeline-card.is-fullscreen .gantt-scroll {
+		border-radius: 16px;
 	}
 
 	.gantt-grid {
@@ -1149,8 +1329,44 @@
 		width: 100%;
 	}
 
-	.task-title-wrap small {
-		font-size: 0.74rem;
+	.task-date-range {
+		display: inline-flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.34rem;
+	}
+
+	.task-date-chip {
+		min-height: 1.45rem;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.34rem;
+		padding: 0.18rem 0.5rem;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--gantt-border) 86%, var(--gantt-accent) 14%);
+		background: color-mix(in srgb, var(--gantt-surface-soft) 88%, var(--gantt-accent-soft) 12%);
+		color: var(--gantt-text);
+		font-size: 0.73rem;
+		line-height: 1;
+	}
+
+	.task-date-label {
+		font-size: 0.65rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--gantt-muted);
+	}
+
+	.task-date-chip strong {
+		font-size: 0.76rem;
+		font-weight: 700;
+		color: var(--gantt-text);
+	}
+
+	.task-date-separator {
+		font-size: 0.72rem;
+		font-weight: 600;
 		color: var(--gantt-muted);
 	}
 
@@ -1248,14 +1464,13 @@
 		align-items: center;
 		border-bottom: 1px solid var(--gantt-grid-line);
 		padding: 0.56rem 0;
-		background:
-			repeating-linear-gradient(
-				90deg,
-				transparent,
-				transparent calc(var(--day-col) - 1px),
-				var(--gantt-grid-line) calc(var(--day-col) - 1px),
-				var(--gantt-grid-line) var(--day-col)
-			);
+		background: repeating-linear-gradient(
+			90deg,
+			transparent,
+			transparent calc(var(--day-col) - 1px),
+			var(--gantt-grid-line) calc(var(--day-col) - 1px),
+			var(--gantt-grid-line) var(--day-col)
+		);
 		min-height: 4.05rem;
 	}
 
@@ -1317,8 +1532,33 @@
 			padding: 0.72rem;
 		}
 
-		.smart-form {
+		.toolbar-meta {
+			width: 100%;
+			display: grid;
 			grid-template-columns: minmax(0, 1fr);
+			justify-content: stretch;
+		}
+
+		.sprint-picker {
+			width: 100%;
+			max-width: none;
+		}
+
+		.summary-chips {
+			width: 100%;
+			flex-wrap: nowrap;
+			overflow-x: auto;
+			padding-bottom: 0.08rem;
+		}
+
+		.timeline-card.is-fullscreen {
+			inset: 0.55rem;
+			padding: 0.82rem;
+			border-radius: 18px;
+		}
+
+		.timeline-head-actions {
+			gap: 0.32rem;
 		}
 	}
 </style>

@@ -2,6 +2,7 @@
 	import { createEventDispatcher } from 'svelte';
 	import type { FieldSchema } from '$lib/stores/fieldSchema';
 	import type { OnlineMember } from '$lib/types/chat';
+	import { parseFlexibleDateValue } from '$lib/utils/dateParsing';
 
 	type TaskLike = {
 		id: string;
@@ -10,6 +11,7 @@
 		assigneeId?: string;
 		customFields?: Record<string, unknown>;
 		dueDate?: number | string | null;
+		startDate?: number | string | null;
 		taskType?: string;
 		updatedAt?: number;
 	};
@@ -42,9 +44,10 @@
 	let activeMonth = startOfMonth(new Date());
 	let expandedDateKeys = new Set<string>();
 
-	$: dueDateFieldId = resolveDateFieldId(fieldSchemas, ['duedate']);
+	$: startDateFieldId = resolveDateFieldId(fieldSchemas, ['startdate']);
+	$: dueDateFieldId = resolveDateFieldId(fieldSchemas, ['duedate', 'enddate', 'deadline']);
 	$: memberNameByKey = buildMemberNameByKey(onlineMembers);
-	$: taskBuckets = bucketTasksByDueDate(tasks, dueDateFieldId, memberNameByKey);
+	$: taskBuckets = bucketTasksByDueDate(tasks, startDateFieldId, dueDateFieldId, memberNameByKey);
 	$: dueTasksByDate = taskBuckets.byDate;
 	$: undatedTasks = taskBuckets.undated;
 	$: monthTitle = activeMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
@@ -56,7 +59,10 @@
 	$: dayCells = buildCalendarDays(gridStart, gridEnd, monthStart);
 
 	function normalizeSchemaName(value: string) {
-		return value.trim().toLowerCase().replace(/[\s_-]+/g, '');
+		return value
+			.trim()
+			.toLowerCase()
+			.replace(/[\s_-]+/g, '');
 	}
 
 	function resolveDateFieldId(schemas: FieldSchema[], aliases: string[]) {
@@ -86,37 +92,6 @@
 			return 'in_progress';
 		}
 		return 'todo';
-	}
-
-	function parseDateValue(value: unknown): Date | null {
-		if (value instanceof Date && Number.isFinite(value.getTime())) {
-			return new Date(value.getTime());
-		}
-		if (typeof value === 'number' && Number.isFinite(value)) {
-			const date = new Date(value);
-			return Number.isFinite(date.getTime()) ? date : null;
-		}
-		if (typeof value !== 'string') {
-			return null;
-		}
-		const trimmed = value.trim();
-		if (!trimmed) {
-			return null;
-		}
-		const dateOnlyMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-		if (dateOnlyMatch) {
-			const year = Number.parseInt(dateOnlyMatch[1], 10);
-			const month = Number.parseInt(dateOnlyMatch[2], 10);
-			const day = Number.parseInt(dateOnlyMatch[3], 10);
-			if (Number.isFinite(year) && Number.isFinite(month) && Number.isFinite(day)) {
-				return new Date(year, month - 1, day);
-			}
-		}
-		const parsed = new Date(trimmed);
-		if (!Number.isFinite(parsed.getTime())) {
-			return null;
-		}
-		return parsed;
 	}
 
 	function pad2(value: number) {
@@ -156,20 +131,43 @@
 		return memberMap.get(assigneeId.toLowerCase()) ?? assigneeId.replace(/[_-]+/g, ' ');
 	}
 
-	function readDueDate(task: TaskLike, dueFieldId: string) {
-		if (task.dueDate != null) {
-			return parseDateValue(task.dueDate);
+	function readTaskDate(
+		task: TaskLike,
+		preferredFieldId: string,
+		fallbackKeys: string[],
+		directField?: number | string | null
+	) {
+		if (directField != null) {
+			return parseFlexibleDateValue(directField);
 		}
 		const fields = task.customFields ?? {};
-		if (dueFieldId && dueFieldId in fields) {
-			return parseDateValue(fields[dueFieldId]);
+		if (preferredFieldId && preferredFieldId in fields) {
+			return parseFlexibleDateValue(fields[preferredFieldId]);
 		}
-		for (const fallbackKey of ['due_date', 'dueDate', 'duedate']) {
+		for (const fallbackKey of fallbackKeys) {
 			if (fallbackKey in fields) {
-				return parseDateValue(fields[fallbackKey]);
+				return parseFlexibleDateValue(fields[fallbackKey]);
 			}
 		}
 		return null;
+	}
+
+	function readCalendarDate(task: TaskLike, startFieldId: string, dueFieldId: string) {
+		const dueDate = readTaskDate(
+			task,
+			dueFieldId,
+			['due_date', 'dueDate', 'duedate', 'end_date', 'endDate', 'enddate', 'deadline'],
+			task.dueDate
+		);
+		if (dueDate) {
+			return dueDate;
+		}
+		return readTaskDate(
+			task,
+			startFieldId,
+			['start_date', 'startDate', 'startdate', 'begin_date', 'beginDate', 'begindate'],
+			task.startDate
+		);
 	}
 
 	function compareCalendarTasks(left: CalendarTask, right: CalendarTask) {
@@ -187,6 +185,7 @@
 
 	function bucketTasksByDueDate(
 		sourceTasks: TaskLike[],
+		startFieldId: string,
 		dueFieldId: string,
 		memberMap: Map<string, string>
 	) {
@@ -200,7 +199,7 @@
 				assigneeLabel: ownerLabel(task, memberMap),
 				updatedAt: Number.isFinite(task.updatedAt) ? Number(task.updatedAt) : 0
 			};
-			const dueDate = readDueDate(task, dueFieldId);
+			const dueDate = readCalendarDate(task, startFieldId, dueFieldId);
 			if (!dueDate) {
 				undated.push(normalizedTask);
 				continue;
@@ -248,7 +247,11 @@
 		return next;
 	}
 
-	function buildCalendarDays(gridStartDate: Date, gridEndDate: Date, currentMonth: Date): CalendarDay[] {
+	function buildCalendarDays(
+		gridStartDate: Date,
+		gridEndDate: Date,
+		currentMonth: Date
+	): CalendarDay[] {
 		const days: CalendarDay[] = [];
 		for (
 			let cursor = new Date(gridStartDate.getTime());
@@ -300,7 +303,12 @@
 <section class="calendar-view" aria-label="Calendar view">
 	<header class="calendar-toolbar">
 		<div class="calendar-nav-group">
-			<button type="button" class="nav-btn" on:click={() => shiftMonth(-1)} aria-label="Previous month">
+			<button
+				type="button"
+				class="nav-btn"
+				on:click={() => shiftMonth(-1)}
+				aria-label="Previous month"
+			>
 				<svg viewBox="0 0 24 24" aria-hidden="true">
 					<path d="m14.5 6.5-5 5.5 5 5.5"></path>
 				</svg>

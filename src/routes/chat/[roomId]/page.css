@@ -163,6 +163,141 @@
 	min-height: 2.22rem;
 	display: flex;
 	align-items: flex-start;
+	position: relative;
+}
+
+.typing-row {
+	display: flex;
+	align-items: center;
+	width: 100%;
+	gap: 6px;
+}
+
+/* ── Panda progress button ────────────────────────────────── */
+.tora-panda-btn {
+	position: relative;
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+	margin-left: auto;
+	font-size: 1.1rem;
+	line-height: 1;
+	transition: transform 0.15s;
+	user-select: none;
+}
+.tora-panda-btn:hover { transform: scale(1.15); }
+
+.tora-panda-thinking .panda-emoji {
+	animation: panda-bounce 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes panda-bounce {
+	from { transform: translateY(0); }
+	to   { transform: translateY(-4px); }
+}
+
+.panda-pulse {
+	position: absolute;
+	inset: -3px;
+	border-radius: 50%;
+	border: 2px solid #818cf8;
+	animation: panda-ring 1.2s ease-out infinite;
+	pointer-events: none;
+}
+
+@keyframes panda-ring {
+	0%   { opacity: 0.8; transform: scale(0.85); }
+	100% { opacity: 0;   transform: scale(1.4); }
+}
+
+/* ── Panda progress panel ─────────────────────────────────── */
+.tora-panda-panel {
+	position: absolute;
+	bottom: calc(100% + 8px);
+	right: 0.78rem;
+	width: 280px;
+	background: #1c1c2e;
+	color: #e2e8f0;
+	border: 1px solid rgba(255,255,255,0.1);
+	border-radius: 10px;
+	box-shadow: 0 12px 36px rgba(0,0,0,0.45);
+	z-index: 900;
+	overflow: hidden;
+}
+
+.panda-panel-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 8px 12px 6px;
+	border-bottom: 1px solid rgba(255,255,255,0.08);
+	font-size: 0.8rem;
+	font-weight: 700;
+	color: #f1f5f9;
+}
+
+.panda-panel-close {
+	background: none;
+	border: none;
+	color: #64748b;
+	cursor: pointer;
+	font-size: 0.75rem;
+	padding: 2px 4px;
+	border-radius: 3px;
+}
+.panda-panel-close:hover { color: #f1f5f9; }
+
+.panda-panel-log {
+	max-height: 200px;
+	overflow-y: auto;
+	padding: 6px 0;
+}
+
+.panda-log-entry {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	padding: 4px 12px;
+	font-size: 0.76rem;
+	line-height: 1.4;
+}
+.panda-log-entry.panda-log-thinking {
+	color: #818cf8;
+}
+
+.panda-log-dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: #475569;
+	flex-shrink: 0;
+	margin-top: 5px;
+}
+.thinking-dot {
+	background: #818cf8;
+	animation: dot-pulse 1s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+	0%, 100% { opacity: 1; }
+	50%       { opacity: 0.3; }
+}
+
+.panda-log-text {
+	flex: 1;
+	color: #cbd5e1;
+	word-break: break-word;
+}
+
+.panda-log-time {
+	font-size: 0.68rem;
+	color: #475569;
+	white-space: nowrap;
+	flex-shrink: 0;
 }
 
 .composer-typing-card {

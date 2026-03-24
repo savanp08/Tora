@@ -87,6 +87,8 @@
 		label: string;
 		insertValue: string;
 		isAI?: boolean;
+		isTag?: boolean;
+		tagDesc?: string; // short description shown beside the tag option
 	};
 
 	type ComposerTextSegment = {
@@ -229,7 +231,7 @@
 				? 'Task mode active. Press send when ready.'
 				: hasPendingAttachment
 					? 'Add a caption (optional)'
-					: 'Type a message';
+					: 'Message — @ToraAI to ask · @Project to edit tasks · @Canvas for code';
 
 	const dispatch = createEventDispatcher<{
 		send: ComposerMediaPayload | undefined;
@@ -380,12 +382,14 @@
 		const verticalBorder = parsePixel(styles.borderTopWidth) + parsePixel(styles.borderBottomWidth);
 		const minHeight = lineHeight + verticalPadding + verticalBorder;
 		const maxHeight = lineHeight * COMPOSER_MAX_VISIBLE_LINES + verticalPadding + verticalBorder;
+		const isEmpty = composerTextareaEl.value.length === 0;
 
 		composerTextareaEl.style.height = 'auto';
-		const nextHeight = Math.max(minHeight, Math.min(composerTextareaEl.scrollHeight, maxHeight));
+		const measuredHeight = isEmpty ? minHeight : composerTextareaEl.scrollHeight;
+		const nextHeight = Math.max(minHeight, Math.min(measuredHeight, maxHeight));
 		composerTextareaEl.style.height = `${nextHeight}px`;
 		composerTextareaEl.style.overflowY =
-			composerTextareaEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
+			!isEmpty && composerTextareaEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
 		syncComposerHighlightScroll();
 	}
 
@@ -432,6 +436,26 @@
 					isAI: true
 				});
 			}
+
+			// @Project and @Canvas edit tags
+			if (normalizedQuery === '' || 'project'.includes(normalizedQuery)) {
+				options.push({
+					id: 'tag_project',
+					label: 'Project',
+					insertValue: '@Project',
+					isTag: true,
+					tagDesc: 'Edit task board'
+				});
+			}
+			if (normalizedQuery === '' || 'canvas'.includes(normalizedQuery)) {
+				options.push({
+					id: 'tag_canvas',
+					label: 'Canvas',
+					insertValue: '@Canvas',
+					isTag: true,
+					tagDesc: 'Edit code canvas'
+				});
+			}
 		}
 
 		for (const name of normalizeMentionCandidateValues()) {
@@ -448,7 +472,7 @@
 			});
 		}
 
-		return options.slice(0, 8);
+		return options.slice(0, 10);
 	}
 
 	function updateMentionSuggestionsFromCaret() {
@@ -2204,6 +2228,8 @@
 							<span class="mention-option-label">@{option.label}</span>
 							{#if option.isAI}
 								<span class="mention-option-pill">AI</span>
+							{:else if option.isTag}
+								<span class="mention-option-pill mention-option-pill-tag">{option.tagDesc}</span>
 							{/if}
 						</button>
 					{/each}
@@ -3267,6 +3293,7 @@
 		position: absolute;
 		inset: 0;
 		z-index: 0;
+		display: none;
 		pointer-events: none;
 		overflow: auto;
 		scrollbar-width: none;
@@ -3314,9 +3341,16 @@
 		line-height: 1.32;
 		font-family: inherit;
 		background: transparent;
-		color: transparent;
-		-webkit-text-fill-color: transparent;
+		color: var(--text-primary);
+		-webkit-text-fill-color: var(--text-primary);
 		caret-color: var(--text-primary);
+		letter-spacing: normal;
+		word-spacing: normal;
+		font-kerning: none;
+		font-variant-ligatures: none;
+		font-feature-settings:
+			'liga' 0,
+			'calt' 0;
 		box-sizing: border-box;
 		overflow-y: hidden;
 	}
@@ -3393,6 +3427,12 @@
 		font-weight: 700;
 		letter-spacing: 0.03em;
 		color: var(--text-secondary);
+	}
+
+	.mention-option-pill-tag {
+		background: rgba(99, 102, 241, 0.12);
+		border-color: rgba(99, 102, 241, 0.35);
+		color: #818cf8;
 	}
 
 	@media (max-width: 700px) {

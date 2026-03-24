@@ -357,19 +357,21 @@
 		{/if}
 	</div>
 
-	<div class="suggestions-panel">
-		{#each TORA_PROMPT_SUGGESTIONS.slice(0, 3) as suggestion}
-			<button
-				type="button"
-				class="suggestion-item"
-				on:click={() => applyToraSuggestion(suggestion)}
-				disabled={$timelineLoading || !currentState}
-			>
-				<span class="suggestion-arrow" aria-hidden="true">→</span>
-				<span class="suggestion-text">{suggestion}</span>
-			</button>
-		{/each}
-	</div>
+	{#if messages.length === 0}
+		<div class="suggestions-panel">
+			{#each TORA_PROMPT_SUGGESTIONS.slice(0, 3) as suggestion}
+				<button
+					type="button"
+					class="suggestion-item"
+					on:click={() => applyToraSuggestion(suggestion)}
+					disabled={$timelineLoading || !currentState}
+				>
+					<span class="suggestion-arrow" aria-hidden="true">→</span>
+					<span class="suggestion-text">{suggestion}</span>
+				</button>
+			{/each}
+		</div>
+	{/if}
 
 	{#if submitError}
 		<div class="tora-error" role="status" aria-live="polite">{submitError}</div>
@@ -746,9 +748,18 @@
 		border: none;
 		background: transparent;
 		color: #e8eaed;
+		caret-color: #e8eaed;
 		padding: 0;
+		font-family: inherit;
 		font-size: 0.84rem;
 		line-height: 1.46;
+		letter-spacing: normal;
+		word-spacing: normal;
+		font-kerning: none;
+		font-variant-ligatures: none;
+		font-feature-settings:
+			'liga' 0,
+			'calt' 0;
 		resize: none;
 	}
 

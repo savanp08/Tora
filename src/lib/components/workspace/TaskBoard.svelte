@@ -58,6 +58,8 @@
 		completed: boolean;
 		position: number;
 	};
+	type TaskRole = { role: string; responsibilities: string };
+
 	type DisplayTask = {
 		id: string;
 		roomId: string;
@@ -74,6 +76,7 @@
 		spent?: number;
 		dueDate?: number;
 		startDate?: number;
+		roles?: TaskRole[];
 		sprintName: string;
 		assigneeId: string;
 		statusActorId?: string;
@@ -131,6 +134,7 @@
 		start_date?: unknown;
 		startDate?: unknown;
 		spentCost?: unknown;
+		roles?: unknown;
 		created_at?: unknown;
 		createdAt?: unknown;
 		updated_at?: unknown;
@@ -223,8 +227,13 @@
 
 	// ── task edit modal ───────────────────────────────────────────────────────
 	let taskEditModal: DisplayTask | null = null;
-	let taskEditVals: { title: string; assigneeId: string; status: string; budget: string; spent: string } =
-		{ title: '', assigneeId: '', status: 'todo', budget: '', spent: '' };
+	let taskEditVals: {
+		title: string;
+		assigneeId: string;
+		status: string;
+		budget: string;
+		spent: string;
+	} = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '' };
 	let taskModalSaving = false;
 	let hoveredTaskId = '';
 	let newTaskInput: HTMLInputElement | null = null;
@@ -298,6 +307,7 @@
 				title: task.title,
 				description: task.description,
 				status: task.status,
+				taskType: task.taskType,
 				customFields: { ...(task.customFields ?? {}) },
 				blockedBy: [...(task.blockedBy ?? [])],
 				blocks: [...(task.blocks ?? [])],
@@ -305,6 +315,8 @@
 				completionPercent: task.completionPercent,
 				budget: task.budget,
 				spent: task.spent,
+				dueDate: task.dueDate,
+				startDate: task.startDate,
 				sprintName: task.sprintName || '',
 				assigneeId: task.assigneeId,
 				statusActorId: task.statusActorId,
@@ -1382,7 +1394,9 @@
 				continue;
 			}
 			const source = entry as Record<string, unknown>;
-			const id = normalizeTaskRelationIdentifier(source.id ?? source.subtask_id ?? source.subtaskId);
+			const id = normalizeTaskRelationIdentifier(
+				source.id ?? source.subtask_id ?? source.subtaskId
+			);
 			if (!id || seen.has(id)) {
 				continue;
 			}
@@ -1592,6 +1606,7 @@
 			title: displayTitle,
 			description: description || (content !== displayTitle ? content : ''),
 			status: toStringValue(source.status) || 'pending',
+			taskType: 'sprint',
 			customFields: {},
 			blockedBy: [],
 			blocks: [],
@@ -1635,9 +1650,18 @@
 		const completionPercent =
 			parseBudgetValue(source.completion_percent ?? source.completionPercent) ??
 			calculateSubtaskCompletionPercent(subtasks);
-		const taskTypeRaw = toStringValue(source.task_type ?? source.taskType).trim().toLowerCase();
+		const taskTypeRaw = toStringValue(source.task_type ?? source.taskType)
+			.trim()
+			.toLowerCase();
 		const dueDate = parseTimestamp(source.due_date ?? source.dueDate) || undefined;
 		const startDate = parseTimestamp(source.start_date ?? source.startDate) || undefined;
+		const rolesRaw = source.roles;
+		const roles: TaskRole[] | undefined = (() => {
+			if (!rolesRaw) return undefined;
+			if (Array.isArray(rolesRaw)) return rolesRaw as TaskRole[];
+			if (typeof rolesRaw === 'string') { try { return JSON.parse(rolesRaw) as TaskRole[]; } catch { return undefined; } }
+			return undefined;
+		})();
 		return {
 			id: taskID,
 			roomId: normalizeRoomIDValue(normalizedRoomId || $activeContext.id),
@@ -1654,6 +1678,7 @@
 			spent,
 			dueDate: dueDate && dueDate > 0 ? dueDate : undefined,
 			startDate: startDate && startDate > 0 ? startDate : undefined,
+			roles: roles && roles.length > 0 ? roles : undefined,
 			sprintName: toStringValue(source.sprint_name ?? source.sprintName),
 			assigneeId: toStringValue(source.assignee_id ?? source.assigneeId),
 			statusActorId: toStringValue(source.status_actor_id ?? source.statusActorId) || undefined,
@@ -2254,7 +2279,9 @@
 	function relationTaskOptions(task: DisplayTask) {
 		return boardTasks
 			.filter((entry) => entry.source === 'room' && entry.id !== task.id)
-			.sort((left, right) => left.title.localeCompare(right.title, undefined, { sensitivity: 'base' }));
+			.sort((left, right) =>
+				left.title.localeCompare(right.title, undefined, { sensitivity: 'base' })
+			);
 	}
 
 	function isEditingDependencySelected(taskID: string) {
@@ -2477,7 +2504,8 @@
 		const nextSubtasks = normalizeEditingSubtasks(editingSubtasks);
 		const baselineSubtasks = normalizeEditingSubtasks(editingSubtasksBaseline);
 
-		const dependenciesChanged = dependencySignature(nextBlockedBy) !== dependencySignature(baselineBlockedBy);
+		const dependenciesChanged =
+			dependencySignature(nextBlockedBy) !== dependencySignature(baselineBlockedBy);
 		const subtasksChanged = subtasksSignature(nextSubtasks) !== subtasksSignature(baselineSubtasks);
 		if (!dependenciesChanged && !subtasksChanged) {
 			return true;
@@ -3596,140 +3624,140 @@
 	{/if}
 
 	{#if boardView === 'table' || boardView === 'kanban'}
-	<section class="sprint-composer" aria-label="Create sprint">
-		<div class="sprint-composer-head">
-			<button
-				type="button"
-				class="sprint-composer-trigger"
-				on:click={() => void openSprintComposer()}
-				disabled={!canEdit || !canCreateSprintTask || sprintComposerSaving}
-			>
-				+ Add Sprint
-			</button>
-			<p>
-				{#if canCreateSprintTask}
-					Set a sprint name and optionally add task titles on separate lines.
-				{:else}
-					Select a room workspace to create sprint tasks.
-				{/if}
-			</p>
-		</div>
-		{#if sprintComposerOpen}
-			<form
-				class="sprint-composer-form"
-				on:submit|preventDefault={() => void submitSprintComposer()}
-			>
-				<label class="sprint-composer-field">
-					<span>Sprint name</span>
-					<input
-						bind:this={sprintComposerNameInput}
-						type="text"
-						bind:value={sprintComposerName}
-						placeholder="Sprint 5 - Stabilization"
-						autocomplete="off"
-						disabled={sprintComposerSaving}
-						maxlength="160"
-					/>
-				</label>
-				<section class="sprint-preview-grid" aria-label="Sprint task preview">
-					<div class="sprint-preview-head">
-						<span>Task</span>
-						<span>Status</span>
-						<span>Assignee</span>
-						<span>Budget</span>
-						<span>Cost</span>
-						<span>Updated</span>
-					</div>
-					<div class="sprint-preview-body">
-						{#each sprintComposerPreviewRows as previewRow (previewRow.index)}
-							<div class="sprint-preview-row">
-								<div class="sprint-preview-cell sprint-preview-task-cell">
-									{#if sprintComposerActiveTaskIndex === previewRow.index}
-										<input
-											bind:this={sprintComposerTaskInput}
-											type="text"
-											class="sprint-preview-task-input"
-											bind:value={sprintComposerTaskInputValue}
-											on:keydown={onSprintComposerTaskInputKeydown}
-											on:blur={commitSprintComposerTaskEdit}
-											placeholder="Task title..."
-											autocomplete="off"
-											maxlength="220"
-										/>
-									{:else}
-										<button
-											type="button"
-											class="sprint-preview-task-btn"
-											class:is-empty={!previewRow.title}
-											on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-											disabled={sprintComposerSaving || !canCreateSprintTask}
-										>
-											{previewRow.title || 'Click any cell in this row to add task'}
-										</button>
-									{/if}
-								</div>
-								<button
-									type="button"
-									class="sprint-preview-cell sprint-preview-meta-cell"
-									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-									disabled={sprintComposerSaving || !canCreateSprintTask}
-								>
-									To Do
-								</button>
-								<button
-									type="button"
-									class="sprint-preview-cell sprint-preview-meta-cell"
-									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-									disabled={sprintComposerSaving || !canCreateSprintTask}
-								>
-									Unassigned
-								</button>
-								<button
-									type="button"
-									class="sprint-preview-cell sprint-preview-meta-cell"
-									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-									disabled={sprintComposerSaving || !canCreateSprintTask}
-								>
-									$0
-								</button>
-								<button
-									type="button"
-									class="sprint-preview-cell sprint-preview-meta-cell"
-									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-									disabled={sprintComposerSaving || !canCreateSprintTask}
-								>
-									$0
-								</button>
-								<button
-									type="button"
-									class="sprint-preview-cell sprint-preview-meta-cell"
-									on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-									disabled={sprintComposerSaving || !canCreateSprintTask}
-								>
-									--
-								</button>
-							</div>
-						{/each}
-					</div>
-				</section>
-				<p class="sprint-composer-hint">
-					Click any preview row cell to add tasks. Press Enter to save a cell.
+		<section class="sprint-composer" aria-label="Create sprint">
+			<div class="sprint-composer-head">
+				<button
+					type="button"
+					class="sprint-composer-trigger"
+					on:click={() => void openSprintComposer()}
+					disabled={!canEdit || !canCreateSprintTask || sprintComposerSaving}
+				>
+					+ Add Sprint
+				</button>
+				<p>
+					{#if canCreateSprintTask}
+						Set a sprint name and optionally add task titles on separate lines.
+					{:else}
+						Select a room workspace to create sprint tasks.
+					{/if}
 				</p>
-				<div class="sprint-composer-actions">
-					<button
-						type="submit"
-						class="sprint-composer-submit"
-						disabled={sprintComposerSaving || !sprintComposerName.trim()}
-					>
-						{sprintComposerSaving ? 'Creating…' : 'Create sprint'}
-					</button>
-					<button type="button" class="sprint-composer-cancel" on:click={closeSprintComposer}>
-						Cancel
-					</button>
-				</div>
-			</form>
-		{/if}
-	</section>
+			</div>
+			{#if sprintComposerOpen}
+				<form
+					class="sprint-composer-form"
+					on:submit|preventDefault={() => void submitSprintComposer()}
+				>
+					<label class="sprint-composer-field">
+						<span>Sprint name</span>
+						<input
+							bind:this={sprintComposerNameInput}
+							type="text"
+							bind:value={sprintComposerName}
+							placeholder="Sprint 5 - Stabilization"
+							autocomplete="off"
+							disabled={sprintComposerSaving}
+							maxlength="160"
+						/>
+					</label>
+					<section class="sprint-preview-grid" aria-label="Sprint task preview">
+						<div class="sprint-preview-head">
+							<span>Task</span>
+							<span>Status</span>
+							<span>Assignee</span>
+							<span>Budget</span>
+							<span>Cost</span>
+							<span>Updated</span>
+						</div>
+						<div class="sprint-preview-body">
+							{#each sprintComposerPreviewRows as previewRow (previewRow.index)}
+								<div class="sprint-preview-row">
+									<div class="sprint-preview-cell sprint-preview-task-cell">
+										{#if sprintComposerActiveTaskIndex === previewRow.index}
+											<input
+												bind:this={sprintComposerTaskInput}
+												type="text"
+												class="sprint-preview-task-input"
+												bind:value={sprintComposerTaskInputValue}
+												on:keydown={onSprintComposerTaskInputKeydown}
+												on:blur={commitSprintComposerTaskEdit}
+												placeholder="Task title..."
+												autocomplete="off"
+												maxlength="220"
+											/>
+										{:else}
+											<button
+												type="button"
+												class="sprint-preview-task-btn"
+												class:is-empty={!previewRow.title}
+												on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+												disabled={sprintComposerSaving || !canCreateSprintTask}
+											>
+												{previewRow.title || 'Click any cell in this row to add task'}
+											</button>
+										{/if}
+									</div>
+									<button
+										type="button"
+										class="sprint-preview-cell sprint-preview-meta-cell"
+										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+										disabled={sprintComposerSaving || !canCreateSprintTask}
+									>
+										To Do
+									</button>
+									<button
+										type="button"
+										class="sprint-preview-cell sprint-preview-meta-cell"
+										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+										disabled={sprintComposerSaving || !canCreateSprintTask}
+									>
+										Unassigned
+									</button>
+									<button
+										type="button"
+										class="sprint-preview-cell sprint-preview-meta-cell"
+										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+										disabled={sprintComposerSaving || !canCreateSprintTask}
+									>
+										$0
+									</button>
+									<button
+										type="button"
+										class="sprint-preview-cell sprint-preview-meta-cell"
+										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+										disabled={sprintComposerSaving || !canCreateSprintTask}
+									>
+										$0
+									</button>
+									<button
+										type="button"
+										class="sprint-preview-cell sprint-preview-meta-cell"
+										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
+										disabled={sprintComposerSaving || !canCreateSprintTask}
+									>
+										--
+									</button>
+								</div>
+							{/each}
+						</div>
+					</section>
+					<p class="sprint-composer-hint">
+						Click any preview row cell to add tasks. Press Enter to save a cell.
+					</p>
+					<div class="sprint-composer-actions">
+						<button
+							type="submit"
+							class="sprint-composer-submit"
+							disabled={sprintComposerSaving || !sprintComposerName.trim()}
+						>
+							{sprintComposerSaving ? 'Creating…' : 'Create sprint'}
+						</button>
+						<button type="button" class="sprint-composer-cancel" on:click={closeSprintComposer}>
+							Cancel
+						</button>
+					</div>
+				</form>
+			{/if}
+		</section>
 	{/if}
 
 	{#if quickEditVisible && editingTask && editingField}
@@ -4275,6 +4303,14 @@
 											</button>
 										</div>
 
+										{#if task.roles?.length}
+											<div class="kanban-roles">
+												{#each task.roles as r}
+													<span class="kanban-role-chip">{r.role}</span>
+												{/each}
+											</div>
+										{/if}
+
 										<footer class="kanban-card-footer">
 											<span>{task.sprintName.trim() || 'Backlog'}</span>
 											<time datetime={new Date(task.updatedAt).toISOString()}>
@@ -4469,11 +4505,17 @@
 										{#each sprintGroup.tasks as task (task.id)}
 											<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
 											<tr
+												class:row-todo={resolveColumn(task.status) === 'todo'}
+												class:row-progress={resolveColumn(task.status) === 'in_progress'}
 												class:row-done={resolveColumn(task.status) === 'done'}
 												class:row-selected={isEditMode && isTaskSelected(task.id)}
 												class:row-modal-open={taskEditModal?.id === task.id}
-												on:mouseenter={() => { hoveredTaskId = task.id; }}
-												on:mouseleave={() => { hoveredTaskId = ''; }}
+												on:mouseenter={() => {
+													hoveredTaskId = task.id;
+												}}
+												on:mouseleave={() => {
+													hoveredTaskId = '';
+												}}
 												on:click={() => openTaskModal(task)}
 											>
 												<!-- Checkbox -->
@@ -4592,40 +4634,80 @@
 																		class="eef-input"
 																		type="text"
 																		bind:value={taskEditVals.title}
-																		on:keydown={(e) => { if (e.key === 'Escape') closeTaskModal(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void saveTaskModal(); }}
+																		on:keydown={(e) => {
+																			if (e.key === 'Escape') closeTaskModal();
+																			if (e.key === 'Enter' && (e.ctrlKey || e.metaKey))
+																				void saveTaskModal();
+																		}}
 																	/>
 																</div>
 																<div class="eef">
 																	<label class="eef-label" for="eef-status-{task.id}">Status</label>
-																	<select id="eef-status-{task.id}" class="eef-select" bind:value={taskEditVals.status}>
+																	<select
+																		id="eef-status-{task.id}"
+																		class="eef-select"
+																		bind:value={taskEditVals.status}
+																	>
 																		{#each STATUS_OPTIONS as opt (opt.value)}
 																			<option value={opt.value}>{opt.label}</option>
 																		{/each}
 																	</select>
 																</div>
 																<div class="eef">
-																	<label class="eef-label" for="eef-assignee-{task.id}">Assignee</label>
-																	<select id="eef-assignee-{task.id}" class="eef-select" bind:value={taskEditVals.assigneeId}>
+																	<label class="eef-label" for="eef-assignee-{task.id}"
+																		>Assignee</label
+																	>
+																	<select
+																		id="eef-assignee-{task.id}"
+																		class="eef-select"
+																		bind:value={taskEditVals.assigneeId}
+																	>
 																		<option value="">— unassigned —</option>
 																		{#each ownerOptions as opt (opt.id)}
-																			<option value={opt.id}>{opt.label}{opt.isOnline ? '' : ' (offline)'}</option>
+																			<option value={opt.id}
+																				>{opt.label}{opt.isOnline ? '' : ' (offline)'}</option
+																			>
 																		{/each}
 																	</select>
 																</div>
 																<div class="eef">
-																	<label class="eef-label" for="eef-budget-{task.id}">Budget ($)</label>
-																	<input id="eef-budget-{task.id}" class="eef-input eef-num" type="number" min="0" step="0.01" bind:value={taskEditVals.budget} />
+																	<label class="eef-label" for="eef-budget-{task.id}"
+																		>Budget ($)</label
+																	>
+																	<input
+																		id="eef-budget-{task.id}"
+																		class="eef-input eef-num"
+																		type="number"
+																		min="0"
+																		step="0.01"
+																		bind:value={taskEditVals.budget}
+																	/>
 																</div>
 																<div class="eef">
-																	<label class="eef-label" for="eef-spent-{task.id}">Cost ($)</label>
-																	<input id="eef-spent-{task.id}" class="eef-input eef-num" type="number" min="0" step="0.01" bind:value={taskEditVals.spent} />
+																	<label class="eef-label" for="eef-spent-{task.id}">Cost ($)</label
+																	>
+																	<input
+																		id="eef-spent-{task.id}"
+																		class="eef-input eef-num"
+																		type="number"
+																		min="0"
+																		step="0.01"
+																		bind:value={taskEditVals.spent}
+																	/>
 																</div>
 															</div>
 															<div class="edit-expand-actions">
-																<button type="button" class="eef-save" on:click={() => void saveTaskModal()} disabled={taskModalSaving}>
+																<button
+																	type="button"
+																	class="eef-save"
+																	on:click={() => void saveTaskModal()}
+																	disabled={taskModalSaving}
+																>
 																	{taskModalSaving ? 'Saving…' : 'Save'}
 																</button>
-																<button type="button" class="eef-cancel" on:click={closeTaskModal}>Cancel</button>
+																<button type="button" class="eef-cancel" on:click={closeTaskModal}
+																	>Cancel</button
+																>
 															</div>
 														</div>
 													</td>
@@ -4671,107 +4753,126 @@
 			</div>
 		{/if}
 	</div>
-
 </section>
 
 <style>
 	:global(:root) {
-		--workspace-taskboard-bg: #efeff1;
+		--workspace-taskboard-bg:
+			radial-gradient(circle at 0% 0%, rgba(89, 105, 255, 0.2), transparent 28%),
+			radial-gradient(circle at 100% 8%, rgba(16, 185, 129, 0.16), transparent 24%),
+			radial-gradient(circle at 50% 100%, rgba(236, 72, 153, 0.16), transparent 28%),
+			linear-gradient(180deg, #eef4ff 0%, #edf1fb 100%);
 		--workspace-taskboard-column-border: #d4d5da;
 		--workspace-taskboard-item-bg: rgba(255, 255, 255, 0.9);
 		--workspace-taskboard-item-border: rgba(43, 46, 56, 0.14);
 		--workspace-taskboard-item-text: #17181c;
-		--workspace-taskboard-meta: #555963;
+		--workspace-taskboard-meta: #56617f;
 
-		--tb-panel-bg: rgba(255, 255, 255, 0.8);
-		--tb-panel-border: rgba(43, 46, 56, 0.2);
+		--tb-panel-bg: rgba(255, 255, 255, 0.78);
+		--tb-panel-border: rgba(96, 118, 201, 0.24);
 		--tb-form-bg: rgba(255, 255, 255, 0.82);
-		--tb-form-border: rgba(43, 46, 56, 0.22);
+		--tb-form-border: rgba(96, 118, 201, 0.22);
 		--tb-input-bg: rgba(252, 254, 255, 0.94);
-		--tb-input-border: #ccced6;
+		--tb-input-border: #cad3f2;
 		--tb-input-text: #1c1e23;
-		--tb-input-placeholder: #717580;
-		--tb-btn-bg: #ececef;
-		--tb-btn-border: #cfd1d8;
-		--tb-btn-text: #2a2d34;
+		--tb-input-placeholder: #6d7694;
+		--tb-btn-bg: #eaf0ff;
+		--tb-btn-border: #c5d0f3;
+		--tb-btn-text: #30406f;
 		--tb-state-bg: rgba(255, 255, 255, 0.82);
-		--tb-state-border: rgba(43, 46, 56, 0.2);
-		--tb-state-text: #4a4e58;
+		--tb-state-border: rgba(96, 118, 201, 0.18);
+		--tb-state-text: #4f5a79;
 		--tb-error-text: #2d3036;
 
-		--tb-grid-bg: rgba(255, 255, 255, 0.86);
-		--tb-grid-border: rgba(43, 46, 56, 0.24);
-		--tb-grid-head-bg: #1a1b1f;
-		--tb-grid-head-text: #f6f7fa;
-		--tb-grid-head-muted: #d0d2d8;
+		--tb-grid-bg: rgba(255, 255, 255, 0.88);
+		--tb-grid-border: rgba(96, 118, 201, 0.24);
+		--tb-grid-head-bg: #243b8f;
+		--tb-grid-head-text: #f6f8ff;
+		--tb-grid-head-muted: #d9e2ff;
 		--tb-grid-row-border: rgba(43, 46, 56, 0.16);
 		--tb-grid-col-border: rgba(43, 46, 56, 0.12);
-		--tb-grid-row-hover: rgba(35, 37, 44, 0.1);
-		--tb-grid-row-done: rgba(35, 37, 44, 0.14);
+		--tb-grid-row-hover: rgba(68, 90, 180, 0.1);
+		--tb-grid-row-done: rgba(20, 184, 166, 0.08);
 		--tb-cell-text: #1f2127;
-		--tb-cell-muted: #666a75;
+		--tb-cell-muted: #64708d;
 		--tb-editor-bg: #fefefe;
-		--tb-editor-border: #8c909a;
-		--tb-editor-ring: rgba(35, 37, 44, 0.2);
+		--tb-editor-border: #8e9fd2;
+		--tb-editor-ring: rgba(78, 96, 191, 0.22);
 		--tb-avatar-text: #ffffff;
-		--tb-icon-bg: rgba(34, 36, 44, 0.12);
-		--tb-icon-bg-hover: rgba(34, 36, 44, 0.24);
-		--tb-icon-text: #2b2e36;
+		--tb-icon-bg: rgba(68, 90, 180, 0.12);
+		--tb-icon-bg-hover: rgba(68, 90, 180, 0.22);
+		--tb-icon-text: #354677;
 
-		--tb-accent: #2f3138;
-		--tb-accent-strong: #1f2127;
-		--tb-accent-soft: rgba(47, 49, 56, 0.14);
-		--tb-panel-shadow: 0 18px 32px rgba(16, 17, 20, 0.12);
+		--tb-accent: #516dff;
+		--tb-accent-strong: #2948db;
+		--tb-accent-soft: rgba(81, 109, 255, 0.16);
+		--tb-status-todo: #6f80ff;
+		--tb-status-todo-text: #f7f8ff;
+		--tb-status-progress: #ffbf47;
+		--tb-status-progress-text: #4d2b00;
+		--tb-status-done: #1cc7a1;
+		--tb-status-done-text: #042d23;
+		--tb-panel-shadow: 0 18px 36px rgba(34, 59, 152, 0.14);
 	}
 
 	:global(:root[data-theme='dark']),
 	:global(.theme-dark) {
-		--workspace-taskboard-bg: #0f1014;
+		--workspace-taskboard-bg:
+			radial-gradient(circle at 0% 0%, rgba(87, 103, 255, 0.22), transparent 24%),
+			radial-gradient(circle at 100% 6%, rgba(20, 184, 166, 0.18), transparent 22%),
+			radial-gradient(circle at 50% 100%, rgba(236, 72, 153, 0.16), transparent 24%),
+			linear-gradient(180deg, #0e1120 0%, #111523 100%);
 		--workspace-taskboard-column-border: rgba(231, 233, 239, 0.2);
-		--workspace-taskboard-item-bg: rgba(17, 18, 24, 0.9);
+		--workspace-taskboard-item-bg: rgba(16, 21, 35, 0.92);
 		--workspace-taskboard-item-border: rgba(231, 233, 239, 0.14);
 		--workspace-taskboard-item-text: #eef0f5;
-		--workspace-taskboard-meta: #a4a8b2;
+		--workspace-taskboard-meta: #aeb9da;
 
-		--tb-panel-bg: rgba(17, 18, 24, 0.86);
-		--tb-panel-border: rgba(231, 233, 239, 0.2);
-		--tb-form-bg: rgba(14, 15, 20, 0.88);
-		--tb-form-border: rgba(231, 233, 239, 0.18);
-		--tb-input-bg: rgba(10, 11, 16, 0.92);
-		--tb-input-border: rgba(231, 233, 239, 0.26);
+		--tb-panel-bg: rgba(16, 22, 36, 0.86);
+		--tb-panel-border: rgba(135, 156, 255, 0.18);
+		--tb-form-bg: rgba(12, 18, 31, 0.88);
+		--tb-form-border: rgba(135, 156, 255, 0.18);
+		--tb-input-bg: rgba(9, 13, 24, 0.92);
+		--tb-input-border: rgba(154, 171, 255, 0.24);
 		--tb-input-text: #f1f3f8;
-		--tb-input-placeholder: #8f949f;
-		--tb-btn-bg: rgba(41, 42, 48, 0.94);
-		--tb-btn-border: rgba(231, 233, 239, 0.24);
+		--tb-input-placeholder: #8f9cc0;
+		--tb-btn-bg: rgba(43, 57, 112, 0.72);
+		--tb-btn-border: rgba(154, 171, 255, 0.22);
 		--tb-btn-text: #eceef4;
-		--tb-state-bg: rgba(14, 15, 20, 0.9);
-		--tb-state-border: rgba(231, 233, 239, 0.18);
-		--tb-state-text: #c4c8d2;
+		--tb-state-bg: rgba(13, 19, 32, 0.9);
+		--tb-state-border: rgba(154, 171, 255, 0.16);
+		--tb-state-text: #c4cdee;
 		--tb-error-text: #d0d3da;
 
-		--tb-grid-bg: rgba(14, 15, 20, 0.92);
-		--tb-grid-border: rgba(231, 233, 239, 0.2);
-		--tb-grid-head-bg: #090a0d;
-		--tb-grid-head-text: #f5f6f9;
-		--tb-grid-head-muted: #b5b9c2;
+		--tb-grid-bg: rgba(12, 18, 31, 0.92);
+		--tb-grid-border: rgba(154, 171, 255, 0.18);
+		--tb-grid-head-bg: #111c46;
+		--tb-grid-head-text: #f5f7ff;
+		--tb-grid-head-muted: #c7d3ff;
 		--tb-grid-row-border: rgba(231, 233, 239, 0.14);
 		--tb-grid-col-border: rgba(231, 233, 239, 0.12);
-		--tb-grid-row-hover: rgba(231, 233, 239, 0.08);
-		--tb-grid-row-done: rgba(231, 233, 239, 0.12);
+		--tb-grid-row-hover: rgba(109, 129, 255, 0.12);
+		--tb-grid-row-done: rgba(28, 199, 161, 0.1);
 		--tb-cell-text: #eef0f5;
-		--tb-cell-muted: #a5a9b3;
-		--tb-editor-bg: rgba(8, 9, 13, 0.96);
-		--tb-editor-border: rgba(231, 233, 239, 0.35);
-		--tb-editor-ring: rgba(231, 233, 239, 0.2);
+		--tb-cell-muted: #aab6da;
+		--tb-editor-bg: rgba(8, 12, 22, 0.96);
+		--tb-editor-border: rgba(154, 171, 255, 0.34);
+		--tb-editor-ring: rgba(154, 171, 255, 0.22);
 		--tb-avatar-text: #ffffff;
-		--tb-icon-bg: rgba(231, 233, 239, 0.16);
-		--tb-icon-bg-hover: rgba(231, 233, 239, 0.24);
-		--tb-icon-text: #dde0e8;
+		--tb-icon-bg: rgba(123, 147, 255, 0.18);
+		--tb-icon-bg-hover: rgba(123, 147, 255, 0.28);
+		--tb-icon-text: #eef1ff;
 
-		--tb-accent: #d0d3da;
-		--tb-accent-strong: #f1f2f5;
-		--tb-accent-soft: rgba(231, 233, 239, 0.2);
-		--tb-panel-shadow: 0 22px 34px rgba(0, 0, 0, 0.36);
+		--tb-accent: #8b9bff;
+		--tb-accent-strong: #dfe5ff;
+		--tb-accent-soft: rgba(139, 155, 255, 0.18);
+		--tb-status-todo: #8794ff;
+		--tb-status-todo-text: #f5f7ff;
+		--tb-status-progress: #ffc857;
+		--tb-status-progress-text: #442700;
+		--tb-status-done: #34d399;
+		--tb-status-done-text: #04291d;
+		--tb-panel-shadow: 0 22px 38px rgba(0, 0, 0, 0.34);
 	}
 
 	.task-board {
@@ -4782,10 +4883,7 @@
 		display: grid;
 		grid-template-rows: auto auto auto minmax(0, 1fr);
 		gap: 0.8rem;
-		background:
-			radial-gradient(circle at 0% 0%, rgba(20, 21, 27, 0.12), transparent 38%),
-			radial-gradient(circle at 100% 0%, rgba(20, 21, 27, 0.09), transparent 34%),
-			var(--workspace-taskboard-bg);
+		background: var(--workspace-taskboard-bg);
 		font-family: 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
 	}
 
@@ -4800,21 +4898,43 @@
 	}
 
 	.board-header {
+		position: relative;
+		overflow: hidden;
+		isolation: isolate;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.8rem;
 		padding: 0.92rem 1.06rem;
 		border-radius: 16px;
-		background: var(--tb-panel-bg);
-		border: 1px solid var(--tb-panel-border);
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--tb-accent-soft) 82%, var(--tb-panel-bg) 18%),
+			var(--tb-panel-bg)
+		);
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 20%, var(--tb-panel-border));
 		backdrop-filter: blur(14px);
 		box-shadow: var(--tb-panel-shadow);
 	}
 
+	.board-header::before {
+		content: '';
+		position: absolute;
+		inset: -40% auto auto 58%;
+		width: 240px;
+		height: 240px;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--tb-accent-soft) 76%, transparent);
+		filter: blur(32px);
+		pointer-events: none;
+	}
+
 	.header-main {
+		position: relative;
+		z-index: 1;
 		display: grid;
 		gap: 0.15rem;
+		min-width: 0;
 	}
 
 	.header-main h2 {
@@ -4822,7 +4942,8 @@
 		font-size: 1.03rem;
 		line-height: 1.2;
 		font-weight: 700;
-		color: var(--workspace-taskboard-item-text);
+		color: var(--tb-accent-strong);
+		min-width: 0;
 	}
 
 	.header-main p {
@@ -4832,11 +4953,14 @@
 	}
 
 	.header-meta {
+		position: relative;
+		z-index: 1;
 		display: flex;
 		flex-wrap: wrap;
 		justify-content: flex-end;
 		gap: 0.4rem;
 		align-items: center;
+		min-width: 0;
 	}
 
 	.header-meta span {
@@ -4844,9 +4968,17 @@
 		font-weight: 600;
 		padding: 0.22rem 0.55rem;
 		border-radius: 999px;
-		color: var(--workspace-taskboard-meta);
-		border: 1px solid var(--tb-panel-border);
-		background: color-mix(in srgb, var(--tb-panel-bg) 82%, #ffffff 18%);
+		color: var(--tb-accent-strong);
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 20%, var(--tb-panel-border));
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--tb-accent-soft) 72%, var(--tb-panel-bg) 28%),
+			color-mix(in srgb, var(--tb-panel-bg) 86%, #ffffff 14%)
+		);
+		max-width: 100%;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.task-search {
@@ -4855,8 +4987,12 @@
 		gap: 0.6rem;
 		padding: 0.68rem 0.76rem;
 		border-radius: 14px;
-		border: 1px solid var(--tb-form-border);
-		background: var(--tb-form-bg);
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 16%, var(--tb-form-border));
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--tb-accent-soft) 42%, var(--tb-form-bg) 58%),
+			var(--tb-form-bg)
+		);
 		backdrop-filter: blur(10px);
 		box-shadow: var(--tb-panel-shadow);
 	}
@@ -4871,7 +5007,7 @@
 	.task-search-field span {
 		font-size: 0.72rem;
 		font-weight: 700;
-		color: var(--tb-cell-muted);
+		color: var(--tb-accent-strong);
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 	}
@@ -4885,6 +5021,7 @@
 		color: var(--tb-input-text);
 		font-size: 0.84rem;
 		padding: 0 0.7rem;
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
 	}
 
 	.task-search-field input::placeholder {
@@ -4894,8 +5031,12 @@
 	.task-search-clear {
 		height: 2.08rem;
 		border-radius: 10px;
-		border: 1px solid var(--tb-btn-border);
-		background: color-mix(in srgb, var(--tb-btn-bg) 82%, #ffffff 18%);
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 18%, var(--tb-btn-border));
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--tb-accent-soft) 58%, var(--tb-btn-bg) 42%),
+			color-mix(in srgb, var(--tb-btn-bg) 84%, #ffffff 16%)
+		);
 		color: var(--tb-btn-text);
 		font-size: 0.76rem;
 		font-weight: 700;
@@ -5205,7 +5346,9 @@
 		outline: none;
 		box-sizing: border-box;
 		width: 100%;
-		transition: border-color 0.12s, box-shadow 0.12s;
+		transition:
+			border-color 0.12s,
+			box-shadow 0.12s;
 	}
 
 	.eef-input:focus,
@@ -5214,7 +5357,9 @@
 		box-shadow: 0 0 0 2px var(--tb-editor-ring);
 	}
 
-	.eef-num { text-align: right; }
+	.eef-num {
+		text-align: right;
+	}
 
 	.edit-expand-actions {
 		display: flex;
@@ -5231,8 +5376,13 @@
 		font-weight: 600;
 		cursor: pointer;
 	}
-	.eef-save:disabled { opacity: 0.5; cursor: not-allowed; }
-	.eef-save:not(:disabled):hover { opacity: 0.82; }
+	.eef-save:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.eef-save:not(:disabled):hover {
+		opacity: 0.82;
+	}
 
 	.eef-cancel {
 		padding: 0.3rem 0.7rem;
@@ -5243,7 +5393,9 @@
 		font-size: 0.78rem;
 		cursor: pointer;
 	}
-	.eef-cancel:hover { color: var(--tb-cell-text); }
+	.eef-cancel:hover {
+		color: var(--tb-cell-text);
+	}
 
 	/* highlight the row above the edit row */
 	.task-grid tbody tr.row-modal-open {
@@ -5496,7 +5648,7 @@
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr);
 		border-radius: 16px;
-		border: 1px solid var(--tb-grid-border);
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 16%, var(--tb-grid-border));
 		background: var(--tb-panel-bg);
 		backdrop-filter: blur(10px);
 		box-shadow: var(--tb-panel-shadow);
@@ -5505,6 +5657,30 @@
 	.kanban-column-head {
 		padding: 0.6rem 0.7rem;
 		border-bottom: 1px solid var(--tb-grid-col-border);
+	}
+
+	.kanban-column:nth-child(1) .kanban-column-head {
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--tb-status-todo) 14%, var(--tb-panel-bg)),
+			transparent
+		);
+	}
+
+	.kanban-column:nth-child(2) .kanban-column-head {
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--tb-status-progress) 18%, var(--tb-panel-bg)),
+			transparent
+		);
+	}
+
+	.kanban-column:nth-child(3) .kanban-column-head {
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--tb-status-done) 16%, var(--tb-panel-bg)),
+			transparent
+		);
 	}
 
 	.kanban-column-title-wrap {
@@ -5534,6 +5710,24 @@
 		font-size: 0.72rem;
 		font-weight: 700;
 		font-variant-numeric: tabular-nums;
+	}
+
+	.kanban-column:nth-child(1) .kanban-column-title-wrap span {
+		border-color: color-mix(in srgb, var(--tb-status-todo) 36%, var(--tb-grid-col-border));
+		background: color-mix(in srgb, var(--tb-status-todo) 16%, var(--tb-btn-bg));
+		color: color-mix(in srgb, var(--tb-status-todo) 72%, var(--tb-cell-text));
+	}
+
+	.kanban-column:nth-child(2) .kanban-column-title-wrap span {
+		border-color: color-mix(in srgb, var(--tb-status-progress) 42%, var(--tb-grid-col-border));
+		background: color-mix(in srgb, var(--tb-status-progress) 18%, var(--tb-btn-bg));
+		color: color-mix(in srgb, var(--tb-status-progress-text) 72%, var(--tb-cell-text));
+	}
+
+	.kanban-column:nth-child(3) .kanban-column-title-wrap span {
+		border-color: color-mix(in srgb, var(--tb-status-done) 42%, var(--tb-grid-col-border));
+		background: color-mix(in srgb, var(--tb-status-done) 16%, var(--tb-btn-bg));
+		color: color-mix(in srgb, var(--tb-status-done) 72%, var(--tb-cell-text));
 	}
 
 	.kanban-column-body {
@@ -5686,6 +5880,22 @@
 		gap: 0.5rem;
 		font-size: 0.71rem;
 		color: var(--tb-cell-muted);
+	}
+
+	.kanban-roles {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		padding: 2px 0;
+	}
+	.kanban-role-chip {
+		font-size: 0.67rem;
+		padding: 1px 6px;
+		border-radius: 20px;
+		background: rgba(124, 58, 237, 0.1);
+		color: #7c3aed;
+		border: 1px solid rgba(124, 58, 237, 0.2);
+		white-space: nowrap;
 	}
 
 	.support-view {
@@ -6261,8 +6471,12 @@
 		min-height: 0;
 		overflow: auto;
 		border-radius: 16px;
-		border: 1px solid var(--tb-grid-border);
-		background: var(--tb-grid-bg);
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 14%, var(--tb-grid-border));
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--tb-accent-soft) 12%, var(--tb-grid-bg) 88%),
+			var(--tb-grid-bg)
+		);
 		scrollbar-width: thin;
 		box-shadow:
 			inset 0 1px 0 rgba(255, 255, 255, 0.08),
@@ -6351,8 +6565,37 @@
 		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tb-accent) 24%, transparent);
 	}
 
+	.task-grid tbody tr.row-todo {
+		background: color-mix(in srgb, var(--tb-status-todo) 5%, transparent);
+		box-shadow: inset 3px 0 0 color-mix(in srgb, var(--tb-status-todo) 58%, transparent);
+	}
+
+	.task-grid tbody tr.row-progress {
+		background: color-mix(in srgb, var(--tb-status-progress) 7%, transparent);
+		box-shadow: inset 3px 0 0 color-mix(in srgb, var(--tb-status-progress) 62%, transparent);
+	}
+
 	.task-grid tbody tr.row-done {
 		background: var(--tb-grid-row-done);
+		box-shadow: inset 3px 0 0 color-mix(in srgb, var(--tb-status-done) 62%, transparent);
+	}
+
+	.task-grid tbody tr.row-todo:hover {
+		box-shadow:
+			inset 3px 0 0 color-mix(in srgb, var(--tb-status-todo) 72%, transparent),
+			inset 0 0 0 1px color-mix(in srgb, var(--tb-accent) 24%, transparent);
+	}
+
+	.task-grid tbody tr.row-progress:hover {
+		box-shadow:
+			inset 3px 0 0 color-mix(in srgb, var(--tb-status-progress) 78%, transparent),
+			inset 0 0 0 1px color-mix(in srgb, var(--tb-accent) 24%, transparent);
+	}
+
+	.task-grid tbody tr.row-done:hover {
+		box-shadow:
+			inset 3px 0 0 color-mix(in srgb, var(--tb-status-done) 78%, transparent),
+			inset 0 0 0 1px color-mix(in srgb, var(--tb-accent) 24%, transparent);
 	}
 
 	.task-grid tbody tr.row-selected {
@@ -6649,36 +6892,36 @@
 	}
 
 	.status-todo {
-		background: #595c64;
-		color: #f4f5f7;
+		background: var(--tb-status-todo);
+		color: var(--tb-status-todo-text);
 	}
 
 	.status-in_progress {
-		background: #facc15;
-		color: #2e2302;
+		background: var(--tb-status-progress);
+		color: var(--tb-status-progress-text);
 	}
 
 	.status-done {
-		background: #22c55e;
-		color: #082714;
+		background: var(--tb-status-done);
+		color: var(--tb-status-done-text);
 	}
 
 	:global(:root[data-theme='dark']) .status-todo,
 	:global(.theme-dark) .status-todo {
-		background: #6b6f78;
-		color: #f6f7fa;
+		background: var(--tb-status-todo);
+		color: var(--tb-status-todo-text);
 	}
 
 	:global(:root[data-theme='dark']) .status-in_progress,
 	:global(.theme-dark) .status-in_progress {
-		background: #facc15;
-		color: #2e2302;
+		background: var(--tb-status-progress);
+		color: var(--tb-status-progress-text);
 	}
 
 	:global(:root[data-theme='dark']) .status-done,
 	:global(.theme-dark) .status-done {
-		background: #22c55e;
-		color: #082714;
+		background: var(--tb-status-done);
+		color: var(--tb-status-done-text);
 	}
 
 	.status-menu {
@@ -6832,6 +7075,11 @@
 			justify-content: flex-start;
 		}
 
+		.header-main,
+		.header-meta {
+			width: 100%;
+		}
+
 		.task-search {
 			flex-direction: column;
 			align-items: stretch;
@@ -6847,6 +7095,16 @@
 
 		.sprint-composer-actions {
 			justify-content: flex-start;
+		}
+
+		.quick-edit-controls {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.quick-edit-input {
+			min-width: 0;
+			width: 100%;
 		}
 
 		.kanban-board {
@@ -6875,8 +7133,74 @@
 			grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
 		}
 
+		.sprint-group-header {
+			flex-direction: column;
+			align-items: flex-start;
+		}
+
+		.sgh-actions {
+			width: 100%;
+			justify-content: flex-start;
+		}
+
+		.sprint-add-form {
+			flex-wrap: wrap;
+		}
+
 		.task-grid {
 			min-width: 980px;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.board-header {
+			padding: 0.82rem 0.88rem;
+		}
+
+		.header-main h2 {
+			font-size: 0.96rem;
+		}
+
+		.task-search-clear,
+		.quick-edit-btn,
+		.sprint-composer-trigger,
+		.sprint-add-form button,
+		.support-create-btn,
+		.support-clear-btn {
+			width: 100%;
+		}
+
+		.quick-subtask-row {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.quick-subtask-remove {
+			width: 100%;
+		}
+
+		.sprint-composer-head > :first-child,
+		.sprint-composer-head > p {
+			width: 100%;
+		}
+
+		.sprint-add-form {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.kanban-board {
+			grid-template-columns: minmax(0, 1fr);
+			overflow: visible;
+		}
+
+		.support-composer-actions {
+			flex-direction: column;
+			align-items: stretch;
+		}
+
+		.support-ticket-card {
+			aspect-ratio: auto;
+			min-height: 180px;
 		}
 	}
 </style>

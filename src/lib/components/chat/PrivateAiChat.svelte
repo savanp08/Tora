@@ -237,7 +237,12 @@
 		role="presentation"
 		on:click={onOverlayClick}
 	>
-		<div class="private-ai-drawer" role="dialog" aria-modal="true" aria-label="Private AI Assistant">
+		<div
+			class="private-ai-drawer"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Private AI Assistant"
+		>
 			<header class="private-ai-header">
 				<div class="private-ai-title-wrap">
 					<h2>Private Tora AI</h2>
@@ -256,7 +261,12 @@
 					>
 						Clear chat
 					</button>
-					<button type="button" class="close-btn" on:click={() => dispatch('close')} aria-label="Close">
+					<button
+						type="button"
+						class="close-btn"
+						on:click={() => dispatch('close')}
+						aria-label="Close"
+					>
 						<svg viewBox="0 0 12 12" aria-hidden="true">
 							<path d="M2 2l8 8M10 2 2 10"></path>
 						</svg>
@@ -299,19 +309,21 @@
 				{/if}
 			</div>
 
-			<div class="suggestions-panel">
-				{#each PRIVATE_AI_SUGGESTIONS as suggestion}
-					<button
-						type="button"
-						class="suggestion-item"
-						on:click={() => applyPrivateSuggestion(suggestion)}
-						disabled={isSending}
-					>
-						<span class="suggestion-arrow" aria-hidden="true">→</span>
-						<span class="suggestion-text">{suggestion}</span>
-					</button>
-				{/each}
-			</div>
+			{#if messages.length === 0}
+				<div class="suggestions-panel">
+					{#each PRIVATE_AI_SUGGESTIONS as suggestion}
+						<button
+							type="button"
+							class="suggestion-item"
+							on:click={() => applyPrivateSuggestion(suggestion)}
+							disabled={isSending}
+						>
+							<span class="suggestion-arrow" aria-hidden="true">→</span>
+							<span class="suggestion-text">{suggestion}</span>
+						</button>
+					{/each}
+				</div>
+			{/if}
 
 			{#if errorText}
 				<div class="private-ai-error">{errorText}</div>
@@ -694,10 +706,18 @@
 		outline: none;
 		background: transparent;
 		color: #e8eaed;
+		caret-color: #e8eaed;
 		padding: 0;
 		font: inherit;
 		font-size: 0.86rem;
 		line-height: 1.48;
+		letter-spacing: normal;
+		word-spacing: normal;
+		font-kerning: none;
+		font-variant-ligatures: none;
+		font-feature-settings:
+			'liga' 0,
+			'calt' 0;
 	}
 
 	.private-ai-textarea::placeholder {

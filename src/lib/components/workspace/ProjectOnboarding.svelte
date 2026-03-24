@@ -173,7 +173,8 @@
 	).length;
 	$: roomHasExistingContent = roomTaskCount > 0 || roomFieldCount > 0;
 	$: availableTemplates = [BLANK_TEMPLATE_CARD, ...templates];
-	$: selectedTemplate = availableTemplates.find((template) => template.id === selectedTemplateId) ?? null;
+	$: selectedTemplate =
+		availableTemplates.find((template) => template.id === selectedTemplateId) ?? null;
 	$: templatePreviewFields = selectedTemplate?.fieldSchemas ?? [];
 	$: templatePreviewTasks = selectedTemplate?.sampleTasks ?? [];
 
@@ -304,13 +305,19 @@
 			: [];
 		const fieldSchemas = rawFieldSchemas
 			.map((entry: unknown) => normalizeTemplateField(entry))
-			.filter((entry: IndustryTemplateField | null): entry is IndustryTemplateField => Boolean(entry));
+			.filter((entry: IndustryTemplateField | null): entry is IndustryTemplateField =>
+				Boolean(entry)
+			);
 		const sampleTasks = rawSampleTasks
 			.map((entry: unknown) => normalizeTemplateTask(entry))
-			.filter((entry: IndustryTemplateTask | null): entry is IndustryTemplateTask => Boolean(entry));
+			.filter((entry: IndustryTemplateTask | null): entry is IndustryTemplateTask =>
+				Boolean(entry)
+			);
 		const automationRules = rawAutomationRules
 			.map((entry: unknown) => normalizeTemplateRule(entry))
-			.filter((entry: IndustryTemplateRule | null): entry is IndustryTemplateRule => Boolean(entry));
+			.filter((entry: IndustryTemplateRule | null): entry is IndustryTemplateRule =>
+				Boolean(entry)
+			);
 		return {
 			id,
 			name,
@@ -530,11 +537,7 @@
 
 	function parseTemplateError(payload: unknown, status: number) {
 		const source = toRecord(payload);
-		return (
-			toStringValue(source?.error) ||
-			toStringValue(source?.message) ||
-			`HTTP ${status}`
-		);
+		return toStringValue(source?.error) || toStringValue(source?.message) || `HTTP ${status}`;
 	}
 
 	async function loadTemplates() {
@@ -709,7 +712,11 @@
 	}
 </script>
 
-<section class="project-onboarding" class:is-modal={isModal} aria-label="Project workspace onboarding">
+<section
+	class="project-onboarding"
+	class:is-modal={isModal}
+	aria-label="Project workspace onboarding"
+>
 	{#if mode === 'selection'}
 		<div class="selection-shell">
 			<header class="selection-header">
@@ -737,8 +744,10 @@
 					<button type="button" class="selection-btn ai" on:click={() => (mode = 'ai')}>
 						<span class="selection-icon" aria-hidden="true">
 							<svg viewBox="0 0 24 24">
-								<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"></path>
-								<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"></path>
+								<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"
+								></path>
+								<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"
+								></path>
 							</svg>
 						</span>
 						<span class="selection-copy">
@@ -846,7 +855,9 @@
 			{/if}
 
 			{#if localError || $timelineError}
-				<div class="tora-error" role="status" aria-live="polite">{localError || $timelineError}</div>
+				<div class="tora-error" role="status" aria-live="polite">
+					{localError || $timelineError}
+				</div>
 			{/if}
 
 			<form class="tora-composer" on:submit|preventDefault={() => void generateWorkspace()}>
@@ -898,7 +909,8 @@
 				</div>
 				<div class="wizard-head-actions">
 					{#if templatePickerOnly}
-						<button type="button" class="ghost-btn" on:click={() => dispatch('close')}>Close</button>
+						<button type="button" class="ghost-btn" on:click={() => dispatch('close')}>Close</button
+						>
 					{:else}
 						<button type="button" class="back-btn" on:click={goBackToSelection}>Back</button>
 					{/if}
@@ -910,8 +922,8 @@
 					<div>
 						<strong>Template library</strong>
 						<p>
-							Start with a structured board instead of an empty canvas. Every template includes starter
-							fields and sample tasks so the workspace feels usable immediately.
+							Start with a structured board instead of an empty canvas. Every template includes
+							starter fields and sample tasks so the workspace feels usable immediately.
 						</p>
 					</div>
 					<div class="template-intro-meta">
@@ -923,7 +935,8 @@
 				{#if templateLoadError}
 					<div class="error-banner">
 						<span>{templateLoadError}</span>
-						<button type="button" class="inline-link-btn" on:click={retryTemplateLoad}>Retry</button>
+						<button type="button" class="inline-link-btn" on:click={retryTemplateLoad}>Retry</button
+						>
 					</div>
 				{/if}
 
@@ -946,7 +959,12 @@
 							<p>{template.description}</p>
 							<div class="template-card-meta">
 								{#if template.fieldSchemas.length > 0}
-									<span>{template.fieldSchemas.slice(0, 3).map((field) => field.name).join(' · ')}</span>
+									<span
+										>{template.fieldSchemas
+											.slice(0, 3)
+											.map((field) => field.name)
+											.join(' · ')}</span
+									>
 								{:else}
 									<span>No starter data</span>
 								{/if}
@@ -963,11 +981,9 @@
 						type="button"
 						class="primary-btn"
 						on:click={reviewSelectedTemplate}
-						disabled={
-							!selectedTemplate ||
+						disabled={!selectedTemplate ||
 							applyingTemplate ||
-							(templatesLoading && selectedTemplate?.id !== BLANK_TEMPLATE_ID)
-						}
+							(templatesLoading && selectedTemplate?.id !== BLANK_TEMPLATE_ID)}
 					>
 						Review selection
 					</button>
@@ -979,7 +995,9 @@
 							<h4>{selectedTemplate?.name}</h4>
 							<p>{selectedTemplate?.description}</p>
 						</div>
-						<span class="template-pill subtle">{selectedTemplate?.industries.join(' · ') || 'Blank'}</span>
+						<span class="template-pill subtle"
+							>{selectedTemplate?.industries.join(' · ') || 'Blank'}</span
+						>
 					</div>
 
 					<div class="template-preview-summary">
@@ -1035,8 +1053,8 @@
 							<div>
 								<strong>Replace existing workspace content</strong>
 								<p>
-									This will remove the current room tasks, custom fields, and saved automation presets
-									before the new template is applied.
+									This will remove the current room tasks, custom fields, and saved automation
+									presets before the new template is applied.
 								</p>
 							</div>
 						</label>
@@ -1940,9 +1958,18 @@
 		border: none;
 		background: transparent;
 		color: #e8eaed;
+		caret-color: #e8eaed;
 		padding: 0;
+		font-family: inherit;
 		font-size: 0.84rem;
 		line-height: 1.46;
+		letter-spacing: normal;
+		word-spacing: normal;
+		font-kerning: none;
+		font-variant-ligatures: none;
+		font-feature-settings:
+			'liga' 0,
+			'calt' 0;
 		resize: none;
 	}
 

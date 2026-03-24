@@ -584,12 +584,20 @@
 			<div class="head-kpi">
 				<span>Budget</span>
 				<strong>{hasAnyBudget ? fmtMoney(totalBudgetValue) : '--'}</strong>
-				<p>{hasAnyBudget ? `${fmtMoney(weeklyBudgetValue)} / week` : estimatedCost || 'Not configured'}</p>
+				<p>
+					{hasAnyBudget
+						? `${fmtMoney(weeklyBudgetValue)} / week`
+						: estimatedCost || 'Not configured'}
+				</p>
 			</div>
 			<div class="head-kpi">
 				<span>Usage</span>
 				<strong>{hasAnyBudget ? `${budgetPercent}%` : '--'}</strong>
-				<p>{hasAnyBudget ? `${fmtMoney(effectiveBudgetSpent)} spent · ${fmtMoney(weeklySpendValue)} / week` : 'No usage data yet'}</p>
+				<p>
+					{hasAnyBudget
+						? `${fmtMoney(effectiveBudgetSpent)} spent · ${fmtMoney(weeklySpendValue)} / week`
+						: 'No usage data yet'}
+				</p>
 			</div>
 		</header>
 
@@ -1614,13 +1622,37 @@
 
 	@media (max-width: 900px) {
 		.project-head {
-			display: flex;
-			flex-direction: row;
+			grid-template-columns: minmax(0, 1fr);
 			gap: 0.75rem;
 		}
 
 		.head-main {
-			grid-column: auto;
+			grid-column: 1;
+		}
+
+		.head-main h2 {
+			white-space: normal;
+			overflow: visible;
+			text-overflow: clip;
+		}
+
+		.head-kpi {
+			max-width: none;
+		}
+
+		.head-kpi p {
+			white-space: normal;
+			overflow: visible;
+			text-overflow: clip;
+		}
+
+		.stats-grid {
+			max-width: none;
+			justify-content: stretch;
+		}
+
+		.stat-card {
+			max-width: none;
 		}
 
 		.runway-row {
@@ -1647,6 +1679,10 @@
 
 	@media (max-width: 640px) {
 		.board {
+			padding: 0.9rem;
+		}
+
+		.project-head {
 			padding: 0.9rem;
 		}
 

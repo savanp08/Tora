@@ -504,6 +504,11 @@
 	let typingNamesPreview = '';
 	let typingIndicatorText = '';
 	let hasTypingUsers = false;
+	// Tora panda progress indicator (separate from normal typing)
+	const TORA_BOT_ID = 'Tora-Bot';
+	let toraIsThinking = false;
+	let toraPandaOpen = false;
+	let toraProgressLog: Array<{ text: string; time: number }> = [];
 	let historyLoadingByRoom: Record<string, boolean> = {};
 	let historyHasMoreByRoom: Record<string, boolean> = {};
 	let offlineHydratedByRoom: Record<string, boolean> = {};
@@ -1351,6 +1356,18 @@
 			remoteExpiresAt > now && remoteExpiresAt <= now + REMOTE_TYPING_MAX_FUTURE_MS
 				? remoteExpiresAt
 				: now + TYPING_SAFETY_TIMEOUT_MS;
+		// Route Tora-Bot typing to the panda indicator instead of the normal typing bar
+		if (participantId === TORA_BOT_ID) {
+			toraIsThinking = kind === 'typing_start';
+			if (kind === 'typing_start') {
+				toraProgressLog = [
+					...toraProgressLog.slice(-9),
+					{ text: 'Tora is thinking...', time: Date.now() }
+				];
+			}
+			return true;
+		}
+
 		if (kind === 'typing_start') {
 			setTypingIndicator(targetRoomId, participantId, participantName, expiresAt);
 		} else {
@@ -3635,6 +3652,25 @@
 		const shouldCountUnread = !isOwnMessage;
 		upsertMessage(message.roomId, message, shouldCountUnread);
 		addBeaconMessageToDashboard(message);
+
+		// Track Tora-Bot responses in the panda progress log
+		if (normalizeIdentifier(message.senderId) === TORA_BOT_ID) {
+			toraIsThinking = false;
+			let logEntry = '';
+			if (message.type === 'tora_action') {
+				try {
+					const p = JSON.parse(message.content ?? '');
+					const arr = JSON.parse(p.actionsJson ?? '[]');
+					logEntry = `Proposed ${Array.isArray(arr) ? arr.length : '?'} changes`;
+				} catch {
+					logEntry = 'Proposed changes';
+				}
+			} else {
+				const preview = (message.content ?? '').replace(/\n/g, ' ').trim().slice(0, 80);
+				logEntry = preview ? (preview.length === 80 ? preview + '…' : preview) : 'Responded';
+			}
+			toraProgressLog = [...toraProgressLog.slice(-9), { text: logEntry, time: Date.now() }];
+		}
 	}
 
 	function upsertMessage(targetRoomId: string, message: ChatMessage, shouldCountUnread: boolean) {
@@ -6955,6 +6991,8 @@
 							{focusMessageId}
 							isLoadingOlder={isLoadingOlderHistory}
 							hasMoreOlder={hasMoreOlderHistory}
+							apiBase={API_BASE}
+							chatAuthToken={getSessionToken() || ($authToken ?? '')}
 							on:toggleExpand={(event) => toggleMessageExpanded(event.detail.messageId)}
 							on:joinBreakRoom={onJoinBreakRoom}
 							on:joinRoom={() => void joinCurrentRoom()}
@@ -6970,22 +7008,68 @@
 							on:readProgress={onChatReadProgress}
 							on:toggleTask={onTaskToggle}
 							on:addTask={onTaskAdd}
+							currentUserName={currentUsername}
 						/>
 					{/if}
 				</div>
 
 				{#if !isDrawBoardActive && !isDashboardActive && !isTaskBoardActive}
 					<div class="composer-typing-slot" role="status" aria-live="polite" aria-atomic="true">
-						{#if hasTypingUsers}
-							{#key `${roomId}:${typingIndicatorText}`}
-								<div class="composer-typing-card is-visible">
-									<div class="composer-typing-names">{typingNamesPreview}</div>
-									<div class="composer-typing-status">{typingIndicatorText}</div>
+						<div class="typing-row">
+							{#if hasTypingUsers}
+								{#key `${roomId}:${typingIndicatorText}`}
+									<div class="composer-typing-card is-visible">
+										<div class="composer-typing-names">{typingNamesPreview}</div>
+										<div class="composer-typing-status">{typingIndicatorText}</div>
+									</div>
+								{/key}
+							{:else}
+								<div class="composer-typing-placeholder" aria-hidden="true"></div>
+							{/if}
+
+							<!-- Panda progress indicator for Tora AI -->
+							{#if toraIsThinking || toraProgressLog.length > 0}
+								<!-- svelte-ignore a11y-click-events-have-key-events -->
+								<!-- svelte-ignore a11y-no-static-element-interactions -->
+								<div
+									class="tora-panda-btn"
+									class:tora-panda-thinking={toraIsThinking}
+									title="Tora AI activity"
+									on:click={() => (toraPandaOpen = !toraPandaOpen)}
+								>
+									<span class="panda-emoji" aria-hidden="true">🐼</span>
+									{#if toraIsThinking}
+										<span class="panda-pulse" aria-hidden="true"></span>
+									{/if}
 								</div>
-							{/key}
-						{:else}
-							<div class="composer-typing-placeholder" aria-hidden="true"></div>
-						{/if}
+
+								{#if toraPandaOpen}
+									<!-- svelte-ignore a11y-click-events-have-key-events -->
+									<!-- svelte-ignore a11y-no-static-element-interactions -->
+									<div class="tora-panda-panel" on:click|stopPropagation>
+										<div class="panda-panel-header">
+											<span>🐼 Tora Activity</span>
+											<button class="panda-panel-close" on:click={() => (toraPandaOpen = false)}>✕</button>
+										</div>
+										<div class="panda-panel-log">
+											{#if toraIsThinking}
+												<div class="panda-log-entry panda-log-thinking">
+													<span class="panda-log-dot thinking-dot"></span>
+													<span>Thinking…</span>
+												</div>
+											{/if}
+											{#each [...toraProgressLog].reverse() as entry (entry.time)}
+												<div class="panda-log-entry">
+													<span class="panda-log-dot"></span>
+													<span class="panda-log-text">{entry.text}</span>
+													<span class="panda-log-time">{new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+												</div>
+											{/each}
+										</div>
+									</div>
+								{/if}
+							{/if}
+						</div>
 					</div>
 				{/if}
 				{#if isMember && !isDrawBoardActive && !isDashboardActive && !isTaskBoardActive}

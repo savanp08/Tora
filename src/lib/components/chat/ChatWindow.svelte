@@ -9,6 +9,7 @@
 	import { formatBeaconTimestamp, parseBeaconMessagePayload } from '$lib/utils/chat/beacon';
 	import { resolveSenderNameColor } from '$lib/utils/chat/senderNameColors';
 	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
+	import ToraBotActionCard from '$lib/components/chat/ToraBotActionCard.svelte';
 
 	type ReplyPreview = {
 		messageId: string;
@@ -60,6 +61,11 @@
 	export let unreadCount = 0;
 	export let lastReadTimestamp = Date.now();
 	export let firstUnreadMessageId = '';
+	// For Tora action cards: needed to call the task API on accept
+	export let apiBase = '';
+	export let chatAuthToken = '';
+	export let toraAutoApply = false;
+	export let currentUserName = '';
 
 	const dispatch = createEventDispatcher<{
 		toggleExpand: { messageId: string };
@@ -2042,6 +2048,21 @@
 								on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
 								on:addTask={(event) => dispatch('addTask', event.detail)}
 							/>
+						{:else if message.type === 'tora_action'}
+							{@const toraPayload = (() => { try { return JSON.parse(message.content); } catch { return null; } })()}
+							{#if toraPayload}
+								<ToraBotActionCard
+									text={toraPayload.text ?? ''}
+									actionsJson={toraPayload.actionsJson ?? ''}
+									{roomId}
+									{apiBase}
+									authToken={chatAuthToken}
+									autoApply={toraAutoApply}
+									{currentUserName}
+								/>
+							{:else}
+								{message.content}
+							{/if}
 						{:else if beaconPayload}
 							<div class="beacon-card">
 								<div class="beacon-card-head">
