@@ -117,6 +117,10 @@ func NewRoomHandler(hub *websocket.Hub, redisStore *database.RedisStore, scyllaS
 	handler.ensureRoomSchema()
 	handler.ensureRoomMessageSoftExpirySchema()
 	handler.ensureTaskSchema()
+	handler.ensureTaskRelationSchema()
+	handler.ensureFieldSchemaSchema()
+	handler.ensureAutomationRuleSchema()
+	handler.ensureIntakeFormsSchema()
 	handler.ensurePinnedDiscussionSchema()
 	return handler
 }

@@ -7,6 +7,7 @@
 	import type { ChatMessage, MessageActionMode } from '$lib/types/chat';
 	import { normalizeIdentifier } from '$lib/utils/chat/core';
 	import { formatBeaconTimestamp, parseBeaconMessagePayload } from '$lib/utils/chat/beacon';
+	import { resolveSenderNameColor } from '$lib/utils/chat/senderNameColors';
 	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 
 	type ReplyPreview = {
@@ -112,10 +113,6 @@
 	const EMOJI_TOKEN_PATTERN =
 		/(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*)/gu;
 	const MENTION_TOKEN_PATTERN = /(^|[^A-Za-z0-9_])(@[A-Za-z0-9_.-]{1,32})/g;
-	const LIGHT_SENDER_NAME_FALLBACK = '#475569';
-	const DARK_SENDER_NAME_FALLBACK = '#cbd5e1';
-	const SELF_LIGHT_SENDER_NAME_FALLBACK = '#f5f8ff';
-
 	let viewport: HTMLDivElement | null = null;
 	let previousVisibleCount = 0;
 	let copiedMessageId = '';
@@ -156,8 +153,6 @@
 	let suppressNativeMessageContextMenuUntil = 0;
 	let reactionPopoverMessageId = '';
 	let touchReactionRevealMessageId = '';
-	const senderNameColorCache = new Map<string, string>();
-
 	$: if (!focusMessageId && focusedMessageId) {
 		focusedMessageId = '';
 	}
@@ -447,36 +442,12 @@
 	}
 
 	function getSenderNameColor(senderId: string, senderName: string, isOwnMessage = false) {
-		const normalizedSenderId = normalizeIdentifier(senderId || '');
-		const normalizedSenderName = normalizeIdentifier(senderName || '');
-		const identity = normalizedSenderId || normalizedSenderName;
-		if (!identity) {
-			if (isOwnMessage && !isDarkMode) {
-				return SELF_LIGHT_SENDER_NAME_FALLBACK;
-			}
-			return isDarkMode ? DARK_SENDER_NAME_FALLBACK : LIGHT_SENDER_NAME_FALLBACK;
-		}
-		const theme = isDarkMode ? 'dark' : 'light';
-		const cacheKey = `${theme}:${isOwnMessage ? 'mine' : 'peer'}:${identity}`;
-		const cached = senderNameColorCache.get(cacheKey);
-		if (cached) {
-			return cached;
-		}
-		let hash = 2166136261;
-		for (let index = 0; index < identity.length; index += 1) {
-			hash ^= identity.charCodeAt(index);
-			hash = Math.imul(hash, 16777619) >>> 0;
-		}
-		const hue = hash % 360;
-		let saturation = isDarkMode ? 72 : 68;
-		let lightness = isDarkMode ? 66 + (hash % 8) : 34 + (hash % 10);
-		if (isOwnMessage && !isDarkMode) {
-			saturation = 80 + (hash % 8);
-			lightness = 88 + (hash % 6);
-		}
-		const color = `hsl(${hue} ${saturation}% ${lightness}%)`;
-		senderNameColorCache.set(cacheKey, color);
-		return color;
+		return resolveSenderNameColor({
+			senderId,
+			senderName,
+			isOwnMessage,
+			isDarkMode
+		});
 	}
 
 	function getVisibleMessageKey(entries: ChatMessage[]) {

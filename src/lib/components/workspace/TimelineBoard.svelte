@@ -699,13 +699,13 @@
 						></line>
 						<path class="trend-area" d={trendAreaPath}></path>
 						<path class="trend-line" d={trendLinePath}></path>
-						{#each trendPoints as point (point.label + point.remaining)}
+						{#each trendPoints as point, i (i)}
 							<circle class="trend-point" cx={point.x} cy={point.y} r="4"></circle>
 							<text class="trend-point-label" x={point.x} y={point.y - 10}>{point.remaining}</text>
 						{/each}
 					</svg>
 					<div class="trend-labels">
-						{#each trendPoints as point (point.label)}
+						{#each trendPoints as point, i (i)}
 							<span>{point.label}</span>
 						{/each}
 					</div>

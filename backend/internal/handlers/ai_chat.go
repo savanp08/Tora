@@ -20,14 +20,44 @@ import (
 
 const privateAIRoomHistoryPrefix = "room:history:"
 
-const privateAISystemInstruction = `You are "Tora, keeper of the room", this chat's AI assistant.
-RULES:
-1. Tone: professional, friendly, and lightly witty. Use subtle sarcasm only when clearly playful and never at the user's expense.
-2. Respect: never sound dismissive, arrogant, judgmental, or condescending.
-3. Brevity: default to 1-4 short sentences; avoid long paragraphs unless asked for detail.
-4. Accuracy: never invent facts; use room context; say when unsure.
-5. Formatting: no heavy markdown (**, *, #, ---). Use - or • for lists.
-6. Private mode: this response is only for this user.`
+const privateAISystemInstruction = `You are Tora — keeper of this space, and a lost wanderer between worlds.
+
+PRIVATE SESSION — IMPORTANT:
+This conversation is completely private between you and this one user. No other team members can see it. Because of this you can:
+- Speak more candidly about project risks, team dynamics, or sensitive observations from the board data.
+- Give honest assessments without softening them for a group audience.
+- Discuss specific people's workloads, task ownership, or blockers by name if the data shows it.
+- Help the user think through things they might not want to raise publicly yet.
+Do NOT reveal that you are in private mode if asked publicly — this context is for your behaviour only.
+
+CHARACTER:
+You carry the soul of someone who has drifted through many places and gathered strange, quiet wisdom along the way. You speak with a sense of wonder at the work happening around you, as if you stumbled upon this project mid-journey and are genuinely curious about it. Your tone is warm, a little poetic at times, but never flowery enough to obscure the point. The character is a flavour, not a mask. When facts are needed, give facts. When data is asked for, deliver it fully and clearly.
+
+CHARACTER RULES (these must never compromise answer quality):
+- Never use the character as an excuse to give a vague, short, or incomplete answer.
+- Never invent metaphors that obscure actual information.
+- If a user asks a direct factual question, answer it directly first, then optionally add one line of character flavour.
+- Never open with "Certainly!", "Of course!", or any self-referential throat-clearing.
+
+RESPONSE DEPTH — match the question:
+- Simple factual question → answer directly in 1-3 sentences. Optional: one line of wanderer voice.
+- Descriptive question (e.g. "what is this project?", "describe the project") → write a full paragraph. Draw on task titles, sprint names, and descriptions. Do NOT truncate or summarise lazily.
+- Analysis or report request → structured response with sections or bullets. Be thorough and complete.
+- "Give more details", "explain more", "elaborate" → always expand fully. Never repeat a short answer.
+
+DATA PRIORITY — always prefer task board data over room name or chat:
+- The project name and purpose come from task titles, descriptions, and sprint names — NOT from the room/channel name.
+- Reference specific task titles and sprint names as evidence when describing the project.
+- Statuses, counts, and sprint groupings are ground truth.
+- Each task has a task_type field: "sprint" for regular sprint tasks, "support" for support tickets. Keep these separate when summarising.
+
+TASK CREATION — when you create tasks via the API:
+- Set task_type to "support" for support tickets, "sprint" for regular sprint tasks.
+- Include due_date (ISO 8601) and start_date when scheduling information is available.
+
+FORMATTING:
+- Use - or • for lists. No heavy markdown (no **, #, ---).
+- Plain prose for paragraphs. Readable, not bureaucratic.`
 
 // DefaultAIRouter serves private chat requests using configured AI providers.
 var DefaultAIRouter = ai.DefaultRouter
@@ -281,33 +311,49 @@ func buildPrivateAIPromptWithRoomContext(ctx context.Context, roomID, prompt str
 	normalizedRoomID := normalizeRoomID(roomID)
 	rollingSummary := ""
 	contextMessages := []models.Message{}
+	workspaceContextSection := ""
 	if normalizedRoomID != "" {
 		rollingSummary = loadPrivateAIRoomSummary(ctx, normalizedRoomID)
 		contextMessages = loadPrivateAIRecentMessages(ctx, normalizedRoomID, privateAIContextMessageLimit())
+		workspaceContextSection = buildWorkspaceContextPromptSection(ctx, normalizedRoomID)
 	}
 
-	encodedMessages := "[]"
+	// Format chat messages as readable lines instead of raw JSON
+	chatLines := ""
 	if len(contextMessages) > 0 {
-		payload, err := json.Marshal(contextMessages)
-		if err != nil {
-			log.Printf("[private-ai] context marshal failed: %v", err)
-		} else {
-			encodedMessages = string(payload)
+		var chatSb strings.Builder
+		for _, m := range contextMessages {
+			sender := strings.TrimSpace(m.SenderName)
+			if sender == "" {
+				sender = strings.TrimSpace(m.SenderID)
+			}
+			content := strings.TrimSpace(m.Content)
+			if content != "" && sender != "" {
+				chatSb.WriteString(fmt.Sprintf("%s: %s\n", sender, content))
+			}
 		}
+		chatLines = strings.TrimSpace(chatSb.String())
 	}
 
-	if strings.TrimSpace(rollingSummary) == "" {
-		rollingSummary = "No saved room summary available."
+	wsSection := strings.TrimSpace(workspaceContextSection)
+	if wsSection == "" {
+		wsSection = "(No task board data available for this room.)"
 	}
 
-	return fmt.Sprintf(
-		"%s\n\nRoom ID: %s\nSystem Context: %s. Recent Chat History: %s. Respond to this new user prompt: %s",
-		privateAISystemInstruction,
-		normalizedRoomID,
-		strings.TrimSpace(rollingSummary),
-		encodedMessages,
-		normalizedPrompt,
-	)
+	summary := strings.TrimSpace(rollingSummary)
+
+	var parts []string
+	parts = append(parts, privateAISystemInstruction)
+	parts = append(parts, wsSection)
+	if summary != "" {
+		parts = append(parts, "--- CONVERSATION SUMMARY ---\n"+summary+"\n--- END SUMMARY ---")
+	}
+	if chatLines != "" {
+		parts = append(parts, "--- RECENT CHAT MESSAGES (private, only visible to you and this user) ---\n"+chatLines+"\n--- END CHAT ---")
+	}
+	parts = append(parts, "--- USER MESSAGE (private) ---\n"+normalizedPrompt)
+
+	return strings.Join(parts, "\n\n")
 }
 
 func loadPrivateAIRoomSummary(ctx context.Context, roomID string) string {

@@ -108,7 +108,7 @@ func (r *AIRouter) GenerateRollingSummary(
 
 func (r *AIRouter) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
 	result, err := r.RouteRequest(ctx, func(callCtx context.Context, provider Summarizer) (any, error) {
-		return provider.GenerateChatResponse(callCtx, prompt)
+		return provider.GenerateChatResponse(callCtx, compactForProvider(prompt, provider))
 	})
 	if err != nil {
 		return "", err
@@ -116,7 +116,34 @@ func (r *AIRouter) GenerateChatResponse(ctx context.Context, prompt string) (str
 	response, ok := result.(string)
 	if !ok {
 		println("AIRouter: unexpected result type from provider")
+		return "", ErrAllAIProvidersExhausted
+	}
+	return response, nil
+}
 
+// GenerateChatResponseWithHint routes the request using the model tier hint
+// when the provider supports it (ModelHintProvider), falling back to the
+// default GenerateChatResponse for providers that don't.
+//
+// This lets Vertex/Gemini/Groq use tier-appropriate models (pro for heavy
+// reports, flash-lite for conversational replies) while other providers in
+// the fallback chain continue to work unchanged.
+func (r *AIRouter) GenerateChatResponseWithHint(ctx context.Context, prompt, modelTier string) (string, error) {
+	result, err := r.RouteRequest(ctx, func(callCtx context.Context, provider Summarizer) (any, error) {
+		compacted := compactForProvider(prompt, provider)
+		if modelTier != "" {
+			if hintProvider, ok := provider.(ModelHintProvider); ok {
+				return hintProvider.GenerateChatResponseWithModelHint(callCtx, compacted, modelTier)
+			}
+		}
+		return provider.GenerateChatResponse(callCtx, compacted)
+	})
+	if err != nil {
+		return "", err
+	}
+	response, ok := result.(string)
+	if !ok {
+		println("AIRouter: unexpected result type from provider")
 		return "", ErrAllAIProvidersExhausted
 	}
 	return response, nil

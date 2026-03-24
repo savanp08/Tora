@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
 	import type { OnlineMember } from '$lib/types/chat';
+	import { resolveApiBase } from '$lib/config/apiBase';
 	import { currentUser } from '$lib/store';
 	import { taskStore, upsertTaskStoreEntry, type Task } from '$lib/stores/tasks';
 	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
@@ -16,7 +17,7 @@
 
 	const OVERLOAD_THRESHOLD = 20;
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const API_BASE = resolveApiBase(API_BASE_RAW);
 
 	type WorkloadUser = {
 		key: string;
@@ -80,11 +81,47 @@
 	}
 
 	function parseEffortScore(task: Task) {
+		const customFieldEffort = parseCustomFieldEffort(task.customFields);
+		if (customFieldEffort > 0) {
+			return customFieldEffort;
+		}
 		const entries = parseDescriptionMetadata(task.description || '');
 		const effortRaw = entries.find((entry) => entry.key === 'effort')?.value ?? '';
-		const parsed = Number(effortRaw.replace(/[^\d.\-]/g, ''));
-		if (Number.isFinite(parsed) && parsed > 0) {
-			return parsed;
+		return parsePositiveNumber(effortRaw);
+	}
+
+	function parsePositiveNumber(value: unknown) {
+		if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+			return value;
+		}
+		if (typeof value === 'string') {
+			const parsed = Number(value.replace(/[^\d.\-]/g, ''));
+			if (Number.isFinite(parsed) && parsed > 0) {
+				return parsed;
+			}
+		}
+		return 0;
+	}
+
+	function parseCustomFieldEffort(fields: Task['customFields']) {
+		if (!fields || typeof fields !== 'object') {
+			return 0;
+		}
+		const record = fields as Record<string, unknown>;
+		const effortFieldCandidates = [
+			'effort',
+			'effort_score',
+			'effortScore',
+			'story_points',
+			'storyPoints',
+			'estimate',
+			'estimated_effort'
+		];
+		for (const key of effortFieldCandidates) {
+			const parsed = parsePositiveNumber(record[key]);
+			if (parsed > 0) {
+				return parsed;
+			}
 		}
 		return 0;
 	}
@@ -224,6 +261,19 @@
 		);
 	}
 
+	function taskEffortScore(task: Task) {
+		return parseEffortScore(task);
+	}
+
+	function sortTasksByEffortDesc(taskList: Task[]) {
+		return [...taskList].sort(
+			(left, right) =>
+				taskEffortScore(right) - taskEffortScore(left) ||
+				right.updatedAt - left.updatedAt ||
+				left.title.localeCompare(right.title, undefined, { sensitivity: 'base' })
+		);
+	}
+
 	function toggleUserExpansion(userKey: string) {
 		expandedUserKey = expandedUserKey === userKey ? '' : userKey;
 		reassignError = '';
@@ -336,8 +386,9 @@
 						</button>
 
 						{#if expandedUserKey === user.key}
+							{@const lowerWorkloadCandidates = resolveLowerWorkloadCandidates(user)}
 							<div class="reassign-panel">
-								{#each user.tasks as task (task.id)}
+								{#each sortTasksByEffortDesc(user.tasks) as task (task.id)}
 									<div class="reassign-row">
 										<button
 											type="button"
@@ -345,6 +396,7 @@
 											on:click={() => openTaskEditor(task.id)}
 										>
 											{task.title}
+											<small>{taskEffortScore(task).toFixed(1)} effort</small>
 										</button>
 										<select
 											value={normalizeUserKey(task.assigneeId || '')}
@@ -357,11 +409,14 @@
 											disabled={!canEdit || savingTaskIds.has(task.id)}
 										>
 											<option value={user.key}>{user.name} (current)</option>
-											{#each resolveLowerWorkloadCandidates(user) as candidate (candidate.key)}
+											{#each lowerWorkloadCandidates as candidate (candidate.key)}
 												<option value={candidate.key}>
 													{candidate.name} · {candidate.totalEffortScore.toFixed(1)} effort
 												</option>
 											{/each}
+											{#if lowerWorkloadCandidates.length === 0}
+												<option value={user.key} disabled>No lower-workload teammates available</option>
+											{/if}
 											<option value="unassigned">Unassigned</option>
 										</select>
 									</div>
@@ -550,10 +605,17 @@
 		color: var(--ws-text);
 		cursor: pointer;
 		padding: 0;
+		display: grid;
+		gap: 0.16rem;
 	}
 
 	.task-open:hover {
 		text-decoration: underline;
+	}
+
+	.task-open small {
+		font-size: 0.64rem;
+		color: var(--ws-muted);
 	}
 
 	.reassign-row select {

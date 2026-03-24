@@ -279,7 +279,9 @@ Rules:
   - delete: remove file and keep updated_code empty
 - location_hint is required and should identify where the change applies.
 - Never omit assistant_reply or changes.
-- Return raw JSON only, no markdown fences, no extra text.`;
+- Return raw JSON only, no markdown fences, no extra text.
+- CONVERSATIONAL RESPONSES: If the user asks a question, wants explanation, or there is nothing to change in any file, return changes as an empty array [] and put the full, complete answer in assistant_reply. Never leave assistant_reply empty when changes is [].
+- Do NOT invent file changes when none are needed. An empty changes array is correct and valid.`;
 	const CANVAS_AI_CHAT_HISTORY_LIMIT = 20;
 	const CANVAS_AI_CONTEXT_MESSAGES = 8;
 	const CANVAS_AI_TEXT_PREVIEW_LIMIT = 420;
@@ -3771,7 +3773,7 @@ Rules:
 		terminal.loadAddon(terminalFitAddon);
 		terminal.open(terminalContainer);
 		scheduleTerminalFit();
-		writeTerminalLine('\x1b[32mWelcome to Converse Terminal...\x1b[0m');
+		writeTerminalLine('\x1b[32mWelcome to Tora Terminal...\x1b[0m');
 		if (typeof ResizeObserver !== 'undefined') {
 			terminalResizeObserver = new ResizeObserver(() => {
 				scheduleTerminalFit();
@@ -5615,6 +5617,7 @@ ${previewItems.join('\n')}${overflowLabel}`;
 		}
 
 		const jsonCandidates = extractCanvasAIJSONCandidates(normalized);
+		let conversationalReplyFromJSON = '';
 		for (const candidate of jsonCandidates) {
 			try {
 				const parsed = JSON.parse(candidate);
@@ -5626,9 +5629,23 @@ ${previewItems.join('\n')}${overflowLabel}`;
 				if (structured && structured.changes.length > 0) {
 					return structured;
 				}
+				// JSON had assistant_reply but no changes — capture it so we don't fall through to raw-text fallback
+				if (!conversationalReplyFromJSON) {
+					const reply = toCanvasAIString(
+						parsedRecord.assistant_reply ?? parsedRecord.assistantReply ?? parsedRecord.reply ?? parsedRecord.message
+					);
+					if (reply) conversationalReplyFromJSON = reply;
+				}
 			} catch {
 				// Ignore malformed candidate; continue to other fallbacks.
 			}
+		}
+
+		// A JSON response with assistant_reply but no code changes is a valid conversational reply.
+		// Return it directly — do NOT fall through to code-fence / raw-text fallbacks which would
+		// treat the JSON string itself as file content.
+		if (conversationalReplyFromJSON) {
+			return { assistantReply: conversationalReplyFromJSON, changes: [] };
 		}
 
 		const codeFenceMatch = normalized.match(/```[a-zA-Z0-9_+-]*\n?[\s\S]*?```/);

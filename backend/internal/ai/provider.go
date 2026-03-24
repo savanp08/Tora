@@ -9,10 +9,43 @@ import (
 
 type Message = models.Message
 
+// Summarizer is the base interface all AI providers must implement.
 type Summarizer interface {
 	GenerateRollingSummary(ctx context.Context, previousState []byte, newMessages []Message) ([]byte, error)
 	GenerateChatResponse(ctx context.Context, prompt string) (string, error)
 }
+
+// ModelHintProvider is an optional capability interface for providers that
+// support per-request model tier selection. The router detects this via type
+// assertion and uses it when a model tier hint is available.
+//
+// This keeps the base Summarizer interface stable — providers that don't
+// implement this just fall back to their default GenerateChatResponse.
+type ModelHintProvider interface {
+	GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error)
+}
+
+// ContextLimiter is defined in compactor.go.
+// It is an optional interface — providers that implement it report their
+// maximum input token budget so the router can compact prompts before
+// dispatch. Providers that don't implement it use defaultMaxInputTokens.
+
+// Model tier constants — used by intent routing to select an appropriate
+// model for the complexity of a given query.
+const (
+	// AIModelTierLight — fastest, cheapest model. Good for conversational
+	// replies and simple lookups where reasoning depth doesn't matter.
+	AIModelTierLight = "light"
+
+	// AIModelTierStandard — balanced model. Good for task/sprint queries
+	// that need accurate data synthesis but not deep analytical reasoning.
+	AIModelTierStandard = "standard"
+
+	// AIModelTierHeavy — highest capability model. Used for full reports,
+	// team workload analysis, and multi-dimension project health queries
+	// where coherent structured reasoning makes a measurable difference.
+	AIModelTierHeavy = "heavy"
+)
 
 type HTTPStatusError struct {
 	Code     int

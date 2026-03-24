@@ -5,6 +5,7 @@
 	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
 	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import toraLogo from '$lib/assets/tora-logo.svg';
+	import { resolveApiBase } from '$lib/config/apiBase';
 	import { APP_LIMITS } from '$lib/config/limits';
 	import {
 		activeRoomPassword,
@@ -44,7 +45,7 @@
 	};
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const API_BASE = resolveApiBase(API_BASE_RAW);
 	const TURNSTILE_SITE_KEY_RAW = import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined;
 	const TURNSTILE_SITE_KEY = TURNSTILE_SITE_KEY_RAW?.trim() ?? '';
 	const TURNSTILE_DEBUG_RAW = import.meta.env.VITE_TURNSTILE_DEBUG as string | undefined;

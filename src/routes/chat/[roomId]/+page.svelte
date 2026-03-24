@@ -18,6 +18,7 @@
 	import ChatWindow from '$lib/components/chat/ChatWindow.svelte';
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
+	import { resolveApiBase } from '$lib/config/apiBase';
 	import { clearTaskStore, initializeTaskStoreForRoom } from '$lib/stores/tasks';
 	import {
 		activeRoomPassword,
@@ -170,7 +171,7 @@
 	import './page.css';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const API_BASE = resolveApiBase(API_BASE_RAW);
 	const TYPING_PING_INTERVAL_MS = 3000;
 	const TYPING_STOP_DELAY_MS = 5000;
 	const TYPING_SAFETY_TIMEOUT_MS = 7000;
@@ -7083,6 +7084,7 @@
 		<OnlinePanel
 			members={currentOnlineMembers}
 			isDarkMode={$isDarkMode}
+			{currentUserId}
 			canCollapse={canCollapseOnlinePanel && !isOnlinePanelAutoCollapsed}
 			isCollapsed={isOnlinePanelEffectivelyCollapsed}
 			on:toggleCollapse={toggleOnlinePanelCollapse}

@@ -711,9 +711,9 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 			}:
 			default:
 			}
-			h.removeClientFromAllRooms(client, true)
-			client.closeSendChannel()
-			return
+			// Skip only the saturated room so one crowded room does not terminate
+			// the entire websocket session and other room subscriptions.
+			continue
 		}
 
 		alreadyWritable := client.canWriteToRoom(roomID)

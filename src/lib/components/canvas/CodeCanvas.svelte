@@ -277,7 +277,9 @@ Rules:
   - delete: remove file and keep updated_code empty
 - location_hint is required and should identify where the change applies.
 - Never omit assistant_reply or changes.
-- Return raw JSON only, no markdown fences, no extra text.`;
+- Return raw JSON only, no markdown fences, no extra text.
+- CONVERSATIONAL RESPONSES: If the user asks a question, wants explanation, or there is nothing to change in any file, return changes as an empty array [] and put the full, complete answer in assistant_reply. Never leave assistant_reply empty when changes is [].
+- Do NOT invent file changes when none are needed. An empty changes array is correct and valid.`;
 	const CANVAS_AI_CHAT_HISTORY_LIMIT = 20;
 	const CANVAS_AI_CONTEXT_MESSAGES = 8;
 	const CANVAS_AI_TEXT_PREVIEW_LIMIT = 420;
@@ -285,7 +287,10 @@ Rules:
 	const CANVAS_AI_CHARS_PER_TOKEN = 4;
 	const CANVAS_AI_MAX_PROMPT_CHARS = CANVAS_AI_MAX_INPUT_TOKENS * CANVAS_AI_CHARS_PER_TOKEN;
 	const CANVAS_AI_PROMPT_RESERVED_CHARS = 9000;
-	const CANVAS_AI_CONTEXT_MAX_CHARS = Math.max(4000, CANVAS_AI_MAX_PROMPT_CHARS - CANVAS_AI_PROMPT_RESERVED_CHARS);
+	const CANVAS_AI_CONTEXT_MAX_CHARS = Math.max(
+		4000,
+		CANVAS_AI_MAX_PROMPT_CHARS - CANVAS_AI_PROMPT_RESERVED_CHARS
+	);
 	const CANVAS_AI_MAX_CONVERSATION_CONTEXT_CHARS = 4000;
 	const CANVAS_AI_MAX_INSTRUCTION_CHARS = 3200;
 	const CANVAS_AI_MIN_SECTION_CHARS = 160;
@@ -349,22 +354,14 @@ Rules:
 			'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.2" y="3.2" width="17.6" height="17.6" rx="2.2" fill="#3178C6"/><path fill="#FFFFFF" d="M9.23 10.7H6.9V9.35h6.22v1.35h-2.33v7.12H9.23Zm5.1 5.57c.42.7 1 1.2 2 1.2.85 0 1.4-.42 1.4-1.01 0-.7-.55-.95-1.47-1.35l-.5-.21c-1.43-.6-2.37-1.34-2.37-2.9 0-1.45 1.1-2.55 2.83-2.55 1.22 0 2.1.42 2.74 1.53l-1.34.86c-.3-.53-.61-.73-1.1-.73-.5 0-.82.32-.82.73 0 .52.32.73 1.06 1.05l.5.21c1.68.72 2.63 1.46 2.63 3.12 0 1.78-1.4 2.76-3.29 2.76-1.85 0-3.05-.88-3.64-2.03Z"/></svg>',
 		python:
 			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#3776AB" d="M12.1 3.2c-4.3 0-4.03 1.86-4.03 1.86v1.93h4.1v.58H6.43S3.7 7.25 3.7 12.13c0 4.9 2.4 4.73 2.4 4.73h1.43v-2.02s-.08-2.4 2.35-2.4h4.07s2.3.04 2.3-2.22V6.3s.35-3.1-4.15-3.1Zm-2.27 1.78a.78.78 0 1 1 0 1.56.78.78 0 0 1 0-1.56Z"/><path fill="#FFD43B" d="M11.9 20.8c4.3 0 4.03-1.86 4.03-1.86V17h-4.1v-.58h5.74s2.73.32 2.73-4.56c0-4.9-2.4-4.73-2.4-4.73h-1.43v2.02s.08 2.4-2.35 2.4h-4.07s-2.3-.04-2.3 2.22v3.92s-.35 3.1 4.15 3.1Zm2.27-1.78a.78.78 0 1 1 0-1.56.78.78 0 0 1 0 1.56Z"/></svg>',
-		c:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4A5FB5" d="m12 2.2 8.49 4.9v9.8L12 21.8 3.5 16.9V7.1Z"/><path fill="#FFFFFF" d="M14.8 15.7a4.2 4.2 0 1 1 0-7.4l-.86 1.17a2.73 2.73 0 1 0 0 5.06z"/></svg>',
-		cpp:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#659AD2" d="m12 2.2 8.49 4.9v9.8L12 21.8 3.5 16.9V7.1Z"/><path fill="#FFFFFF" d="M11.38 15.68a4.2 4.2 0 1 1 0-7.36l-.86 1.17a2.73 2.73 0 1 0 0 5.02Zm3.1-4.08h1.03v-1.02h1.04v1.02h1.03v1.04h-1.03v1.03H15.5v-1.03h-1.03Zm3.34 0h1.03v-1.02h1.03v1.02h1.04v1.04h-1.04v1.03h-1.03v-1.03h-1.03Z"/></svg>',
-		java:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E76F00" d="M12.8 3.9c1.4 1-.86 2.03-.86 3.2 0 .62.57 1.1.92 1.7.58 1.02-.34 1.65-1.06 2.26 1.77-.48 2.9-1.45 2.9-2.76 0-1.06-.72-1.74-1.9-4.4Z"/><path fill="#4A89C7" d="M7.1 14.7h9.8c.76 0 1.36.6 1.36 1.36v.12c0 1.76-1.42 3.18-3.18 3.18h-6.16a3.18 3.18 0 0 1-3.18-3.18v-.12c0-.76.6-1.36 1.36-1.36Zm1.55-2.7c2.05 1.17 5 1.16 7.12-.02l.42.86c-2.33 1.36-5.64 1.37-8 .02Z"/></svg>',
-		go:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#00ADD8" d="M4.2 12.9c0-2.86 2.31-5.18 5.17-5.18h5.15c2.86 0 5.18 2.32 5.18 5.18s-2.32 5.18-5.18 5.18H9.37A5.18 5.18 0 0 1 4.2 12.9Z"/><circle cx="10.05" cy="12.9" r="1.05" fill="#FFFFFF"/><circle cx="14.28" cy="12.9" r="1.05" fill="#FFFFFF"/><path fill="#FFFFFF" d="M7.4 15.3h9.2v1.12H7.4z"/></svg>',
-		rust:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#D9D9D9" d="m12 3.2 2.04.56 1.96-.78 1.16 1.78 2.09.2.2 2.08 1.78 1.17-.78 1.95L21.01 12l-.56 2.05.78 1.95-1.78 1.17-.2 2.08-2.09.2-1.16 1.78-1.96-.78-2.04.56-2.05-.56-1.96.78-1.16-1.78-2.09-.2-.2-2.08-1.78-1.17.78-1.95L2.99 12l.56-2.04-.78-1.96 1.78-1.17.2-2.08 2.09-.2 1.16-1.78 1.96.78Z"/><circle cx="12" cy="12" r="3.15" fill="#111827"/><path fill="#111827" d="M11.12 10.24h1.56c1.15 0 1.88.6 1.88 1.58 0 .73-.42 1.27-1.08 1.5l1.2 1.95h-1.24l-1.06-1.77h-.18v1.77h-1.08Zm1.42 2.43c.55 0 .86-.28.86-.75s-.31-.73-.86-.73h-.34v1.48Z"/></svg>',
-		json:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#F7C948" d="M5.8 4.2h12.4a1.4 1.4 0 0 1 1.4 1.4v12.8a1.4 1.4 0 0 1-1.4 1.4H5.8a1.4 1.4 0 0 1-1.4-1.4V5.6a1.4 1.4 0 0 1 1.4-1.4Z"/><path fill="#1F2937" d="M8.35 8.2h1.18v1.62c0 .34-.08.62-.23.84-.16.22-.37.38-.63.48.26.1.47.26.63.47.15.22.23.5.23.84v1.63H8.35v-1.63c0-.34-.08-.58-.25-.72-.16-.14-.43-.2-.8-.2v-1.06c.37 0 .64-.07.8-.2.17-.14.25-.38.25-.72Zm7.3 0h-1.18v1.62c0 .34.08.62.23.84.16.22.37.38.63.48-.26.1-.47.26-.63.47-.15.22-.23.5-.23.84v1.63h1.18v-1.63c0-.34.08-.58.25-.72.16-.14.43-.2.8-.2v-1.06c-.37 0-.64-.07-.8-.2-.17-.14-.25-.38-.25-.72Z"/></svg>',
-		html:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E34F26" d="m4.1 3.6 1.6 16.8L12 22.2l6.3-1.8 1.6-16.8Z"/><path fill="#F16529" d="m12 20.73 5.07-1.45 1.37-14.3H12Z"/><path fill="#EBEBEB" d="M12 11.2H8.9l-.21-2.3H12V6.65H6.22l.06.63.58 6.17H12Zm0 5.87-.01.01-2.14-.6-.14-1.56H7.78l.27 2.97 3.94 1.1Z"/><path fill="#FFFFFF" d="M11.99 11.2v2.25h2.86l-.27 3.02-2.59.71v2.34l3.94-1.1.03-.32.54-5.65.06-.63Zm0-4.55V8.9h4.2l.03-.34.06-.65.14-1.57.06-.63Z"/></svg>',
-		css:
-			'<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#1572B6" d="m4.1 3.6 1.6 16.8L12 22.2l6.3-1.8 1.6-16.8Z"/><path fill="#33A9DC" d="m12 20.73 5.07-1.45 1.37-14.3H12Z"/><path fill="#EBEBEB" d="M12 11.1H8.93l-.2-2.2H12V6.65H6.2l.05.62.56 6.08H12Zm0 5.83-.01.01-2.12-.59-.14-1.53H7.8l.27 2.93 3.92 1.09Z"/><path fill="#FFFFFF" d="M12 11.1v2.2h2.72l-.26 2.86-2.46.67v2.29l3.9-1.09.03-.31.53-5.5.05-.62Zm0-4.45V8.9h4.07l.03-.33.06-.65.13-1.54.05-.62Z"/></svg>',
+		c: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4A5FB5" d="m12 2.2 8.49 4.9v9.8L12 21.8 3.5 16.9V7.1Z"/><path fill="#FFFFFF" d="M14.8 15.7a4.2 4.2 0 1 1 0-7.4l-.86 1.17a2.73 2.73 0 1 0 0 5.06z"/></svg>',
+		cpp: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#659AD2" d="m12 2.2 8.49 4.9v9.8L12 21.8 3.5 16.9V7.1Z"/><path fill="#FFFFFF" d="M11.38 15.68a4.2 4.2 0 1 1 0-7.36l-.86 1.17a2.73 2.73 0 1 0 0 5.02Zm3.1-4.08h1.03v-1.02h1.04v1.02h1.03v1.04h-1.03v1.03H15.5v-1.03h-1.03Zm3.34 0h1.03v-1.02h1.03v1.02h1.04v1.04h-1.04v1.03h-1.03v-1.03h-1.03Z"/></svg>',
+		java: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E76F00" d="M12.8 3.9c1.4 1-.86 2.03-.86 3.2 0 .62.57 1.1.92 1.7.58 1.02-.34 1.65-1.06 2.26 1.77-.48 2.9-1.45 2.9-2.76 0-1.06-.72-1.74-1.9-4.4Z"/><path fill="#4A89C7" d="M7.1 14.7h9.8c.76 0 1.36.6 1.36 1.36v.12c0 1.76-1.42 3.18-3.18 3.18h-6.16a3.18 3.18 0 0 1-3.18-3.18v-.12c0-.76.6-1.36 1.36-1.36Zm1.55-2.7c2.05 1.17 5 1.16 7.12-.02l.42.86c-2.33 1.36-5.64 1.37-8 .02Z"/></svg>',
+		go: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#00ADD8" d="M4.2 12.9c0-2.86 2.31-5.18 5.17-5.18h5.15c2.86 0 5.18 2.32 5.18 5.18s-2.32 5.18-5.18 5.18H9.37A5.18 5.18 0 0 1 4.2 12.9Z"/><circle cx="10.05" cy="12.9" r="1.05" fill="#FFFFFF"/><circle cx="14.28" cy="12.9" r="1.05" fill="#FFFFFF"/><path fill="#FFFFFF" d="M7.4 15.3h9.2v1.12H7.4z"/></svg>',
+		rust: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#D9D9D9" d="m12 3.2 2.04.56 1.96-.78 1.16 1.78 2.09.2.2 2.08 1.78 1.17-.78 1.95L21.01 12l-.56 2.05.78 1.95-1.78 1.17-.2 2.08-2.09.2-1.16 1.78-1.96-.78-2.04.56-2.05-.56-1.96.78-1.16-1.78-2.09-.2-.2-2.08-1.78-1.17.78-1.95L2.99 12l.56-2.04-.78-1.96 1.78-1.17.2-2.08 2.09-.2 1.16-1.78 1.96.78Z"/><circle cx="12" cy="12" r="3.15" fill="#111827"/><path fill="#111827" d="M11.12 10.24h1.56c1.15 0 1.88.6 1.88 1.58 0 .73-.42 1.27-1.08 1.5l1.2 1.95h-1.24l-1.06-1.77h-.18v1.77h-1.08Zm1.42 2.43c.55 0 .86-.28.86-.75s-.31-.73-.86-.73h-.34v1.48Z"/></svg>',
+		json: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#F7C948" d="M5.8 4.2h12.4a1.4 1.4 0 0 1 1.4 1.4v12.8a1.4 1.4 0 0 1-1.4 1.4H5.8a1.4 1.4 0 0 1-1.4-1.4V5.6a1.4 1.4 0 0 1 1.4-1.4Z"/><path fill="#1F2937" d="M8.35 8.2h1.18v1.62c0 .34-.08.62-.23.84-.16.22-.37.38-.63.48.26.1.47.26.63.47.15.22.23.5.23.84v1.63H8.35v-1.63c0-.34-.08-.58-.25-.72-.16-.14-.43-.2-.8-.2v-1.06c.37 0 .64-.07.8-.2.17-.14.25-.38.25-.72Zm7.3 0h-1.18v1.62c0 .34.08.62.23.84.16.22.37.38.63.48-.26.1-.47.26-.63.47-.15.22-.23.5-.23.84v1.63h1.18v-1.63c0-.34.08-.58.25-.72.16-.14.43-.2.8-.2v-1.06c-.37 0-.64-.07-.8-.2-.17-.14-.25-.38-.25-.72Z"/></svg>',
+		html: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#E34F26" d="m4.1 3.6 1.6 16.8L12 22.2l6.3-1.8 1.6-16.8Z"/><path fill="#F16529" d="m12 20.73 5.07-1.45 1.37-14.3H12Z"/><path fill="#EBEBEB" d="M12 11.2H8.9l-.21-2.3H12V6.65H6.22l.06.63.58 6.17H12Zm0 5.87-.01.01-2.14-.6-.14-1.56H7.78l.27 2.97 3.94 1.1Z"/><path fill="#FFFFFF" d="M11.99 11.2v2.25h2.86l-.27 3.02-2.59.71v2.34l3.94-1.1.03-.32.54-5.65.06-.63Zm0-4.55V8.9h4.2l.03-.34.06-.65.14-1.57.06-.63Z"/></svg>',
+		css: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#1572B6" d="m4.1 3.6 1.6 16.8L12 22.2l6.3-1.8 1.6-16.8Z"/><path fill="#33A9DC" d="m12 20.73 5.07-1.45 1.37-14.3H12Z"/><path fill="#EBEBEB" d="M12 11.1H8.93l-.2-2.2H12V6.65H6.2l.05.62.56 6.08H12Zm0 5.83-.01.01-2.12-.59-.14-1.53H7.8l.27 2.93 3.92 1.09Z"/><path fill="#FFFFFF" d="M12 11.1v2.2h2.72l-.26 2.86-2.46.67v2.29l3.9-1.09.03-.31.53-5.5.05-.62Zm0-4.45V8.9h4.07l.03-.33.06-.65.13-1.54.05-.62Z"/></svg>',
 		markdown:
 			'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.4" y="4.5" width="17.2" height="15" rx="2" fill="#6B7280"/><path fill="#FFFFFF" d="M6.9 8h2.05l1.8 2.23L12.55 8h2.05v7.96h-2.05v-4.8l-1.8 2.2-1.8-2.2v4.8H6.9Zm8.8 4.25h1.6V9.92h1.56v2.33h1.61L18 15.96Z"/></svg>',
 		shell:
@@ -416,7 +413,12 @@ Rules:
 	let yFileTree: any = null;
 	let yFileTreeObserver: ((event: any) => void) | null = null;
 	let ydocUpdateHandler:
-		| ((update: Uint8Array, origin: unknown, doc: unknown, transaction: { local?: boolean }) => void)
+		| ((
+				update: Uint8Array,
+				origin: unknown,
+				doc: unknown,
+				transaction: { local?: boolean }
+		  ) => void)
 		| null = null;
 	let ydocBeforeTransactionHandler: ((transaction: { local?: boolean }) => void) | null = null;
 	let provider: any = null;
@@ -1174,10 +1176,7 @@ Rules:
 			1,
 			Math.min(IMPORT_MENU_MAX_HEIGHT_PX, Math.floor(maxHeightForDirection))
 		);
-		const effectiveMenuHeight = Math.min(
-			Math.max(1, measuredMenuHeight),
-			importMenuMaxHeightPx
-		);
+		const effectiveMenuHeight = Math.min(Math.max(1, measuredMenuHeight), importMenuMaxHeightPx);
 		const preferredTop =
 			menuDirection === 'up'
 				? anchorRect.top - effectiveMenuHeight - IMPORT_MENU_ANCHOR_GAP_PX
@@ -1406,8 +1405,12 @@ Rules:
 		let textResults: SidebarSearchResult[] = [];
 		if (!editor || !monacoApi) {
 			sidebarSearchResults = fileAndFolderResults;
-			sidebarFileResultCount = fileAndFolderResults.filter((result) => result.kind === 'file').length;
-			sidebarFolderResultCount = fileAndFolderResults.filter((result) => result.kind === 'folder').length;
+			sidebarFileResultCount = fileAndFolderResults.filter(
+				(result) => result.kind === 'file'
+			).length;
+			sidebarFolderResultCount = fileAndFolderResults.filter(
+				(result) => result.kind === 'folder'
+			).length;
 			sidebarTextResultCount = 0;
 			sidebarActiveSearchIndex = sidebarSearchResults.length > 0 ? 0 : -1;
 			return;
@@ -1416,8 +1419,12 @@ Rules:
 		const model = editor.getModel?.();
 		if (!model) {
 			sidebarSearchResults = fileAndFolderResults;
-			sidebarFileResultCount = fileAndFolderResults.filter((result) => result.kind === 'file').length;
-			sidebarFolderResultCount = fileAndFolderResults.filter((result) => result.kind === 'folder').length;
+			sidebarFileResultCount = fileAndFolderResults.filter(
+				(result) => result.kind === 'file'
+			).length;
+			sidebarFolderResultCount = fileAndFolderResults.filter(
+				(result) => result.kind === 'folder'
+			).length;
 			sidebarTextResultCount = 0;
 			sidebarActiveSearchIndex = sidebarSearchResults.length > 0 ? 0 : -1;
 			return;
@@ -1456,16 +1463,15 @@ Rules:
 
 		sidebarSearchResults = [...fileAndFolderResults, ...textResults];
 		sidebarFileResultCount = fileAndFolderResults.filter((result) => result.kind === 'file').length;
-		sidebarFolderResultCount = fileAndFolderResults.filter((result) => result.kind === 'folder').length;
+		sidebarFolderResultCount = fileAndFolderResults.filter(
+			(result) => result.kind === 'folder'
+		).length;
 		sidebarTextResultCount = textResults.length;
 		if (sidebarSearchResults.length === 0) {
 			sidebarActiveSearchIndex = -1;
 			return;
 		}
-		if (
-			sidebarActiveSearchIndex < 0 ||
-			sidebarActiveSearchIndex >= sidebarSearchResults.length
-		) {
+		if (sidebarActiveSearchIndex < 0 || sidebarActiveSearchIndex >= sidebarSearchResults.length) {
 			sidebarActiveSearchIndex = 0;
 		}
 	}
@@ -1513,7 +1519,9 @@ Rules:
 		if (!textResultIndexes.length) {
 			return;
 		}
-		const currentTextIndex = textResultIndexes.findIndex((index) => index === sidebarActiveSearchIndex);
+		const currentTextIndex = textResultIndexes.findIndex(
+			(index) => index === sidebarActiveSearchIndex
+		);
 		const nextIndex =
 			currentTextIndex >= 0
 				? textResultIndexes[(currentTextIndex + 1) % textResultIndexes.length]
@@ -1529,7 +1537,9 @@ Rules:
 		if (!textResultIndexes.length) {
 			return;
 		}
-		const currentTextIndex = textResultIndexes.findIndex((index) => index === sidebarActiveSearchIndex);
+		const currentTextIndex = textResultIndexes.findIndex(
+			(index) => index === sidebarActiveSearchIndex
+		);
 		const previousIndex =
 			currentTextIndex >= 0
 				? textResultIndexes[
@@ -1693,7 +1703,10 @@ Rules:
 	}
 
 	function normalizeSmartInputLabel(rawLabel: string) {
-		return rawLabel.replace(/\s+/g, ' ').replace(/[:\-]+$/g, '').trim();
+		return rawLabel
+			.replace(/\s+/g, ' ')
+			.replace(/[:\-]+$/g, '')
+			.trim();
 	}
 
 	function createSmartInputFieldId(label: string, index: number) {
@@ -1870,7 +1883,9 @@ Rules:
 		}
 		const hintedKind = resolveSmartInputKindFromLabelHint(label);
 		const resolvedKind =
-			kind === 'text' && hintedKind !== 'text' ? hintedKind : mergeSmartInputKinds(kind, hintedKind);
+			kind === 'text' && hintedKind !== 'text'
+				? hintedKind
+				: mergeSmartInputKinds(kind, hintedKind);
 		const existingIndex = drafts.findIndex(
 			(candidate) => candidate.label.toLowerCase() === label.toLowerCase()
 		);
@@ -1879,7 +1894,9 @@ Rules:
 			return;
 		}
 		const existing = drafts[existingIndex];
-		if (resolveSmartInputKindPriority(resolvedKind) > resolveSmartInputKindPriority(existing.kind)) {
+		if (
+			resolveSmartInputKindPriority(resolvedKind) > resolveSmartInputKindPriority(existing.kind)
+		) {
 			drafts[existingIndex] = { ...existing, kind: resolvedKind };
 		}
 	}
@@ -1898,7 +1915,9 @@ Rules:
 		}
 	}
 
-	function buildSmartInputFieldsFromDrafts(drafts: Array<{ label: string; kind: SmartInputValueKind }>) {
+	function buildSmartInputFieldsFromDrafts(
+		drafts: Array<{ label: string; kind: SmartInputValueKind }>
+	) {
 		return drafts.slice(0, SMART_INPUT_MAX_FIELDS).map((draft, index) => ({
 			id: createSmartInputFieldId(draft.label, index),
 			label: draft.label,
@@ -1926,8 +1945,7 @@ Rules:
 			while ((match = numericAssignmentPattern.exec(code)) !== null) {
 				pushSmartInputDraft(drafts, match[1] || '', 'number');
 			}
-			const booleanAssignmentPattern =
-				/([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:bool)\s*\(\s*input\s*\(/g;
+			const booleanAssignmentPattern = /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:bool)\s*\(\s*input\s*\(/g;
 			while ((match = booleanAssignmentPattern.exec(code)) !== null) {
 				pushSmartInputDraft(drafts, match[1] || '', 'boolean');
 			}
@@ -2005,7 +2023,8 @@ Rules:
 					.filter(Boolean);
 				for (const token of tokens) {
 					const kind =
-						cLikeVariableKinds[smartInputLabelKey(token)] || resolveSmartInputKindFromLabelHint(token);
+						cLikeVariableKinds[smartInputLabelKey(token)] ||
+						resolveSmartInputKindFromLabelHint(token);
 					pushSmartInputDraft(drafts, token, kind);
 				}
 			}
@@ -2020,7 +2039,7 @@ Rules:
 				const argIdentifiers = argString
 					.split(',')
 					.map((piece) => extractIdentifierFromExpression(piece))
-				.filter(Boolean);
+					.filter(Boolean);
 				const total = Math.max(specifiers.length, argIdentifiers.length);
 				for (let index = 0; index < total; index += 1) {
 					const label = argIdentifiers[index] || `scanf_${index + 1}`;
@@ -2035,7 +2054,11 @@ Rules:
 			const scannerPattern =
 				/(?:int|long|double|float|String|char|boolean)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^;\n]*\.next([A-Za-z0-9_]*)\s*\(/g;
 			while ((match = scannerPattern.exec(code)) !== null) {
-				pushSmartInputDraft(drafts, match[1] || '', resolveSmartInputKindFromJavaNext(match[2] || ''));
+				pushSmartInputDraft(
+					drafts,
+					match[1] || '',
+					resolveSmartInputKindFromJavaNext(match[2] || '')
+				);
 			}
 			const readerPattern = /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^;\n]*readLine\s*\(/g;
 			while ((match = readerPattern.exec(code)) !== null) {
@@ -2052,8 +2075,9 @@ Rules:
 				const hasFormatString = parts.length > 0 && /^["'`]/.test(parts[0] || '');
 				const argOffset = hasFormatString ? 1 : 0;
 				const formatSpecifiers = hasFormatString
-					? Array.from(String(parts[0] || '').matchAll(/%[-+#0-9.*]*([a-zA-Z])/g), (found) =>
-							found[1] || ''
+					? Array.from(
+							String(parts[0] || '').matchAll(/%[-+#0-9.*]*([a-zA-Z])/g),
+							(found) => found[1] || ''
 						)
 					: [];
 				for (let index = argOffset; index < parts.length; index += 1) {
@@ -2159,7 +2183,8 @@ Rules:
 			const fixedCount = /^\d+$/.test(trimmedToken)
 				? Math.max(0, Number.parseInt(trimmedToken, 10))
 				: 0;
-			const countFieldLabels = fixedCount > 0 ? [] : [normalizeSmartInputLabel(trimmedToken)].filter(Boolean);
+			const countFieldLabels =
+				fixedCount > 0 ? [] : [normalizeSmartInputLabel(trimmedToken)].filter(Boolean);
 			if (fixedCount <= 1 && countFieldLabels.length === 0) {
 				return;
 			}
@@ -2266,7 +2291,9 @@ Rules:
 		for (const rawLabel of rule.countFieldLabels) {
 			const key = smartInputLabelKey(rawLabel);
 			const matchingField = fields.find((field) => smartInputLabelKey(field.label) === key);
-			const rawValue = matchingField ? String(values[matchingField.id] ?? '') : valuesByLabel.get(key) || '';
+			const rawValue = matchingField
+				? String(values[matchingField.id] ?? '')
+				: valuesByLabel.get(key) || '';
 			const parsed = Number.parseInt(rawValue.trim(), 10);
 			if (!Number.isFinite(parsed) || parsed <= 0) {
 				continue;
@@ -2307,7 +2334,9 @@ Rules:
 						break;
 					}
 					const templateKey = smartInputLabelKey(template.label);
-					const hasBaseField = fields.some((field) => smartInputLabelKey(field.label) === templateKey);
+					const hasBaseField = fields.some(
+						(field) => smartInputLabelKey(field.label) === templateKey
+					);
 					const firstDynamicIndex = hasBaseField ? 2 : 1;
 					for (
 						let index = firstDynamicIndex;
@@ -2561,8 +2590,8 @@ Rules:
 				})
 		);
 
-		const normalizedWorkspaceFiles = workspaceFiles.filter(
-			(file): file is ExecutionWorkspaceFile => Boolean(file && file.name)
+		const normalizedWorkspaceFiles = workspaceFiles.filter((file): file is ExecutionWorkspaceFile =>
+			Boolean(file && file.name)
 		);
 		if (!normalizedWorkspaceFiles.some((file) => file.name === normalizedActivePath)) {
 			normalizedWorkspaceFiles.unshift({
@@ -2635,8 +2664,7 @@ Rules:
 		if (language === 'python' || language === 'py') {
 			executionManager.resetWorker(language);
 		}
-		const executionEndpoint =
-			requestScope === 'ide' ? `${API_BASE}/api/ide/execute` : undefined;
+		const executionEndpoint = requestScope === 'ide' ? `${API_BASE}/api/ide/execute` : undefined;
 		const executionRequestHeaders =
 			requestScope === 'ide'
 				? {
@@ -2973,13 +3001,8 @@ Rules:
 		const availableFiles = new Set(
 			fileTree.filter((entry) => !entry.isDir).map((entry) => entry.relativePath)
 		);
-		openTabs = openTabs.filter(
-			(tab) => isCanvasAIDiffTabPath(tab) || availableFiles.has(tab)
-		);
-		if (
-			currentFile &&
-			(isCanvasAIDiffTabPath(currentFile) || availableFiles.has(currentFile))
-		) {
+		openTabs = openTabs.filter((tab) => isCanvasAIDiffTabPath(tab) || availableFiles.has(tab));
+		if (currentFile && (isCanvasAIDiffTabPath(currentFile) || availableFiles.has(currentFile))) {
 			return;
 		}
 		if (openTabs.length > 0) {
@@ -3196,9 +3219,7 @@ Rules:
 	}
 
 	function isInlineExplorerCreateMode() {
-		return (
-			inlineExplorerAction.mode === 'new-file' || inlineExplorerAction.mode === 'new-folder'
-		);
+		return inlineExplorerAction.mode === 'new-file' || inlineExplorerAction.mode === 'new-folder';
 	}
 
 	function isInlineExplorerRenameForEntry(entry: ProjectFileEntry) {
@@ -3321,17 +3342,14 @@ Rules:
 			nextRelativePath
 		);
 		const affectsActiveFile =
-			activePathAfterRename !== previousCurrentFile ||
-			currentRelativePath === previousCurrentFile;
+			activePathAfterRename !== previousCurrentFile || currentRelativePath === previousCurrentFile;
 		if (affectsActiveFile) {
 			await persistCurrentFileToFS();
 		}
 		await getActiveFS().promises.rename(entry.path, nextPath);
 		openTabs = Array.from(
 			new Set(
-				openTabs.map((tab) =>
-					renameRelativeProjectPath(tab, currentRelativePath, nextRelativePath)
-				)
+				openTabs.map((tab) => renameRelativeProjectPath(tab, currentRelativePath, nextRelativePath))
 			)
 		);
 		currentFile = activePathAfterRename;
@@ -3541,11 +3559,7 @@ Rules:
 	}
 
 	function startSidebarResize(event: PointerEvent) {
-		if (
-			isCompactCanvasLayout ||
-			typeof window === 'undefined' ||
-			typeof document === 'undefined'
-		) {
+		if (isCompactCanvasLayout || typeof window === 'undefined' || typeof document === 'undefined') {
 			return;
 		}
 		if (typeof event.button === 'number' && event.button !== 0) {
@@ -3778,7 +3792,7 @@ Rules:
 		terminal.loadAddon(terminalFitAddon);
 		terminal.open(terminalContainer);
 		scheduleTerminalFit();
-		writeTerminalLine('\x1b[32mWelcome to Converse Terminal...\x1b[0m');
+		writeTerminalLine('\x1b[32mWelcome to Tora Terminal...\x1b[0m');
 		if (typeof ResizeObserver !== 'undefined') {
 			terminalResizeObserver = new ResizeObserver(() => {
 				scheduleTerminalFit();
@@ -4272,8 +4286,7 @@ Rules:
 			const clientY = explorerLongPressLastY;
 			clearExplorerLongPressState();
 			suppressExplorerClickUntil = Date.now() + EXPLORER_LONG_PRESS_CLICK_SUPPRESSION_MS;
-			suppressNativeExplorerContextMenuUntil =
-				Date.now() + EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS;
+			suppressNativeExplorerContextMenuUntil = Date.now() + EXPLORER_NATIVE_CONTEXT_SUPPRESSION_MS;
 			void openContextMenuAtPosition(clientX, clientY, contextTarget);
 		}, EXPLORER_LONG_PRESS_DELAY_MS);
 	}
@@ -4419,8 +4432,7 @@ Rules:
 				zipEntries[`${relativePrefix}${name}`] = textEncoder.encode(rawContent);
 				continue;
 			}
-			const fileBytes =
-				rawContent instanceof Uint8Array ? rawContent : new Uint8Array(rawContent);
+			const fileBytes = rawContent instanceof Uint8Array ? rawContent : new Uint8Array(rawContent);
 			zipEntries[`${relativePrefix}${name}`] = new Uint8Array(fileBytes);
 		}
 		return zipEntries;
@@ -4973,7 +4985,9 @@ Rules:
 		if (typeof window === 'undefined') {
 			return `canvas-ide-session-${createPresenceSessionId()}`;
 		}
-		const existing = (window.sessionStorage.getItem(CANVAS_IDE_SESSION_ID_STORAGE_KEY) || '').trim();
+		const existing = (
+			window.sessionStorage.getItem(CANVAS_IDE_SESSION_ID_STORAGE_KEY) || ''
+		).trim();
 		if (existing) {
 			return existing;
 		}
@@ -4986,7 +5000,9 @@ Rules:
 	}
 
 	function stripCodeFences(rawResponse: string) {
-		let normalized = String(rawResponse || '').replace(/\r\n/g, '\n').trim();
+		let normalized = String(rawResponse || '')
+			.replace(/\r\n/g, '\n')
+			.trim();
 		if (!normalized) {
 			return '';
 		}
@@ -5017,7 +5033,9 @@ Rules:
 	}
 
 	function normalizeCanvasAIFilePath(rawPath: string) {
-		const normalizedInput = String(rawPath || '').trim().replace(/\\/g, '/');
+		const normalizedInput = String(rawPath || '')
+			.trim()
+			.replace(/\\/g, '/');
 		if (!normalizedInput) {
 			return '';
 		}
@@ -5097,7 +5115,9 @@ Rules:
 			changes: normalizedChanges,
 			timestamp: Date.now()
 		};
-		canvasAIChatMessages = [...canvasAIChatMessages, nextMessage].slice(-CANVAS_AI_CHAT_HISTORY_LIMIT);
+		canvasAIChatMessages = [...canvasAIChatMessages, nextMessage].slice(
+			-CANVAS_AI_CHAT_HISTORY_LIMIT
+		);
 		scrollCanvasAIThreadToBottom();
 		return nextMessage.id;
 	}
@@ -5128,7 +5148,9 @@ Rules:
 		if (!canvasAILastSuggestedMessageId) {
 			return null;
 		}
-		return canvasAIChatMessages.find((message) => message.id === canvasAILastSuggestedMessageId) ?? null;
+		return (
+			canvasAIChatMessages.find((message) => message.id === canvasAILastSuggestedMessageId) ?? null
+		);
 	}
 
 	function getCanvasAILastPendingChangeCount() {
@@ -5164,7 +5186,10 @@ Rules:
 		return recentMessages
 			.map((message, index) => {
 				const roleLabel = message.role === 'assistant' ? 'Assistant' : 'User';
-				const text = truncateCanvasAIText(message.text || '(no message)', CANVAS_AI_TEXT_PREVIEW_LIMIT);
+				const text = truncateCanvasAIText(
+					message.text || '(no message)',
+					CANVAS_AI_TEXT_PREVIEW_LIMIT
+				);
 				if (!message.changes || message.changes.length === 0) {
 					return `${index + 1}. ${roleLabel}: ${text}`;
 				}
@@ -5174,7 +5199,8 @@ Rules:
 					return `- ${change.action.toUpperCase()} ${change.filePath} @ ${location}: ${summary}`;
 				});
 				const overflowCount = Math.max(0, message.changes.length - previewItems.length);
-				const overflowLabel = overflowCount > 0 ? `\n- ...and ${overflowCount} more file change(s)` : '';
+				const overflowLabel =
+					overflowCount > 0 ? `\n- ...and ${overflowCount} more file change(s)` : '';
 				return `${index + 1}. ${roleLabel}: ${text}
 Proposed changes:
 ${previewItems.join('\n')}${overflowLabel}`;
@@ -5191,7 +5217,11 @@ ${previewItems.join('\n')}${overflowLabel}`;
 			return String(editor.getModel().getValue() || '');
 		}
 		const yText = ydoc?.getText?.(yTextKeyForFile(normalizedPath));
-		if (yText && (yFileTree?.has?.(normalizedPath) || fileTree.some((entry) => entry.relativePath === normalizedPath))) {
+		if (
+			yText &&
+			(yFileTree?.has?.(normalizedPath) ||
+				fileTree.some((entry) => entry.relativePath === normalizedPath))
+		) {
 			return String(yText.toString() || '');
 		}
 		try {
@@ -5221,13 +5251,15 @@ ${previewItems.join('\n')}${overflowLabel}`;
 			.map((entry) => normalizeCanvasAIFilePath(entry.relativePath || entry.name))
 			.filter(Boolean);
 		const prioritized = Array.from(
-			new Set([
-				normalizeCanvasAIFilePath(targetFilePath),
-				normalizeCanvasAIFilePath(currentFile),
-				...openTabs.map((path) => normalizeCanvasAIFilePath(path)),
-				...dirtyFiles.map((path) => normalizeCanvasAIFilePath(path)),
-				...allFilePaths
-			].filter(Boolean))
+			new Set(
+				[
+					normalizeCanvasAIFilePath(targetFilePath),
+					normalizeCanvasAIFilePath(currentFile),
+					...openTabs.map((path) => normalizeCanvasAIFilePath(path)),
+					...dirtyFiles.map((path) => normalizeCanvasAIFilePath(path)),
+					...allFilePaths
+				].filter(Boolean)
+			)
 		);
 		const contextBlocks: string[] = [];
 		let remainingChars = CANVAS_AI_CONTEXT_MAX_CHARS;
@@ -5239,7 +5271,10 @@ ${previewItems.join('\n')}${overflowLabel}`;
 			}
 			const language = getLanguageFromExtension(filePath) || 'plaintext';
 			const source = await resolveCanvasAIFileContent(filePath);
-			const maxContentChars = Math.max(0, Math.min(CANVAS_AI_MAX_CHARS_PER_FILE, remainingChars - 220));
+			const maxContentChars = Math.max(
+				0,
+				Math.min(CANVAS_AI_MAX_CHARS_PER_FILE, remainingChars - 220)
+			);
 			if (maxContentChars <= 0) {
 				break;
 			}
@@ -5271,7 +5306,9 @@ ${previewItems.join('\n')}${overflowLabel}`;
 		}
 		return {
 			contextText:
-				contextBlocks.length > 0 ? contextBlocks.join('\n\n') : 'No workspace files are currently available.',
+				contextBlocks.length > 0
+					? contextBlocks.join('\n\n')
+					: 'No workspace files are currently available.',
 			includedFiles,
 			totalFiles: allFilePaths.length,
 			truncatedFiles,
@@ -5280,7 +5317,9 @@ ${previewItems.join('\n')}${overflowLabel}`;
 	}
 
 	function trimCanvasAIResponseCodeFence(rawText: string) {
-		let normalized = String(rawText || '').replace(/\r\n/g, '\n').trim();
+		let normalized = String(rawText || '')
+			.replace(/\r\n/g, '\n')
+			.trim();
 		if (!normalized) {
 			return '';
 		}
@@ -5366,10 +5405,12 @@ ${previewItems.join('\n')}${overflowLabel}`;
 		}
 		const action = parseCanvasAIChangeAction(source.action, 'replace');
 		const summary =
-			toCanvasAIString(source.summary ?? source.reason ?? source.description) || 'Updated file content';
+			toCanvasAIString(source.summary ?? source.reason ?? source.description) ||
+			'Updated file content';
 		const locationHint =
-			toCanvasAIString(source.location_hint ?? source.locationHint ?? source.location ?? source.scope) ||
-			'file-level update';
+			toCanvasAIString(
+				source.location_hint ?? source.locationHint ?? source.location ?? source.scope
+			) || 'file-level update';
 		const updatedCode = stripCodeFences(
 			toCanvasAICodeString(
 				source.updated_code ??
@@ -5411,11 +5452,7 @@ ${previewItems.join('\n')}${overflowLabel}`;
 				nested.message
 		);
 		const rawChanges = toCanvasAIArray(
-			nested.changes ??
-				nested.edits ??
-				nested.patches ??
-				nested.file_changes ??
-				nested.fileChanges
+			nested.changes ?? nested.edits ?? nested.patches ?? nested.file_changes ?? nested.fileChanges
 		);
 		const changes: CanvasAIChangeDraft[] = [];
 		for (const candidate of rawChanges) {
@@ -5471,6 +5508,7 @@ ${previewItems.join('\n')}${overflowLabel}`;
 		}
 
 		const jsonCandidates = extractCanvasAIJSONCandidates(normalized);
+		let conversationalReplyFromJSON = '';
 		for (const candidate of jsonCandidates) {
 			try {
 				const parsed = JSON.parse(candidate);
@@ -5482,9 +5520,26 @@ ${previewItems.join('\n')}${overflowLabel}`;
 				if (structured && structured.changes.length > 0) {
 					return structured;
 				}
+				// JSON had assistant_reply but no changes — capture it so we don't fall through to raw-text fallback
+				if (!conversationalReplyFromJSON) {
+					const reply = toCanvasAIString(
+						parsedRecord.assistant_reply ??
+							parsedRecord.assistantReply ??
+							parsedRecord.reply ??
+							parsedRecord.message
+					);
+					if (reply) conversationalReplyFromJSON = reply;
+				}
 			} catch {
 				// Ignore malformed candidate; continue to other fallbacks.
 			}
+		}
+
+		// A JSON response with assistant_reply but no code changes is a valid conversational reply.
+		// Return it directly — do NOT fall through to code-fence / raw-text fallbacks which would
+		// treat the JSON string itself as file content.
+		if (conversationalReplyFromJSON) {
+			return { assistantReply: conversationalReplyFromJSON, changes: [] };
 		}
 
 		const codeFenceMatch = normalized.match(/```[a-zA-Z0-9_+-]*\n?[\s\S]*?```/);
@@ -5497,7 +5552,8 @@ ${previewItems.join('\n')}${overflowLabel}`;
 					throw new Error('AI response did not include file paths for changes.');
 				}
 				return {
-					assistantReply: conversationalText || 'I prepared an updated version of your active file.',
+					assistantReply:
+						conversationalText || 'I prepared an updated version of your active file.',
 					changes: [
 						{
 							filePath: normalizedFallbackPath,
@@ -5591,7 +5647,8 @@ ${previewItems.join('\n')}${overflowLabel}`;
 			CANVAS_AI_MAX_INSTRUCTION_CHARS
 		);
 		const workspaceContext = await buildCanvasAIWorkspaceContext(targetFilePath);
-		const baseContextSummary = `Included ${workspaceContext.includedFiles}/${workspaceContext.totalFiles} files from workspace context.` +
+		const baseContextSummary =
+			`Included ${workspaceContext.includedFiles}/${workspaceContext.totalFiles} files from workspace context.` +
 			` Omitted: ${workspaceContext.omittedFiles}. Truncated: ${workspaceContext.truncatedFiles}.`;
 		let contextSummary = baseContextSummary;
 		let workspaceContextText = workspaceContext.contextText;
@@ -5729,7 +5786,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	function splitCanvasAIContentIntoLines(content: string) {
-		return String(content ?? '').replace(/\r\n/g, '\n').split('\n');
+		return String(content ?? '')
+			.replace(/\r\n/g, '\n')
+			.split('\n');
 	}
 
 	function buildCanvasAIUnifiedDiff(filePath: string, previousCode: string, updatedCode: string) {
@@ -5748,7 +5807,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		}
 		let oldSuffix = oldLines.length - 1;
 		let newSuffix = newLines.length - 1;
-		while (oldSuffix >= prefix && newSuffix >= prefix && oldLines[oldSuffix] === newLines[newSuffix]) {
+		while (
+			oldSuffix >= prefix &&
+			newSuffix >= prefix &&
+			oldLines[oldSuffix] === newLines[newSuffix]
+		) {
 			oldSuffix -= 1;
 			newSuffix -= 1;
 		}
@@ -5792,8 +5855,8 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			(oldIndex < oldLines.length || newIndex < newLines.length) &&
 			previewLines.length < CANVAS_AI_DIFF_MAX_PREVIEW_LINES
 		) {
-			const oldLine = oldIndex < oldLines.length ? oldLines[oldIndex] ?? '' : null;
-			const newLine = newIndex < newLines.length ? newLines[newIndex] ?? '' : null;
+			const oldLine = oldIndex < oldLines.length ? (oldLines[oldIndex] ?? '') : null;
+			const newLine = newIndex < newLines.length ? (newLines[newIndex] ?? '') : null;
 			if (oldLine !== null && newLine !== null && oldLine === newLine) {
 				previewLines.push({
 					kind: 'context',
@@ -5979,7 +6042,8 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			showReadOnlyWarning &&
 			normalizeCanvasAIFilePath(change.filePath) === normalizeCanvasAIFilePath(currentFile)
 		) {
-			canvasAIError = 'Current file is read-only. Wait for editor slots to free up before applying.';
+			canvasAIError =
+				'Current file is read-only. Wait for editor slots to free up before applying.';
 			return;
 		}
 		canvasAIError = '';
@@ -6035,7 +6099,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 	async function applyAllCanvasAIChanges(messageId: string) {
 		const message = canvasAIChatMessages.find((entry) => entry.id === messageId);
-		const pendingChanges = (message?.changes ?? []).filter((entry) => entry.applyState === 'pending');
+		const pendingChanges = (message?.changes ?? []).filter(
+			(entry) => entry.applyState === 'pending'
+		);
 		if (!message || pendingChanges.length === 0) {
 			canvasAIError = 'No pending AI changes to apply.';
 			return;
@@ -6192,7 +6258,8 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		const verticalPadding =
 			parseCanvasAIPromptPixel(styles.paddingTop) + parseCanvasAIPromptPixel(styles.paddingBottom);
 		const verticalBorder =
-			parseCanvasAIPromptPixel(styles.borderTopWidth) + parseCanvasAIPromptPixel(styles.borderBottomWidth);
+			parseCanvasAIPromptPixel(styles.borderTopWidth) +
+			parseCanvasAIPromptPixel(styles.borderBottomWidth);
 		const minHeight = lineHeight + verticalPadding + verticalBorder;
 		const maxHeight = lineHeight * 2 + verticalPadding + verticalBorder;
 		promptElement.style.height = 'auto';
@@ -6634,9 +6701,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		await getActiveFS().promises.rename(`/project/${normalizedCurrent}`, nextPath);
 		openTabs = Array.from(
 			new Set(
-				openTabs.map((tab) =>
-					renameRelativeProjectPath(tab, normalizedCurrent, normalizedNext)
-				)
+				openTabs.map((tab) => renameRelativeProjectPath(tab, normalizedCurrent, normalizedNext))
 			)
 		);
 		await moveSharedEntries(normalizedCurrent, normalizedNext);
@@ -6647,7 +6712,10 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		await switchToFile(normalizedNext);
 	}
 
-	async function createLanguageFileFromDefault(option: CanvasExecutionLanguageOption, content: string) {
+	async function createLanguageFileFromDefault(
+		option: CanvasExecutionLanguageOption,
+		content: string
+	) {
 		await ensureProjectDirectory();
 		if (requestScope === 'ide') {
 			const destinationRelativePath = buildIdeTempRelativePath(option.extension);
@@ -6797,7 +6865,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	async function runFile(entry: ProjectFileEntry | null) {
-		const target = entry && !entry.isDir ? entry : currentFileEntry() ?? firstFileEntry();
+		const target = entry && !entry.isDir ? entry : (currentFileEntry() ?? firstFileEntry());
 		if (!target || target.isDir) {
 			fileExplorerError = 'Select a file to run';
 			writeTerminalLine('\x1b[31mSelect a file to run.\x1b[0m');
@@ -7531,8 +7599,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				roomId,
 				error: error instanceof Error ? error.message : String(error)
 			});
-			fileExplorerError =
-				error instanceof Error ? error.message : 'Canvas failed to initialize';
+			fileExplorerError = error instanceof Error ? error.message : 'Canvas failed to initialize';
 		}
 	});
 
@@ -7678,19 +7745,19 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						placeholder="Add a message about this code (optional)..."
 					></textarea>
 				</div>
-					<footer class="snippet-composer-footer">
-						<button type="button" class="snippet-button secondary" on:click={closeSnippetComposer}>
-							Cancel
-						</button>
-						<button
-							type="button"
-							class="snippet-button primary"
-							on:click={sendSnippetMessage}
-							disabled={!snippetDraft.trim()}
-						>
-							Send to Chat
-						</button>
-					</footer>
+				<footer class="snippet-composer-footer">
+					<button type="button" class="snippet-button secondary" on:click={closeSnippetComposer}>
+						Cancel
+					</button>
+					<button
+						type="button"
+						class="snippet-button primary"
+						on:click={sendSnippetMessage}
+						disabled={!snippetDraft.trim()}
+					>
+						Send to Chat
+					</button>
+				</footer>
 			</div>
 		</div>
 	{/if}
@@ -7968,7 +8035,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 												handleExplorerEntryKeydown(event, row.entry);
 											}}
 										>
-											<span class="file-entry-icon" class:is-dir={row.entry.isDir} aria-hidden="true">
+											<span
+												class="file-entry-icon"
+												class:is-dir={row.entry.isDir}
+												aria-hidden="true"
+											>
 												{#if row.entry.isDir}
 													{#if isFolderExpanded(row.entry)}
 														<svg viewBox="0 0 24 24">
@@ -7978,9 +8049,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 														</svg>
 													{:else}
 														<svg viewBox="0 0 24 24">
-															<path
-																d="M3.5 7.5h6l2 2h9v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z"
-															/>
+															<path d="M3.5 7.5h6l2 2h9v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.5Z" />
 														</svg>
 													{/if}
 												{:else}
@@ -8043,7 +8112,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 											<svg viewBox="0 0 24 24" aria-hidden="true">
 												<path d="M4.5 7.5h15" />
 												<path d="M9.5 7.5v-2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v2" />
-												<path d="M7.5 7.5l.8 11a1.5 1.5 0 0 0 1.5 1.4h4.4a1.5 1.5 0 0 0 1.5-1.4l.8-11" />
+												<path
+													d="M7.5 7.5l.8 11a1.5 1.5 0 0 0 1.5 1.4h4.4a1.5 1.5 0 0 0 1.5-1.4l.8-11"
+												/>
 												<path d="M10 11v5.5M14 11v5.5" />
 											</svg>
 										</button>
@@ -8214,7 +8285,10 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						{#if canvasAIChatMessages.length === 0}
 							<div class="canvas-ai-empty">
 								<p>Chat with AI about the currently selected file.</p>
-								<p>AI proposes file-level changes. Use Show Diff to open a temp diff tab, then apply or cancel.</p>
+								<p>
+									AI proposes file-level changes. Use Show Diff to open a temp diff tab, then apply
+									or cancel.
+								</p>
 							</div>
 						{:else}
 							{#each canvasAIChatMessages as message (message.id)}
@@ -8244,7 +8318,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 													<div class="canvas-ai-change-headline">
 														<div class="canvas-ai-change-meta">
 															<strong class="canvas-ai-change-file">{change.filePath}</strong>
-															<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
+															<span class="canvas-ai-change-chip"
+																>{change.action.toUpperCase()}</span
+															>
 														</div>
 														<span class="canvas-ai-change-location">{change.locationHint}</span>
 													</div>
@@ -8305,11 +8381,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 							type="button"
 							class="canvas-ai-action secondary"
 							on:click={() => void clearCanvasAIConversation()}
-							disabled={
-								isCanvasAIGenerating ||
+							disabled={isCanvasAIGenerating ||
 								(canvasAIChatMessages.length === 0 &&
-									Object.keys(canvasAITempDiffFiles).length === 0)
-							}
+									Object.keys(canvasAITempDiffFiles).length === 0)}
 						>
 							Clear Chat
 						</button>
@@ -8417,476 +8491,458 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				<div class="editor-breadcrumb-empty">No file selected</div>
 			{/if}
 		</div>
-			<div class="canvas-editor-body" bind:this={canvasEditorBodyElement}>
+		<div class="canvas-editor-body" bind:this={canvasEditorBodyElement}>
+			<div
+				class="canvas-editor-pane"
+				class:is-empty={openTabs.length === 0}
+				role="region"
+				aria-label="Code editor pane"
+				on:dragstart|capture={handleEditorCodeDragStart}
+				on:dragenter|capture={handleEditorCodeDragEnter}
+				on:dragover|capture={handleEditorCodeDragOver}
+				on:dragleave|capture={handleEditorCodeDragLeave}
+				on:drop|capture={handleEditorCodeDrop}
+				on:dragend|capture={handleEditorCodeDragEnd}
+			>
 				<div
-					class="canvas-editor-pane"
-					class:is-empty={openTabs.length === 0}
-					role="region"
-					aria-label="Code editor pane"
-					on:dragstart|capture={handleEditorCodeDragStart}
-					on:dragenter|capture={handleEditorCodeDragEnter}
-					on:dragover|capture={handleEditorCodeDragOver}
-					on:dragleave|capture={handleEditorCodeDragLeave}
-					on:drop|capture={handleEditorCodeDrop}
-					on:dragend|capture={handleEditorCodeDragEnd}
-				>
-					<div class="code-canvas" class:is-hidden={Boolean(activeCanvasAIDiff)} bind:this={editorContainer}></div>
-					{#if activeCanvasAIDiff}
-						<section class="canvas-ai-diff-pane" aria-label="AI diff preview">
-							<header class="canvas-ai-diff-header">
-								<div class="canvas-ai-diff-title">
-									<strong>{activeCanvasAIDiff.filePath}</strong>
-									<span class="canvas-ai-change-chip">{activeCanvasAIDiff.action.toUpperCase()}</span>
-								</div>
-								<p class="canvas-ai-diff-summary">{activeCanvasAIDiff.summary}</p>
-								<p class="canvas-ai-diff-location">{activeCanvasAIDiff.locationHint}</p>
-								<div class="canvas-ai-diff-actions">
-									<button
-										type="button"
-										class="canvas-ai-action primary"
-										on:click={() =>
-											void applyCanvasAIChange(
-												activeCanvasAIDiff.messageId,
-												activeCanvasAIDiff.changeId
-											)}
-										disabled={
-											isCanvasAIGenerating ||
-											['applied', 'cancelled'].includes(
-												canvasAIChatMessages
-													.find((message) => message.id === activeCanvasAIDiff?.messageId)
-													?.changes?.find((change) => change.id === activeCanvasAIDiff?.changeId)
-													?.applyState ?? ''
-											)
-										}
-									>
-										Apply Changes
-									</button>
-									<button
-										type="button"
-										class="canvas-ai-action secondary"
-										on:click={() =>
-											void cancelCanvasAIChange(
-												activeCanvasAIDiff.messageId,
-												activeCanvasAIDiff.changeId
-											)}
-										disabled={isCanvasAIGenerating}
-									>
-										Cancel
-									</button>
-								</div>
-							</header>
-							<div class="canvas-ai-diff-body" role="table" aria-label="Diff lines">
-								{#each activeCanvasAIDiff.lines as line, index (`${activeCanvasAIDiff.tabPath}-${index}`)}
-									<div class={`canvas-ai-diff-line kind-${line.kind}`}>
-										<span class="canvas-ai-diff-gutter old">
-											{line.oldLine ?? ''}
-										</span>
-										<span class="canvas-ai-diff-gutter new">
-											{line.newLine ?? ''}
-										</span>
-										<code class="canvas-ai-diff-code">{line.text}</code>
-									</div>
-								{/each}
+					class="code-canvas"
+					class:is-hidden={Boolean(activeCanvasAIDiff)}
+					bind:this={editorContainer}
+				></div>
+				{#if activeCanvasAIDiff}
+					<section class="canvas-ai-diff-pane" aria-label="AI diff preview">
+						<header class="canvas-ai-diff-header">
+							<div class="canvas-ai-diff-title">
+								<strong>{activeCanvasAIDiff.filePath}</strong>
+								<span class="canvas-ai-change-chip">{activeCanvasAIDiff.action.toUpperCase()}</span>
 							</div>
-						</section>
-					{/if}
-					{#if aiEnabled && showCanvasAIPrompt}
-						<div class="canvas-ai-overlay" role="presentation">
-							<div class="canvas-ai-panel" role="dialog" aria-modal="true" aria-label="AI code prompt">
-								<div class="canvas-ai-panel-header">
-									<div class="canvas-ai-panel-head-main">
-										<span>AI in Editor</span>
-										{#if currentFile}
-											<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
-										{/if}
-									</div>
-									<button
-										type="button"
-										class="canvas-ai-close"
-										on:click={closeCanvasAIPromptPanel}
-										aria-label="Close AI prompt"
-									>
-										×
-									</button>
+							<p class="canvas-ai-diff-summary">{activeCanvasAIDiff.summary}</p>
+							<p class="canvas-ai-diff-location">{activeCanvasAIDiff.locationHint}</p>
+							<div class="canvas-ai-diff-actions">
+								<button
+									type="button"
+									class="canvas-ai-action primary"
+									on:click={() =>
+										void applyCanvasAIChange(
+											activeCanvasAIDiff.messageId,
+											activeCanvasAIDiff.changeId
+										)}
+									disabled={isCanvasAIGenerating ||
+										['applied', 'cancelled'].includes(
+											canvasAIChatMessages
+												.find((message) => message.id === activeCanvasAIDiff?.messageId)
+												?.changes?.find((change) => change.id === activeCanvasAIDiff?.changeId)
+												?.applyState ?? ''
+										)}
+								>
+									Apply Changes
+								</button>
+								<button
+									type="button"
+									class="canvas-ai-action secondary"
+									on:click={() =>
+										void cancelCanvasAIChange(
+											activeCanvasAIDiff.messageId,
+											activeCanvasAIDiff.changeId
+										)}
+									disabled={isCanvasAIGenerating}
+								>
+									Cancel
+								</button>
+							</div>
+						</header>
+						<div class="canvas-ai-diff-body" role="table" aria-label="Diff lines">
+							{#each activeCanvasAIDiff.lines as line, index (`${activeCanvasAIDiff.tabPath}-${index}`)}
+								<div class={`canvas-ai-diff-line kind-${line.kind}`}>
+									<span class="canvas-ai-diff-gutter old">
+										{line.oldLine ?? ''}
+									</span>
+									<span class="canvas-ai-diff-gutter new">
+										{line.newLine ?? ''}
+									</span>
+									<code class="canvas-ai-diff-code">{line.text}</code>
 								</div>
-								<div class="canvas-ai-thread" bind:this={canvasAIThreadElement}>
-									{#if canvasAIChatMessages.length === 0}
-										<div class="canvas-ai-empty">
-											<p>Chat with AI about this file. Ask for refactors, fixes, or new features.</p>
-											<p>AI responses include structured file changes. Use Show Diff to review in a temp diff tab.</p>
-										</div>
-									{:else}
-										{#each canvasAIChatMessages as message (message.id)}
-											<article class="canvas-ai-message" class:user={message.role === 'user'}>
-												<header class="canvas-ai-message-header">
-													<strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
-													<time>
-														{new Date(message.timestamp).toLocaleTimeString([], {
-															hour: '2-digit',
-															minute: '2-digit'
-														})}
-													</time>
-												</header>
-												<p class="canvas-ai-message-text">{message.text}</p>
-												{#if message.changes && message.changes.length > 0}
-													<div class="canvas-ai-change-list">
-														<div class="canvas-ai-change-list-header">
-															<span>{message.changes.length} proposed file change(s)</span>
-														</div>
-														{#each message.changes as change (change.id)}
-															<section
-																class="canvas-ai-code-block"
-																class:is-applied={change.applyState === 'applied'}
-																class:is-failed={change.applyState === 'failed'}
-																class:is-cancelled={change.applyState === 'cancelled'}
-															>
-																<div class="canvas-ai-change-headline">
-																	<div class="canvas-ai-change-meta">
-																		<strong class="canvas-ai-change-file">{change.filePath}</strong>
-																		<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
-																	</div>
-																	<span class="canvas-ai-change-location">{change.locationHint}</span>
-																</div>
-																<p class="canvas-ai-change-summary">{change.summary}</p>
-																<div class="canvas-ai-code-actions">
-																	<button
-																		type="button"
-																		class="canvas-ai-action secondary canvas-ai-show-diff"
-																		on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
-																		disabled={isCanvasAIGenerating}
-																	>
-																		Show Diff <span aria-hidden="true">↗</span>
-																	</button>
-																	<span class={`canvas-ai-change-state state-${change.applyState}`}>
-																		{change.applyState}
-																	</span>
-																</div>
-																{#if change.applyError}
-																	<div class="canvas-ai-change-error">{change.applyError}</div>
-																{/if}
-															</section>
-														{/each}
-													</div>
-												{/if}
-											</article>
-										{/each}
+							{/each}
+						</div>
+					</section>
+				{/if}
+				{#if aiEnabled && showCanvasAIPrompt}
+					<div class="canvas-ai-overlay" role="presentation">
+						<div
+							class="canvas-ai-panel"
+							role="dialog"
+							aria-modal="true"
+							aria-label="AI code prompt"
+						>
+							<div class="canvas-ai-panel-header">
+								<div class="canvas-ai-panel-head-main">
+									<span>AI in Editor</span>
+									{#if currentFile}
+										<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
 									{/if}
 								</div>
-								{#if canvasAIError}
-									<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
+								<button
+									type="button"
+									class="canvas-ai-close"
+									on:click={closeCanvasAIPromptPanel}
+									aria-label="Close AI prompt"
+								>
+									×
+								</button>
+							</div>
+							<div class="canvas-ai-thread" bind:this={canvasAIThreadElement}>
+								{#if canvasAIChatMessages.length === 0}
+									<div class="canvas-ai-empty">
+										<p>Chat with AI about this file. Ask for refactors, fixes, or new features.</p>
+										<p>
+											AI responses include structured file changes. Use Show Diff to review in a
+											temp diff tab.
+										</p>
+									</div>
+								{:else}
+									{#each canvasAIChatMessages as message (message.id)}
+										<article class="canvas-ai-message" class:user={message.role === 'user'}>
+											<header class="canvas-ai-message-header">
+												<strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
+												<time>
+													{new Date(message.timestamp).toLocaleTimeString([], {
+														hour: '2-digit',
+														minute: '2-digit'
+													})}
+												</time>
+											</header>
+											<p class="canvas-ai-message-text">{message.text}</p>
+											{#if message.changes && message.changes.length > 0}
+												<div class="canvas-ai-change-list">
+													<div class="canvas-ai-change-list-header">
+														<span>{message.changes.length} proposed file change(s)</span>
+													</div>
+													{#each message.changes as change (change.id)}
+														<section
+															class="canvas-ai-code-block"
+															class:is-applied={change.applyState === 'applied'}
+															class:is-failed={change.applyState === 'failed'}
+															class:is-cancelled={change.applyState === 'cancelled'}
+														>
+															<div class="canvas-ai-change-headline">
+																<div class="canvas-ai-change-meta">
+																	<strong class="canvas-ai-change-file">{change.filePath}</strong>
+																	<span class="canvas-ai-change-chip"
+																		>{change.action.toUpperCase()}</span
+																	>
+																</div>
+																<span class="canvas-ai-change-location">{change.locationHint}</span>
+															</div>
+															<p class="canvas-ai-change-summary">{change.summary}</p>
+															<div class="canvas-ai-code-actions">
+																<button
+																	type="button"
+																	class="canvas-ai-action secondary canvas-ai-show-diff"
+																	on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
+																	disabled={isCanvasAIGenerating}
+																>
+																	Show Diff <span aria-hidden="true">↗</span>
+																</button>
+																<span class={`canvas-ai-change-state state-${change.applyState}`}>
+																	{change.applyState}
+																</span>
+															</div>
+															{#if change.applyError}
+																<div class="canvas-ai-change-error">{change.applyError}</div>
+															{/if}
+														</section>
+													{/each}
+												</div>
+											{/if}
+										</article>
+									{/each}
 								{/if}
-								<textarea
-									bind:this={canvasAIPromptElement}
-									bind:value={canvasAIPrompt}
-									rows="2"
-									class="canvas-ai-input"
-									placeholder="Ask AI what to change in this file..."
-									on:input={handleCanvasAIPromptInput}
-									on:keydown={handleCanvasAIPromptKeydown}
-									disabled={isCanvasAIGenerating || !currentFileEntry()}
-								></textarea>
-								<div class="canvas-ai-actions">
-									<button
-										type="button"
-										class="canvas-ai-action secondary"
-										on:click={closeCanvasAIPromptPanel}
-										disabled={isCanvasAIGenerating}
-									>
-										Cancel
-									</button>
-									<button
-										type="button"
-										class="canvas-ai-action secondary"
-										on:click={() => void clearCanvasAIConversation()}
-										disabled={
-											isCanvasAIGenerating ||
-											(canvasAIChatMessages.length === 0 &&
-												Object.keys(canvasAITempDiffFiles).length === 0)
-										}
-									>
-										Clear Chat
-									</button>
-									<button
-										type="button"
-										class="canvas-ai-action primary"
-										on:click={() => void sendCanvasAIMessage()}
-										disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFileEntry()}
-									>
-										{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
-									</button>
-								</div>
+							</div>
+							{#if canvasAIError}
+								<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
+							{/if}
+							<textarea
+								bind:this={canvasAIPromptElement}
+								bind:value={canvasAIPrompt}
+								rows="2"
+								class="canvas-ai-input"
+								placeholder="Ask AI what to change in this file..."
+								on:input={handleCanvasAIPromptInput}
+								on:keydown={handleCanvasAIPromptKeydown}
+								disabled={isCanvasAIGenerating || !currentFileEntry()}
+							></textarea>
+							<div class="canvas-ai-actions">
+								<button
+									type="button"
+									class="canvas-ai-action secondary"
+									on:click={closeCanvasAIPromptPanel}
+									disabled={isCanvasAIGenerating}
+								>
+									Cancel
+								</button>
+								<button
+									type="button"
+									class="canvas-ai-action secondary"
+									on:click={() => void clearCanvasAIConversation()}
+									disabled={isCanvasAIGenerating ||
+										(canvasAIChatMessages.length === 0 &&
+											Object.keys(canvasAITempDiffFiles).length === 0)}
+								>
+									Clear Chat
+								</button>
+								<button
+									type="button"
+									class="canvas-ai-action primary"
+									on:click={() => void sendCanvasAIMessage()}
+									disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFileEntry()}
+								>
+									{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
+								</button>
 							</div>
 						</div>
-					{/if}
-					{#if openTabs.length === 0}
-						<div class="canvas-blank-state" role="status" aria-live="polite">
-							Open a file from Explorer to start editing.
-						</div>
-					{/if}
-					{#if isDraggingCode}
-						<div class="canvas-code-drop-overlay">
-							<div class="canvas-code-drop-box">
-								<svg viewBox="0 0 24 24" class="canvas-code-drop-icon" aria-hidden="true">
-									<path d="M4 7.5h16v9H4z" />
-									<path d="m4 8 8 6 8-6" />
-								</svg>
-								<span>Drop code here to send to chat</span>
-							</div>
-						</div>
-					{/if}
-					{#if snippetsEnabled && showSelectionSnippetAction}
-						<button
-							type="button"
-							class="selection-snippet-action"
-							style:left={`${selectionSnippetActionLeft}px`}
-							style:top={`${selectionSnippetActionTop}px`}
-							aria-label="Send selected code to chat"
-							title="Send selected code to chat"
-							on:pointerdown|preventDefault
-							on:click={openSnippetComposerForSelection}
-						>
-							<svg viewBox="0 0 24 24" aria-hidden="true">
+					</div>
+				{/if}
+				{#if openTabs.length === 0}
+					<div class="canvas-blank-state" role="status" aria-live="polite">
+						Open a file from Explorer to start editing.
+					</div>
+				{/if}
+				{#if isDraggingCode}
+					<div class="canvas-code-drop-overlay">
+						<div class="canvas-code-drop-box">
+							<svg viewBox="0 0 24 24" class="canvas-code-drop-icon" aria-hidden="true">
 								<path d="M4 7.5h16v9H4z" />
 								<path d="m4 8 8 6 8-6" />
 							</svg>
-						</button>
-					{/if}
-				</div>
-				<div
-					class="terminal-panel"
-					class:is-collapsed={terminalPanelCollapsed}
-					style={terminalPanelCollapsed ? '' : `height:${terminalHeight}px`}
-				>
-					{#if !terminalPanelCollapsed}
-						<button
-							type="button"
-							class="terminal-resize-handle"
-							on:pointerdown={startTerminalResize}
-							aria-label="Resize terminal"
-						>
-							<span class="terminal-resize-grip" aria-hidden="true"></span>
-						</button>
-					{/if}
-					<div class="terminal-header">
-						<span class="terminal-title">
-							{#if isRunInProgress && runningFilePath}
-								Running {getTabLabel(runningFilePath)}
-							{:else}
-								Terminal
-							{/if}
-						</span>
-						<div class="terminal-header-right">
-							<div class="terminal-action-group">
-								<div class="terminal-language-menu" bind:this={languageMenuElement}>
-									<button
-										type="button"
-										class="terminal-action-button terminal-language-trigger"
-										on:click={toggleLanguageMenu}
-										disabled={!canUseLanguagePicker()}
-										aria-expanded={showLanguageMenu}
-										title="Change file language"
-									>
-										<span>{resolveCurrentExecutionLanguageLabel()}</span>
-										<svg viewBox="0 0 24 24" aria-hidden="true">
-											<path d="m7 9 5 6 5-6" />
-										</svg>
-									</button>
-									{#if showLanguageMenu}
-										<div class="terminal-language-dropdown" role="menu" aria-label="Supported languages">
-											{#each EXECUTION_LANGUAGE_OPTIONS as option (option.id)}
-												<button
-													type="button"
-													class="terminal-language-option"
-													class:is-active={resolveCurrentExecutionLanguageOption()?.id === option.id}
-													role="menuitem"
-													on:click={() => void applyExecutionLanguageToCurrentFile(option.id)}
-												>
-													<span>{option.label}</span>
-													<code>.{option.extension}</code>
-												</button>
-											{/each}
-										</div>
-									{/if}
-								</div>
-								<button
-									type="button"
-									class="terminal-action-button terminal-action-run"
-									on:click={() => void runFile(currentFileEntry() ?? firstFileEntry())}
-									disabled={isRunInProgress}
-								>
-									{isRunInProgress ? 'Running...' : 'Run'}
-								</button>
-								{#if snippetsEnabled}
-									<button
-										type="button"
-										class="terminal-action-button terminal-action-snippet"
-										on:click={openSnippetComposerForSelection}
-										disabled={!canSendSnippetFromSelection}
-										title="Send selected code to chat"
-										aria-label="Send selected code to chat"
-									>
-										<svg viewBox="0 0 24 24" aria-hidden="true">
-											<path d="M4 7.5h16v9H4z" />
-											<path d="m4 8 8 6 8-6" />
-										</svg>
-										<span>Snippet</span>
-									</button>
-								{/if}
-								<button
-									type="button"
-									class="terminal-action-button terminal-action-stop"
-									on:click={stopRunningCode}
-									disabled={!isRunInProgress}
-								>
-									Stop
-								</button>
-								<button type="button" class="terminal-action-button" on:click={clearTerminal}>
-									Clear
-								</button>
-							</div>
-							<button
-								type="button"
-								class="terminal-action-button terminal-collapse-button"
-								on:click={toggleTerminalPanelCollapse}
-								aria-label={terminalPanelCollapsed ? 'Expand terminal' : 'Collapse terminal'}
-								title={terminalPanelCollapsed ? 'Expand terminal' : 'Collapse terminal'}
-							>
-								<svg viewBox="0 0 24 24" aria-hidden="true">
-									{#if terminalPanelCollapsed}
-										<path d="M7 15l5-6 5 6" />
-									{:else}
-										<path d="m7 9 5 6 5-6" />
-									{/if}
-								</svg>
-							</button>
+							<span>Drop code here to send to chat</span>
 						</div>
 					</div>
-					<div class="terminal-body" class:is-hidden={terminalPanelCollapsed}>
-						<div class="terminal-tabs" role="tablist" aria-label="Terminal panels">
+				{/if}
+				{#if snippetsEnabled && showSelectionSnippetAction}
+					<button
+						type="button"
+						class="selection-snippet-action"
+						style:left={`${selectionSnippetActionLeft}px`}
+						style:top={`${selectionSnippetActionTop}px`}
+						aria-label="Send selected code to chat"
+						title="Send selected code to chat"
+						on:pointerdown|preventDefault
+						on:click={openSnippetComposerForSelection}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M4 7.5h16v9H4z" />
+							<path d="m4 8 8 6 8-6" />
+						</svg>
+					</button>
+				{/if}
+			</div>
+			<div
+				class="terminal-panel"
+				class:is-collapsed={terminalPanelCollapsed}
+				style={terminalPanelCollapsed ? '' : `height:${terminalHeight}px`}
+			>
+				{#if !terminalPanelCollapsed}
+					<button
+						type="button"
+						class="terminal-resize-handle"
+						on:pointerdown={startTerminalResize}
+						aria-label="Resize terminal"
+					>
+						<span class="terminal-resize-grip" aria-hidden="true"></span>
+					</button>
+				{/if}
+				<div class="terminal-header">
+					<span class="terminal-title">
+						{#if isRunInProgress && runningFilePath}
+							Running {getTabLabel(runningFilePath)}
+						{:else}
+							Terminal
+						{/if}
+					</span>
+					<div class="terminal-header-right">
+						<div class="terminal-action-group">
 							<button
 								type="button"
-								class="terminal-tab-button"
-								class:is-active={activeTerminalPanelTab === 'out'}
-								role="tab"
-								aria-selected={activeTerminalPanelTab === 'out'}
-								on:click={() => switchTerminalPanelTab('out')}
+								class="terminal-action-button terminal-action-run"
+								on:click={() => void runFile(currentFileEntry() ?? firstFileEntry())}
+								disabled={isRunInProgress}
 							>
-								Output
+								{isRunInProgress ? 'Running...' : 'Run'}
 							</button>
+							{#if snippetsEnabled}
+								<button
+									type="button"
+									class="terminal-action-button terminal-action-snippet"
+									on:click={openSnippetComposerForSelection}
+									disabled={!canSendSnippetFromSelection}
+									title="Send selected code to chat"
+									aria-label="Send selected code to chat"
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M4 7.5h16v9H4z" />
+										<path d="m4 8 8 6 8-6" />
+									</svg>
+									<span>Snippet</span>
+								</button>
+							{/if}
 							<button
 								type="button"
-								class="terminal-tab-button"
-								class:is-active={activeTerminalPanelTab === 'in'}
-								role="tab"
-								aria-selected={activeTerminalPanelTab === 'in'}
-								on:click={() => switchTerminalPanelTab('in')}
+								class="terminal-action-button terminal-action-stop"
+								on:click={stopRunningCode}
+								disabled={!isRunInProgress}
 							>
-								Input
+								Stop
 							</button>
-							<button
-								type="button"
-								class="terminal-tab-button"
-								class:is-active={activeTerminalPanelTab === 'smart'}
-								role="tab"
-								aria-selected={activeTerminalPanelTab === 'smart'}
-								on:click={() => switchTerminalPanelTab('smart')}
-							>
-								Smart Input
+							<button type="button" class="terminal-action-button" on:click={clearTerminal}>
+								Clear
 							</button>
 						</div>
-						<div class="terminal-tab-panel" class:is-active={activeTerminalPanelTab === 'out'}>
-							<div class="terminal-container" bind:this={terminalContainer}></div>
-						</div>
-						<div class="terminal-tab-panel terminal-tab-panel-in" class:is-active={activeTerminalPanelTab === 'in'}>
-							<textarea
-								class="terminal-input-area"
-								bind:value={terminalInputDraft}
-								placeholder="Program stdin (optional). If empty, ToraEditorInput.txt is used."
-								spellcheck="false"
-								autocomplete="off"
-								autocapitalize="off"
-							></textarea>
-						</div>
-						<div
-							class="terminal-tab-panel terminal-tab-panel-smart"
-							class:is-active={activeTerminalPanelTab === 'smart'}
+						<button
+							type="button"
+							class="terminal-action-button terminal-collapse-button"
+							on:click={toggleTerminalPanelCollapse}
+							aria-label={terminalPanelCollapsed ? 'Expand terminal' : 'Collapse terminal'}
+							title={terminalPanelCollapsed ? 'Expand terminal' : 'Collapse terminal'}
 						>
-							<div class="smart-input-panel">
-								<div class="smart-input-header">
-									<div class="smart-input-heading">
-										<strong>Smart stdin mapper</strong>
-										<p>{smartInputStatusText}</p>
-									</div>
-									<div class="smart-input-header-actions">
-										<button
-											type="button"
-											class="smart-input-random-all"
-											on:click={randomizeAllSmartInputs}
-											disabled={smartInputFields.length === 0}
-										>
-											Random All
-										</button>
-										<button
-											type="button"
-											class="smart-input-rescan"
-											on:click={() => void refreshSmartInputFields({ force: true })}
-										>
-											Re-scan
-										</button>
-									</div>
-								</div>
-								{#if smartInputFields.length === 0}
-									<div class="smart-input-empty" role="status">
-										{#if smartInputHasInputRead}
-											Stdin appears in code, but named fields were not inferred.
-										{:else}
-											No stdin reads detected in this file.
-										{/if}
-									</div>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								{#if terminalPanelCollapsed}
+									<path d="M7 15l5-6 5 6" />
 								{:else}
-									<div class="smart-input-list">
-										{#each smartInputFields as field (field.id)}
-											<div class="smart-input-row">
-												<div class="smart-input-meta">
-													<span class="smart-input-icon" aria-hidden="true">{field.icon}</span>
-													<span class="smart-input-label">{field.label}</span>
-												</div>
-												<button
-													type="button"
-													class="smart-input-random-one"
-													title={`Randomize ${field.label}`}
-													on:click={() => randomizeSmartInputField(field.id)}
-												>
-													Random
-												</button>
-												<input
-													type="text"
-													class="smart-input-value"
-													value={smartInputValues[field.id] ?? ''}
-													placeholder={`Value for ${field.label}`}
-													autocapitalize="off"
-													autocomplete="off"
-													autocorrect="off"
-													spellcheck="false"
-													on:input={(event) =>
-														updateSmartInputValue(
-															field.id,
-															(event.currentTarget as HTMLInputElement).value
-														)}
-												/>
-											</div>
-										{/each}
-									</div>
-									<div class="smart-input-preview-shell">
-										<span class="smart-input-preview-label">stdin preview</span>
-										<pre class="smart-input-preview">{buildSmartInputStdin() || '(empty)'}</pre>
-									</div>
+									<path d="m7 9 5 6 5-6" />
 								{/if}
+							</svg>
+						</button>
+					</div>
+				</div>
+				<div class="terminal-body" class:is-hidden={terminalPanelCollapsed}>
+					<div class="terminal-tabs" role="tablist" aria-label="Terminal panels">
+						<button
+							type="button"
+							class="terminal-tab-button"
+							class:is-active={activeTerminalPanelTab === 'out'}
+							role="tab"
+							aria-selected={activeTerminalPanelTab === 'out'}
+							on:click={() => switchTerminalPanelTab('out')}
+						>
+							Output
+						</button>
+						<button
+							type="button"
+							class="terminal-tab-button"
+							class:is-active={activeTerminalPanelTab === 'in'}
+							role="tab"
+							aria-selected={activeTerminalPanelTab === 'in'}
+							on:click={() => switchTerminalPanelTab('in')}
+						>
+							Input
+						</button>
+						<button
+							type="button"
+							class="terminal-tab-button"
+							class:is-active={activeTerminalPanelTab === 'smart'}
+							role="tab"
+							aria-selected={activeTerminalPanelTab === 'smart'}
+							on:click={() => switchTerminalPanelTab('smart')}
+						>
+							Smart Input
+						</button>
+					</div>
+					<div class="terminal-tab-panel" class:is-active={activeTerminalPanelTab === 'out'}>
+						<div class="terminal-container" bind:this={terminalContainer}></div>
+					</div>
+					<div
+						class="terminal-tab-panel terminal-tab-panel-in"
+						class:is-active={activeTerminalPanelTab === 'in'}
+					>
+						<textarea
+							class="terminal-input-area"
+							bind:value={terminalInputDraft}
+							placeholder="Program stdin (optional). If empty, ToraEditorInput.txt is used."
+							spellcheck="false"
+							autocomplete="off"
+							autocapitalize="off"
+						></textarea>
+					</div>
+					<div
+						class="terminal-tab-panel terminal-tab-panel-smart"
+						class:is-active={activeTerminalPanelTab === 'smart'}
+					>
+						<div class="smart-input-panel">
+							<div class="smart-input-header">
+								<div class="smart-input-heading">
+									<strong>Smart stdin mapper</strong>
+									<p>{smartInputStatusText}</p>
+								</div>
+								<div class="smart-input-header-actions">
+									<button
+										type="button"
+										class="smart-input-random-all"
+										on:click={randomizeAllSmartInputs}
+										disabled={smartInputFields.length === 0}
+									>
+										Random All
+									</button>
+									<button
+										type="button"
+										class="smart-input-rescan"
+										on:click={() => void refreshSmartInputFields({ force: true })}
+									>
+										Re-scan
+									</button>
+								</div>
 							</div>
+							{#if smartInputFields.length === 0}
+								<div class="smart-input-empty" role="status">
+									{#if smartInputHasInputRead}
+										Stdin appears in code, but named fields were not inferred.
+									{:else}
+										No stdin reads detected in this file.
+									{/if}
+								</div>
+							{:else}
+								<div class="smart-input-list">
+									{#each smartInputFields as field (field.id)}
+										<div class="smart-input-row">
+											<div class="smart-input-meta">
+												<span class="smart-input-icon" aria-hidden="true">{field.icon}</span>
+												<span class="smart-input-label">{field.label}</span>
+											</div>
+											<button
+												type="button"
+												class="smart-input-random-one"
+												title={`Randomize ${field.label}`}
+												on:click={() => randomizeSmartInputField(field.id)}
+											>
+												Random
+											</button>
+											<input
+												type="text"
+												class="smart-input-value"
+												value={smartInputValues[field.id] ?? ''}
+												placeholder={`Value for ${field.label}`}
+												autocapitalize="off"
+												autocomplete="off"
+												autocorrect="off"
+												spellcheck="false"
+												on:input={(event) =>
+													updateSmartInputValue(
+														field.id,
+														(event.currentTarget as HTMLInputElement).value
+													)}
+											/>
+										</div>
+									{/each}
+								</div>
+								<div class="smart-input-preview-shell">
+									<span class="smart-input-preview-label">stdin preview</span>
+									<pre class="smart-input-preview">{buildSmartInputStdin() || '(empty)'}</pre>
+								</div>
+							{/if}
 						</div>
 					</div>
 				</div>
 			</div>
+		</div>
 	</div>
 	{#if deleteConfirmTarget}
 		<div class="canvas-delete-overlay" role="presentation" on:click|self={closeDeleteConfirmation}>
@@ -8982,20 +9038,20 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			on:click={() => void contextNewFile()}
 		>
 			New File
-			</button>
-			<div class="explorer-context-divider"></div>
-			<button
-				type="button"
-				class="explorer-context-action"
-				role="menuitem"
-				on:click={() => void contextRunFile()}
-				disabled={isRunInProgress}
-			>
-				Run File
-			</button>
-			<button
-				type="button"
-				class="explorer-context-action"
+		</button>
+		<div class="explorer-context-divider"></div>
+		<button
+			type="button"
+			class="explorer-context-action"
+			role="menuitem"
+			on:click={() => void contextRunFile()}
+			disabled={isRunInProgress}
+		>
+			Run File
+		</button>
+		<button
+			type="button"
+			class="explorer-context-action"
 			role="menuitem"
 			on:click={() => void contextDelete()}
 			disabled={!contextMenuTarget}
@@ -10234,11 +10290,8 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr) auto auto;
 		gap: 0.62rem;
-		padding:
-			max(0.78rem, env(safe-area-inset-top))
-			max(1rem, env(safe-area-inset-right))
-			max(0.78rem, env(safe-area-inset-bottom))
-			max(1rem, env(safe-area-inset-left));
+		padding: max(0.78rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+			max(0.78rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
 		background: #1e1f24;
 		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 	}
@@ -10508,12 +10561,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		font-size: 0.8rem;
 		line-height: 1.42;
 		color: #dbe9ff;
-		font-family:
-			'SFMono-Regular',
-			Consolas,
-			'Liberation Mono',
-			Menlo,
-			monospace;
+		font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 		white-space: pre;
 	}
 
@@ -10590,12 +10638,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		border: 1px solid rgba(86, 109, 145, 0.64);
 		border-radius: 0.56rem;
 		background: rgba(10, 14, 21, 0.98);
-		font-family:
-			'SFMono-Regular',
-			Consolas,
-			'Liberation Mono',
-			Menlo,
-			monospace;
+		font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 		font-size: 0.78rem;
 		line-height: 1.36;
 	}
@@ -10719,11 +10762,8 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 	@media (max-width: 900px) {
 		.canvas-ai-panel {
-			padding:
-				max(0.72rem, env(safe-area-inset-top))
-				max(0.72rem, env(safe-area-inset-right))
-				max(0.72rem, env(safe-area-inset-bottom))
-				max(0.72rem, env(safe-area-inset-left));
+			padding: max(0.72rem, env(safe-area-inset-top)) max(0.72rem, env(safe-area-inset-right))
+				max(0.72rem, env(safe-area-inset-bottom)) max(0.72rem, env(safe-area-inset-left));
 			gap: 0.56rem;
 		}
 
@@ -10840,12 +10880,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		color: #d4d4d4;
 		font-size: 0.79rem;
 		line-height: 1.45;
-		font-family:
-			'SFMono-Regular',
-			Consolas,
-			'Liberation Mono',
-			Menlo,
-			monospace;
+		font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
@@ -10989,61 +11024,6 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		gap: 0.34rem;
 	}
 
-	.terminal-language-menu {
-		position: relative;
-	}
-
-	.terminal-language-trigger {
-		min-width: 7.1rem;
-		justify-content: space-between;
-	}
-
-	.terminal-language-dropdown {
-		position: absolute;
-		top: calc(100% + 0.34rem);
-		left: 0;
-		z-index: 18;
-		min-width: 9.8rem;
-		padding: 0.35rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.24rem;
-		border-radius: 0.45rem;
-		border: 1px solid rgba(102, 132, 177, 0.56);
-		background: rgba(10, 16, 25, 0.98);
-		box-shadow: 0 14px 32px rgba(0, 0, 0, 0.34);
-	}
-
-	.terminal-language-option {
-		border: 1px solid rgba(103, 125, 160, 0.52);
-		background: rgba(24, 35, 52, 0.88);
-		color: #dbe6f8;
-		border-radius: 0.35rem;
-		padding: 0.28rem 0.44rem;
-		font-size: 0.66rem;
-		font-weight: 600;
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.42rem;
-	}
-
-	.terminal-language-option code {
-		font-size: 0.6rem;
-		color: rgba(191, 214, 245, 0.85);
-	}
-
-	.terminal-language-option:hover {
-		border-color: rgba(139, 168, 211, 0.68);
-		background: rgba(41, 61, 92, 0.92);
-	}
-
-	.terminal-language-option.is-active {
-		border-color: rgba(113, 177, 255, 0.78);
-		background: rgba(35, 80, 126, 0.86);
-	}
-
 	.terminal-action-button {
 		border: 1px solid rgba(103, 125, 160, 0.52);
 		background: rgba(24, 35, 52, 0.88);
@@ -11172,12 +11152,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		margin-bottom: 30px;
 		padding: 0.56rem 0.62rem;
 		resize: none;
-		font-family:
-			'SFMono-Regular',
-			Consolas,
-			'Liberation Mono',
-			Menlo,
-			monospace;
+		font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 	}
 
 	.terminal-input-area:focus {
@@ -11365,12 +11340,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		color: #dce9ff;
 		white-space: pre-wrap;
 		word-break: break-word;
-		font-family:
-			'SFMono-Regular',
-			Consolas,
-			'Liberation Mono',
-			Menlo,
-			monospace;
+		font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 	}
 
 	@media (max-width: 900px) {

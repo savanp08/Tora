@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
+	import { createEventDispatcher, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import ProjectOnboarding from '$lib/components/workspace/ProjectOnboarding.svelte';
 	import ProgressGanttTab from '$lib/components/workspace/ProgressGanttTab.svelte';
@@ -8,8 +8,11 @@
 	import TimelineBoard from '$lib/components/workspace/TimelineBoard.svelte';
 	import CostManagement from '$lib/components/workspace/CostManagement.svelte';
 	import PeopleManagement from '$lib/components/workspace/PeopleManagement.svelte';
+	import IntakeForms from '$lib/components/workspace/IntakeForms.svelte';
+	import SheetsTool from '$lib/components/workspace/SheetsTool.svelte';
 	import TableBoard from '$lib/components/workspace/TableBoard.svelte';
 	import ActivityFeedPanel from './ActivityFeedPanel.svelte';
+	import { resolveApiBase } from '$lib/config/apiBase';
 	import { currentUser } from '$lib/store';
 	import type { OnlineMember } from '$lib/types/chat';
 
@@ -25,9 +28,10 @@
 		type ProjectTab
 	} from '$lib/stores/timeline';
 	import { addBoardActivity, setBoardActivityRoom } from '$lib/stores/boardActivity';
+	import { initializeFieldSchemasForRoom } from '$lib/stores/fieldSchema';
 	import { initializeTaskStoreForRoom, taskStore } from '$lib/stores/tasks';
 	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
-	import { sendSocketPayload } from '$lib/ws';
+	import { globalMessages, sendSocketPayload } from '$lib/ws';
 	import { buildBoardActivitySocketPayload, buildTaskSocketPayload } from '$lib/ws/client';
 
 	export let roomId = '';
@@ -36,7 +40,8 @@
 	export let onlineMembers: OnlineMember[] = [];
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const API_BASE = resolveApiBase(API_BASE_RAW);
+	const COMPACT_WORKSPACE_BREAKPOINT = 1100;
 
 	type WorkspaceTabMeta = {
 		key: ProjectTab;
@@ -45,10 +50,11 @@
 		icon: string;
 	};
 
-	type SidebarMode = 'activity' | 'task_management' | 'ai' | 'tools';
-	type TaskBoardViewMode = 'table' | 'tabulator' | 'kanban' | 'support';
-	type TaskBoardCanvasView = 'table' | 'kanban' | 'support';
+	type SidebarMode = 'activity' | 'task_management' | 'ai' | 'tools' | 'forms';
+	type TaskBoardViewMode = 'table' | 'tabulator' | 'kanban' | 'support' | 'calendar' | 'workload';
+	type TaskBoardCanvasView = 'table' | 'kanban' | 'support' | 'calendar' | 'workload';
 	type ToolsTab = 'cost' | 'people' | 'sheets';
+	type MobileWorkspacePane = 'sidebar' | 'board';
 
 	// Activity bar icons (left rail — icon-only buttons)
 	const WORKSPACE_TABS: WorkspaceTabMeta[] = [
@@ -80,26 +86,38 @@
 
 	const TOOLS_ICON_PATH =
 		'M9.8 8.2 8.4 5.9l1.4-1.4 2.3 1.4a5.7 5.7 0 0 1 1.8 0l2.3-1.4 1.4 1.4-1.4 2.3c.2.6.3 1.2.3 1.8s-.1 1.2-.3 1.8l1.4 2.3-1.4 1.4-2.3-1.4a5.7 5.7 0 0 1-1.8 0l-2.3 1.4-1.4-1.4 1.4-2.3a5.7 5.7 0 0 1 0-3.6ZM12 14.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z';
+	const FORMS_ICON_PATH =
+		'M4 6.5h10.2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Zm2.2 3.1h6.2M6.2 12.2h6.2M6.2 14.8h4.1m8.1-8.5 3.6 3.4-5.6 5.4-2.3.3.4-2.2 3.9-3.9Z';
 	const AI_HEADER_ICON_PATH =
 		'M12 4.2 13.7 8l3.8 1.5-3.8 1.5L12 14.8 10.3 11 6.5 9.5 10.3 8 12 4.2Z M18.5 13.5l.9 2.2 2.1.8-2.1.9-.9 2.1-.8-2.1-2.2-.9 2.2-.8z';
+	const TEMPLATE_HEADER_ICON_PATH =
+		'M12 2.9a2 2 0 0 1 2 2V6h1.1a2 2 0 0 1 1.5.7l.8.9 1.5-.3a2 2 0 0 1 2.3 2.3l-.3 1.5.9.8a2 2 0 0 1 .7 1.5V15a2 2 0 0 1-.7 1.5l-.9.8.3 1.5a2 2 0 0 1-2.3 2.3l-1.5-.3-.8.9a2 2 0 0 1-1.5.7H14v1.1a2 2 0 0 1-4 0V22h-1.1a2 2 0 0 1-1.5-.7l-.8-.9-1.5.3a2 2 0 0 1-2.3-2.3l.3-1.5-.9-.8A2 2 0 0 1 2 15v-1.1a2 2 0 0 1 .7-1.5l.9-.8-.3-1.5a2 2 0 0 1 2.3-2.3l1.5.3.8-.9A2 2 0 0 1 8.9 6H10V4.9a2 2 0 0 1 2-2Z M9 12h6M9 16h6M9 8h6';
 
 	let lastWorkspaceRoomID = '';
+	let lastTemplateSocketSignature = '';
 	let workspaceLoadToken = 0;
 	let clearingTaskboard = false;
+	let templatePickerOpen = false;
 	let rightPanelMode: SidebarMode = 'activity';
 	let sidebarAIVisible = false;
 	let toolsTab: ToolsTab = 'cost';
 	let toolsSidebarPinned = false;
+	let formsSidebarPinned = false;
 	let taskBoardViewMode: TaskBoardViewMode = 'table';
 	let taskBoardCanvasView: TaskBoardCanvasView = 'table';
 	let lastNonAITab: Exclude<ProjectTab, 'tora_ai'> = 'overview';
 	let pendingTaskEditID = '';
+	let isCompactWorkspaceLayout = false;
+	let mobileWorkspacePane: MobileWorkspacePane = 'board';
 
 	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: normalizedWorkspaceRoomID = normalizeRoomIDValue(roomId);
+	$: mobileSidebarTitle = resolveMobileSidebarTitle(rightPanelMode);
 	$: visibleWorkspaceTabs = aiEnabled
 		? WORKSPACE_TABS
 		: WORKSPACE_TABS.filter((tab) => tab.key !== 'tora_ai');
+	$: leadingWorkspaceTabs = visibleWorkspaceTabs.filter((tab) => tab.key !== 'tora_ai');
+	$: trailingAITab = visibleWorkspaceTabs.find((tab) => tab.key === 'tora_ai') ?? null;
 	$: if (!aiEnabled && $activeProjectTab === 'tora_ai') {
 		activeProjectTab.set('overview');
 	}
@@ -111,7 +129,9 @@
 	}
 	$: taskBoardCanvasView = taskBoardViewMode === 'tabulator' ? 'table' : taskBoardViewMode;
 	$: {
-		if (toolsSidebarPinned) {
+		if (formsSidebarPinned) {
+			rightPanelMode = 'forms';
+		} else if (toolsSidebarPinned) {
 			rightPanelMode = 'tools';
 		} else if (sidebarAIVisible && aiEnabled && $activeProjectTab !== 'tora_ai') {
 			rightPanelMode = 'ai';
@@ -123,14 +143,27 @@
 	}
 	$: if (normalizedWorkspaceRoomID !== lastWorkspaceRoomID) {
 		lastWorkspaceRoomID = normalizedWorkspaceRoomID;
-			activeProjectTab.set('overview');
-			taskBoardViewMode = 'table';
-			toolsSidebarPinned = false;
-			sidebarAIVisible = false;
-			toolsTab = 'cost';
-			setBoardActivityRoom(normalizedWorkspaceRoomID);
-			void hydrateWorkspaceForRoom(normalizedWorkspaceRoomID);
-		}
+		lastTemplateSocketSignature = '';
+		activeProjectTab.set('overview');
+		taskBoardViewMode = 'table';
+		toolsSidebarPinned = false;
+		formsSidebarPinned = false;
+		sidebarAIVisible = false;
+		templatePickerOpen = false;
+		toolsTab = 'cost';
+		mobileWorkspacePane = 'board';
+		setBoardActivityRoom(normalizedWorkspaceRoomID);
+		void hydrateWorkspaceForRoom(normalizedWorkspaceRoomID);
+	}
+	$: latestTemplateSocketEvent = extractTemplateSocketEvent($globalMessages?.payload);
+	$: if (
+		latestTemplateSocketEvent &&
+		latestTemplateSocketEvent.roomId === normalizedWorkspaceRoomID &&
+		latestTemplateSocketEvent.signature !== lastTemplateSocketSignature
+	) {
+		lastTemplateSocketSignature = latestTemplateSocketEvent.signature;
+		void refreshWorkspaceAfterTemplateApply(latestTemplateSocketEvent.templateId === 'blank');
+	}
 
 	$: timeline = $projectTimeline;
 	$: sprints = timeline?.sprints ?? [];
@@ -141,8 +174,60 @@
 	$: todoCount = allTasks.filter((task) => task.status === 'todo').length;
 	$: completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
+	onMount(() => {
+		syncCompactWorkspaceLayout();
+		window.addEventListener('resize', syncCompactWorkspaceLayout);
+		return () => {
+			window.removeEventListener('resize', syncCompactWorkspaceLayout);
+		};
+	});
+
+	function syncCompactWorkspaceLayout() {
+		const nextCompactLayout = window.innerWidth <= COMPACT_WORKSPACE_BREAKPOINT;
+		isCompactWorkspaceLayout = nextCompactLayout;
+		if (!nextCompactLayout) {
+			mobileWorkspacePane = 'board';
+		}
+	}
+
+	function showMobileBoardPane() {
+		if (isCompactWorkspaceLayout) {
+			mobileWorkspacePane = 'board';
+		}
+	}
+
+	function showMobileSidebarPane() {
+		if (isCompactWorkspaceLayout) {
+			mobileWorkspacePane = 'sidebar';
+		}
+	}
+
+	function toggleMobileWorkspacePane() {
+		if (!isCompactWorkspaceLayout) {
+			return;
+		}
+		mobileWorkspacePane = mobileWorkspacePane === 'board' ? 'sidebar' : 'board';
+	}
+
+	function resolveMobileSidebarTitle(mode: SidebarMode) {
+		switch (mode) {
+			case 'forms':
+				return 'Forms';
+			case 'tools':
+				return 'Tools';
+			case 'task_management':
+				return 'Task Views';
+			case 'ai':
+				return 'Tora AI';
+			default:
+				return 'Activity';
+		}
+	}
+
 	function activateTab(tab: ProjectTab) {
 		toolsSidebarPinned = false;
+		formsSidebarPinned = false;
+		showMobileBoardPane();
 		if (tab === 'tora_ai') {
 			sidebarAIVisible = false;
 			activeProjectTab.set('tora_ai');
@@ -159,27 +244,47 @@
 	function setTaskBoardView(nextView: TaskBoardViewMode) {
 		taskBoardViewMode = nextView;
 		toolsSidebarPinned = false;
+		formsSidebarPinned = false;
 		sidebarAIVisible = false;
+		showMobileBoardPane();
 		if (get(activeProjectTab) !== 'tasks') {
 			activeProjectTab.set('tasks');
 		}
 	}
 
 	function toggleToolsSidebar() {
+		formsSidebarPinned = false;
 		if (toolsSidebarPinned) {
 			toolsSidebarPinned = false;
+			showMobileBoardPane();
 			return;
 		}
 		toolsSidebarPinned = true;
 		sidebarAIVisible = false;
 		rightPanelMode = 'tools';
+		showMobileBoardPane();
 	}
 
 	function openToolsTab(nextTab: ToolsTab) {
 		toolsTab = nextTab;
 		toolsSidebarPinned = true;
+		formsSidebarPinned = false;
 		sidebarAIVisible = false;
 		rightPanelMode = 'tools';
+		showMobileBoardPane();
+	}
+
+	function toggleFormsSidebar() {
+		toolsSidebarPinned = false;
+		sidebarAIVisible = false;
+		if (formsSidebarPinned) {
+			formsSidebarPinned = false;
+			showMobileBoardPane();
+			return;
+		}
+		formsSidebarPinned = true;
+		rightPanelMode = 'forms';
+		showMobileBoardPane();
 	}
 
 	function toggleHeaderAISidebar() {
@@ -187,12 +292,45 @@
 			return;
 		}
 		toolsSidebarPinned = false;
+		formsSidebarPinned = false;
 		if ($activeProjectTab === 'tora_ai') {
 			activeProjectTab.set(lastNonAITab || 'overview');
 			sidebarAIVisible = true;
+			showMobileSidebarPane();
 			return;
 		}
 		sidebarAIVisible = !sidebarAIVisible;
+		if (sidebarAIVisible) {
+			showMobileSidebarPane();
+			return;
+		}
+		showMobileBoardPane();
+	}
+
+	function createBlankWorkspaceTimeline() {
+		const today = new Date();
+		const dateText = today.toISOString().slice(0, 10);
+		return {
+			project_name: 'Blank Workspace',
+			total_progress: 0,
+			sprints: [
+				{
+					id: 'sprint-backlog',
+					name: 'Backlog',
+					start_date: dateText,
+					end_date: dateText,
+					tasks: []
+				}
+			]
+		};
+	}
+
+	function openTemplatePicker() {
+		templatePickerOpen = true;
+	}
+
+	function closeTemplatePicker() {
+		templatePickerOpen = false;
 	}
 
 	function requestTaskEdit(taskID: string) {
@@ -201,16 +339,96 @@
 			return;
 		}
 		toolsSidebarPinned = false;
+		formsSidebarPinned = false;
 		sidebarAIVisible = false;
 		taskBoardViewMode = 'table';
 		pendingTaskEditID = normalizedTaskID;
 		activeProjectTab.set('tasks');
+		showMobileBoardPane();
 	}
 
 	function handleTaskEditBridgeClear(taskID: string) {
 		if (pendingTaskEditID === taskID) {
 			pendingTaskEditID = '';
 		}
+	}
+
+	function toWorkspaceRecord(value: unknown): Record<string, unknown> | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		return value as Record<string, unknown>;
+	}
+
+	function extractTemplateSocketEvent(rawPayload: unknown) {
+		const source = toWorkspaceRecord(rawPayload);
+		if (!source) {
+			return null;
+		}
+		const payload = toWorkspaceRecord(source.payload);
+		const type = String(source.type ?? '')
+			.trim()
+			.toLowerCase();
+		if (type !== 'template_applied') {
+			return null;
+		}
+		const roomId = normalizeRoomIDValue(
+			String(source.roomId ?? source.room_id ?? payload?.roomId ?? payload?.room_id ?? '')
+		);
+		if (!roomId) {
+			return null;
+		}
+		const templateId = String(source.template_id ?? payload?.template_id ?? '')
+			.trim()
+			.toLowerCase();
+		const appliedAt = String(source.applied_at ?? payload?.applied_at ?? '').trim();
+		return {
+			roomId,
+			templateId,
+			signature: `${roomId}:${templateId}:${appliedAt || 'no-timestamp'}`
+		};
+	}
+
+	async function refreshWorkspaceAfterTemplateApply(blank: boolean) {
+		if (!normalizedWorkspaceRoomID) {
+			if (blank) {
+				setProjectTimeline(createBlankWorkspaceTimeline());
+				activeProjectTab.set('overview');
+			}
+			return;
+		}
+
+		if (blank) {
+			await Promise.all([
+				initializeTaskStoreForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
+				initializeFieldSchemasForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE })
+			]);
+			setProjectTimeline(createBlankWorkspaceTimeline());
+			activeProjectTab.set('overview');
+			return;
+		}
+
+		await Promise.all([
+			initializeProjectTimelineForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
+			initializeTaskStoreForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
+			initializeFieldSchemasForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE })
+		]);
+		activeProjectTab.set('overview');
+	}
+
+	async function handleTemplateApplied(
+		event: CustomEvent<{
+			templateId: string;
+			templateName: string;
+			blank: boolean;
+			fieldsCreated: number;
+			tasksCreated: number;
+			automationRulesCreated: number;
+		}>
+	) {
+		const detail = event.detail;
+		templatePickerOpen = false;
+		await refreshWorkspaceAfterTemplateApply(Boolean(detail?.blank));
 	}
 
 	async function parseWorkspaceError(response: Response) {
@@ -235,7 +453,8 @@
 
 		await Promise.all([
 			initializeProjectTimelineForRoom(normalizedRoomID, { apiBase: API_BASE }),
-			initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE })
+			initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE }),
+			initializeFieldSchemasForRoom(normalizedRoomID, { apiBase: API_BASE })
 		]);
 
 		if (loadToken !== workspaceLoadToken) return;
@@ -271,9 +490,7 @@
 			if (!response.ok) throw new Error(await parseWorkspaceError(response));
 
 			for (const task of existingTasks) {
-				sendSocketPayload(
-					buildTaskSocketPayload('task_delete', normalizedWorkspaceRoomID, task)
-				);
+				sendSocketPayload(buildTaskSocketPayload('task_delete', normalizedWorkspaceRoomID, task));
 			}
 
 			const clearEvent = addBoardActivity({
@@ -282,13 +499,12 @@
 				subtitle: 'Removed all tasks in this room',
 				actor: sessionUserID || 'Unknown'
 			});
-			sendSocketPayload(
-				buildBoardActivitySocketPayload(normalizedWorkspaceRoomID, clearEvent)
-			);
+			sendSocketPayload(buildBoardActivitySocketPayload(normalizedWorkspaceRoomID, clearEvent));
 
 			await Promise.all([
 				initializeProjectTimelineForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
-				initializeTaskStoreForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE })
+				initializeTaskStoreForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
+				initializeFieldSchemasForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE })
 			]);
 
 			activeProjectTab.set('overview');
@@ -314,9 +530,14 @@
 		</svg>
 	</button>
 
-	<div class="workspace-frame">
+	<div
+		class="workspace-frame"
+		class:is-compact-layout={isCompactWorkspaceLayout}
+		class:show-mobile-sidebar={isCompactWorkspaceLayout && mobileWorkspacePane === 'sidebar'}
+		class:show-mobile-board={isCompactWorkspaceLayout && mobileWorkspacePane === 'board'}
+	>
 		<nav class="activity-bar" aria-label="Workspace navigation">
-			{#each visibleWorkspaceTabs as tab (tab.key)}
+			{#each leadingWorkspaceTabs as tab (tab.key)}
 				<button
 					type="button"
 					class="act-btn"
@@ -335,6 +556,20 @@
 			<button
 				type="button"
 				class="act-btn"
+				class:is-active={rightPanelMode === 'forms'}
+				on:click={toggleFormsSidebar}
+				title="Forms"
+				aria-label="Forms"
+				aria-pressed={rightPanelMode === 'forms'}
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d={FORMS_ICON_PATH}></path>
+				</svg>
+			</button>
+
+			<button
+				type="button"
+				class="act-btn"
 				class:is-active={rightPanelMode === 'tools'}
 				on:click={toggleToolsSidebar}
 				title="Tools"
@@ -345,6 +580,22 @@
 					<path d={TOOLS_ICON_PATH}></path>
 				</svg>
 			</button>
+
+			{#if trailingAITab}
+				<button
+					type="button"
+					class="act-btn"
+					class:is-active={$activeProjectTab === trailingAITab.key}
+					on:click={() => activateTab(trailingAITab.key)}
+					title={trailingAITab.label}
+					aria-label={trailingAITab.label}
+					aria-current={$activeProjectTab === trailingAITab.key ? 'page' : undefined}
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d={trailingAITab.icon}></path>
+					</svg>
+				</button>
+			{/if}
 
 			<span class="act-spacer" aria-hidden="true"></span>
 
@@ -366,35 +617,78 @@
 			</div>
 		</nav>
 
-			<div class="workspace-content">
-				<header class="workspace-header">
+		<div class="workspace-content">
+			<header class="workspace-header">
+				<div class="workspace-header-primary">
+					{#if isCompactWorkspaceLayout}
+						<button
+							type="button"
+							class="workspace-mobile-pane-btn"
+							on:click={toggleMobileWorkspacePane}
+							aria-label={mobileWorkspacePane === 'board'
+								? `Show ${mobileSidebarTitle} sidebar`
+								: 'Back to board'}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								{#if mobileWorkspacePane === 'board'}
+									<path d="M15 6 9 12l6 6"></path>
+								{:else}
+									<path d="m9 6 6 6-6 6"></path>
+								{/if}
+							</svg>
+							<span>{mobileWorkspacePane === 'board' ? mobileSidebarTitle : 'Board'}</span>
+						</button>
+					{/if}
 					<div class="workspace-header-copy">
 						<h2>Workspace</h2>
 						<p>{totalTasks} total · {inProgressTasks} in progress · {completionRate}% done</p>
 					</div>
+				</div>
+				<div class="workspace-header-actions">
+					<button
+						type="button"
+						class="header-ai-btn"
+						class:is-active={templatePickerOpen}
+						on:click={openTemplatePicker}
+						title="Change starter template"
+						aria-label="Change starter template"
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d={TEMPLATE_HEADER_ICON_PATH}></path>
+						</svg>
+					</button>
 					{#if aiEnabled}
-						<div class="workspace-header-actions">
-							<button
-								type="button"
-								class="header-ai-btn"
-								class:is-active={rightPanelMode === 'ai'}
-								on:click={toggleHeaderAISidebar}
-								title="Open Tora AI in sidebar"
-								aria-label="Open Tora AI in sidebar"
-							>
-								<svg viewBox="0 0 24 24" aria-hidden="true">
-									<path d={AI_HEADER_ICON_PATH}></path>
-								</svg>
-							</button>
-						</div>
+						<button
+							type="button"
+							class="header-ai-btn"
+							class:is-active={rightPanelMode === 'ai'}
+							on:click={toggleHeaderAISidebar}
+							title="Open Tora AI in sidebar"
+							aria-label="Open Tora AI in sidebar"
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d={AI_HEADER_ICON_PATH}></path>
+							</svg>
+						</button>
 					{/if}
-				</header>
+				</div>
+			</header>
 
-				<div class="workspace-main">
-					<aside class="activity-feed-sidebar">
-						{#if rightPanelMode === 'tools'}
-							<section class="resource-sidebar" aria-label="Workspace tools">
-								<nav class="resource-tab-nav tools-tab-nav" aria-label="Tools tabs">
+			<div class="workspace-main">
+				<aside class="activity-feed-sidebar">
+					{#if rightPanelMode === 'forms'}
+						<section class="resource-sidebar" aria-label="Forms">
+							<header class="task-sidebar-head">
+								<h3>Forms</h3>
+								<p>Build intake forms and review submissions.</p>
+							</header>
+							<p class="task-sidebar-note">
+								Public form links can create tasks directly in this room.
+							</p>
+						</section>
+					{:else if rightPanelMode === 'tools'}
+						<section class="resource-sidebar" aria-label="Workspace tools">
+							<nav class="resource-tab-nav tools-tab-nav" aria-label="Tools tabs">
 								<button
 									type="button"
 									class="resource-tab-btn"
@@ -420,15 +714,15 @@
 									on:click={() => openToolsTab('sheets')}
 									aria-current={toolsTab === 'sheets' ? 'page' : undefined}
 								>
-										Sheets
-									</button>
-								</nav>
-								<div class="resource-tab-panel">
-									<p class="task-sidebar-note">Tools render in the main board area.</p>
-								</div>
-							</section>
-						{:else if rightPanelMode === 'task_management'}
-							<section class="task-sidebar" aria-label="Task management options">
+									Sheets
+								</button>
+							</nav>
+							<div class="resource-tab-panel">
+								<p class="task-sidebar-note">Tools render in the main board area.</p>
+							</div>
+						</section>
+					{:else if rightPanelMode === 'task_management'}
+						<section class="task-sidebar" aria-label="Task management options">
 							<header class="task-sidebar-head">
 								<h3>Task Management</h3>
 								<p>Select how the task board renders.</p>
@@ -441,24 +735,24 @@
 									on:click={() => setTaskBoardView('table')}
 									aria-current={taskBoardViewMode === 'table' ? 'page' : undefined}
 								>
-										Grid Table
-									</button>
-									<button
-										type="button"
-										class="resource-tab-btn"
-										class:is-active={taskBoardViewMode === 'tabulator'}
-										on:click={() => setTaskBoardView('tabulator')}
-										aria-current={taskBoardViewMode === 'tabulator' ? 'page' : undefined}
-									>
-										Tabulator Table
-									</button>
-									<button
-										type="button"
-										class="resource-tab-btn"
-										class:is-active={taskBoardViewMode === 'kanban'}
-										on:click={() => setTaskBoardView('kanban')}
-										aria-current={taskBoardViewMode === 'kanban' ? 'page' : undefined}
-									>
+									Grid Table
+								</button>
+								<button
+									type="button"
+									class="resource-tab-btn"
+									class:is-active={taskBoardViewMode === 'tabulator'}
+									on:click={() => setTaskBoardView('tabulator')}
+									aria-current={taskBoardViewMode === 'tabulator' ? 'page' : undefined}
+								>
+									Tabulator Table
+								</button>
+								<button
+									type="button"
+									class="resource-tab-btn"
+									class:is-active={taskBoardViewMode === 'kanban'}
+									on:click={() => setTaskBoardView('kanban')}
+									aria-current={taskBoardViewMode === 'kanban' ? 'page' : undefined}
+								>
 									Kanban
 								</button>
 								<button
@@ -470,23 +764,45 @@
 								>
 									Support Ticket
 								</button>
+								<button
+									type="button"
+									class="resource-tab-btn"
+									class:is-active={taskBoardViewMode === 'calendar'}
+									on:click={() => setTaskBoardView('calendar')}
+									aria-current={taskBoardViewMode === 'calendar' ? 'page' : undefined}
+								>
+									Calendar
+								</button>
+								<button
+									type="button"
+									class="resource-tab-btn"
+									class:is-active={taskBoardViewMode === 'workload'}
+									on:click={() => setTaskBoardView('workload')}
+									aria-current={taskBoardViewMode === 'workload' ? 'page' : undefined}
+								>
+									Workload
+								</button>
 							</nav>
-								<p class="task-sidebar-note">
-									{#if taskBoardViewMode === 'table'}
-										Grid table view keeps the current detailed task table layout.
-									{:else if taskBoardViewMode === 'tabulator'}
-										Tabulator table keeps the spreadsheet-style task data grid.
-									{:else if taskBoardViewMode === 'kanban'}
-										Kanban view shows swimlanes for To Do, Working on it, and Done.
-									{:else}
-										Support view is focused on support-ticket intake and tracking.
-									{/if}
-								</p>
-							</section>
-						{:else if rightPanelMode === 'ai' && aiEnabled && $activeProjectTab !== 'tora_ai'}
-							<div class="sidebar-panel">
-								<ToraAIPanel {roomId} contextKey="taskboard-sidebar" {onlineMembers} />
-							</div>
+							<p class="task-sidebar-note">
+								{#if taskBoardViewMode === 'table'}
+									Grid table view keeps the current detailed task table layout.
+								{:else if taskBoardViewMode === 'tabulator'}
+									Tabulator table keeps the spreadsheet-style task data grid.
+								{:else if taskBoardViewMode === 'kanban'}
+									Kanban view shows swimlanes for To Do, Working on it, and Done.
+								{:else if taskBoardViewMode === 'support'}
+									Support view is focused on support-ticket intake and tracking.
+								{:else if taskBoardViewMode === 'calendar'}
+									Calendar view groups tasks by due date and highlights undated work.
+								{:else}
+									Workload view maps assignees against task date ranges.
+								{/if}
+							</p>
+						</section>
+					{:else if rightPanelMode === 'ai' && aiEnabled && $activeProjectTab !== 'tora_ai'}
+						<div class="sidebar-panel">
+							<ToraAIPanel {roomId} contextKey="taskboard-sidebar" {onlineMembers} />
+						</div>
 					{:else}
 						<div class="sidebar-panel">
 							<ActivityFeedPanel />
@@ -494,56 +810,55 @@
 					{/if}
 				</aside>
 
-					<main class="workspace-canvas">
-						{#if $timelineLoading && !$projectTimeline && !$isProjectNew}
-							<div class="canvas-loading">
-								<span class="loading-spinner" aria-hidden="true"></span>
-								<p>Loading workspace…</p>
-							</div>
-						{:else if $isProjectNew || !$projectTimeline}
-							<ProjectOnboarding {roomId} {aiEnabled} />
-						{:else if rightPanelMode === 'tools'}
-							<div class="workspace-tool-canvas">
-								{#if toolsTab === 'cost'}
-									<CostManagement
-										on:requestTaskEdit={(event) => requestTaskEdit(event.detail?.taskId ?? '')}
-									/>
-								{:else if toolsTab === 'people'}
-									<PeopleManagement
-										{onlineMembers}
-										{canEdit}
-										on:requestTaskEdit={(event) => requestTaskEdit(event.detail?.taskId ?? '')}
-									/>
-								{:else}
-									<section class="task-sidebar" aria-label="Sheets placeholder">
-										<header class="task-sidebar-head">
-											<h3>Sheets Tool</h3>
-											<p>Placeholder ready. We can wire the sheet workflow next.</p>
-										</header>
-										<p class="task-sidebar-note">
-											This slot is reserved for the upcoming Sheets tool integration.
-										</p>
-									</section>
-								{/if}
-							</div>
-						{:else if $activeProjectTab === 'overview'}
-							<TimelineBoard />
-						{:else if $activeProjectTab === 'tasks' || $activeProjectTab === 'table'}
-							{#if taskBoardViewMode === 'tabulator'}
-								<TableBoard />
-							{:else}
-								<TaskBoard
-									{roomId}
+				<main class="workspace-canvas">
+					{#if $timelineLoading && !$projectTimeline && !$isProjectNew}
+						<div class="canvas-loading">
+							<span class="loading-spinner" aria-hidden="true"></span>
+							<p>Loading workspace…</p>
+						</div>
+					{:else if rightPanelMode === 'forms'}
+						<IntakeForms
+							{roomId}
+							{canEdit}
+							on:requestTaskEdit={(event) => requestTaskEdit(event.detail?.taskId ?? '')}
+						/>
+					{:else if $isProjectNew || !$projectTimeline}
+						<ProjectOnboarding {roomId} {aiEnabled} on:templateApplied={handleTemplateApplied} />
+					{:else if rightPanelMode === 'tools'}
+						<div class="workspace-tool-canvas">
+							{#if toolsTab === 'cost'}
+								<CostManagement
 									{canEdit}
-									{onlineMembers}
-									boardView={taskBoardCanvasView}
-									externalEditTaskId={pendingTaskEditID}
-									onExternalEditHandled={handleTaskEditBridgeClear}
+									on:requestTaskEdit={(event) => requestTaskEdit(event.detail?.taskId ?? '')}
 								/>
+							{:else if toolsTab === 'people'}
+								<PeopleManagement
+									{onlineMembers}
+									{canEdit}
+									on:requestTaskEdit={(event) => requestTaskEdit(event.detail?.taskId ?? '')}
+								/>
+							{:else}
+								<SheetsTool {canEdit} {roomId} />
 							{/if}
-						{:else if $activeProjectTab === 'progress'}
-							<ProgressGanttTab {onlineMembers} />
-						{:else if aiEnabled && $activeProjectTab === 'tora_ai'}
+						</div>
+					{:else if $activeProjectTab === 'overview'}
+						<TimelineBoard />
+					{:else if $activeProjectTab === 'tasks' || $activeProjectTab === 'table'}
+						{#if taskBoardViewMode === 'tabulator'}
+							<TableBoard {onlineMembers} />
+						{:else}
+							<TaskBoard
+								{roomId}
+								{canEdit}
+								{onlineMembers}
+								boardView={taskBoardCanvasView}
+								externalEditTaskId={pendingTaskEditID}
+								onExternalEditHandled={handleTaskEditBridgeClear}
+							/>
+						{/if}
+					{:else if $activeProjectTab === 'progress'}
+						<ProgressGanttTab {onlineMembers} />
+					{:else if aiEnabled && $activeProjectTab === 'tora_ai'}
 						<!-- tora_ai -->
 						<ToraAIPanel {roomId} contextKey="taskboard" {onlineMembers} />
 					{:else}
@@ -553,6 +868,40 @@
 			</div>
 		</div>
 	</div>
+
+	{#if templatePickerOpen}
+		<div
+			class="template-modal-backdrop"
+			role="presentation"
+			tabindex="-1"
+			on:click={closeTemplatePicker}
+			on:keydown={(event) => {
+				if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
+					event.preventDefault();
+					closeTemplatePicker();
+				}
+			}}
+		>
+			<div
+				class="template-modal-card"
+				role="dialog"
+				aria-modal="true"
+				aria-label="Change template"
+				tabindex="0"
+				on:click|stopPropagation
+				on:keydown|stopPropagation
+			>
+				<ProjectOnboarding
+					{roomId}
+					{aiEnabled}
+					templatePickerOnly={true}
+					isModal={true}
+					on:close={closeTemplatePicker}
+					on:templateApplied={handleTemplateApplied}
+				/>
+			</div>
+		</div>
+	{/if}
 </section>
 
 <style>
@@ -734,6 +1083,13 @@
 		background: color-mix(in srgb, var(--ws-surface) 80%, var(--ws-surface-soft));
 	}
 
+	.workspace-header-primary {
+		display: flex;
+		align-items: center;
+		gap: 0.72rem;
+		min-width: 0;
+	}
+
 	.workspace-header-copy h2 {
 		margin: 0;
 		font-size: 0.95rem;
@@ -750,6 +1106,42 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.42rem;
+	}
+
+	.workspace-mobile-pane-btn {
+		height: 2.05rem;
+		border-radius: 10px;
+		border: 1px solid var(--ws-border);
+		background: var(--ws-surface);
+		color: var(--ws-muted);
+		display: inline-flex;
+		align-items: center;
+		gap: 0.38rem;
+		padding: 0 0.7rem 0 0.58rem;
+		font-size: 0.76rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			border-color 0.2s ease,
+			background 0.2s ease,
+			color 0.2s ease;
+	}
+
+	.workspace-mobile-pane-btn svg {
+		width: 0.92rem;
+		height: 0.92rem;
+		stroke: currentColor;
+		stroke-width: 1.9;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		flex-shrink: 0;
+	}
+
+	.workspace-mobile-pane-btn:hover {
+		color: var(--ws-text);
+		border-color: color-mix(in srgb, var(--ws-accent) 42%, var(--ws-border));
+		background: color-mix(in srgb, var(--ws-accent-soft) 58%, var(--ws-surface));
 	}
 
 	.header-ai-btn {
@@ -788,6 +1180,27 @@
 		color: var(--ws-accent);
 		border-color: color-mix(in srgb, var(--ws-accent) 62%, var(--ws-border));
 		background: color-mix(in srgb, var(--ws-accent-soft) 78%, var(--ws-surface));
+	}
+
+	.template-modal-backdrop {
+		position: absolute;
+		inset: 0;
+		z-index: 30;
+		padding: 1.1rem;
+		background: rgba(10, 12, 18, 0.46);
+		backdrop-filter: blur(12px);
+		display: grid;
+		place-items: center;
+	}
+
+	.template-modal-card {
+		width: min(980px, 100%);
+		max-height: min(88vh, 860px);
+		overflow: auto;
+		border-radius: 24px;
+		border: 1px solid color-mix(in srgb, var(--ws-border) 86%, transparent);
+		background: var(--ws-surface);
+		box-shadow: 0 30px 80px rgba(0, 0, 0, 0.28);
 	}
 
 	.workspace-main {
@@ -897,6 +1310,13 @@
 		background: var(--ws-bg);
 	}
 
+	/* On small screens let the canvas scroll so every tab is reachable */
+	@media (max-width: 640px) {
+		.workspace-canvas {
+			overflow-y: auto;
+		}
+	}
+
 	.canvas-loading {
 		height: 100%;
 		display: grid;
@@ -933,6 +1353,15 @@
 
 		.activity-feed-sidebar {
 			display: none;
+			border-right: none;
+		}
+
+		.workspace-frame.show-mobile-sidebar .activity-feed-sidebar {
+			display: block;
+		}
+
+		.workspace-frame.show-mobile-sidebar .workspace-canvas {
+			display: none;
 		}
 	}
 
@@ -960,6 +1389,11 @@
 			flex-direction: column;
 			align-items: flex-start;
 			padding: 0.62rem 0.72rem;
+		}
+
+		.workspace-header-primary {
+			width: 100%;
+			align-items: flex-start;
 		}
 
 		.workspace-header-actions {

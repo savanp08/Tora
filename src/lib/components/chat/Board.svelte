@@ -3,6 +3,7 @@
 	import type { ChatMessage } from '$lib/types/chat';
 	import { APP_LIMITS } from '$lib/config/limits';
 	import { activeRoomPassword } from '$lib/store';
+	import { setWhiteboardContext } from '$lib/stores/whiteboardContext';
 	import {
 		createMessageId,
 		normalizeIdentifier,
@@ -75,7 +76,11 @@
 	const BOARD_STROKE_SCHEMA = 'board_stroke_v1';
 	const BOARD_TEXT_BOX_SCHEMA = 'board_text_box_v1';
 	const BOARD_SHAPE_STYLE_SCHEMA = 'board_shape_style_v1';
+	const BOARD_CONNECTOR_SCHEMA = 'board_connector_v1';
 	const UTF8_ENCODER = new TextEncoder();
+	const WHITEBOARD_CONTEXT_MAX_LINES = 120;
+	const WHITEBOARD_CONTEXT_MAX_CHARS = 5000;
+	const CONNECTOR_SNAP_DISTANCE_PX = 20;
 	const THEME_ADAPTIVE_LIGHT_INK = '#111827';
 	const THEME_ADAPTIVE_DARK_INK = '#f8fafc';
 	const THEME_ADAPTIVE_LIGHT_INK_CANDIDATES = new Set([
@@ -97,7 +102,14 @@
 	const ERASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(ERASER_CURSOR_SVG)}") 5 18, auto`;
 
 	type ToolMode = 'select' | 'draw' | 'eraser' | 'duster';
-	type ShapeKind = 'line' | 'arrow' | 'rect' | 'circle' | 'ellipse' | 'triangle';
+	type ShapeKind = 'line' | 'arrow' | 'connector' | 'rect' | 'circle' | 'ellipse' | 'triangle';
+	type ConnectorAnchor = 'N' | 'E' | 'S' | 'W';
+	type BoardTemplateID = 'flowchart' | 'org_chart' | 'kanban' | 'architecture' | 'user_journey';
+	type BoardTemplateDefinition = {
+		id: BoardTemplateID;
+		name: string;
+		description: string;
+	};
 	type BoardEventType =
 		| 'board_draw_start'
 		| 'board_cursor_move'
@@ -212,6 +224,7 @@
 	let insertWrapEl: HTMLDivElement | null = null;
 	let widthMenuWrapEl: HTMLDivElement | null = null;
 	let colorMenuWrapEl: HTMLDivElement | null = null;
+	let exportMenuWrapEl: HTMLDivElement | null = null;
 	let contextMenuEl: HTMLDivElement | null = null;
 	let boardDetailsWrapEl: HTMLDivElement | null = null;
 
@@ -237,12 +250,16 @@
 	let boardInkColorCustomized = false;
 	let showWidthMenu = false;
 	let showColorMenu = false;
+	let showExportMenu = false;
 	let pendingShapeKind: ShapeKind | null = null;
 	let pendingInsertElementId = '';
 	let pendingShapeAnchorPoint: { x: number; y: number } | null = null;
 	let pendingShapePointerMoved = false;
+	let pendingConnectorFromObjectId = '';
+	let pendingConnectorFromAnchor: ConnectorAnchor | '' = '';
 	let isInsertOperationActive = false;
 	let insertionHintLabel = '';
+	let templatesModalOpen = false;
 	let isWidthControlVisible = false;
 	let shouldUseToolbarMenu = false;
 	let isToolbarExpanded = false;
@@ -314,6 +331,37 @@
 	let boardThemeRefreshToken = 0;
 	let selectionCycleKey = '';
 	let selectionCycleCursor = 0;
+	let selectedConnectorElementId = '';
+	let whiteboardContextPublishTimer: ReturnType<typeof setTimeout> | null = null;
+	let lastPublishedWhiteboardContext = '';
+
+	const BOARD_TEMPLATES: BoardTemplateDefinition[] = [
+		{
+			id: 'flowchart',
+			name: 'Flowchart Starter',
+			description: 'Start/step/decision/end flow with yes/no branches.'
+		},
+		{
+			id: 'org_chart',
+			name: 'Org Chart',
+			description: 'CEO -> leadership -> team structure with linked reporting lines.'
+		},
+		{
+			id: 'kanban',
+			name: 'Kanban Visual',
+			description: 'To Do, In Progress, Done columns with sticky notes.'
+		},
+		{
+			id: 'architecture',
+			name: 'System Architecture',
+			description: 'Browser, gateway, services, and database starter diagram.'
+		},
+		{
+			id: 'user_journey',
+			name: 'User Journey',
+			description: 'Five-stage journey map connected left to right.'
+		}
+	];
 
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
 	$: normalizedCurrentUserID = normalizeIdentifier(currentUserId);
@@ -358,9 +406,13 @@
 			? 'Color menu is open. Pick an ink color.'
 			: showWidthMenu
 				? 'Brush width menu is open. Choose a stroke size.'
-				: showBoardDetails
-					? 'Board details are open.'
-					: '';
+				: showExportMenu
+					? 'Export menu is open.'
+					: showBoardDetails
+						? 'Board details are open.'
+						: templatesModalOpen
+							? 'Templates are open. Choose one to apply.'
+							: '';
 	$: canModerateBoardActions = canEdit;
 	$: canManageAllBoardElements = canEdit && canModerateBoard;
 	$: isWidthControlVisible = activeTool === 'draw';
@@ -383,8 +435,10 @@
 		activeTool !== 'select' ||
 		showInsertMenu ||
 		showWidthMenu ||
+		showExportMenu ||
 		contextMenuOpen ||
 		messagePickerOpen ||
+		templatesModalOpen ||
 		showBoardDetails;
 	$: dusterScreenMetrics = resolveDusterScreenMetrics(viewportRenderTick, dusterCenterX);
 	$: boardStorageUsagePercent =
@@ -468,6 +522,10 @@
 			fabricCanvas.dispose();
 			fabricCanvas = null;
 		}
+		if (whiteboardContextPublishTimer) {
+			clearTimeout(whiteboardContextPublishTimer);
+			whiteboardContextPublishTimer = null;
+		}
 		fabricPackage = null;
 		boardBoundsRect = null;
 		boardReady = false;
@@ -487,6 +545,9 @@
 		minimapRenderInProgress = false;
 		lastAppliedBoardTheme = '';
 		boardThemeRefreshToken = 0;
+		showExportMenu = false;
+		templatesModalOpen = false;
+		selectedConnectorElementId = '';
 	}
 
 	function registerWindowGuards() {
@@ -546,6 +607,9 @@
 				if (colorMenuWrapEl && colorMenuWrapEl.contains(target)) {
 					return;
 				}
+				if (exportMenuWrapEl && exportMenuWrapEl.contains(target)) {
+					return;
+				}
 				if (contextMenuEl && contextMenuEl.contains(target)) {
 					return;
 				}
@@ -557,6 +621,7 @@
 			showInsertMenu = false;
 			showWidthMenu = false;
 			showColorMenu = false;
+			showExportMenu = false;
 			showBoardDetails = false;
 			isToolbarExpanded = false;
 		};
@@ -663,9 +728,11 @@
 		showInsertMenu = false;
 		showWidthMenu = false;
 		showColorMenu = false;
+		showExportMenu = false;
 		showBoardDetails = false;
 		contextMenuOpen = false;
 		messagePickerOpen = false;
+		templatesModalOpen = false;
 		isToolbarExpanded = false;
 		dispatch('close');
 	}
@@ -1064,6 +1131,7 @@
 				for (const obj of objects) {
 					ensureObjectIdentity(obj as FabricObjectLike);
 					emitBoardElementMove(obj as FabricObjectLike);
+					refreshConnectorsForObject(obj as FabricObjectLike, true);
 				}
 				captureHistorySnapshot();
 			} else {
@@ -1086,6 +1154,7 @@
 				discardPendingTransformForElement(afterElement.elementId);
 				ensureObjectIdentity(target);
 				emitBoardElementMove(target);
+				refreshConnectorsForObject(target, true);
 				if (
 					beforeElement &&
 					!elementsEquivalent(beforeElement, afterElement) &&
@@ -1114,19 +1183,27 @@
 		fabricCanvas.on('selection:created', (event: any) => {
 			enforceSelectionPermissions(event);
 			updateSelectionControlsPosition();
+			syncSelectedConnectorState();
 		});
 		fabricCanvas.on('selection:updated', (event: any) => {
 			enforceSelectionPermissions(event);
 			updateSelectionControlsPosition();
+			syncSelectedConnectorState();
 		});
 		fabricCanvas.on('selection:cleared', () => {
 			zControlVisible = false;
+			syncSelectedConnectorState();
 		});
-		fabricCanvas.on('object:moving', () => {
+		fabricCanvas.on('object:moving', (event: any) => {
 			updateSelectionControlsPosition();
+			const target = (event?.target as FabricObjectLike | null) ?? null;
+			if (target) {
+				refreshConnectorsForObject(target, false);
+			}
 		});
 		fabricCanvas.on('object:modified', () => {
 			updateSelectionControlsPosition();
+			syncSelectedConnectorState();
 		});
 		fabricCanvas.on('after:render', () => {
 			updateSelectionControlsPosition();
@@ -1155,10 +1232,7 @@
 		return event.pointerType === 'touch';
 	}
 
-	function computePointerDistance(
-		left: { x: number; y: number },
-		right: { x: number; y: number }
-	) {
+	function computePointerDistance(left: { x: number; y: number }, right: { x: number; y: number }) {
 		return Math.hypot(right.x - left.x, right.y - left.y);
 	}
 
@@ -1292,6 +1366,29 @@
 		zControlVisible = true;
 	}
 
+	function syncSelectedConnectorState() {
+		if (!fabricCanvas) {
+			selectedConnectorElementId = '';
+			return;
+		}
+		const activeObject = fabricCanvas.getActiveObject?.() as FabricObjectLike | null;
+		if (!activeObject || activeObject === boardBoundsRect) {
+			selectedConnectorElementId = '';
+			return;
+		}
+		if ((activeObject as Record<string, unknown>).type === 'activeSelection') {
+			selectedConnectorElementId = '';
+			return;
+		}
+		if (!isConnectorObject(activeObject)) {
+			selectedConnectorElementId = '';
+			return;
+		}
+		selectedConnectorElementId = normalizeMessageID(
+			toStringValue((activeObject as Record<string, unknown>).elementId)
+		);
+	}
+
 	function bringSelectedObjectForward() {
 		if (!fabricCanvas) {
 			return;
@@ -1331,6 +1428,22 @@
 		fabricCanvas.requestRenderAll?.();
 		captureHistorySnapshot();
 		updateSelectionControlsPosition();
+	}
+
+	function deleteSelectedConnector() {
+		if (!fabricCanvas || !selectedConnectorElementId) {
+			return;
+		}
+		const connectorObject = findObjectByElementId(selectedConnectorElementId);
+		if (
+			!connectorObject ||
+			!isConnectorObject(connectorObject) ||
+			!canMutateBoardObject(connectorObject)
+		) {
+			return;
+		}
+		removeBoardObject(connectorObject, true);
+		selectedConnectorElementId = '';
 	}
 
 	function cursorColorFromUserID(userId: string) {
@@ -1514,6 +1627,7 @@
 			showInsertMenu = false;
 			showWidthMenu = false;
 			showColorMenu = false;
+			showExportMenu = false;
 		}
 		if (resetSelection && mode !== 'eraser') {
 			fabricCanvas.discardActiveObject?.();
@@ -1525,7 +1639,8 @@
 		if (!fabricCanvas) {
 			return;
 		}
-		const baseCursor = mode === 'eraser' ? ERASER_CURSOR : mode === 'draw' ? 'crosshair' : 'default';
+		const baseCursor =
+			mode === 'eraser' ? ERASER_CURSOR : mode === 'draw' ? 'crosshair' : 'default';
 		const hoverCursor = mode === 'eraser' ? ERASER_CURSOR : 'move';
 		fabricCanvas.defaultCursor = baseCursor;
 		fabricCanvas.hoverCursor = hoverCursor;
@@ -1545,6 +1660,7 @@
 		if (showWidthMenu) {
 			showColorMenu = false;
 			showInsertMenu = false;
+			showExportMenu = false;
 			showBoardDetails = false;
 		}
 	}
@@ -1615,6 +1731,7 @@
 		if (showColorMenu) {
 			showInsertMenu = false;
 			showWidthMenu = false;
+			showExportMenu = false;
 			showBoardDetails = false;
 		}
 	}
@@ -1638,6 +1755,7 @@
 		contextMenuOpen = false;
 		showColorMenu = false;
 		showWidthMenu = false;
+		showExportMenu = false;
 		showBoardDetails = false;
 		showInsertMenu = !showInsertMenu;
 	}
@@ -1648,6 +1766,7 @@
 			showColorMenu = false;
 			showInsertMenu = false;
 			showWidthMenu = false;
+			showExportMenu = false;
 		}
 	}
 
@@ -1743,25 +1862,446 @@
 		captureHistorySnapshot();
 	}
 
+	function downloadBoardAsset(href: string, fileName: string) {
+		if (!browser || typeof document === 'undefined' || !href) {
+			return;
+		}
+		const anchor = document.createElement('a');
+		anchor.href = href;
+		anchor.download = fileName;
+		anchor.style.display = 'none';
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+	}
+
+	function toggleExportMenu() {
+		if (!canEdit) {
+			return;
+		}
+		showExportMenu = !showExportMenu;
+		if (showExportMenu) {
+			showColorMenu = false;
+			showInsertMenu = false;
+			showWidthMenu = false;
+			showBoardDetails = false;
+		}
+	}
+
 	function exportBoardAsPNG() {
 		if (!fabricCanvas || !browser) {
 			return;
 		}
 		const dataURL = fabricCanvas.toDataURL?.({
 			format: 'png',
-			quality: 0.8,
-			multiplier: 1
+			multiplier: 2
 		});
 		if (typeof dataURL !== 'string' || dataURL === '') {
 			return;
 		}
-		const anchor = document.createElement('a');
-		anchor.href = dataURL;
-		anchor.download = 'board_export.png';
-		anchor.style.display = 'none';
-		document.body.appendChild(anchor);
-		anchor.click();
-		anchor.remove();
+		downloadBoardAsset(dataURL, 'tora-board.png');
+		showExportMenu = false;
+	}
+
+	function exportBoardAsSVG() {
+		if (!fabricCanvas || !browser) {
+			return;
+		}
+		const rawSVG = toStringValue(fabricCanvas.toSVG?.()).trim();
+		if (!rawSVG) {
+			return;
+		}
+		const svgDataURL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(rawSVG)}`;
+		downloadBoardAsset(svgDataURL, 'tora-board.svg');
+		showExportMenu = false;
+	}
+
+	function openTemplatesModal() {
+		if (!canEdit) {
+			return;
+		}
+		showExportMenu = false;
+		showInsertMenu = false;
+		showWidthMenu = false;
+		showColorMenu = false;
+		showBoardDetails = false;
+		templatesModalOpen = true;
+	}
+
+	function closeTemplatesModal() {
+		templatesModalOpen = false;
+	}
+
+	function centerTemplateObjects(objects: FabricObjectLike[]) {
+		if (!fabricCanvas || objects.length === 0) {
+			return;
+		}
+		let minX = Number.POSITIVE_INFINITY;
+		let minY = Number.POSITIVE_INFINITY;
+		let maxX = Number.NEGATIVE_INFINITY;
+		let maxY = Number.NEGATIVE_INFINITY;
+		for (const object of objects) {
+			const element = boardObjectToElement(object);
+			if (!element) {
+				continue;
+			}
+			minX = Math.min(minX, element.x);
+			minY = Math.min(minY, element.y);
+			maxX = Math.max(maxX, element.x + element.width);
+			maxY = Math.max(maxY, element.y + element.height);
+		}
+		if (
+			!Number.isFinite(minX) ||
+			!Number.isFinite(minY) ||
+			!Number.isFinite(maxX) ||
+			!Number.isFinite(maxY)
+		) {
+			return;
+		}
+		const currentCenterX = (minX + maxX) / 2;
+		const currentCenterY = (minY + maxY) / 2;
+		const targetCenterX = BOARD_WIDTH / 2;
+		const targetCenterY = BOARD_HEIGHT / 2;
+		const deltaX = targetCenterX - currentCenterX;
+		const deltaY = targetCenterY - currentCenterY;
+		for (const object of objects) {
+			const record = object as Record<string, unknown>;
+			const elementType = toStringValue(record.elementType).trim().toLowerCase();
+			if (elementType === 'line' || elementType === 'arrow') {
+				object.set?.({
+					x1: toNumber(record.x1, 0) + deltaX,
+					y1: toNumber(record.y1, 0) + deltaY,
+					x2: toNumber(record.x2, 0) + deltaX,
+					y2: toNumber(record.y2, 0) + deltaY
+				});
+				object.setCoords?.();
+				continue;
+			}
+			object.set?.({
+				left: toNumber(record.left, 0) + deltaX,
+				top: toNumber(record.top, 0) + deltaY
+			});
+			object.setCoords?.();
+		}
+		for (const object of objects) {
+			if (isConnectorObject(object)) {
+				syncConnectorObjectToLinkedShapes(object, false);
+			}
+		}
+	}
+
+	function applyTemplate(templateId: BoardTemplateID) {
+		if (!fabricCanvas || !canEdit) {
+			return;
+		}
+		const currentCount = (fabricCanvas.getObjects?.() ?? []).filter(
+			(entry: unknown) => entry && entry !== boardBoundsRect
+		).length;
+		if (currentCount > 0 && browser) {
+			const shouldReplace = window.confirm(
+				'Applying a template will clear the current board. Continue?'
+			);
+			if (!shouldReplace) {
+				return;
+			}
+		}
+
+		const RectClass = getFabricClass('Rect');
+		const CircleClass = getFabricClass('Circle');
+		const EllipseClass = getFabricClass('Ellipse');
+		const LineClass = getFabricClass('Line');
+		const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
+		if (!RectClass || !LineClass || !TextboxClass) {
+			return;
+		}
+
+		clearBoardWithBounds(true, true);
+		const createdObjects: FabricObjectLike[] = [];
+		const strokeColor = resolveThemeAwareInkColor(boardInkColor);
+		const fillColor = isDarkMode ? 'rgba(148, 163, 184, 0.12)' : 'rgba(15, 23, 42, 0.04)';
+
+		const addObject = (
+			object: FabricObjectLike | null,
+			fallbackType: string,
+			content = ''
+		): FabricObjectLike | null => {
+			if (!object || !fabricCanvas) {
+				return null;
+			}
+			ensureObjectIdentity(object, fallbackType);
+			if (content) {
+				object.set?.({ content });
+			}
+			fabricCanvas.add(object);
+			applyObjectPermission(object);
+			createdObjects.push(object);
+			return object;
+		};
+
+		const addRect = (
+			left: number,
+			top: number,
+			width: number,
+			height: number,
+			label = '',
+			rounded = true
+		) => {
+			const rect = new RectClass({
+				left,
+				top,
+				width,
+				height,
+				rx: rounded ? 10 : 2,
+				ry: rounded ? 10 : 2,
+				stroke: strokeColor,
+				strokeWidth: 2,
+				fill: fillColor
+			}) as FabricObjectLike;
+			const shape = addObject(rect, 'rect');
+			if (!shape || !label) {
+				return shape;
+			}
+			const labelObject = new TextboxClass(label, {
+				left: left + 8,
+				top: top + Math.max(8, height / 2 - 12),
+				width: Math.max(40, width - 16),
+				fontSize: 14,
+				lineHeight: 1.2,
+				fill: strokeColor,
+				backgroundColor: 'transparent',
+				textAlign: 'center'
+			}) as FabricObjectLike;
+			addObject(labelObject, 'text_box', label);
+			return shape;
+		};
+
+		const addCircle = (left: number, top: number, radius: number, label = '') => {
+			if (!CircleClass) {
+				return null;
+			}
+			const circle = new CircleClass({
+				left,
+				top,
+				radius,
+				stroke: strokeColor,
+				strokeWidth: 2,
+				fill: fillColor
+			}) as FabricObjectLike;
+			const shape = addObject(circle, 'circle');
+			if (!shape || !label) {
+				return shape;
+			}
+			const labelObject = new TextboxClass(label, {
+				left: left + 6,
+				top: top + radius - 10,
+				width: Math.max(30, radius * 2 - 12),
+				fontSize: 13,
+				lineHeight: 1.2,
+				fill: strokeColor,
+				backgroundColor: 'transparent',
+				textAlign: 'center'
+			}) as FabricObjectLike;
+			addObject(labelObject, 'text_box', label);
+			return shape;
+		};
+
+		const addLooseLabel = (left: number, top: number, width: number, label: string) => {
+			if (!label) {
+				return null;
+			}
+			const textObject = new TextboxClass(label, {
+				left,
+				top,
+				width,
+				fontSize: 13,
+				lineHeight: 1.2,
+				fill: strokeColor,
+				backgroundColor: 'transparent',
+				textAlign: 'center'
+			}) as FabricObjectLike;
+			return addObject(textObject, 'text_box', label);
+		};
+
+		const addConnector = (
+			fromObject: FabricObjectLike | null,
+			fromAnchor: ConnectorAnchor,
+			toObject: FabricObjectLike | null,
+			toAnchor: ConnectorAnchor,
+			asArrow = true,
+			label = ''
+		) => {
+			if (!fromObject || !toObject || !LineClass) {
+				return null;
+			}
+			const fromIdentity = ensureObjectIdentity(fromObject);
+			const toIdentity = ensureObjectIdentity(toObject);
+			const fromElement = boardObjectToElement(fromObject);
+			const toElement = boardObjectToElement(toObject);
+			if (!fromElement || !toElement) {
+				return null;
+			}
+			const startPoint = resolveAnchorPointForElement(fromElement, fromAnchor);
+			const endPoint = resolveAnchorPointForElement(toElement, toAnchor);
+			const line = new LineClass([startPoint.x, startPoint.y, endPoint.x, endPoint.y], {
+				stroke: strokeColor,
+				strokeWidth: asArrow ? 1.7 : 1.4
+			}) as FabricObjectLike;
+			const connector = addObject(line, asArrow ? 'arrow' : 'line');
+			if (!connector) {
+				return null;
+			}
+			setConnectorObjectMetadata(connector, {
+				fromObjectId: fromIdentity.elementId,
+				toObjectId: toIdentity.elementId,
+				fromAnchor,
+				toAnchor,
+				label
+			});
+			syncConnectorObjectToLinkedShapes(connector, false);
+			return connector;
+		};
+
+		if (templateId === 'flowchart') {
+			const start = addRect(440, 80, 180, 84, 'Start');
+			const step = addRect(440, 240, 180, 84, 'Step 1');
+			const decision = (() => {
+				if (!RectClass) {
+					return null;
+				}
+				const diamond = new RectClass({
+					left: 470,
+					top: 410,
+					width: 120,
+					height: 120,
+					angle: 45,
+					stroke: strokeColor,
+					strokeWidth: 2,
+					fill: fillColor
+				}) as FabricObjectLike;
+				const shape = addObject(diamond, 'rect');
+				addLooseLabel(465, 462, 130, 'Decision?');
+				return shape;
+			})();
+			const yesPath = addRect(730, 430, 180, 74, 'Yes Path');
+			const noPath = addRect(150, 430, 180, 74, 'No Path');
+			const end = addRect(440, 650, 180, 84, 'End');
+			addConnector(start, 'S', step, 'N', true);
+			addConnector(step, 'S', decision, 'N', true);
+			addConnector(decision, 'S', end, 'N', true);
+			addConnector(decision, 'E', yesPath, 'W', true, 'Yes');
+			addConnector(decision, 'W', noPath, 'E', true, 'No');
+		} else if (templateId === 'org_chart') {
+			const ceo = addRect(430, 80, 190, 72, 'CEO');
+			const cto = addRect(140, 250, 170, 68, 'CTO');
+			const cmo = addRect(440, 250, 170, 68, 'CMO');
+			const cfo = addRect(740, 250, 170, 68, 'CFO');
+			const leaders = [cto, cmo, cfo];
+			for (const leader of leaders) {
+				addConnector(ceo, 'S', leader, 'N', false);
+			}
+			const lowerY = 430;
+			const leadData: Array<{ parent: FabricObjectLike | null; centerX: number }> = [
+				{ parent: cto, centerX: 225 },
+				{ parent: cmo, centerX: 525 },
+				{ parent: cfo, centerX: 825 }
+			];
+			for (const entry of leadData) {
+				const left = addRect(entry.centerX - 110, lowerY, 100, 62, 'Lead');
+				const right = addRect(entry.centerX + 10, lowerY, 100, 62, 'Lead');
+				addConnector(entry.parent, 'S', left, 'N', false);
+				addConnector(entry.parent, 'S', right, 'N', false);
+			}
+		} else if (templateId === 'kanban') {
+			const todo = addRect(70, 90, 250, 580, 'To Do');
+			const progress = addRect(355, 90, 250, 580, 'In Progress');
+			const done = addRect(640, 90, 250, 580, 'Done');
+			const columns = [
+				{ object: todo, x: 95 },
+				{ object: progress, x: 380 },
+				{ object: done, x: 665 }
+			];
+			for (const [columnIndex, column] of columns.entries()) {
+				void column.object;
+				for (let noteIndex = 0; noteIndex < 3; noteIndex += 1) {
+					const note = createStickyNoteObject(
+						`Task ${columnIndex + 1}.${noteIndex + 1}`,
+						column.x,
+						170 + noteIndex * 140,
+						200,
+						100
+					);
+					addObject(note, 'sticky_note', `Task ${columnIndex + 1}.${noteIndex + 1}`);
+				}
+			}
+		} else if (templateId === 'architecture') {
+			const browserBox = addRect(80, 110, 180, 74, 'Browser');
+			const gatewayBox = addRect(360, 110, 210, 74, 'API Gateway');
+			const authBox = addRect(130, 320, 160, 74, 'Auth Service');
+			const apiBox = addRect(370, 320, 160, 74, 'API Service');
+			const dbServiceBox = addRect(610, 320, 170, 74, 'DB Service');
+			addConnector(browserBox, 'E', gatewayBox, 'W', true);
+			addConnector(gatewayBox, 'S', authBox, 'N', true);
+			addConnector(gatewayBox, 'S', apiBox, 'N', true);
+			addConnector(gatewayBox, 'S', dbServiceBox, 'N', true);
+			const dbTop =
+				EllipseClass &&
+				addObject(
+					new EllipseClass({
+						left: 635,
+						top: 520,
+						rx: 65,
+						ry: 20,
+						stroke: strokeColor,
+						strokeWidth: 2,
+						fill: fillColor
+					}) as FabricObjectLike,
+					'ellipse'
+				);
+			const dbBody = addRect(570, 540, 130, 90, '', false);
+			const dbBottom =
+				EllipseClass &&
+				addObject(
+					new EllipseClass({
+						left: 635,
+						top: 610,
+						rx: 65,
+						ry: 20,
+						stroke: strokeColor,
+						strokeWidth: 2,
+						fill: fillColor
+					}) as FabricObjectLike,
+					'ellipse'
+				);
+			void dbBody;
+			void dbBottom;
+			addLooseLabel(582, 565, 108, 'Database');
+			addConnector(dbServiceBox, 'S', dbTop, 'N', true);
+		} else if (templateId === 'user_journey') {
+			const labels = ['Awareness', 'Consideration', 'Decision', 'Purchase', 'Loyalty'];
+			const circles: FabricObjectLike[] = [];
+			for (let index = 0; index < labels.length; index += 1) {
+				const x = 90 + index * 190;
+				const circle = addCircle(x, 260, 62, '');
+				if (circle) {
+					circles.push(circle);
+				}
+				addLooseLabel(x - 20, 396, 164, labels[index] || '');
+			}
+			for (let index = 0; index < circles.length - 1; index += 1) {
+				const left = circles[index];
+				const right = circles[index + 1];
+				addConnector(left, 'E', right, 'W', true);
+			}
+		}
+
+		centerTemplateObjects(createdObjects);
+		for (const object of createdObjects) {
+			emitBoardElementAdd(object);
+		}
+		fabricCanvas.requestRenderAll?.();
+		refreshBoardStats();
+		captureHistorySnapshot(true);
+		templatesModalOpen = false;
 	}
 
 	function describeShapeKind(kind: ShapeKind) {
@@ -1780,11 +2320,14 @@
 		if (kind === 'arrow') {
 			return 'arrow';
 		}
+		if (kind === 'connector') {
+			return 'connector';
+		}
 		return 'line';
 	}
 
-	function isLineShapeKind(kind: ShapeKind | null): kind is 'line' | 'arrow' {
-		return kind === 'line' || kind === 'arrow';
+	function isLineShapeKind(kind: ShapeKind | null): kind is 'line' | 'arrow' | 'connector' {
+		return kind === 'line' || kind === 'arrow' || kind === 'connector';
 	}
 
 	function clampBoardPoint(point: { x: number; y: number }) {
@@ -1813,26 +2356,341 @@
 		});
 	}
 
+	function normalizeConnectorAnchor(value: unknown): ConnectorAnchor | '' {
+		const normalized = toStringValue(value).trim().toUpperCase();
+		if (normalized === 'N' || normalized === 'E' || normalized === 'S' || normalized === 'W') {
+			return normalized;
+		}
+		return '';
+	}
+
+	function resolveAnchorPointForElement(element: BoardElementWire, anchor: ConnectorAnchor) {
+		if (anchor === 'N') {
+			return { x: element.x + element.width / 2, y: element.y };
+		}
+		if (anchor === 'S') {
+			return { x: element.x + element.width / 2, y: element.y + element.height };
+		}
+		if (anchor === 'E') {
+			return { x: element.x + element.width, y: element.y + element.height / 2 };
+		}
+		return { x: element.x, y: element.y + element.height / 2 };
+	}
+
+	function getConnectorSnapThresholdInBoardUnits() {
+		const zoom = clampZoom(toNumber(fabricCanvas?.getZoom?.(), 1));
+		return CONNECTOR_SNAP_DISTANCE_PX / Math.max(0.05, zoom);
+	}
+
+	function isConnectorAnchorCandidateObject(object: FabricObjectLike | null) {
+		if (!object || object === boardBoundsRect || isPendingObject(object)) {
+			return false;
+		}
+		const elementType = toStringValue((object as Record<string, unknown>).elementType)
+			.trim()
+			.toLowerCase();
+		return (
+			elementType !== 'line' &&
+			elementType !== 'arrow' &&
+			elementType !== 'stroke' &&
+			elementType !== 'path' &&
+			elementType !== 'text_box' &&
+			elementType !== 'textbox' &&
+			elementType !== 'i-text' &&
+			elementType !== 'text'
+		);
+	}
+
+	function resolveNearestConnectorAnchorTarget(
+		point: { x: number; y: number },
+		excludedObjectId = ''
+	): {
+		object: FabricObjectLike;
+		objectId: string;
+		anchor: ConnectorAnchor;
+		point: { x: number; y: number };
+		distance: number;
+	} | null {
+		if (!fabricCanvas) {
+			return null;
+		}
+		const threshold = getConnectorSnapThresholdInBoardUnits();
+		const objects = fabricCanvas.getObjects?.() ?? [];
+		let closestTarget: {
+			object: FabricObjectLike;
+			objectId: string;
+			anchor: ConnectorAnchor;
+			point: { x: number; y: number };
+			distance: number;
+		} | null = null;
+		for (const candidate of objects) {
+			const object = candidate as FabricObjectLike;
+			if (!isConnectorAnchorCandidateObject(object)) {
+				continue;
+			}
+			const objectId = normalizeMessageID(
+				toStringValue((object as Record<string, unknown>).elementId)
+			);
+			if (!objectId || (excludedObjectId && objectId === excludedObjectId)) {
+				continue;
+			}
+			const element = boardObjectToElement(object);
+			if (!element) {
+				continue;
+			}
+			const candidateAnchors: ConnectorAnchor[] = ['N', 'E', 'S', 'W'];
+			for (const anchor of candidateAnchors) {
+				const anchorPoint = resolveAnchorPointForElement(element, anchor);
+				const distance = Math.hypot(anchorPoint.x - point.x, anchorPoint.y - point.y);
+				if (distance > threshold) {
+					continue;
+				}
+				if (!closestTarget || distance < closestTarget.distance) {
+					closestTarget = {
+						object,
+						objectId,
+						anchor,
+						point: anchorPoint,
+						distance
+					};
+				}
+			}
+		}
+		return closestTarget;
+	}
+
+	function parseConnectorMetadataFromObject(object: FabricObjectLike): {
+		fromObjectId: string;
+		toObjectId: string;
+		fromAnchor: ConnectorAnchor | '';
+		toAnchor: ConnectorAnchor | '';
+		label: string;
+	} {
+		const record = object as Record<string, unknown>;
+		return {
+			fromObjectId: normalizeMessageID(toStringValue(record.connectorFromObjectId)),
+			toObjectId: normalizeMessageID(toStringValue(record.connectorToObjectId)),
+			fromAnchor: normalizeConnectorAnchor(record.connectorFromAnchor),
+			toAnchor: normalizeConnectorAnchor(record.connectorToAnchor),
+			label: toStringValue(record.connectorLabel).trim()
+		};
+	}
+
+	function isConnectorObject(object: FabricObjectLike | null) {
+		if (!object || object === boardBoundsRect) {
+			return false;
+		}
+		const record = object as Record<string, unknown>;
+		if (Boolean(record.connectorLinked)) {
+			return true;
+		}
+		const content = toStringValue(record.content);
+		if (!content) {
+			return false;
+		}
+		const parsed = parseContentRecord(content);
+		return toStringValue(parsed?.schema).trim().toLowerCase() === BOARD_CONNECTOR_SCHEMA;
+	}
+
+	function clearPendingConnectorState() {
+		pendingConnectorFromObjectId = '';
+		pendingConnectorFromAnchor = '';
+	}
+
+	function setConnectorObjectMetadata(
+		object: FabricObjectLike,
+		metadata: {
+			fromObjectId: string;
+			toObjectId: string;
+			fromAnchor: ConnectorAnchor | '';
+			toAnchor: ConnectorAnchor | '';
+			label?: string;
+		}
+	) {
+		object.set?.({
+			connectorLinked: true,
+			connectorFromObjectId: normalizeMessageID(metadata.fromObjectId),
+			connectorToObjectId: normalizeMessageID(metadata.toObjectId),
+			connectorFromAnchor: normalizeConnectorAnchor(metadata.fromAnchor),
+			connectorToAnchor: normalizeConnectorAnchor(metadata.toAnchor),
+			connectorLabel: toStringValue(metadata.label).trim(),
+			hasControls: false,
+			lockMovementX: true,
+			lockMovementY: true,
+			lockScalingX: true,
+			lockScalingY: true,
+			lockRotation: true
+		});
+		object.setCoords?.();
+	}
+
+	function updateConnectorObjectGeometry(
+		object: FabricObjectLike,
+		startPoint: { x: number; y: number },
+		endPoint: { x: number; y: number }
+	) {
+		object.set?.({
+			x1: startPoint.x,
+			y1: startPoint.y,
+			x2: endPoint.x,
+			y2: endPoint.y
+		});
+		object.setCoords?.();
+	}
+
+	function resolveConnectorEndpointForObject(
+		objectId: string,
+		anchor: ConnectorAnchor | ''
+	): { x: number; y: number } | null {
+		const normalizedObjectId = normalizeMessageID(objectId);
+		const normalizedAnchor = normalizeConnectorAnchor(anchor);
+		if (!normalizedObjectId || !normalizedAnchor) {
+			return null;
+		}
+		const targetObject = findObjectByElementId(normalizedObjectId);
+		if (!targetObject) {
+			return null;
+		}
+		const element = boardObjectToElement(targetObject);
+		if (!element) {
+			return null;
+		}
+		return resolveAnchorPointForElement(element, normalizedAnchor);
+	}
+
+	function syncConnectorObjectToLinkedShapes(
+		connectorObject: FabricObjectLike,
+		emitMoveEvent = false
+	): boolean {
+		if (!fabricCanvas || !isConnectorObject(connectorObject)) {
+			return false;
+		}
+		const metadata = parseConnectorMetadataFromObject(connectorObject);
+		const startPoint = resolveConnectorEndpointForObject(
+			metadata.fromObjectId,
+			metadata.fromAnchor
+		);
+		const endPoint = resolveConnectorEndpointForObject(metadata.toObjectId, metadata.toAnchor);
+		if (!startPoint || !endPoint) {
+			return false;
+		}
+		const record = connectorObject as Record<string, unknown>;
+		const currentX1 = toNumber(record.x1, startPoint.x);
+		const currentY1 = toNumber(record.y1, startPoint.y);
+		const currentX2 = toNumber(record.x2, endPoint.x);
+		const currentY2 = toNumber(record.y2, endPoint.y);
+		const changed =
+			Math.abs(currentX1 - startPoint.x) > 0.01 ||
+			Math.abs(currentY1 - startPoint.y) > 0.01 ||
+			Math.abs(currentX2 - endPoint.x) > 0.01 ||
+			Math.abs(currentY2 - endPoint.y) > 0.01;
+		if (!changed) {
+			return false;
+		}
+		updateConnectorObjectGeometry(connectorObject, startPoint, endPoint);
+		if (emitMoveEvent) {
+			emitBoardElementAdd(connectorObject);
+		}
+		return true;
+	}
+
+	function refreshConnectorsForObject(object: FabricObjectLike, emitMoveEvent = false) {
+		if (!fabricCanvas) {
+			return false;
+		}
+		const movedObjectId = normalizeMessageID(
+			toStringValue((object as Record<string, unknown>).elementId)
+		);
+		if (!movedObjectId) {
+			return false;
+		}
+		const objects = fabricCanvas.getObjects?.() ?? [];
+		let didUpdateConnector = false;
+		for (const candidate of objects) {
+			const connectorObject = candidate as FabricObjectLike;
+			if (!isConnectorObject(connectorObject)) {
+				continue;
+			}
+			const metadata = parseConnectorMetadataFromObject(connectorObject);
+			if (metadata.fromObjectId !== movedObjectId && metadata.toObjectId !== movedObjectId) {
+				continue;
+			}
+			if (syncConnectorObjectToLinkedShapes(connectorObject, emitMoveEvent)) {
+				didUpdateConnector = true;
+			}
+		}
+		if (didUpdateConnector) {
+			fabricCanvas.requestRenderAll?.();
+		}
+		return didUpdateConnector;
+	}
+
+	function removeConnectorObjectsLinkedToElement(elementId: string, emitDelete: boolean) {
+		if (!fabricCanvas || !elementId) {
+			return;
+		}
+		const normalizedElementId = normalizeMessageID(elementId);
+		if (!normalizedElementId) {
+			return;
+		}
+		const objects = [...(fabricCanvas.getObjects?.() ?? [])] as FabricObjectLike[];
+		for (const object of objects) {
+			if (!isConnectorObject(object)) {
+				continue;
+			}
+			const metadata = parseConnectorMetadataFromObject(object);
+			if (
+				metadata.fromObjectId !== normalizedElementId &&
+				metadata.toObjectId !== normalizedElementId
+			) {
+				continue;
+			}
+			removeBoardObject(object, emitDelete);
+		}
+	}
+
 	function beginShapeInsert(kind: ShapeKind) {
 		if (!fabricCanvas || !canEdit) {
 			return;
 		}
 		applyToolMode('select');
 		cancelPendingOperation(false);
+		clearPendingConnectorState();
 		pendingShapeKind = kind;
 		showInsertMenu = false;
+		showExportMenu = false;
 	}
 
 	function placePendingShapeAt(point: { x: number; y: number }) {
 		if (!fabricCanvas || !canEdit || !pendingShapeKind) {
 			return;
 		}
-		const anchor = clampBoardPoint(point);
+		let anchor = clampBoardPoint(point);
+		if (pendingShapeKind === 'connector') {
+			const startTarget = resolveNearestConnectorAnchorTarget(anchor);
+			if (!startTarget) {
+				dispatch('toastError', { message: 'Start a connector close to a shape edge midpoint.' });
+				return;
+			}
+			anchor = startTarget.point;
+			pendingConnectorFromObjectId = startTarget.objectId;
+			pendingConnectorFromAnchor = startTarget.anchor;
+		}
 		const shapeObject = createShapeObjectAtPoint(pendingShapeKind, anchor);
 		if (!shapeObject) {
+			clearPendingConnectorState();
 			return;
 		}
-		const identity = ensureObjectIdentity(shapeObject, pendingShapeKind);
+		const fallbackType = pendingShapeKind === 'connector' ? 'arrow' : pendingShapeKind;
+		const identity = ensureObjectIdentity(shapeObject, fallbackType);
+		if (pendingShapeKind === 'connector') {
+			setConnectorObjectMetadata(shapeObject, {
+				fromObjectId: pendingConnectorFromObjectId,
+				toObjectId: '',
+				fromAnchor: pendingConnectorFromAnchor,
+				toAnchor: ''
+			});
+		}
 		shapeObject.set?.({
 			pendingCommit: true
 		});
@@ -1859,16 +2717,34 @@
 		let endPoint = clampBoardPoint(point);
 
 		if (isLineShapeKind(pendingShapeKind)) {
+			if (pendingShapeKind === 'connector') {
+				const snapTarget = resolveNearestConnectorAnchorTarget(
+					endPoint,
+					normalizeMessageID(pendingConnectorFromObjectId)
+				);
+				if (snapTarget) {
+					endPoint = snapTarget.point;
+					setConnectorObjectMetadata(pendingObject, {
+						fromObjectId: pendingConnectorFromObjectId,
+						toObjectId: snapTarget.objectId,
+						fromAnchor: pendingConnectorFromAnchor,
+						toAnchor: snapTarget.anchor,
+						label: toStringValue((pendingObject as Record<string, unknown>).connectorLabel).trim()
+					});
+				} else {
+					setConnectorObjectMetadata(pendingObject, {
+						fromObjectId: pendingConnectorFromObjectId,
+						toObjectId: '',
+						fromAnchor: pendingConnectorFromAnchor,
+						toAnchor: '',
+						label: toStringValue((pendingObject as Record<string, unknown>).connectorLabel).trim()
+					});
+				}
+			}
 			if (lockConstraint) {
 				endPoint = resolveSnappedLineEndpoint(anchor, endPoint);
 			}
-			pendingObject.set?.({
-				x1: anchor.x,
-				y1: anchor.y,
-				x2: endPoint.x,
-				y2: endPoint.y
-			});
-			pendingObject.setCoords?.();
+			updateConnectorObjectGeometry(pendingObject, anchor, endPoint);
 			fabricCanvas.requestRenderAll?.();
 			return;
 		}
@@ -1947,7 +2823,7 @@
 			return;
 		}
 		const anchor = pendingShapeAnchorPoint;
-		if (isLineShapeKind(pendingShapeKind)) {
+		if (isLineShapeKind(pendingShapeKind) && pendingShapeKind !== 'connector') {
 			updatePendingShapeGeometry({ x: anchor.x + DEFAULT_LINE_LENGTH, y: anchor.y });
 			return;
 		}
@@ -1986,6 +2862,7 @@
 			pendingInsertElementId = '';
 			pendingShapeAnchorPoint = null;
 			pendingShapePointerMoved = false;
+			clearPendingConnectorState();
 			return;
 		}
 		const pendingObject = findObjectByElementId(pendingInsertElementId);
@@ -1994,7 +2871,22 @@
 			pendingInsertElementId = '';
 			pendingShapeAnchorPoint = null;
 			pendingShapePointerMoved = false;
+			clearPendingConnectorState();
 			return;
+		}
+		if (pendingShapeKind === 'connector') {
+			const metadata = parseConnectorMetadataFromObject(pendingObject);
+			if (
+				!metadata.fromObjectId ||
+				!metadata.toObjectId ||
+				!metadata.fromAnchor ||
+				!metadata.toAnchor
+			) {
+				dispatch('toastError', { message: 'Finish connector near another shape edge midpoint.' });
+				cancelPendingOperation(false);
+				pendingShapeKind = 'connector';
+				return;
+			}
 		}
 		ensurePendingShapeHasMinimumFootprint();
 		pendingObject.set?.({
@@ -2014,6 +2906,7 @@
 		pendingInsertElementId = '';
 		pendingShapeAnchorPoint = null;
 		pendingShapePointerMoved = false;
+		clearPendingConnectorState();
 	}
 
 	function createShapeObjectAtPoint(
@@ -2083,9 +2976,10 @@
 			return null;
 		}
 		const anchor = clampBoardPoint(point);
+		const lineStrokeWidth = kind === 'connector' ? 1.5 : kind === 'arrow' ? 4 : 3;
 		return new LineClass([anchor.x, anchor.y, anchor.x + 1, anchor.y + 1], {
 			stroke: resolveThemeAwareInkColor(boardInkColor),
-			strokeWidth: kind === 'arrow' ? 4 : 3
+			strokeWidth: lineStrokeWidth
 		}) as FabricObjectLike;
 	}
 
@@ -2131,15 +3025,21 @@
 		if (!object || object === boardBoundsRect) {
 			return;
 		}
-		const elementType = toStringValue((object as Record<string, unknown>).elementType)
-			.trim()
-			.toLowerCase();
+		const objectRecord = object as Record<string, unknown>;
+		const elementType = toStringValue(objectRecord.elementType).trim().toLowerCase();
 		const usePreciseHitTest =
 			elementType === 'stroke' ||
 			elementType === 'line' ||
 			elementType === 'arrow' ||
 			elementType === 'text_box';
 		const canMutate = canMutateBoardObject(object);
+		const contentSchema = toStringValue(
+			parseContentRecord(toStringValue(objectRecord.content))?.schema
+		)
+			.trim()
+			.toLowerCase();
+		const isConnectorLinked =
+			Boolean(objectRecord.connectorLinked) || contentSchema === BOARD_CONNECTOR_SCHEMA;
 		object.set?.({
 			selectable: canMutate,
 			evented: canMutate,
@@ -2152,6 +3052,16 @@
 			perPixelTargetFind: usePreciseHitTest,
 			padding: usePreciseHitTest ? 4 : 1
 		});
+		if (canMutate && isConnectorLinked) {
+			object.set?.({
+				hasControls: false,
+				lockMovementX: true,
+				lockMovementY: true,
+				lockScalingX: true,
+				lockScalingY: true,
+				lockRotation: true
+			});
+		}
 		object.setCoords?.();
 	}
 
@@ -2351,6 +3261,7 @@
 		pendingShapeKind = null;
 		pendingShapeAnchorPoint = null;
 		pendingShapePointerMoved = false;
+		clearPendingConnectorState();
 	}
 
 	function cancelCurrentOperation() {
@@ -2362,8 +3273,10 @@
 		showInsertMenu = false;
 		showWidthMenu = false;
 		showColorMenu = false;
+		showExportMenu = false;
 		contextMenuOpen = false;
 		messagePickerOpen = false;
+		templatesModalOpen = false;
 		showBoardDetails = false;
 		pendingTapGesture = null;
 	}
@@ -2460,10 +3373,17 @@
 	}
 
 	function isStackedBoardEventType(type: BoardEventType): type is StackedBoardEventType {
-		return type === 'board_element_add' || type === 'board_element_move' || type === 'board_element_delete';
+		return (
+			type === 'board_element_add' ||
+			type === 'board_element_move' ||
+			type === 'board_element_delete'
+		);
 	}
 
-	function enqueuePendingBoardUpdate(type: StackedBoardEventType, payload: Record<string, unknown>) {
+	function enqueuePendingBoardUpdate(
+		type: StackedBoardEventType,
+		payload: Record<string, unknown>
+	) {
 		if (!normalizedRoomId) {
 			return;
 		}
@@ -2693,14 +3613,41 @@
 		}
 
 		if (elementType === 'line' || elementType === 'arrow') {
-			return JSON.stringify({
+			const linePayload = {
 				x1: toNumber(objectRecord.x1, left),
 				y1: toNumber(objectRecord.y1, top),
 				x2: toNumber(objectRecord.x2, left + width),
 				y2: toNumber(objectRecord.y2, top + height),
 				stroke: normalizeOptionalColor(objectRecord.stroke),
 				strokeWidth: normalizeOptionalPositiveNumber(objectRecord.strokeWidth)
-			});
+			};
+			const existingConnectorContent = parseConnectorContent(baseContent);
+			const hasConnectorMetadata =
+				Boolean(objectRecord.connectorLinked) || Boolean(existingConnectorContent);
+			if (hasConnectorMetadata) {
+				return JSON.stringify({
+					schema: BOARD_CONNECTOR_SCHEMA,
+					...linePayload,
+					fromObjectId: normalizeMessageID(
+						toStringValue(
+							objectRecord.connectorFromObjectId ?? existingConnectorContent?.fromObjectId
+						)
+					),
+					toObjectId: normalizeMessageID(
+						toStringValue(objectRecord.connectorToObjectId ?? existingConnectorContent?.toObjectId)
+					),
+					fromAnchor: normalizeConnectorAnchor(
+						objectRecord.connectorFromAnchor ?? existingConnectorContent?.fromAnchor
+					),
+					toAnchor: normalizeConnectorAnchor(
+						objectRecord.connectorToAnchor ?? existingConnectorContent?.toAnchor
+					),
+					label: toStringValue(
+						objectRecord.connectorLabel ?? existingConnectorContent?.label
+					).trim()
+				});
+			}
+			return JSON.stringify(linePayload);
 		}
 
 		if (
@@ -2789,12 +3736,14 @@
 		pendingShapeKind = null;
 		pendingShapeAnchorPoint = null;
 		pendingShapePointerMoved = false;
+		clearPendingConnectorState();
 		pendingTransformSnapshotByElementId.clear();
 		if (resetLocalActions) {
 			localUndoStack = [];
 			localRedoStack = [];
 			persistLocalActionHistory();
 		}
+		selectedConnectorElementId = '';
 		zControlVisible = false;
 		refreshBoardStats();
 		captureHistorySnapshot(true);
@@ -2971,6 +3920,30 @@
 		};
 	}
 
+	function parseConnectorContent(content: string) {
+		const record = parseContentRecord(content);
+		if (!record) {
+			return null;
+		}
+		const schema = toStringValue(record.schema).trim().toLowerCase();
+		if (schema !== BOARD_CONNECTOR_SCHEMA) {
+			return null;
+		}
+		return {
+			x1: toNumber(record.x1, 0),
+			y1: toNumber(record.y1, 0),
+			x2: toNumber(record.x2, 0),
+			y2: toNumber(record.y2, 0),
+			stroke: normalizeOptionalColor(record.stroke),
+			strokeWidth: normalizeOptionalPositiveNumber(record.strokeWidth ?? record.stroke_width),
+			fromObjectId: normalizeMessageID(toStringValue(record.fromObjectId ?? record.from_object_id)),
+			toObjectId: normalizeMessageID(toStringValue(record.toObjectId ?? record.to_object_id)),
+			fromAnchor: normalizeConnectorAnchor(record.fromAnchor ?? record.from_anchor),
+			toAnchor: normalizeConnectorAnchor(record.toAnchor ?? record.to_anchor),
+			label: toStringValue(record.label).trim()
+		};
+	}
+
 	function parseLineContent(content: string) {
 		const record = parseContentRecord(content);
 		if (!record) {
@@ -3100,16 +4073,27 @@
 			if (!LineClass) {
 				return null;
 			}
-			const lineContent = parseLineContent(element.content);
+			const connectorContent = parseConnectorContent(element.content);
+			const lineContent = connectorContent ?? parseLineContent(element.content);
 			const linePoints = lineContent
 				? [lineContent.x1, lineContent.y1, lineContent.x2, lineContent.y2]
 				: parseLinePoints(element.content, element);
 			const lineStrokeColor = resolveThemeAwareInkColor(lineContent?.stroke || fallbackStrokeColor);
 			const lineStrokeWidth = lineContent?.strokeWidth || (elementType === 'arrow' ? 4 : 3);
-			return new LineClass(linePoints, {
+			const lineObject = new LineClass(linePoints, {
 				stroke: lineStrokeColor,
 				strokeWidth: lineStrokeWidth
 			}) as FabricObjectLike;
+			if (connectorContent) {
+				setConnectorObjectMetadata(lineObject, {
+					fromObjectId: connectorContent.fromObjectId,
+					toObjectId: connectorContent.toObjectId,
+					fromAnchor: connectorContent.fromAnchor,
+					toAnchor: connectorContent.toAnchor,
+					label: connectorContent.label
+				});
+			}
+			return lineObject;
 		}
 
 		if (elementType === 'image') {
@@ -3870,6 +4854,7 @@
 					const targetIndex = Math.max(minIndex, Math.min(maxIndex, movement.zIndex + minIndex));
 					fabricCanvas.moveTo?.(target as any, targetIndex);
 				}
+				refreshConnectorsForObject(target, false);
 				fabricCanvas.requestRenderAll?.();
 			} finally {
 				endRemoteApply();
@@ -3887,8 +4872,7 @@
 			}
 			beginRemoteApply();
 			try {
-				fabricCanvas.remove(target as any);
-				fabricCanvas.requestRenderAll?.();
+				removeBoardObject(target, false);
 				refreshBoardStats();
 			} finally {
 				endRemoteApply();
@@ -3958,6 +4942,7 @@
 			pendingShapeKind = null;
 			pendingShapeAnchorPoint = null;
 			pendingShapePointerMoved = false;
+			clearPendingConnectorState();
 		}
 	}
 
@@ -4114,6 +5099,9 @@
 		if (emitDelete && !wasPendingInsert && !canMutateBoardObject(object)) {
 			return;
 		}
+		if (elementId && !isConnectorObject(object)) {
+			removeConnectorObjectsLinkedToElement(elementId, emitDelete);
+		}
 		const beforeElement = boardObjectToElement(object);
 		fabricCanvas.remove(object as any);
 		fabricCanvas.discardActiveObject?.();
@@ -4123,6 +5111,7 @@
 			pendingShapeKind = null;
 			pendingShapeAnchorPoint = null;
 			pendingShapePointerMoved = false;
+			clearPendingConnectorState();
 		}
 		if (emitDelete && elementId && !wasPendingInsert) {
 			emitBoardElementDelete(elementId);
@@ -4137,6 +5126,7 @@
 		if (elementId) {
 			discardPendingTransformForElement(elementId);
 		}
+		syncSelectedConnectorState();
 		captureHistorySnapshot();
 	}
 
@@ -4315,6 +5305,168 @@
 		);
 	}
 
+	function parseBoardObjectContent(content: unknown) {
+		const normalized = toStringValue(content).trim();
+		if (!normalized.startsWith('{') || !normalized.endsWith('}')) {
+			return null;
+		}
+		try {
+			const parsed = JSON.parse(normalized);
+			if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+				return null;
+			}
+			return parsed as Record<string, unknown>;
+		} catch {
+			return null;
+		}
+	}
+
+	function compactDescriptionText(value: unknown, maxLength = 90) {
+		const normalized = toStringValue(value).replace(/\s+/g, ' ').trim();
+		if (!normalized) {
+			return '';
+		}
+		if (normalized.length <= maxLength) {
+			return normalized;
+		}
+		return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+	}
+
+	function buildWhiteboardObjectDescription(objectRecord: Record<string, unknown>) {
+		const rawElementType = toStringValue(objectRecord.elementType).trim().toLowerCase();
+		const rawFabricType = toStringValue(objectRecord.type).trim().toLowerCase();
+		const elementType = rawElementType || rawFabricType;
+		if (!elementType) {
+			return '';
+		}
+		const left = Math.round(toNumber(objectRecord.left, 0));
+		const top = Math.round(toNumber(objectRecord.top, 0));
+		const width = Math.round(
+			toNumber(objectRecord.width, 0) * Math.abs(toNumber(objectRecord.scaleX, 1))
+		);
+		const height = Math.round(
+			toNumber(objectRecord.height, 0) * Math.abs(toNumber(objectRecord.scaleY, 1))
+		);
+		const contentRecord = parseBoardObjectContent(objectRecord.content);
+		const contentText = compactDescriptionText(
+			contentRecord?.text ?? objectRecord.text ?? objectRecord.content,
+			120
+		);
+		switch (elementType) {
+			case 'text_box':
+			case 'textbox':
+			case 'i-text':
+			case 'text':
+				return contentText
+					? `Text: "${contentText}" at (${left},${top})`
+					: `Text box at (${left},${top})`;
+			case 'rect':
+			case 'shape':
+			case 'triangle':
+			case 'ellipse':
+				return `${elementType} (${Math.max(1, width)}x${Math.max(1, height)}) at (${left},${top})`;
+			case 'circle': {
+				const radius = Math.round(toNumber(objectRecord.radius, Math.max(width, height) / 2));
+				return `Circle r=${Math.max(1, radius)} at (${left},${top})`;
+			}
+			case 'line':
+			case 'arrow':
+			case 'stroke':
+			case 'path':
+				if (
+					(elementType === 'line' || elementType === 'arrow') &&
+					toStringValue(contentRecord?.schema).trim().toLowerCase() === BOARD_CONNECTOR_SCHEMA
+				) {
+					const fromObjectId = normalizeMessageID(
+						toStringValue(contentRecord?.fromObjectId ?? contentRecord?.from_object_id)
+					);
+					const toObjectId = normalizeMessageID(
+						toStringValue(contentRecord?.toObjectId ?? contentRecord?.to_object_id)
+					);
+					if (fromObjectId && toObjectId) {
+						return `Connector ${fromObjectId.slice(0, 6)} -> ${toObjectId.slice(0, 6)}`;
+					}
+				}
+				return `Connector/path at (${left},${top})`;
+			case 'sticky_note':
+				return contentText
+					? `Sticky note: "${contentText}" at (${left},${top})`
+					: `Sticky note at (${left},${top})`;
+			case 'message':
+				return contentText
+					? `Message card: "${contentText}" at (${left},${top})`
+					: `Message card at (${left},${top})`;
+			case 'image':
+			case 'video':
+			case 'audio':
+			case 'file':
+			case 'media':
+				return `${elementType} card at (${left},${top})`;
+			case 'group':
+				return `Grouped objects at (${left},${top})`;
+			default:
+				return `${elementType} at (${left},${top})`;
+		}
+	}
+
+	function buildWhiteboardTextDescription(serializedSnapshot: string) {
+		const normalized = toStringValue(serializedSnapshot).trim();
+		if (!normalized.startsWith('{') || !normalized.endsWith('}')) {
+			return '';
+		}
+		try {
+			const parsed = JSON.parse(normalized) as Record<string, unknown>;
+			const objects = Array.isArray(parsed.objects) ? parsed.objects : [];
+			if (objects.length === 0) {
+				return '';
+			}
+			const descriptions: string[] = [];
+			for (const object of objects) {
+				if (!object || typeof object !== 'object' || Array.isArray(object)) {
+					continue;
+				}
+				const description = buildWhiteboardObjectDescription(object as Record<string, unknown>);
+				if (!description) {
+					continue;
+				}
+				descriptions.push(description);
+				if (descriptions.length >= WHITEBOARD_CONTEXT_MAX_LINES) {
+					break;
+				}
+			}
+			if (descriptions.length === 0) {
+				return '';
+			}
+			const merged = descriptions.join('\n');
+			if (merged.length <= WHITEBOARD_CONTEXT_MAX_CHARS) {
+				return merged;
+			}
+			return `${merged.slice(0, WHITEBOARD_CONTEXT_MAX_CHARS)}\n...`;
+		} catch {
+			return '';
+		}
+	}
+
+	function scheduleWhiteboardContextPublish(serializedSnapshot = '') {
+		const contextRoomID = normalizeRoomIDValue(normalizedRoomId || initializedRoomId);
+		if (!contextRoomID) {
+			return;
+		}
+		const snapshotForExport = toStringValue(serializedSnapshot).trim();
+		if (whiteboardContextPublishTimer) {
+			clearTimeout(whiteboardContextPublishTimer);
+		}
+		whiteboardContextPublishTimer = setTimeout(() => {
+			whiteboardContextPublishTimer = null;
+			const description = buildWhiteboardTextDescription(snapshotForExport);
+			if (description === lastPublishedWhiteboardContext) {
+				return;
+			}
+			lastPublishedWhiteboardContext = description;
+			setWhiteboardContext(contextRoomID, description);
+		}, 120);
+	}
+
 	function refreshBoardStats(serializedSnapshot = '') {
 		if (!fabricCanvas) {
 			boardElementCount = 0;
@@ -4331,6 +5483,7 @@
 		boardApproxBytes = serialized ? UTF8_ENCODER.encode(serialized).length : 0;
 		latestSerializedBoardSnapshot = serialized;
 		latestSerializedBoardSnapshotBytes = serialized ? new Blob([serialized]).size : 0;
+		scheduleWhiteboardContextPublish(serialized);
 	}
 
 	function captureHistorySnapshot(force = false) {
@@ -4484,8 +5637,10 @@
 			showInsertMenu = false;
 			showWidthMenu = false;
 			showColorMenu = false;
+			showExportMenu = false;
 			showBoardDetails = false;
 			messagePickerOpen = false;
+			templatesModalOpen = false;
 			pendingTapGesture = null;
 			moveDusterToBoardX(boardPoint.x);
 			dusterIsDragging = true;
@@ -4528,6 +5683,7 @@
 				pendingShapeKind = null;
 				pendingShapeAnchorPoint = null;
 				pendingShapePointerMoved = false;
+				clearPendingConnectorState();
 				return;
 			}
 			event.preventDefault();
@@ -4760,6 +5916,7 @@
 		contextMenuY = Math.max(0, Math.min(rect.height - menuHeight, offsetY));
 		contextMenuOpen = true;
 		showInsertMenu = false;
+		showExportMenu = false;
 	}
 
 	function openMediaPicker() {
@@ -5175,60 +6332,77 @@
 	}
 </script>
 
-	<section class="board-root">
-		<div class="board-toolbar" bind:this={boardToolbarEl}>
-			{#if openToolbarHintText}
-				<div class="toolbar-open-hint" role="status" aria-live="polite">{openToolbarHintText}</div>
-			{/if}
+<section class="board-root">
+	<div class="board-toolbar" bind:this={boardToolbarEl}>
+		{#if openToolbarHintText}
+			<div class="toolbar-open-hint" role="status" aria-live="polite">{openToolbarHintText}</div>
+		{/if}
+		<button
+			type="button"
+			class="tool-icon-button board-close-button"
+			on:click={closeBoardView}
+			title="Close board"
+			aria-label="Close board"
+		>
+			<span aria-hidden="true">×</span>
+		</button>
+		<div class="toolbar-primary-group" bind:this={toolbarPrimaryEl}>
 			<button
 				type="button"
-				class="tool-icon-button board-close-button"
-				on:click={closeBoardView}
-				title="Close board"
-				aria-label="Close board"
+				class="tool-icon-button"
+				class:active={activeTool === 'draw'}
+				on:click={() => toggleToolMode('draw')}
+				title="Free draw"
 			>
-				<span aria-hidden="true">×</span>
+				<svg class="tool-icon" viewBox="0 0 24 24">
+					<path
+						d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z"
+					/>
+				</svg>
 			</button>
-			<div class="toolbar-primary-group" bind:this={toolbarPrimaryEl}>
-				<button
-					type="button"
-					class="tool-icon-button"
-					class:active={activeTool === 'draw'}
-					on:click={() => toggleToolMode('draw')}
-					title="Free draw"
-				>
-					<svg class="tool-icon" viewBox="0 0 24 24">
-						<path
-							d="M4 16.8V20h3.2l9.4-9.4-3.2-3.2L4 16.8Zm14.7-8.7a.9.9 0 0 0 0-1.3l-1.5-1.5a.9.9 0 0 0-1.3 0l-1.2 1.2 3.2 3.2 1.2-1.2Z"
-						/>
-					</svg>
-				</button>
-				<button
-					type="button"
-					class="tool-icon-button"
-					class:active={activeTool === 'eraser'}
-					on:click={() => toggleToolMode('eraser')}
-					title="Eraser"
-					aria-label="Eraser"
-					disabled={!canModerateBoardActions}
-				>
-					<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M15.2 4a2 2 0 0 1 2.8 0l2 2a2 2 0 0 1 0 2.8L12 16.8H6.4L4 14.4a2 2 0 0 1 0-2.8z" />
-						<path d="M6 19h10.5" fill="none" stroke="currentColor" stroke-width="1.8" />
-					</svg>
-				</button>
-				<button
-					type="button"
-					class="tool-icon-button"
-					on:click={insertTextBox}
-					title="Insert text box"
-					aria-label="Insert text box"
-					disabled={!canEdit}
-				>
-					<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M5 6h14v2H13v10h-2V8H5z" />
-					</svg>
-				</button>
+			<button
+				type="button"
+				class="tool-icon-button"
+				class:active={activeTool === 'eraser'}
+				on:click={() => toggleToolMode('eraser')}
+				title="Eraser"
+				aria-label="Eraser"
+				disabled={!canModerateBoardActions}
+			>
+				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<path
+						d="M15.2 4a2 2 0 0 1 2.8 0l2 2a2 2 0 0 1 0 2.8L12 16.8H6.4L4 14.4a2 2 0 0 1 0-2.8z"
+					/>
+					<path d="M6 19h10.5" fill="none" stroke="currentColor" stroke-width="1.8" />
+				</svg>
+			</button>
+			<button
+				type="button"
+				class="tool-icon-button"
+				on:click={insertTextBox}
+				title="Insert text box"
+				aria-label="Insert text box"
+				disabled={!canEdit}
+			>
+				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M5 6h14v2H13v10h-2V8H5z" />
+				</svg>
+			</button>
+			<button
+				type="button"
+				class="tool-icon-button"
+				class:active={pendingShapeKind === 'connector'}
+				on:click={() => beginShapeInsert('connector')}
+				title="Connector tool"
+				aria-label="Connector tool"
+				disabled={!canEdit}
+			>
+				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M6 7h5v2H8v6h3v2H6z" />
+					<path d="M18 17h-5v-2h3V9h-3V7h5z" />
+					<path d="M9 12h6" fill="none" stroke="currentColor" stroke-width="1.8" />
+				</svg>
+			</button>
 			<div class="color-menu-wrap" bind:this={colorMenuWrapEl}>
 				<button
 					type="button"
@@ -5332,7 +6506,7 @@
 					</svg>
 				</button>
 			{/if}
-				<div class="insert-wrap" bind:this={insertWrapEl}>
+			<div class="insert-wrap" bind:this={insertWrapEl}>
 				<button
 					type="button"
 					class="insert-toggle"
@@ -5446,8 +6620,6 @@
 			class:menu-mode={shouldUseToolbarMenu}
 			bind:this={toolbarSecondaryEl}
 		>
-			
-
 			{#if isWidthControlVisible}
 				<div class="brush-width-wrap" bind:this={widthMenuWrapEl}>
 					<button
@@ -5489,7 +6661,47 @@
 				</div>
 			{/if}
 
-		
+			<div class="export-menu-wrap" bind:this={exportMenuWrapEl}>
+				<button
+					type="button"
+					class="export-toggle-button"
+					class:active={showExportMenu}
+					on:click={toggleExportMenu}
+					aria-haspopup="true"
+					aria-expanded={showExportMenu}
+					title={showExportMenu ? undefined : 'Export board'}
+					disabled={!canEdit}
+				>
+					Export
+				</button>
+				{#if showExportMenu}
+					<div class="export-menu-popover">
+						<button type="button" on:click={exportBoardAsPNG}>Export PNG</button>
+						<button type="button" on:click={exportBoardAsSVG}>Export SVG</button>
+					</div>
+				{/if}
+			</div>
+
+			<button
+				type="button"
+				class="templates-toggle-button"
+				on:click={openTemplatesModal}
+				title="Open diagram templates"
+				disabled={!canEdit}
+			>
+				Templates
+			</button>
+
+			{#if selectedConnectorElementId}
+				<button
+					type="button"
+					class="connector-delete-button"
+					on:click={deleteSelectedConnector}
+					title="Delete selected connector"
+				>
+					Delete Connector
+				</button>
+			{/if}
 
 			<button
 				type="button"
@@ -5711,6 +6923,46 @@
 		</div>
 	{/if}
 
+	{#if templatesModalOpen}
+		<div
+			class="board-modal-backdrop"
+			role="button"
+			tabindex="0"
+			aria-label="Close templates"
+			on:pointerdown={closeTemplatesModal}
+			on:keydown={(event) => {
+				if (event.key === 'Enter' || event.key === ' ') {
+					event.preventDefault();
+					closeTemplatesModal();
+				}
+			}}
+		>
+			<div
+				class="board-modal templates-modal"
+				role="dialog"
+				aria-label="Diagram templates"
+				tabindex="-1"
+				on:pointerdown|stopPropagation
+			>
+				<div class="board-modal-header">
+					<h3>Diagram Templates</h3>
+					<button type="button" on:click={closeTemplatesModal}>Close</button>
+				</div>
+				<div class="template-grid">
+					{#each BOARD_TEMPLATES as template (template.id)}
+						<article class="template-card">
+							<h4>{template.name}</h4>
+							<p>{template.description}</p>
+							<button type="button" on:click={() => applyTemplate(template.id)}>
+								Apply Template
+							</button>
+						</article>
+					{/each}
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	<input
 		bind:this={mediaInputEl}
 		type="file"
@@ -5733,8 +6985,7 @@
 	}
 
 	.board-toolbar {
-	   
-	   max-width: 89vw;
+		max-width: 89vw;
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
@@ -6009,6 +7260,52 @@
 		border-radius: 6px;
 		padding: 0;
 		background: transparent;
+	}
+
+	.export-menu-wrap {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+	}
+
+	.export-toggle-button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.28rem 0.56rem;
+		font-size: 0.76rem;
+	}
+
+	.export-menu-popover {
+		position: absolute;
+		top: calc(100% + 6px);
+		left: 0;
+		z-index: 36;
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		padding: 0.4rem;
+		border-radius: 10px;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-secondary);
+		box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
+		min-width: 138px;
+	}
+
+	.export-menu-popover button {
+		padding: 0.32rem 0.5rem;
+		font-size: 0.73rem;
+	}
+
+	.templates-toggle-button {
+		padding: 0.32rem 0.56rem;
+	}
+
+	.connector-delete-button {
+		border-color: rgba(249, 115, 22, 0.6) !important;
+		background: rgba(249, 115, 22, 0.18) !important;
+		color: #fed7aa !important;
+		padding: 0.3rem 0.58rem;
 	}
 
 	.insert-wrap {
@@ -6314,6 +7611,46 @@
 		background: var(--bg-secondary);
 	}
 
+	.templates-modal {
+		width: min(860px, 94vw);
+	}
+
+	.template-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.58rem;
+		overflow: auto;
+		padding-right: 0.12rem;
+	}
+
+	.template-card {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+		padding: 0.7rem;
+		border-radius: 10px;
+		border: 1px solid var(--border-subtle);
+		background: var(--bg-primary);
+	}
+
+	.template-card h4 {
+		margin: 0;
+		font-size: 0.9rem;
+		color: var(--text-main);
+	}
+
+	.template-card p {
+		margin: 0;
+		font-size: 0.76rem;
+		line-height: 1.35;
+		color: var(--text-muted);
+	}
+
+	.template-card button {
+		align-self: flex-start;
+		padding: 0.33rem 0.56rem;
+	}
+
 	.board-modal-header {
 		display: flex;
 		align-items: center;
@@ -6503,6 +7840,10 @@
 			bottom: 0.65rem;
 			width: 160px;
 			height: 120px;
+		}
+
+		.template-grid {
+			grid-template-columns: minmax(0, 1fr);
 		}
 	}
 

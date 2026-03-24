@@ -1,6 +1,11 @@
 import { browser } from '$app/environment';
+import { resolveApiBase } from '$lib/config/apiBase';
 import { APP_LIMITS } from '$lib/config/limits';
-import { syncBoardActivityFromSocketPayload, syncTaskStoreFromSocketPayload } from '$lib/ws/client';
+import {
+	syncBoardActivityFromSocketPayload,
+	syncFieldSchemaStoreFromSocketPayload,
+	syncTaskStoreFromSocketPayload
+} from '$lib/ws/client';
 import { writable } from 'svelte/store';
 
 export type GlobalSocketState = 'idle' | 'connecting' | 'open' | 'closed' | 'error';
@@ -11,7 +16,7 @@ export type GlobalSocketEvent = {
 };
 
 const MAX_QUEUED_MESSAGES = APP_LIMITS.ws.maxQueuedMessages;
-const DEFAULT_API_BASE = 'http://127.0.0.1:8080';
+const DEFAULT_API_BASE = 'http://localhost:8080';
 
 export const socketState = writable<GlobalSocketState>('idle');
 export const globalMessages = writable<GlobalSocketEvent | null>(null);
@@ -100,14 +105,18 @@ function connectSocket() {
 	if (!browser || !activeUserID) {
 		return;
 	}
-	if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+	if (
+		socket &&
+		(socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+	) {
 		return;
 	}
 
 	clearReconnectTimer();
 	socketState.set('connecting');
 
-	const nextSocket = new WebSocket(buildSocketURL(activeUserID, activeUsername));
+	const socketURL = buildSocketURL(activeUserID, activeUsername);
+	const nextSocket = new WebSocket(socketURL);
 	socket = nextSocket;
 
 	nextSocket.onopen = () => {
@@ -127,6 +136,7 @@ function connectSocket() {
 		const payload = parseMessagePayload(event.data);
 		syncTaskStoreFromSocketPayload(payload);
 		syncBoardActivityFromSocketPayload(payload);
+		syncFieldSchemaStoreFromSocketPayload(payload);
 		globalMessages.set({
 			payload,
 			receivedAt: Date.now()
@@ -138,14 +148,25 @@ function connectSocket() {
 			return;
 		}
 		socketState.set('error');
+		if (import.meta.env.DEV) {
+			console.warn('[ws] connect error', { socketURL });
+		}
 	};
 
-	nextSocket.onclose = () => {
+	nextSocket.onclose = (event: CloseEvent) => {
 		if (socket !== nextSocket) {
 			return;
 		}
 		socket = null;
 		socketState.set('closed');
+		if (import.meta.env.DEV) {
+			console.warn('[ws] closed', {
+				socketURL,
+				code: event.code,
+				reason: event.reason,
+				wasClean: event.wasClean
+			});
+		}
 		if (shouldReconnect) {
 			scheduleReconnect();
 		}
@@ -171,8 +192,10 @@ function disconnectSocket() {
 
 function scheduleReconnect() {
 	clearReconnectTimer();
-	reconnectAttempts = Math.min(reconnectAttempts + 1, 6);
-	const delay = Math.min(1000 * 2 ** (reconnectAttempts - 1), 10000);
+	reconnectAttempts = Math.min(reconnectAttempts + 1, 8);
+	const baseDelay = Math.min(1000 * 2 ** (reconnectAttempts - 1), 60000);
+	const jitter = Math.floor(Math.random() * 2000);
+	const delay = baseDelay + jitter;
 	reconnectTimer = setTimeout(() => {
 		connectSocket();
 	}, delay);
@@ -253,7 +276,7 @@ function safeStringify(payload: unknown) {
 
 function buildSocketURL(userId: string, username: string) {
 	const explicitWSBase = toNonEmpty(import.meta.env.VITE_WS_BASE as string | undefined);
-	const apiBase = toNonEmpty(import.meta.env.VITE_API_BASE as string | undefined) || DEFAULT_API_BASE;
+	const apiBase = resolveApiBase(import.meta.env.VITE_API_BASE as string | undefined);
 	const baseURL = explicitWSBase ? toWebSocketURL(explicitWSBase) : toWebSocketURL(apiBase);
 
 	const path = baseURL.pathname.replace(/\/+$/g, '');

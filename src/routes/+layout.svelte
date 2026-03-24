@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { page } from '$app/stores';
 	import { onMount, onDestroy } from 'svelte';
 	import GlobalNavbar from '$lib/components/layout/GlobalNavbar.svelte';
 	import type { LayoutData } from './$types';
@@ -60,6 +61,10 @@
 		document.body.classList.toggle('theme-dark', $isDarkMode);
 		document.body.dataset.theme = $isDarkMode ? 'dark' : 'light';
 	}
+	$: hideGlobalNavbar =
+		$page.url.pathname.startsWith('/form/') ||
+		$page.url.pathname === '/home' ||
+		$page.url.pathname.startsWith('/home/');
 
 	function initializeThemePreference() {
 		if (!browser) {
@@ -312,7 +317,9 @@
 	</script>
 </svelte:head>
 
-<GlobalNavbar />
+{#if !hideGlobalNavbar}
+	<GlobalNavbar />
+{/if}
 <slot />
 <div
 	class="instant-tooltip"

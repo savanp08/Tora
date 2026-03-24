@@ -1789,18 +1789,135 @@
 		const dataURL = fabricCanvas.toDataURL?.({
 			format: 'png',
 			quality: 0.8,
-			multiplier: 1
+			multiplier: 2
 		});
 		if (typeof dataURL !== 'string' || dataURL === '') {
 			return;
 		}
 		const anchor = document.createElement('a');
 		anchor.href = dataURL;
-		anchor.download = 'board_export.png';
+		anchor.download = 'tora-board.png';
 		anchor.style.display = 'none';
 		document.body.appendChild(anchor);
 		anchor.click();
 		anchor.remove();
+		showExportMenu = false;
+	}
+
+	function exportBoardAsSVG() {
+		if (!fabricCanvas || !browser) {
+			return;
+		}
+		const svgContent = fabricCanvas.toSVG?.();
+		if (typeof svgContent !== 'string' || svgContent === '') {
+			return;
+		}
+		const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement('a');
+		anchor.href = url;
+		anchor.download = 'tora-board.svg';
+		anchor.style.display = 'none';
+		document.body.appendChild(anchor);
+		anchor.click();
+		anchor.remove();
+		URL.revokeObjectURL(url);
+		showExportMenu = false;
+	}
+
+	let showExportMenu = false;
+	let showTemplatesModal = false;
+
+	function applyDiagramTemplate(templateId: string) {
+		if (!fabricCanvas || !canEdit) return;
+		const hasObjects = (fabricCanvas.getObjects?.() ?? []).filter((o: any) => !o.excludeFromExport).length > 0;
+		if (hasObjects && !confirm('This will clear the current board. Continue?')) return;
+		if (hasObjects) {
+			const objects = [...(fabricCanvas.getObjects?.() ?? [])];
+			objects.forEach((o: any) => { if (!o.excludeFromExport) fabricCanvas!.remove?.(o); });
+		}
+		const RectClass = getFabricClass('Rect');
+		const CircleClass = getFabricClass('Circle');
+		const LineClass = getFabricClass('Line');
+		const TextboxClass = getFabricClass('Textbox') ?? getFabricClass('Text');
+		if (!RectClass || !LineClass || !TextboxClass) return;
+		const cx = BOARD_WIDTH / 2;
+		const cy = BOARD_HEIGHT / 2;
+		function addRect(x: number, y: number, w: number, h: number, label: string, rx = 8) {
+			const r = new RectClass({ left: x - w/2, top: y - h/2, width: w, height: h, rx, ry: rx, fill: 'transparent', stroke: '#64748b', strokeWidth: 2 });
+			const t = new TextboxClass(label, { left: x - w/2, top: y - h/2, width: w, height: h, fontSize: 13, textAlign: 'center', fill: '#94a3b8', selectable: true, editable: true });
+			fabricCanvas!.add?.(r as any);
+			fabricCanvas!.add?.(t as any);
+			ensureObjectIdentity(r as any, 'rect');
+			ensureObjectIdentity(t as any, 'text_box');
+		}
+		function addLine(x1: number, y1: number, x2: number, y2: number) {
+			const l = new LineClass([x1, y1, x2, y2], { stroke: '#64748b', strokeWidth: 1.5 });
+			fabricCanvas!.add?.(l as any);
+			ensureObjectIdentity(l as any, 'line');
+		}
+		function addCircle(x: number, y: number, r: number, label: string) {
+			const c = CircleClass ? new CircleClass({ left: x - r, top: y - r, radius: r, fill: 'transparent', stroke: '#64748b', strokeWidth: 2 }) : null;
+			if (c) {
+				fabricCanvas!.add?.(c as any);
+				ensureObjectIdentity(c as any, 'circle');
+			}
+			const t = new TextboxClass(label, { left: x - r, top: y - 8, width: r * 2, fontSize: 11, textAlign: 'center', fill: '#94a3b8' });
+			fabricCanvas!.add?.(t as any);
+			ensureObjectIdentity(t as any, 'text_box');
+		}
+		if (templateId === 'flowchart') {
+			addRect(cx, cy - 180, 160, 50, 'Start');
+			addLine(cx, cy - 155, cx, cy - 80);
+			addRect(cx, cy - 55, 160, 50, 'Step 1');
+			addLine(cx, cy - 30, cx, cy + 50);
+			// Diamond for decision
+			const d = new TextboxClass('Decision?', { left: cx - 60, top: cy + 50, width: 120, fontSize: 13, textAlign: 'center', fill: '#94a3b8' });
+			fabricCanvas!.add?.(d as any);
+			ensureObjectIdentity(d as any, 'text_box');
+			addLine(cx, cy + 80, cx, cy + 150);
+			addRect(cx, cy + 175, 160, 50, 'End');
+		} else if (templateId === 'orgchart') {
+			addRect(cx, cy - 200, 160, 50, 'CEO');
+			addLine(cx, cy - 175, cx, cy - 120);
+			const titles = ['CTO', 'CMO', 'CFO'];
+			[-220, 0, 220].forEach((dx, i) => {
+				addLine(cx, cy - 120, cx + dx, cy - 80);
+				addRect(cx + dx, cy - 55, 140, 50, titles[i]);
+				[-75, 75].forEach((ddx) => {
+					addLine(cx + dx, cy - 30, cx + dx + ddx, cy + 20);
+					addRect(cx + dx + ddx, cy + 45, 120, 40, 'Report');
+				});
+			});
+		} else if (templateId === 'kanban') {
+			['To Do', 'In Progress', 'Done'].forEach((label, i) => {
+				const x = cx + (i - 1) * 220;
+				addRect(x, cy, 180, 300, label, 4);
+				['Task A', 'Task B'].forEach((tl, j) => {
+					addRect(x, cy - 80 + j * 70, 150, 50, tl, 4);
+				});
+			});
+		} else if (templateId === 'sysarch') {
+			addRect(cx - 320, cy, 140, 50, 'Browser');
+			addLine(cx - 250, cy, cx - 180, cy);
+			addRect(cx - 110, cy, 140, 50, 'API Gateway');
+			[-220, 0, 220].forEach((dx, i) => {
+				addLine(cx - 40, cy, cx + dx, cy + 80);
+				addRect(cx + dx, cy + 105, 130, 50, ['Auth', 'API', 'DB'][i]);
+			});
+			addLine(cx + 220, cy + 130, cx + 220, cy + 180);
+			addRect(cx + 220, cy + 205, 130, 50, 'Database');
+		} else if (templateId === 'userjourney') {
+			const labels = ['Awareness', 'Consideration', 'Decision', 'Purchase', 'Loyalty'];
+			labels.forEach((label, i) => {
+				const x = cx - 300 + i * 150;
+				addCircle(x, cy, 45, label);
+				if (i < labels.length - 1) addLine(x + 45, cy, x + 105, cy);
+			});
+		}
+		fabricCanvas.requestRenderAll?.();
+		captureHistorySnapshot();
+		showTemplatesModal = false;
 	}
 
 	function describeShapeKind(kind: ShapeKind) {
@@ -5673,6 +5790,39 @@
 
 		
 
+			<!-- Export dropdown -->
+			<div style="position:relative;display:inline-flex;">
+				<button
+					type="button"
+					on:click={() => { showExportMenu = !showExportMenu; }}
+					title="Export board"
+					aria-label="Export board"
+				>
+					<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+					</svg>
+				</button>
+				{#if showExportMenu}
+					<div style="position:absolute;bottom:110%;right:0;background:var(--bg-secondary,#1e293b);border:1px solid var(--border-subtle,#334155);border-radius:6px;padding:0.25rem;z-index:200;min-width:110px;display:flex;flex-direction:column;gap:0.2rem;">
+						<button type="button" on:click={exportBoardAsPNG} style="text-align:left;padding:0.3rem 0.6rem;font-size:0.78rem;background:none;border:none;color:var(--text-main,#e2e8f0);cursor:pointer;border-radius:4px;">Export PNG</button>
+						<button type="button" on:click={exportBoardAsSVG} style="text-align:left;padding:0.3rem 0.6rem;font-size:0.78rem;background:none;border:none;color:var(--text-main,#e2e8f0);cursor:pointer;border-radius:4px;">Export SVG</button>
+					</div>
+				{/if}
+			</div>
+			<!-- Diagram templates -->
+			<button
+				type="button"
+				on:click={() => { showTemplatesModal = true; }}
+				title="Diagram templates"
+				aria-label="Diagram templates"
+			>
+				<svg class="tool-icon" viewBox="0 0 24 24" aria-hidden="true">
+					<rect x="3" y="3" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
+					<rect x="14" y="3" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
+					<rect x="3" y="14" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
+					<rect x="14" y="14" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="2"/>
+				</svg>
+			</button>
 			<button
 				type="button"
 				class="clear-tool-button"
@@ -5902,6 +6052,34 @@
 		disabled={isUploadingMedia}
 	/>
 </section>
+
+{#if showTemplatesModal}
+	<div role="dialog" aria-modal="true" aria-label="Diagram templates" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;" on:click|self={() => { showTemplatesModal = false; }} on:keydown={(e) => { if (e.key === 'Escape') showTemplatesModal = false; }}>
+		<div style="background:var(--bg-secondary,#1e293b);border:1px solid var(--border-subtle,#334155);border-radius:10px;padding:1.5rem;width:480px;max-width:95vw;">
+			<h3 style="margin:0 0 1rem;color:var(--text-main,#e2e8f0);font-size:1rem;">Diagram Templates</h3>
+			<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+				{#each [
+					{ id: 'flowchart', emoji: '🔀', name: 'Flowchart', desc: 'Start/Process/Decision/End flow' },
+					{ id: 'orgchart', emoji: '🏢', name: 'Org Chart', desc: 'CEO → C-suite → reports hierarchy' },
+					{ id: 'kanban', emoji: '📋', name: 'Kanban Columns', desc: 'To Do / In Progress / Done' },
+					{ id: 'sysarch', emoji: '🖥️', name: 'System Architecture', desc: 'Browser → Gateway → Services → DB' },
+					{ id: 'userjourney', emoji: '🗺️', name: 'User Journey', desc: 'Awareness → Loyalty stages' }
+				] as tmpl}
+					<button
+						type="button"
+						on:click={() => applyDiagramTemplate(tmpl.id)}
+						style="text-align:left;padding:0.75rem;background:var(--bg-tertiary,#334155);border:1px solid var(--border-subtle,#475569);border-radius:8px;color:var(--text-main,#e2e8f0);cursor:pointer;display:flex;flex-direction:column;gap:0.3rem;"
+					>
+						<span style="font-size:1.4rem;">{tmpl.emoji}</span>
+						<strong style="font-size:0.85rem;">{tmpl.name}</strong>
+						<span style="font-size:0.75rem;opacity:0.7;">{tmpl.desc}</span>
+					</button>
+				{/each}
+			</div>
+			<button type="button" on:click={() => { showTemplatesModal = false; }} style="margin-top:1rem;padding:0.4rem 1rem;background:none;border:1px solid var(--border-subtle,#475569);border-radius:6px;color:var(--text-secondary,#94a3b8);cursor:pointer;font-size:0.82rem;">Cancel</button>
+		</div>
+	</div>
+{/if}
 
 <style>
 	.board-root {

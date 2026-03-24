@@ -5,16 +5,31 @@ const DEFAULT_API_BASE = 'http://127.0.0.1:8080';
 
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | string;
 
+export type TaskSubtask = {
+	id: string;
+	content: string;
+	completed: boolean;
+	position: number;
+};
+
 export type Task = {
 	id: string;
 	roomId: string;
 	title: string;
 	description: string;
 	status: TaskStatus;
+	taskType: string;
+	customFields?: Record<string, unknown>;
+	blockedBy: string[];
+	blocks: string[];
+	subtasks: TaskSubtask[];
+	completionPercent?: number;
 	budget?: number;
 	spent?: number;
 	sprintName: string;
 	assigneeId: string;
+	dueDate?: number;
+	startDate?: number;
 	statusActorId?: string;
 	statusActorName?: string;
 	statusChangedAt?: number;
@@ -84,6 +99,103 @@ function normalizeTaskBudgetValue(value: unknown): number | undefined {
 	return undefined;
 }
 
+function normalizeTaskCustomFields(value: unknown): Record<string, unknown> | undefined {
+	let source: Record<string, unknown> | null = null;
+	if (typeof value === 'string') {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		try {
+			source = toRecord(JSON.parse(trimmed));
+		} catch {
+			source = null;
+		}
+	} else {
+		source = toRecord(value);
+	}
+	if (!source) {
+		return undefined;
+	}
+	const normalized: Record<string, unknown> = {};
+	for (const [rawKey, rawValue] of Object.entries(source)) {
+		const key = rawKey.trim();
+		if (!key) {
+			continue;
+		}
+		normalized[key] = rawValue;
+	}
+	return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeTaskRelationID(value: unknown) {
+	return toStringValue(value).trim();
+}
+
+function normalizeTaskRelationIDs(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const seen = new Set<string>();
+	const next: string[] = [];
+	for (const entry of value) {
+		const relationID = normalizeTaskRelationID(entry);
+		if (!relationID || seen.has(relationID)) {
+			continue;
+		}
+		seen.add(relationID);
+		next.push(relationID);
+	}
+	return next;
+}
+
+function normalizeTaskSubtasks(value: unknown): TaskSubtask[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	const next: TaskSubtask[] = [];
+	const seen = new Set<string>();
+	for (const entry of value) {
+		const source = toRecord(entry);
+		if (!source) {
+			continue;
+		}
+		const id = normalizeTaskRelationID(source.id ?? source.subtask_id ?? source.subtaskId);
+		if (!id || seen.has(id)) {
+			continue;
+		}
+		seen.add(id);
+		const content = toStringValue(source.content ?? source.title).trim() || 'Subtask';
+		const completed = Boolean(source.completed);
+		const positionRaw = source.position ?? source.order ?? source.index;
+		let position = 0;
+		if (typeof positionRaw === 'number' && Number.isFinite(positionRaw)) {
+			position = Math.max(0, Math.floor(positionRaw));
+		} else if (typeof positionRaw === 'string') {
+			const parsed = Number(positionRaw);
+			if (Number.isFinite(parsed)) {
+				position = Math.max(0, Math.floor(parsed));
+			}
+		}
+		next.push({
+			id,
+			content,
+			completed,
+			position
+		});
+	}
+	next.sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
+	return next;
+}
+
+function calculateTaskCompletionPercent(subtasks: TaskSubtask[]) {
+	if (subtasks.length === 0) {
+		return undefined;
+	}
+	const completedCount = subtasks.filter((subtask) => subtask.completed).length;
+	return Math.round((completedCount / subtasks.length) * 100);
+}
+
 function parseTaskBudgetFromDescription(description: string): number | undefined {
 	const trimmed = description.trim();
 	if (!trimmed) {
@@ -149,6 +261,15 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 	const title = toStringValue(source.title).trim() || 'Untitled Task';
 	const description = toStringValue(source.description).trim();
 	const status = normalizeTaskStatus(source.status);
+	const customFields = normalizeTaskCustomFields(
+		source.customFields ?? source.custom_fields ?? source.custom_field_values
+	);
+	const blockedBy = normalizeTaskRelationIDs(source.blockedBy ?? source.blocked_by);
+	const blocks = normalizeTaskRelationIDs(source.blocks);
+	const subtasks = normalizeTaskSubtasks(source.subtasks ?? source.checklist);
+	const completionPercent =
+		normalizeTaskBudgetValue(source.completion_percent ?? source.completionPercent) ??
+		calculateTaskCompletionPercent(subtasks);
 	const budget =
 		normalizeTaskBudgetValue(source.budget ?? source.task_budget ?? source.taskBudget) ??
 		parseTaskBudgetFromDescription(description);
@@ -162,10 +283,14 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 		) ?? parseTaskSpentFromDescription(description);
 	const sprintName = toStringValue(source.sprintName ?? source.sprint_name).trim();
 	const assigneeId = toStringValue(source.assigneeId ?? source.assignee_id).trim();
+	const taskTypeRaw = toStringValue(source.taskType ?? source.task_type).trim().toLowerCase();
+	const taskType = taskTypeRaw === 'support' ? 'support' : 'sprint';
 	const statusActorId = toStringValue(source.statusActorId ?? source.status_actor_id).trim();
 	const statusActorName = toStringValue(source.statusActorName ?? source.status_actor_name).trim();
 	const statusChangedAt =
 		parseOptionalTimestamp(source.statusChangedAt ?? source.status_changed_at) || 0;
+	const dueDate = parseOptionalTimestamp(source.dueDate ?? source.due_date) || undefined;
+	const startDate = parseOptionalTimestamp(source.startDate ?? source.start_date) || undefined;
 	const now = Date.now();
 	const createdAt = parseOptionalTimestamp(source.createdAt ?? source.created_at) || now;
 	const updatedAt = parseOptionalTimestamp(source.updatedAt ?? source.updated_at) || createdAt;
@@ -176,10 +301,18 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 		title,
 		description,
 		status,
+		taskType,
+		customFields,
+		blockedBy,
+		blocks,
+		subtasks,
+		completionPercent,
 		budget,
 		spent,
 		sprintName,
 		assigneeId,
+		dueDate: dueDate && dueDate > 0 ? dueDate : undefined,
+		startDate: startDate && startDate > 0 ? startDate : undefined,
 		statusActorId: statusActorId || undefined,
 		statusActorName: statusActorName || undefined,
 		statusChangedAt: statusChangedAt > 0 ? statusChangedAt : undefined,

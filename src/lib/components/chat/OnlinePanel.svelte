@@ -1,15 +1,42 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
 	import type { OnlineMember } from '$lib/types/chat';
+	import { normalizeIdentifier } from '$lib/utils/chat/core';
+	import { resolveSenderNameColor } from '$lib/utils/chat/senderNameColors';
 
 	export let members: OnlineMember[] = [];
 	export let isDarkMode = false;
 	export let canCollapse = false;
 	export let isCollapsed = false;
+	export let currentUserId = '';
 
 	const dispatch = createEventDispatcher<{
 		toggleCollapse: void;
 	}>();
+
+	function buildMemberInitials(name: string) {
+		const normalized = name.trim();
+		if (!normalized) {
+			return '?';
+		}
+		const parts = normalized.split(/\s+/).slice(0, 2);
+		return parts.map((part) => part.charAt(0).toUpperCase()).join('');
+	}
+
+	function resolveMemberAvatarColor(member: OnlineMember) {
+		const normalizedCurrentUserID = normalizeIdentifier(currentUserId || '');
+		const normalizedMemberID = normalizeIdentifier(member.id || '');
+		const isOwn =
+			Boolean(normalizedCurrentUserID) &&
+			Boolean(normalizedMemberID) &&
+			normalizedCurrentUserID === normalizedMemberID;
+		return resolveSenderNameColor({
+			senderId: member.id || '',
+			senderName: member.name || '',
+			isOwnMessage: isOwn,
+			isDarkMode
+		});
+	}
 </script>
 
 <aside class="online-panel {isDarkMode ? 'theme-dark' : ''} {isCollapsed ? 'is-collapsed' : ''}">
@@ -57,8 +84,17 @@
 			{:else}
 				{#each members as member (member.id)}
 					<div class="online-member">
-						<span class="member-dot"></span>
-						<span class="member-name">{member.name}</span>
+						<div
+							class="member-avatar-wrap"
+							style={`--member-avatar-color:${resolveMemberAvatarColor(member)};`}
+						>
+							<span class="member-avatar">{buildMemberInitials(member.name)}</span>
+							<span class="member-status-dot" aria-hidden="true"></span>
+						</div>
+						<div class="member-copy">
+							<span class="member-name">{member.name}</span>
+							<span class="member-state-label">Active now</span>
+						</div>
 					</div>
 				{/each}
 			{/if}
@@ -281,42 +317,97 @@
 		flex: 0 0 auto;
 		display: flex;
 		align-items: center;
-		gap: 0.62rem;
-		padding: 0.72rem 0.75rem;
-		border: 1px solid #dde3ec;
-		border-radius: 12px;
-		background: #ffffff;
-		box-shadow: 0 1px 5px rgba(15, 23, 42, 0.05);
+		gap: 0.68rem;
+		padding: 0.64rem 0.68rem;
+		border: 1px solid #dae2f0;
+		border-radius: 14px;
+		background:
+			linear-gradient(135deg, rgba(255, 255, 255, 0.97), rgba(245, 250, 255, 0.94)),
+			#ffffff;
+		box-shadow:
+			0 8px 18px rgba(25, 44, 74, 0.08),
+			inset 0 1px 0 rgba(255, 255, 255, 0.72);
 		white-space: nowrap;
+		transition:
+			transform 160ms ease,
+			box-shadow 160ms ease,
+			border-color 160ms ease;
 	}
 
 	.online-panel.theme-dark .online-member {
-		border-color: #333338;
-		background: #18181b;
-		box-shadow: 0 3px 10px rgba(0, 0, 0, 0.36);
-	}
-
-	.member-dot {
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		flex-shrink: 0;
+		border-color: rgba(159, 182, 221, 0.25);
+		background:
+			linear-gradient(132deg, rgba(20, 25, 36, 0.94), rgba(27, 34, 48, 0.92)),
+			#171a22;
 		box-shadow:
-			0 0 0 2px rgba(255, 255, 255, 0.92),
-			0 0 0 3px rgba(17, 24, 39, 0.18);
-		background: #22c55e;
+			0 10px 20px rgba(0, 0, 0, 0.36),
+			inset 0 1px 0 rgba(255, 255, 255, 0.04);
 	}
 
-	.online-panel.theme-dark .member-dot {
+	.online-member:hover {
+		transform: translateY(-1px);
+		box-shadow:
+			0 14px 24px rgba(25, 44, 74, 0.12),
+			inset 0 1px 0 rgba(255, 255, 255, 0.72);
+		border-color: #c9d8ed;
+	}
+
+	.online-panel.theme-dark .online-member:hover {
+		box-shadow:
+			0 14px 30px rgba(0, 0, 0, 0.44),
+			inset 0 1px 0 rgba(255, 255, 255, 0.08);
+		border-color: rgba(159, 182, 221, 0.34);
+	}
+
+	.member-avatar-wrap {
+		position: relative;
+		width: 2rem;
+		height: 2rem;
+		flex: 0 0 auto;
+	}
+
+	.member-avatar {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 999px;
+		display: grid;
+		place-items: center;
+		background: var(--member-avatar-color, #64748b);
+		color: #f8fbff;
+		font-size: 0.66rem;
+		font-weight: 800;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		box-shadow: 0 8px 14px rgba(10, 15, 26, 0.2);
+	}
+
+	.member-status-dot {
+		position: absolute;
+		left: -0.08rem;
+		bottom: -0.08rem;
+		width: 0.62rem;
+		height: 0.62rem;
+		border-radius: 999px;
 		background: #22c55e;
+		border: 2px solid rgba(255, 255, 255, 0.96);
+		box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.14);
+	}
+
+	.online-panel.theme-dark .member-status-dot {
+		border-color: #151b27;
+		box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+	}
+
+	.member-copy {
+		min-width: 0;
+		display: grid;
+		gap: 0.1rem;
 	}
 
 	.member-name {
-		font-size: 0.88rem;
+		font-size: 0.84rem;
 		font-weight: 600;
 		color: #141d2a;
-		flex: 1;
-		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -324,6 +415,16 @@
 
 	.online-panel.theme-dark .member-name {
 		color: #f0f0f5;
+	}
+
+	.member-state-label {
+		font-size: 0.66rem;
+		color: #5c6d88;
+		font-weight: 600;
+	}
+
+	.online-panel.theme-dark .member-state-label {
+		color: #9bb0d2;
 	}
 
 	.empty-label {

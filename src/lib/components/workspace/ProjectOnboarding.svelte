@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { tick } from 'svelte';
+	import { createEventDispatcher, tick } from 'svelte';
+	import { resolveApiBase } from '$lib/config/apiBase';
 	import {
 		activeProjectTab,
 		type AITimelineConversationMessage,
@@ -11,23 +12,33 @@
 		timelineError,
 		timelineLoading
 	} from '$lib/stores/timeline';
-	import { initializeTaskStoreForRoom } from '$lib/stores/tasks';
+	import { fieldSchemaStore } from '$lib/stores/fieldSchema';
+	import { initializeTaskStoreForRoom, taskStore } from '$lib/stores/tasks';
 	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
-	import { loadTemplate } from '$lib/utils/timelineTemplates';
 	import type { ProjectTimeline } from '$lib/types/timeline';
 
 	export let roomId = '';
 	export let aiEnabled = true;
+	export let templatePickerOnly = false;
+	export let isModal = false;
 
-	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
-	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
+	const dispatch = createEventDispatcher<{
+		close: void;
+		templateApplied: {
+			templateId: string;
+			templateName: string;
+			blank: boolean;
+			fieldsCreated: number;
+			tasksCreated: number;
+			automationRulesCreated: number;
+		};
+	}>();
+
+	const API_BASE = resolveApiBase(import.meta.env.VITE_API_BASE as string | undefined);
+	const BLANK_TEMPLATE_ID = 'blank';
 
 	type OnboardingMode = 'selection' | 'manual' | 'ai';
-	type ManualTemplateCard = {
-		key: string;
-		label: string;
-		description: string;
-	};
+	type ManualStep = 'picker' | 'confirm';
 	type PromptStarter = {
 		label: string;
 		prompt: string;
@@ -43,68 +54,55 @@
 		version: 1;
 		messages: OnboardingAIMessage[];
 	};
-
-	const MANUAL_TEMPLATE_CARDS: ManualTemplateCard[] = [
-		{
-			key: 'agile_sprint_planner',
-			label: 'Agile Sprint Planner',
-			description: 'Backlog, frontend, backend, and QA sprint structure.'
-		},
-		{
-			key: 'waterfall_linear',
-			label: 'Waterfall / Linear',
-			description: 'Sequential phases with clearly staged delivery.'
-		},
-		{
-			key: 'marketing_blitz',
-			label: 'Marketing Blitz',
-			description: 'Strategy, asset creation, and launch flow.'
-		},
-		{
-			key: 'time_critical',
-			label: 'Time Critical',
-			description: 'Day-based execution plan for urgent delivery.'
-		},
-		{
-			key: 'blank_board',
-			label: 'Blank Board',
-			description: 'Start empty and shape your own workflow.'
-		}
-	];
-
-	let mode: OnboardingMode = 'selection';
-	let aiPrompt = '';
-	let localError = '';
-	let applyingTemplate = false;
-	let aiPartialWarning = '';
-	let aiMissingSprints: string[] = [];
-	let aiConversation: OnboardingAIMessage[] = [];
-	let loadedConversationKey = '';
-	let aiThreadElement: HTMLDivElement | null = null;
-	let aiComposerTextarea: HTMLTextAreaElement | null = null;
-
-	const ONBOARDING_CHAT_STORAGE_PREFIX = 'tora_ai_chat';
-	const ONBOARDING_CHAT_CONTEXT = 'taskboard';
-	const ONBOARDING_CHAT_HISTORY_LIMIT = 80;
-
-	$: normalizedOnboardingRoomID = normalizeRoomIDValue(roomId);
-	$: onboardingConversationStorageKey = `${ONBOARDING_CHAT_STORAGE_PREFIX}:${normalizedOnboardingRoomID}:${ONBOARDING_CHAT_CONTEXT}`;
-	$: if (onboardingConversationStorageKey !== loadedConversationKey) {
-		loadedConversationKey = onboardingConversationStorageKey;
-		loadOnboardingConversation(onboardingConversationStorageKey);
-	}
-
-	$: if (!aiEnabled && mode === 'ai') {
-		mode = 'selection';
-	}
-
-	const TEMPLATE_KEY_MAP: Record<string, string> = {
-		agile_sprint_planner: 'software_agile',
-		waterfall_linear: 'waterfall_linear',
-		marketing_blitz: 'marketing_blitz',
-		time_critical: 'time_critical',
-		blank_board: 'blank_board'
+	type IndustryTemplateField = {
+		name: string;
+		fieldType: string;
+		options: string[];
+		position: number;
 	};
+	type IndustryTemplateTask = {
+		title: string;
+		status: string;
+		sprintName: string;
+		customFields: Record<string, string>;
+	};
+	type IndustryTemplateRule = {
+		name: string;
+		triggerType: string;
+		triggerConfig: string;
+		actionType: string;
+		actionConfig: string;
+	};
+	type IndustryTemplate = {
+		id: string;
+		name: string;
+		description: string;
+		industries: string[];
+		fieldSchemas: IndustryTemplateField[];
+		sampleTasks: IndustryTemplateTask[];
+		automationRules: IndustryTemplateRule[];
+	};
+	type ApplyTemplateResponse = {
+		success?: boolean;
+		template_id?: string;
+		template_name?: string;
+		fields_created?: number;
+		tasks_created?: number;
+		automation_rules_created?: number;
+		error?: string;
+		message?: string;
+	};
+
+	const BLANK_TEMPLATE_CARD: IndustryTemplate = {
+		id: BLANK_TEMPLATE_ID,
+		name: 'Start Blank',
+		description: 'Open a clean workspace with no starter tasks, fields, or automation presets.',
+		industries: ['Blank'],
+		fieldSchemas: [],
+		sampleTasks: [],
+		automationRules: []
+	};
+
 	const AI_PROMPT_STARTERS: PromptStarter[] = [
 		{
 			label: 'Product launch',
@@ -128,6 +126,57 @@
 		}
 	];
 
+	let mode: OnboardingMode = templatePickerOnly ? 'manual' : 'selection';
+	let manualStep: ManualStep = 'picker';
+	let aiPrompt = '';
+	let localError = '';
+	let applyingTemplate = false;
+	let aiPartialWarning = '';
+	let aiMissingSprints: string[] = [];
+	let aiConversation: OnboardingAIMessage[] = [];
+	let loadedConversationKey = '';
+	let aiThreadElement: HTMLDivElement | null = null;
+	let aiComposerTextarea: HTMLTextAreaElement | null = null;
+	let templatesLoading = false;
+	let templatesLoadAttempted = false;
+	let templateLoadError = '';
+	let templates: IndustryTemplate[] = [];
+	let selectedTemplateId = '';
+	let confirmReplaceExisting = false;
+
+	const ONBOARDING_CHAT_STORAGE_PREFIX = 'tora_ai_chat';
+	const ONBOARDING_CHAT_CONTEXT = 'taskboard';
+	const ONBOARDING_CHAT_HISTORY_LIMIT = 80;
+
+	$: normalizedOnboardingRoomID = normalizeRoomIDValue(roomId);
+	$: onboardingConversationStorageKey = `${ONBOARDING_CHAT_STORAGE_PREFIX}:${normalizedOnboardingRoomID}:${ONBOARDING_CHAT_CONTEXT}`;
+	$: if (onboardingConversationStorageKey !== loadedConversationKey) {
+		loadedConversationKey = onboardingConversationStorageKey;
+		loadOnboardingConversation(onboardingConversationStorageKey);
+	}
+	$: if (templatePickerOnly && mode !== 'manual') {
+		mode = 'manual';
+		manualStep = 'picker';
+	}
+	$: if (!aiEnabled && mode === 'ai') {
+		mode = templatePickerOnly ? 'manual' : 'selection';
+	}
+	$: if ((mode === 'manual' || templatePickerOnly) && !templatesLoadAttempted) {
+		templatesLoadAttempted = true;
+		void loadTemplates();
+	}
+	$: roomTaskCount = $taskStore.filter(
+		(task) => normalizeRoomIDValue(task.roomId) === normalizedOnboardingRoomID
+	).length;
+	$: roomFieldCount = $fieldSchemaStore.filter(
+		(schema) => normalizeRoomIDValue(schema.roomId) === normalizedOnboardingRoomID
+	).length;
+	$: roomHasExistingContent = roomTaskCount > 0 || roomFieldCount > 0;
+	$: availableTemplates = [BLANK_TEMPLATE_CARD, ...templates];
+	$: selectedTemplate = availableTemplates.find((template) => template.id === selectedTemplateId) ?? null;
+	$: templatePreviewFields = selectedTemplate?.fieldSchemas ?? [];
+	$: templatePreviewTasks = selectedTemplate?.sampleTasks ?? [];
+
 	function createMessageID() {
 		if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
 			return crypto.randomUUID();
@@ -137,6 +186,140 @@
 
 	function isBrowser() {
 		return typeof window !== 'undefined' && Boolean(window.localStorage);
+	}
+
+	function toRecord(value: unknown): Record<string, unknown> | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		return value as Record<string, unknown>;
+	}
+
+	function toStringValue(value: unknown) {
+		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function toStringArray(value: unknown) {
+		if (!Array.isArray(value)) {
+			return [] as string[];
+		}
+		return value.map((entry) => toStringValue(entry)).filter(Boolean);
+	}
+
+	function normalizeTemplateField(raw: unknown): IndustryTemplateField | null {
+		const source = toRecord(raw);
+		if (!source) {
+			return null;
+		}
+		const name = toStringValue(source.name);
+		const fieldType = toStringValue(source.fieldType ?? source.field_type) || 'text';
+		if (!name) {
+			return null;
+		}
+		const rawPosition = source.position;
+		let position = 0;
+		if (typeof rawPosition === 'number' && Number.isFinite(rawPosition)) {
+			position = Math.max(0, Math.floor(rawPosition));
+		} else if (typeof rawPosition === 'string') {
+			const parsed = Number(rawPosition);
+			if (Number.isFinite(parsed)) {
+				position = Math.max(0, Math.floor(parsed));
+			}
+		}
+		return {
+			name,
+			fieldType,
+			options: toStringArray(source.options),
+			position
+		};
+	}
+
+	function normalizeTemplateTask(raw: unknown): IndustryTemplateTask | null {
+		const source = toRecord(raw);
+		if (!source) {
+			return null;
+		}
+		const title = toStringValue(source.title);
+		if (!title) {
+			return null;
+		}
+		const customFieldsSource = toRecord(source.customFields ?? source.custom_fields) ?? {};
+		const customFields: Record<string, string> = {};
+		for (const [key, value] of Object.entries(customFieldsSource)) {
+			const normalizedKey = key.trim();
+			const normalizedValue = toStringValue(value);
+			if (!normalizedKey || !normalizedValue) {
+				continue;
+			}
+			customFields[normalizedKey] = normalizedValue;
+		}
+		return {
+			title,
+			status: toStringValue(source.status) || 'todo',
+			sprintName: toStringValue(source.sprintName ?? source.sprint_name),
+			customFields
+		};
+	}
+
+	function normalizeTemplateRule(raw: unknown): IndustryTemplateRule | null {
+		const source = toRecord(raw);
+		if (!source) {
+			return null;
+		}
+		const name = toStringValue(source.name);
+		const triggerType = toStringValue(source.triggerType ?? source.trigger_type);
+		const actionType = toStringValue(source.actionType ?? source.action_type);
+		if (!name && !triggerType && !actionType) {
+			return null;
+		}
+		return {
+			name,
+			triggerType,
+			triggerConfig: toStringValue(source.triggerConfig ?? source.trigger_config),
+			actionType,
+			actionConfig: toStringValue(source.actionConfig ?? source.action_config)
+		};
+	}
+
+	function normalizeTemplate(raw: unknown): IndustryTemplate | null {
+		const source = toRecord(raw);
+		if (!source) {
+			return null;
+		}
+		const id = toStringValue(source.id);
+		const name = toStringValue(source.name);
+		if (!id || !name) {
+			return null;
+		}
+		const rawFieldSchemas: unknown[] = Array.isArray(source.fieldSchemas ?? source.field_schemas)
+			? [...((source.fieldSchemas ?? source.field_schemas) as unknown[])]
+			: [];
+		const rawSampleTasks: unknown[] = Array.isArray(source.sampleTasks ?? source.sample_tasks)
+			? [...((source.sampleTasks ?? source.sample_tasks) as unknown[])]
+			: [];
+		const rawAutomationRules: unknown[] = Array.isArray(
+			source.automationRules ?? source.automation_rules
+		)
+			? [...((source.automationRules ?? source.automation_rules) as unknown[])]
+			: [];
+		const fieldSchemas = rawFieldSchemas
+			.map((entry: unknown) => normalizeTemplateField(entry))
+			.filter((entry: IndustryTemplateField | null): entry is IndustryTemplateField => Boolean(entry));
+		const sampleTasks = rawSampleTasks
+			.map((entry: unknown) => normalizeTemplateTask(entry))
+			.filter((entry: IndustryTemplateTask | null): entry is IndustryTemplateTask => Boolean(entry));
+		const automationRules = rawAutomationRules
+			.map((entry: unknown) => normalizeTemplateRule(entry))
+			.filter((entry: IndustryTemplateRule | null): entry is IndustryTemplateRule => Boolean(entry));
+		return {
+			id,
+			name,
+			description: toStringValue(source.description),
+			industries: toStringArray(source.industries),
+			fieldSchemas,
+			sampleTasks,
+			automationRules
+		};
 	}
 
 	function sanitizePersistedConversation(candidate: unknown) {
@@ -305,9 +488,20 @@
 		};
 	}
 
-	function goBackToSelection() {
-		mode = 'selection';
+	function resetTemplateFlow() {
+		manualStep = 'picker';
+		selectedTemplateId = '';
+		confirmReplaceExisting = false;
 		localError = '';
+	}
+
+	function goBackToSelection() {
+		if (templatePickerOnly) {
+			dispatch('close');
+			return;
+		}
+		mode = 'selection';
+		resetTemplateFlow();
 		aiPartialWarning = '';
 		aiMissingSprints = [];
 	}
@@ -332,6 +526,66 @@
 		}
 		event.preventDefault();
 		void generateWorkspace();
+	}
+
+	function parseTemplateError(payload: unknown, status: number) {
+		const source = toRecord(payload);
+		return (
+			toStringValue(source?.error) ||
+			toStringValue(source?.message) ||
+			`HTTP ${status}`
+		);
+	}
+
+	async function loadTemplates() {
+		templatesLoading = true;
+		templateLoadError = '';
+		try {
+			const response = await fetch(`${API_BASE}/api/templates?include_tasks=true`, {
+				method: 'GET',
+				credentials: 'include'
+			});
+			const payload = (await response.json().catch(() => null)) as unknown;
+			if (!response.ok) {
+				throw new Error(parseTemplateError(payload, response.status));
+			}
+			const records = Array.isArray(payload) ? payload : [];
+			templates = records
+				.map((entry) => normalizeTemplate(entry))
+				.filter((entry): entry is IndustryTemplate => Boolean(entry));
+		} catch (error) {
+			templates = [];
+			templateLoadError =
+				error instanceof Error ? error.message : 'Failed to load starter templates.';
+		} finally {
+			templatesLoading = false;
+		}
+	}
+
+	function retryTemplateLoad() {
+		templatesLoadAttempted = true;
+		void loadTemplates();
+	}
+
+	function selectTemplateCard(templateId: string) {
+		selectedTemplateId = templateId;
+		confirmReplaceExisting = false;
+		localError = '';
+	}
+
+	function reviewSelectedTemplate() {
+		if (!selectedTemplate) {
+			localError = 'Choose a starter template or blank workspace first.';
+			return;
+		}
+		manualStep = 'confirm';
+		confirmReplaceExisting = false;
+		localError = '';
+	}
+
+	function goBackToTemplatePicker() {
+		manualStep = 'picker';
+		localError = '';
 	}
 
 	async function generateWorkspace() {
@@ -397,37 +651,56 @@
 		}
 	}
 
-	async function selectManualTemplate(templateKey: string) {
-		const normalizedRoomID = roomId.trim();
-		localError = '';
+	async function applySelectedTemplate() {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
 		if (!normalizedRoomID) {
 			localError = 'Room id is required before applying a template.';
 			return;
 		}
-		if (!templateKey) {
-			localError = 'Choose a valid template.';
+		if (!selectedTemplate) {
+			localError = 'Choose a starter template before applying it.';
 			return;
 		}
-		const resolvedTemplateKey = TEMPLATE_KEY_MAP[templateKey] || templateKey;
-
-		if (resolvedTemplateKey === 'blank_board') {
-			setProjectTimeline(createBlankTimeline());
-			await initializeTaskStoreForRoom(normalizeRoomIDValue(normalizedRoomID), {
-				apiBase: API_BASE
-			});
-			isProjectNew.set(false);
-			activeProjectTab.set('overview');
+		if (roomHasExistingContent && !confirmReplaceExisting) {
+			localError = 'Confirm that you want to replace the current workspace content first.';
 			return;
 		}
 
 		applyingTemplate = true;
+		localError = '';
 		try {
-			await loadTemplate(normalizedRoomID, resolvedTemplateKey);
-			await initializeTaskStoreForRoom(normalizeRoomIDValue(normalizedRoomID), {
-				apiBase: API_BASE
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/apply-template`,
+				{
+					method: 'POST',
+					credentials: 'include',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						template_id: selectedTemplate.id,
+						clear_existing: roomHasExistingContent ? confirmReplaceExisting : false
+					})
+				}
+			);
+			const payload = (await response.json().catch(() => null)) as ApplyTemplateResponse | null;
+			if (!response.ok) {
+				throw new Error(parseTemplateError(payload, response.status));
+			}
+
+			const blank = selectedTemplate.id === BLANK_TEMPLATE_ID;
+			if (blank) {
+				setProjectTimeline(createBlankTimeline());
+				isProjectNew.set(false);
+				activeProjectTab.set('overview');
+			}
+
+			dispatch('templateApplied', {
+				templateId: selectedTemplate.id,
+				templateName: payload?.template_name?.trim() || selectedTemplate.name,
+				blank,
+				fieldsCreated: payload?.fields_created ?? 0,
+				tasksCreated: payload?.tasks_created ?? 0,
+				automationRulesCreated: payload?.automation_rules_created ?? 0
 			});
-			isProjectNew.set(false);
-			activeProjectTab.set('overview');
 		} catch (error) {
 			localError = error instanceof Error ? error.message : 'Failed to apply template.';
 		} finally {
@@ -436,7 +709,7 @@
 	}
 </script>
 
-<section class="project-onboarding" aria-label="Project workspace onboarding">
+<section class="project-onboarding" class:is-modal={isModal} aria-label="Project workspace onboarding">
 	{#if mode === 'selection'}
 		<div class="selection-shell">
 			<header class="selection-header">
@@ -455,8 +728,8 @@
 						</svg>
 					</span>
 					<span class="selection-copy">
-						<strong>Do it yourself</strong>
-						<small>Start from templates or blank and build manually.</small>
+						<strong>Choose a starter template</strong>
+						<small>Pick an industry setup or start blank, then review before applying.</small>
 					</span>
 				</button>
 
@@ -464,10 +737,8 @@
 					<button type="button" class="selection-btn ai" on:click={() => (mode = 'ai')}>
 						<span class="selection-icon" aria-hidden="true">
 							<svg viewBox="0 0 24 24">
-								<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"
-								></path>
-								<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"
-								></path>
+								<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"></path>
+								<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"></path>
 							</svg>
 						</span>
 						<span class="selection-copy">
@@ -619,30 +890,182 @@
 	{:else}
 		<div class="wizard-shell">
 			<header class="wizard-head">
-				<button type="button" class="back-btn" on:click={goBackToSelection}>Back</button>
-				<h3>Manual Setup</h3>
+				<div class="wizard-title-block">
+					<h3>{templatePickerOnly ? 'Change Template' : 'Starter Templates'}</h3>
+					<p>
+						Choose an industry setup, preview what it creates, then apply it when you are ready.
+					</p>
+				</div>
+				<div class="wizard-head-actions">
+					{#if templatePickerOnly}
+						<button type="button" class="ghost-btn" on:click={() => dispatch('close')}>Close</button>
+					{:else}
+						<button type="button" class="back-btn" on:click={goBackToSelection}>Back</button>
+					{/if}
+				</div>
 			</header>
 
-			<div class="template-grid">
-				{#each MANUAL_TEMPLATE_CARDS as template (template.key)}
+			{#if manualStep === 'picker'}
+				<div class="template-intro-card">
+					<div>
+						<strong>Template library</strong>
+						<p>
+							Start with a structured board instead of an empty canvas. Every template includes starter
+							fields and sample tasks so the workspace feels usable immediately.
+						</p>
+					</div>
+					<div class="template-intro-meta">
+						<span>{availableTemplates.length} options</span>
+						<span>{templatesLoading ? 'Loading...' : 'Ready to review'}</span>
+					</div>
+				</div>
+
+				{#if templateLoadError}
+					<div class="error-banner">
+						<span>{templateLoadError}</span>
+						<button type="button" class="inline-link-btn" on:click={retryTemplateLoad}>Retry</button>
+					</div>
+				{/if}
+
+				<div class="template-grid">
+					{#each availableTemplates as template (template.id)}
+						<button
+							type="button"
+							class="template-card"
+							class:is-selected={selectedTemplateId === template.id}
+							on:click={() => selectTemplateCard(template.id)}
+							disabled={applyingTemplate}
+						>
+							<div class="template-card-top">
+								<span class="template-pill">{template.industries[0] || 'Starter'}</span>
+								<span class="template-counts">
+									{template.fieldSchemas.length} fields · {template.sampleTasks.length} tasks
+								</span>
+							</div>
+							<strong>{template.name}</strong>
+							<p>{template.description}</p>
+							<div class="template-card-meta">
+								{#if template.fieldSchemas.length > 0}
+									<span>{template.fieldSchemas.slice(0, 3).map((field) => field.name).join(' · ')}</span>
+								{:else}
+									<span>No starter data</span>
+								{/if}
+							</div>
+						</button>
+					{/each}
+				</div>
+
+				<div class="wizard-actions">
+					{#if !templatePickerOnly}
+						<button type="button" class="ghost-btn" on:click={goBackToSelection}>Back</button>
+					{/if}
 					<button
 						type="button"
-						class="template-card"
-						on:click={() => {
-							void selectManualTemplate(template.key);
-						}}
-						disabled={applyingTemplate || $timelineLoading}
+						class="primary-btn"
+						on:click={reviewSelectedTemplate}
+						disabled={
+							!selectedTemplate ||
+							applyingTemplate ||
+							(templatesLoading && selectedTemplate?.id !== BLANK_TEMPLATE_ID)
+						}
 					>
-						<strong>{template.label}</strong>
-						<p>{template.description}</p>
+						Review selection
 					</button>
-				{/each}
-			</div>
+				</div>
+			{:else}
+				<section class="template-preview-shell">
+					<div class="template-preview-head">
+						<div>
+							<h4>{selectedTemplate?.name}</h4>
+							<p>{selectedTemplate?.description}</p>
+						</div>
+						<span class="template-pill subtle">{selectedTemplate?.industries.join(' · ') || 'Blank'}</span>
+					</div>
+
+					<div class="template-preview-summary">
+						<div class="summary-card">
+							<span class="summary-label">Starter fields</span>
+							<strong>{templatePreviewFields.length}</strong>
+						</div>
+						<div class="summary-card">
+							<span class="summary-label">Starter tasks</span>
+							<strong>{templatePreviewTasks.length}</strong>
+						</div>
+						<div class="summary-card">
+							<span class="summary-label">Automation presets</span>
+							<strong>{selectedTemplate?.automationRules.length ?? 0}</strong>
+						</div>
+					</div>
+
+					{#if selectedTemplate?.id === BLANK_TEMPLATE_ID}
+						<div class="template-preview-note">
+							<strong>Blank workspace</strong>
+							<p>This keeps the board clean so you can shape the structure yourself.</p>
+						</div>
+					{:else}
+						<div class="template-preview-grid">
+							<div class="preview-list-card">
+								<h5>Fields to create</h5>
+								<ul>
+									{#each templatePreviewFields as field (field.name)}
+										<li>
+											<span>{field.name}</span>
+											<small>{field.fieldType}</small>
+										</li>
+									{/each}
+								</ul>
+							</div>
+							<div class="preview-list-card">
+								<h5>Starter tasks</h5>
+								<ul>
+									{#each templatePreviewTasks as task (task.title)}
+										<li>
+											<span>{task.title}</span>
+											<small>{task.sprintName || 'Backlog'}</small>
+										</li>
+									{/each}
+								</ul>
+							</div>
+						</div>
+					{/if}
+
+					{#if roomHasExistingContent}
+						<label class="replace-warning-card">
+							<input type="checkbox" bind:checked={confirmReplaceExisting} />
+							<div>
+								<strong>Replace existing workspace content</strong>
+								<p>
+									This will remove the current room tasks, custom fields, and saved automation presets
+									before the new template is applied.
+								</p>
+							</div>
+						</label>
+					{/if}
+
+					<div class="wizard-actions compact">
+						<button type="button" class="ghost-btn" on:click={goBackToTemplatePicker}>Back</button>
+						<button
+							type="button"
+							class="primary-btn"
+							on:click={() => void applySelectedTemplate()}
+							disabled={applyingTemplate || (roomHasExistingContent && !confirmReplaceExisting)}
+						>
+							{#if applyingTemplate}
+								Applying...
+							{:else if selectedTemplate?.id === BLANK_TEMPLATE_ID}
+								Start blank
+							{:else}
+								Apply template
+							{/if}
+						</button>
+					</div>
+				</section>
+			{/if}
 		</div>
 	{/if}
 
 	{#if (localError || $timelineError) && mode !== 'ai'}
-		<div class="error-banner">{localError || $timelineError}</div>
+		<div class="error-banner standalone">{localError || $timelineError}</div>
 	{/if}
 </section>
 
@@ -711,6 +1134,12 @@
 		padding: 1rem;
 		background: var(--po-bg);
 		color: var(--po-text);
+		overflow-y: auto;
+	}
+
+	.project-onboarding.is-modal {
+		padding: 0;
+		background: transparent;
 	}
 
 	.selection-shell,
@@ -723,10 +1152,11 @@
 
 	.selection-shell {
 		display: grid;
-		align-content: center;
+		align-content: start;
 		justify-items: center;
 		gap: 1.25rem;
 		padding: 1.7rem;
+		overflow-y: auto;
 	}
 
 	.selection-header {
@@ -832,29 +1262,350 @@
 
 	.wizard-head {
 		display: flex;
-		align-items: center;
-		gap: 0.8rem;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
 	}
 
-	.wizard-head h3 {
+	.wizard-title-block {
+		display: grid;
+		gap: 0.24rem;
+	}
+
+	.wizard-title-block h3 {
 		margin: 0;
 		font-size: 1rem;
 	}
 
-	.back-btn {
+	.wizard-title-block p {
+		margin: 0;
+		font-size: 0.78rem;
+		line-height: 1.45;
+		color: var(--po-muted);
+	}
+
+	.wizard-head-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.55rem;
+	}
+
+	.back-btn,
+	.ghost-btn,
+	.primary-btn,
+	.inline-link-btn {
 		border-radius: 10px;
+		padding: 0.56rem 0.9rem;
+		font-size: 0.8rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			border-color 0.16s ease,
+			background 0.16s ease,
+			color 0.16s ease,
+			transform 0.16s ease;
+	}
+
+	.back-btn,
+	.ghost-btn {
 		border: 1px solid var(--po-border);
 		background: var(--po-surface);
 		color: var(--po-text);
-		padding: 0.52rem 0.8rem;
-		font-size: 0.82rem;
+	}
+
+	.back-btn:hover,
+	.ghost-btn:hover:not(:disabled) {
+		border-color: var(--po-border-strong);
+		background: color-mix(in srgb, var(--po-accent-soft) 45%, var(--po-surface));
+	}
+
+	.primary-btn {
+		border: 1px solid color-mix(in srgb, var(--po-accent) 60%, var(--po-border));
+		background: color-mix(in srgb, var(--po-accent-soft) 88%, var(--po-surface));
+		color: var(--po-text);
+	}
+
+	.primary-btn:hover:not(:disabled) {
+		transform: translateY(-1px);
+		border-color: color-mix(in srgb, var(--po-accent) 72%, var(--po-border));
+		background: color-mix(in srgb, var(--po-accent-soft) 100%, var(--po-surface));
+	}
+
+	.primary-btn:disabled,
+	.ghost-btn:disabled,
+	.inline-link-btn:disabled {
+		opacity: 0.58;
+		cursor: not-allowed;
+		transform: none;
+	}
+
+	.inline-link-btn {
+		border: none;
+		background: transparent;
+		padding: 0;
+		color: inherit;
+		text-decoration: underline;
+		text-underline-offset: 0.16rem;
+	}
+
+	.template-intro-card {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: 0.95rem 1rem;
+		border-radius: 16px;
+		border: 1px solid color-mix(in srgb, var(--po-border) 86%, transparent);
+		background: linear-gradient(135deg, var(--po-surface) 0%, var(--po-surface-soft) 100%);
+	}
+
+	.template-intro-card strong {
+		display: block;
+		font-size: 0.92rem;
+	}
+
+	.template-intro-card p {
+		margin: 0.36rem 0 0;
+		font-size: 0.78rem;
+		line-height: 1.48;
+		color: var(--po-muted);
+		max-width: 48rem;
+	}
+
+	.template-intro-meta {
+		display: grid;
+		gap: 0.42rem;
+		justify-items: end;
+		font-size: 0.72rem;
 		font-weight: 600;
+		color: var(--po-muted);
+	}
+
+	.template-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.78rem;
+	}
+
+	.template-card {
+		border: 1px solid var(--po-border);
+		border-radius: 16px;
+		background: var(--po-surface);
+		color: var(--po-text);
+		text-align: left;
+		padding: 0.95rem;
+		cursor: pointer;
+		display: grid;
+		gap: 0.62rem;
+		transition:
+			border-color 0.16s ease,
+			transform 0.16s ease,
+			background 0.16s ease,
+			box-shadow 0.16s ease;
+	}
+
+	.template-card:hover:not(:disabled) {
+		transform: translateY(-1px);
+		border-color: var(--po-border-strong);
+		background: color-mix(in srgb, var(--po-accent-soft) 45%, var(--po-surface));
+	}
+
+	.template-card.is-selected {
+		border-color: color-mix(in srgb, var(--po-accent) 72%, var(--po-border));
+		background: color-mix(in srgb, var(--po-accent-soft) 78%, var(--po-surface));
+		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--po-accent) 20%, transparent);
+	}
+
+	.template-card-top,
+	.template-card-meta {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.template-card strong {
+		display: block;
+		font-size: 0.95rem;
+	}
+
+	.template-card p {
+		margin: 0;
+		font-size: 0.82rem;
+		line-height: 1.48;
+		color: var(--po-muted);
+	}
+
+	.template-pill {
+		display: inline-flex;
+		align-items: center;
+		border-radius: 999px;
+		padding: 0.18rem 0.52rem;
+		font-size: 0.64rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
+		text-transform: uppercase;
+		border: 1px solid color-mix(in srgb, var(--po-accent) 34%, var(--po-border));
+		background: color-mix(in srgb, var(--po-accent-soft) 66%, var(--po-surface));
+		color: var(--po-text);
+	}
+
+	.template-pill.subtle {
+		font-size: 0.66rem;
+		text-transform: none;
+		letter-spacing: 0;
+		font-weight: 600;
+	}
+
+	.template-counts,
+	.template-card-meta {
+		font-size: 0.72rem;
+		color: var(--po-muted);
+	}
+
+	.template-preview-shell {
+		display: grid;
+		gap: 1rem;
+	}
+
+	.template-preview-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+	}
+
+	.template-preview-head h4 {
+		margin: 0;
+		font-size: 1rem;
+	}
+
+	.template-preview-head p {
+		margin: 0.32rem 0 0;
+		font-size: 0.8rem;
+		line-height: 1.5;
+		color: var(--po-muted);
+	}
+
+	.template-preview-summary {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 0.72rem;
+	}
+
+	.summary-card,
+	.preview-list-card,
+	.replace-warning-card,
+	.template-preview-note {
+		border-radius: 16px;
+		border: 1px solid color-mix(in srgb, var(--po-border) 86%, transparent);
+		background: color-mix(in srgb, var(--po-surface-soft) 72%, var(--po-surface));
+	}
+
+	.summary-card {
+		padding: 0.82rem 0.9rem;
+		display: grid;
+		gap: 0.24rem;
+	}
+
+	.summary-label {
+		font-size: 0.7rem;
+		font-weight: 700;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		color: var(--po-muted);
+	}
+
+	.summary-card strong {
+		font-size: 1.2rem;
+	}
+
+	.template-preview-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.8rem;
+	}
+
+	.preview-list-card {
+		padding: 0.9rem;
+	}
+
+	.preview-list-card h5 {
+		margin: 0;
+		font-size: 0.84rem;
+	}
+
+	.preview-list-card ul {
+		margin: 0.72rem 0 0;
+		padding: 0;
+		list-style: none;
+		display: grid;
+		gap: 0.6rem;
+	}
+
+	.preview-list-card li {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.8rem;
+		font-size: 0.8rem;
+	}
+
+	.preview-list-card small {
+		color: var(--po-muted);
+		font-size: 0.72rem;
+	}
+
+	.template-preview-note {
+		padding: 0.95rem 1rem;
+	}
+
+	.template-preview-note strong {
+		display: block;
+		font-size: 0.9rem;
+	}
+
+	.template-preview-note p {
+		margin: 0.3rem 0 0;
+		font-size: 0.78rem;
+		line-height: 1.46;
+		color: var(--po-muted);
+	}
+
+	.replace-warning-card {
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 0.8rem;
+		padding: 0.95rem 1rem;
 		cursor: pointer;
 	}
 
-	.back-btn:hover {
-		border-color: var(--po-border-strong);
-		background: color-mix(in srgb, var(--po-accent-soft) 45%, var(--po-surface));
+	.replace-warning-card input {
+		margin-top: 0.22rem;
+	}
+
+	.replace-warning-card strong {
+		display: block;
+		font-size: 0.84rem;
+	}
+
+	.replace-warning-card p {
+		margin: 0.32rem 0 0;
+		font-size: 0.76rem;
+		line-height: 1.5;
+		color: var(--po-muted);
+	}
+
+	.wizard-actions {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.62rem;
+	}
+
+	.wizard-actions.compact {
+		padding-top: 0.2rem;
 	}
 
 	.tora-chat {
@@ -931,21 +1682,7 @@
 		white-space: nowrap;
 	}
 
-	.tora-back-btn {
-		border-radius: 999px;
-		border: 1px solid rgba(255, 255, 255, 0.16);
-		background: rgba(255, 255, 255, 0.08);
-		color: #bdc1c6;
-		padding: 0.22rem 0.56rem;
-		font-size: 0.66rem;
-		font-weight: 600;
-		cursor: pointer;
-	}
-
-	.tora-back-btn:hover {
-		background: rgba(255, 255, 255, 0.14);
-	}
-
+	.tora-back-btn,
 	.tora-clear-btn {
 		border-radius: 999px;
 		border: 1px solid rgba(255, 255, 255, 0.16);
@@ -957,6 +1694,7 @@
 		cursor: pointer;
 	}
 
+	.tora-back-btn:hover,
 	.tora-clear-btn:hover:not(:disabled) {
 		background: rgba(255, 255, 255, 0.14);
 	}
@@ -1284,58 +2022,23 @@
 		border-top-color: #fff;
 	}
 
-	@keyframes tora-spin {
-		to {
-			transform: rotate(360deg);
-		}
-	}
-
-	.template-grid {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 0.78rem;
-	}
-
-	.template-card {
-		border: 1px solid var(--po-border);
-		border-radius: 14px;
-		background: var(--po-surface);
-		color: var(--po-text);
-		text-align: left;
-		padding: 0.9rem;
-		cursor: pointer;
-		transition:
-			border-color 0.16s ease,
-			transform 0.16s ease,
-			background 0.16s ease;
-	}
-
-	.template-card strong {
-		display: block;
-		font-size: 0.93rem;
-	}
-
-	.template-card p {
-		margin: 0.38rem 0 0;
-		font-size: 0.82rem;
-		line-height: 1.38;
-		color: var(--po-muted);
-	}
-
-	.template-card:hover:not(:disabled) {
-		transform: translateY(-1px);
-		border-color: var(--po-border-strong);
-		background: color-mix(in srgb, var(--po-accent-soft) 45%, var(--po-surface));
-	}
-
 	.error-banner {
 		border-radius: 12px;
 		border: 1px solid color-mix(in srgb, var(--po-danger) 45%, var(--po-border));
 		background: var(--po-danger-soft);
 		color: var(--po-danger);
+		padding: 0.68rem 0.8rem;
+		font-size: 0.8rem;
+		font-weight: 600;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.8rem;
+	}
+
+	.error-banner.standalone {
 		padding: 0.62rem 0.76rem;
 		font-size: 0.84rem;
-		font-weight: 600;
 	}
 
 	.partial-warning-banner {
@@ -1376,20 +2079,32 @@
 		background: rgba(255, 185, 64, 0.22);
 	}
 
+	@keyframes tora-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
 	@media (max-width: 900px) {
 		.selection-actions,
-		.template-grid {
+		.template-grid,
+		.template-preview-grid,
+		.template-preview-summary {
 			grid-template-columns: minmax(0, 1fr);
 		}
 
-		.tora-chat-header {
+		.tora-chat-header,
+		.wizard-head,
+		.template-intro-card,
+		.template-preview-head {
 			flex-wrap: wrap;
-			align-items: flex-start;
 		}
 
-		.tora-meta {
+		.tora-meta,
+		.template-intro-meta {
 			width: 100%;
 			justify-content: space-between;
+			justify-items: start;
 		}
 
 		.tora-thread {
@@ -1398,6 +2113,12 @@
 
 		.partial-warning-banner {
 			margin: 0 0.72rem 0.54rem;
+		}
+
+		.wizard-actions,
+		.replace-warning-card,
+		.preview-list-card li {
+			align-items: flex-start;
 		}
 	}
 </style>

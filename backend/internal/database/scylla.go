@@ -287,6 +287,11 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 	userConnectionsTable := normalizedKeyspace + ".user_connections"
 	personalItemsTable := normalizedKeyspace + ".personal_items"
 	tasksTable := normalizedKeyspace + ".tasks"
+	roomFieldSchemasTable := normalizedKeyspace + ".room_field_schemas"
+	taskRelationsTable := normalizedKeyspace + ".task_relations"
+	timeEntriesTable := normalizedKeyspace + ".time_entries"
+	intakeFormsTable := normalizedKeyspace + ".intake_forms"
+	formSubmissionsTable := normalizedKeyspace + ".form_submissions"
 	roomsTable := normalizedKeyspace + ".rooms"
 
 	persistenceQueries := []string{
@@ -354,6 +359,7 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 					status text,
 					sprint_name text,
 					assignee_id uuid,
+					custom_fields text,
 					status_actor_id text,
 					status_actor_name text,
 					status_changed_at timestamp,
@@ -363,7 +369,81 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 				) WITH CLUSTERING ORDER BY (id ASC)`,
 			tasksTable,
 		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				room_id text,
+				field_id text,
+				name text,
+				field_type text,
+				options text,
+				position int,
+				created_at timestamp,
+				PRIMARY KEY (room_id, field_id)
+			) WITH CLUSTERING ORDER BY (field_id ASC)`,
+			roomFieldSchemasTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				room_id text,
+				from_task_id text,
+				to_task_id text,
+				relation_type text,
+				position int,
+				content text,
+				completed boolean,
+				created_at timestamp,
+				PRIMARY KEY (room_id, from_task_id, to_task_id)
+			) WITH CLUSTERING ORDER BY (from_task_id ASC, to_task_id ASC)`,
+			taskRelationsTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				room_id text,
+				task_id text,
+				entry_id text,
+				user_id text,
+				username text,
+				start_time timestamp,
+				end_time timestamp,
+				duration_seconds int,
+				note text,
+				created_at timestamp,
+				PRIMARY KEY ((room_id, task_id), entry_id)
+			) WITH CLUSTERING ORDER BY (entry_id DESC)`,
+			timeEntriesTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				room_id text,
+				form_id text,
+				title text,
+				description text,
+				fields text,
+				target_status text,
+				target_sprint text,
+				enabled boolean,
+				created_at timestamp,
+				PRIMARY KEY (room_id, form_id)
+			) WITH CLUSTERING ORDER BY (form_id ASC)`,
+			intakeFormsTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				form_id text,
+				submission_id text,
+				room_id text,
+				task_id text,
+				data text,
+				submitter_email text,
+				submitted_at timestamp,
+				PRIMARY KEY (form_id, submission_id)
+			) WITH CLUSTERING ORDER BY (submission_id DESC)`,
+			formSubmissionsTable,
+		),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (assignee_id)`, tasksTable),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (to_task_id)`, taskRelationsTable),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (user_id)`, timeEntriesTable),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (form_id)`, intakeFormsTable),
 	}
 
 	for _, query := range persistenceQueries {
@@ -414,6 +494,7 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_id text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_name text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_changed_at timestamp`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD custom_fields text`, tasksTable),
 	}
 	for _, alterQuery := range alterTasksQueries {
 		err := session.Query(alterQuery).Exec()

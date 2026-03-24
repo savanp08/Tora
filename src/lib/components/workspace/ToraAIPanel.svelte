@@ -41,9 +41,11 @@
 	const TORA_CHAT_HISTORY_LIMIT = 80;
 	const TORA_AI_CONTEXT_USER_LIMIT = 40;
 	const TORA_PROMPT_SUGGESTIONS = [
-		'Rebalance unfinished tasks into the next sprint and keep priority order.',
-		'Identify blockers and add follow-up tasks with owners and due dates.',
-		'Review sprint budget vs spent and suggest where to reduce scope.'
+		'Summarize the current sprint: what is done, in progress, and blocked?',
+		'Based on the task board, what tasks or areas are at risk of delay?',
+		'Generate a concise weekly status report for this project. Include: completed work, in-progress items, blockers, and any budget notes.',
+		'Looking at task assignments and time logs, which team members are taking on the most work? Any imbalance?',
+		'Given the current state of the project, what are the most important next 3 things the team should focus on?'
 	];
 
 	$: normalizedRoomID = normalizeRoomIDValue(roomId);
@@ -356,7 +358,7 @@
 	</div>
 
 	<div class="suggestions-panel">
-		{#each TORA_PROMPT_SUGGESTIONS as suggestion}
+		{#each TORA_PROMPT_SUGGESTIONS.slice(0, 3) as suggestion}
 			<button
 				type="button"
 				class="suggestion-item"

@@ -6,16 +6,24 @@ import {
 	upsertTaskStoreEntry
 } from '$lib/stores/tasks';
 import { addBoardActivityFromSocket, type BoardActivityEvent } from '$lib/stores/boardActivity';
+import { refreshFieldSchemasForRoom } from '$lib/stores/fieldSchema';
 import { normalizeRoomIDValue, toStringValue } from '$lib/utils/chat/core';
 
-export type TaskSocketEventType = 'task_create' | 'task_update' | 'task_move' | 'task_delete';
+export type TaskSocketEventType =
+	| 'task_create'
+	| 'task_update'
+	| 'task_move'
+	| 'task_delete'
+	| 'task_relation_update';
 export const BOARD_ACTIVITY_SOCKET_EVENT_TYPE = 'board_activity';
+export const FIELD_SCHEMA_SOCKET_EVENT_TYPE = 'field_schema_update';
 
 const TASK_SOCKET_EVENT_TYPES = new Set<TaskSocketEventType>([
 	'task_create',
 	'task_update',
 	'task_move',
-	'task_delete'
+	'task_delete',
+	'task_relation_update'
 ]);
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -102,6 +110,11 @@ export function buildTaskSocketPayload(
 			title: task.title,
 			description: task.description,
 			status: normalizedStatus,
+			custom_fields: task.customFields,
+			blocked_by: task.blockedBy,
+			blocks: task.blocks,
+			subtasks: task.subtasks,
+			completion_percent: task.completionPercent,
 			budget: task.budget,
 			actual_cost: task.spent,
 			sprint_name: task.sprintName,
@@ -119,6 +132,14 @@ export function buildTaskSocketPayload(
 			title: task.title,
 			description: task.description,
 			status: normalizedStatus as TaskStatus,
+			customFields: task.customFields,
+			custom_fields: task.customFields,
+			blockedBy: task.blockedBy,
+			blocked_by: task.blockedBy,
+			blocks: task.blocks,
+			subtasks: task.subtasks,
+			completionPercent: task.completionPercent,
+			completion_percent: task.completionPercent,
 			budget: task.budget,
 			actualCost: task.spent,
 			actual_cost: task.spent,
@@ -189,6 +210,23 @@ export function syncTaskStoreFromSocketPayload(rawPayload: unknown) {
 	return true;
 }
 
+export function syncFieldSchemaStoreFromSocketPayload(rawPayload: unknown) {
+	const source = toRecord(rawPayload);
+	if (!source) {
+		return false;
+	}
+	const eventType = toStringValue(source.type).trim().toLowerCase();
+	if (eventType !== FIELD_SCHEMA_SOCKET_EVENT_TYPE) {
+		return false;
+	}
+	const eventRoomId = resolveTaskRoomId(source);
+	if (!eventRoomId) {
+		return true;
+	}
+	void refreshFieldSchemasForRoom(eventRoomId);
+	return true;
+}
+
 export function syncBoardActivityFromSocketPayload(rawPayload: unknown) {
 	const source = toRecord(rawPayload);
 	if (!source) {
@@ -209,7 +247,7 @@ export function syncBoardActivityFromSocketPayload(rawPayload: unknown) {
 	}
 
 	const activityCandidate =
-		payload && 'activity' in payload ? payload.activity : source.activity ?? source.payload;
+		payload && 'activity' in payload ? payload.activity : (source.activity ?? source.payload);
 	addBoardActivityFromSocket(activityCandidate, eventRoomID);
 	return true;
 }

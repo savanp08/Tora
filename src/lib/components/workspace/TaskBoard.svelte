@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { onDestroy, tick } from 'svelte';
+	import CalendarView from '$lib/components/workspace/CalendarView.svelte';
+	import WorkloadView from '$lib/components/workspace/WorkloadView.svelte';
 	import type { OnlineMember } from '$lib/types/chat';
 	import { currentUser } from '$lib/store';
 	import { activeContext } from '$lib/stores/jiraContext';
 	import { addBoardActivity, type BoardActivityInput } from '$lib/stores/boardActivity';
+	import { fieldSchemaStore, type FieldSchema } from '$lib/stores/fieldSchema';
 	import { applyTimelineTaskStatusUpdate } from '$lib/stores/timeline';
 	import {
 		moveTaskOptimistic,
@@ -35,9 +38,10 @@
 		{ value: 'in_progress', label: 'Working on it' },
 		{ value: 'done', label: 'Done' }
 	] as const;
+	const INLINE_GRID_EDIT_FIELDS: EditableField[] = ['title', 'assigneeId', 'budget', 'spent'];
 
 	type ColumnKey = (typeof STATUS_OPTIONS)[number]['value'];
-	type BoardView = 'table' | 'kanban' | 'support';
+	type BoardView = 'table' | 'kanban' | 'support' | 'calendar' | 'workload';
 	type SprintSortColumn = 'title' | 'status' | 'owner' | 'budget' | 'spent' | 'updated';
 	type SprintSortDirection = 'asc' | 'desc';
 	type SprintSortState = {
@@ -48,14 +52,28 @@
 	type EditableCellKey = EditableField | 'status';
 	type TaskSource = 'personal' | 'room';
 	type SupportPriority = 'critical' | 'high' | 'medium' | 'low';
+	type DisplaySubtask = {
+		id: string;
+		content: string;
+		completed: boolean;
+		position: number;
+	};
 	type DisplayTask = {
 		id: string;
 		roomId: string;
 		title: string;
 		description: string;
 		status: string;
+		taskType: string;
+		customFields: Record<string, unknown>;
+		blockedBy: string[];
+		blocks: string[];
+		subtasks: DisplaySubtask[];
+		completionPercent?: number;
 		budget?: number;
 		spent?: number;
+		dueDate?: number;
+		startDate?: number;
 		sprintName: string;
 		assigneeId: string;
 		statusActorId?: string;
@@ -81,6 +99,10 @@
 		title?: unknown;
 		description?: unknown;
 		status?: unknown;
+		task_type?: unknown;
+		taskType?: unknown;
+		custom_fields?: unknown;
+		customFields?: unknown;
 		sprint_name?: unknown;
 		sprintName?: unknown;
 		assignee_id?: unknown;
@@ -91,6 +113,12 @@
 		statusActorName?: unknown;
 		status_changed_at?: unknown;
 		statusChangedAt?: unknown;
+		blocked_by?: unknown;
+		blockedBy?: unknown;
+		blocks?: unknown;
+		subtasks?: unknown;
+		completion_percent?: unknown;
+		completionPercent?: unknown;
 		budget?: unknown;
 		task_budget?: unknown;
 		taskBudget?: unknown;
@@ -98,6 +126,10 @@
 		actualCost?: unknown;
 		spent?: unknown;
 		spent_cost?: unknown;
+		due_date?: unknown;
+		dueDate?: unknown;
+		start_date?: unknown;
+		startDate?: unknown;
 		spentCost?: unknown;
 		created_at?: unknown;
 		createdAt?: unknown;
@@ -176,10 +208,24 @@
 	let editingTaskId = '';
 	let editingField: EditableField | '' = '';
 	let editingValue = '';
+	let editingCustomFields: Record<string, unknown> = {};
+	let editingCustomFieldsBaseline: Record<string, unknown> = {};
+	let editingBlockedBy: string[] = [];
+	let editingBlockedByBaseline: string[] = [];
+	let editingSubtasks: DisplaySubtask[] = [];
+	let editingSubtasksBaseline: DisplaySubtask[] = [];
+	let savingRelations = false;
 	let savingCellKey = '';
 	let quickEditVisible = false;
 	let quickEditorElement: HTMLInputElement | HTMLSelectElement | null = null;
+	let inlineEditorElement: HTMLInputElement | HTMLSelectElement | null = null;
 	let statusMenuTaskId = '';
+
+	// ── task edit modal ───────────────────────────────────────────────────────
+	let taskEditModal: DisplayTask | null = null;
+	let taskEditVals: { title: string; assigneeId: string; status: string; budget: string; spent: string } =
+		{ title: '', assigneeId: '', status: 'todo', budget: '', spent: '' };
+	let taskModalSaving = false;
 	let hoveredTaskId = '';
 	let newTaskInput: HTMLInputElement | null = null;
 	let editingTask: DisplayTask | null = null;
@@ -252,6 +298,11 @@
 				title: task.title,
 				description: task.description,
 				status: task.status,
+				customFields: { ...(task.customFields ?? {}) },
+				blockedBy: [...(task.blockedBy ?? [])],
+				blocks: [...(task.blocks ?? [])],
+				subtasks: cloneDisplaySubtasks(task.subtasks ?? []),
+				completionPercent: task.completionPercent,
 				budget: task.budget,
 				spent: task.spent,
 				sprintName: task.sprintName || '',
@@ -267,7 +318,13 @@
 	).sort(compareTasksForGrid);
 	$: contextGridTasks = dedupeDisplayTasksById([...contextTasks]).sort(compareTasksForGrid);
 	$: boardTasks = contextAware ? contextGridTasks : roomTasks;
-	$: if (boardView !== 'table' && boardView !== 'kanban' && boardView !== 'support') {
+	$: if (
+		boardView !== 'table' &&
+		boardView !== 'kanban' &&
+		boardView !== 'support' &&
+		boardView !== 'calendar' &&
+		boardView !== 'workload'
+	) {
 		boardView = 'table';
 	}
 	$: boardLoading = contextAware ? contextLoading : $taskStoreLoading;
@@ -295,6 +352,7 @@
 	$: if (!editingTaskId || !editingField) {
 		quickEditVisible = false;
 	}
+	$: roomFieldSchemas = [...$fieldSchemaStore];
 	$: ownerOptions = buildOwnerOptions(onlineMembers, boardTasks);
 	$: canCreateSprintTask = canEdit && (!contextAware || $activeContext.type === 'room');
 	$: sprintDraftGroups = sprintDraftGroupsByContext[sprintContextKey] ?? [];
@@ -309,7 +367,7 @@
 	);
 	$: sprintTaskGroups = (() => {
 		const grouped = new Map<string, SprintTaskGroup>();
-		for (const task of boardTasks) {
+		for (const task of supportSourceTasks) {
 			const sprintName = task.sprintName.trim() || 'Backlog';
 			const key = sprintName.toLowerCase();
 			const existing = grouped.get(key);
@@ -339,55 +397,60 @@
 			});
 		}
 
-			return [...grouped.values()]
-				.map((group) => {
-					const sortState = sprintSortStateByKey[group.key];
-					const sortedTasks = sortTasksForSprintGroup(group.tasks, sortState);
-					if (!hasActiveTaskSearch) {
-						return {
-							...group,
-							tasks: sortedTasks,
-							searchScore: 0
-						};
-					}
-
-					const searchMatches = sortedTasks
-						.map((task) => ({
-							task,
-							score: scoreTaskSearchMatch(task, group.name, normalizedTaskSearchQuery, taskSearchTokens)
-						}))
-						.filter((entry) => entry.score > 0)
-						.sort(
-							(left, right) =>
-								right.score - left.score ||
-								compareTasksBySortState(left.task, right.task, sortState) ||
-								compareTasksForGrid(left.task, right.task)
-						);
-
+		return [...grouped.values()]
+			.map((group) => {
+				const sortState = sprintSortStateByKey[group.key];
+				const sortedTasks = sortTasksForSprintGroup(group.tasks, sortState);
+				if (!hasActiveTaskSearch) {
 					return {
 						...group,
-						tasks: searchMatches.map((entry) => entry.task),
-						searchScore: searchMatches[0]?.score ?? 0
+						tasks: sortedTasks,
+						searchScore: 0
 					};
-				})
-				.filter((group) => !hasActiveTaskSearch || group.tasks.length > 0)
-				.sort((left, right) => {
-					if (hasActiveTaskSearch) {
-						const searchDiff = (right.searchScore || 0) - (left.searchScore || 0);
-						if (searchDiff !== 0) {
-							return searchDiff;
-						}
+				}
+
+				const searchMatches = sortedTasks
+					.map((task) => ({
+						task,
+						score: scoreTaskSearchMatch(
+							task,
+							group.name,
+							normalizedTaskSearchQuery,
+							taskSearchTokens
+						)
+					}))
+					.filter((entry) => entry.score > 0)
+					.sort(
+						(left, right) =>
+							right.score - left.score ||
+							compareTasksBySortState(left.task, right.task, sortState) ||
+							compareTasksForGrid(left.task, right.task)
+					);
+
+				return {
+					...group,
+					tasks: searchMatches.map((entry) => entry.task),
+					searchScore: searchMatches[0]?.score ?? 0
+				};
+			})
+			.filter((group) => !hasActiveTaskSearch || group.tasks.length > 0)
+			.sort((left, right) => {
+				if (hasActiveTaskSearch) {
+					const searchDiff = (right.searchScore || 0) - (left.searchScore || 0);
+					if (searchDiff !== 0) {
+						return searchDiff;
 					}
-					if (left.name === 'Backlog' && right.name !== 'Backlog') return 1;
-					if (right.name === 'Backlog' && left.name !== 'Backlog') return -1;
-					return sprintNameCollator.compare(left.name, right.name);
-				});
-		})();
+				}
+				if (left.name === 'Backlog' && right.name !== 'Backlog') return 1;
+				if (right.name === 'Backlog' && left.name !== 'Backlog') return -1;
+				return sprintNameCollator.compare(left.name, right.name);
+			});
+	})();
 	$: hasBoardDataForView = boardView === 'table' ? sprintTaskGroups.length > 0 : hasAnyTasks;
 	$: kanbanColumns = KANBAN_COLUMN_ORDER.map<KanbanColumn>((columnKey) => ({
 		key: columnKey,
 		label: statusLabel(columnKey),
-		tasks: boardTasks
+		tasks: supportSourceTasks
 			.filter((task) => resolveColumn(task.status) === columnKey)
 			.sort(compareTasksForGrid)
 	}));
@@ -564,7 +627,14 @@
 		if (!query) {
 			return [] as string[];
 		}
-		return [...new Set(query.split(/\s+/).map((token) => token.trim()).filter(Boolean))];
+		return [
+			...new Set(
+				query
+					.split(/\s+/)
+					.map((token) => token.trim())
+					.filter(Boolean)
+			)
+		];
 	}
 
 	function scoreSearchField(value: string, token: string, weight: number) {
@@ -721,7 +791,10 @@
 		};
 	}
 
-	function sprintSortDirection(groupKey: string, column: SprintSortColumn): SprintSortDirection | '' {
+	function sprintSortDirection(
+		groupKey: string,
+		column: SprintSortColumn
+	): SprintSortDirection | '' {
 		const current = sprintSortStateByKey[groupKey];
 		if (!current || current.column !== column) {
 			return '';
@@ -893,11 +966,14 @@
 	}
 
 	function sprintGroupKey(value: string) {
-		const trimmed = value.trim();
-		if (!trimmed) {
+		// Collapse all whitespace runs to a single space so that "Sprint 1",
+		// "sprint 1", "sprint  1" all share one group. "sprint1" (no space)
+		// is handled by the backend canonicalization before storage.
+		const normalized = value.trim().toLowerCase().replace(/\s+/g, ' ');
+		if (!normalized) {
 			return 'backlog';
 		}
-		return trimmed.toLowerCase();
+		return normalized;
 	}
 
 	function setSprintDraftGroupsForContext(contextValue: string, nextGroups: string[]) {
@@ -1143,6 +1219,9 @@
 	}
 
 	function isSupportTicket(task: DisplayTask) {
+		if (task.taskType === 'support') {
+			return true;
+		}
 		const ticketType = readSupportMetadataValue(task, ['ticket', 'type']).toLowerCase();
 		if (
 			ticketType === 'support' ||
@@ -1229,6 +1308,270 @@
 		return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized);
 	}
 
+	function parseTaskCustomFieldsValue(value: unknown) {
+		if (typeof value === 'string') {
+			const trimmed = value.trim();
+			if (!trimmed) {
+				return {} as Record<string, unknown>;
+			}
+			try {
+				return parseTaskCustomFieldsValue(JSON.parse(trimmed));
+			} catch {
+				return {} as Record<string, unknown>;
+			}
+		}
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return {} as Record<string, unknown>;
+		}
+		const normalized: Record<string, unknown> = {};
+		for (const [rawKey, rawValue] of Object.entries(value)) {
+			const key = toStringValue(rawKey).trim();
+			if (!key) {
+				continue;
+			}
+			normalized[key] = rawValue;
+		}
+		return normalized;
+	}
+
+	function normalizeCustomFieldType(fieldType: unknown) {
+		return toStringValue(fieldType).trim().toLowerCase();
+	}
+
+	function cloneCustomFieldMap(source: Record<string, unknown>) {
+		const cloned: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(source ?? {})) {
+			if (Array.isArray(value)) {
+				cloned[key] = [...value];
+				continue;
+			}
+			cloned[key] = value;
+		}
+		return cloned;
+	}
+
+	function normalizeTaskRelationIdentifier(value: unknown) {
+		return toStringValue(value).trim();
+	}
+
+	function normalizeTaskRelationIdentifiers(value: unknown) {
+		if (!Array.isArray(value)) {
+			return [] as string[];
+		}
+		const seen = new Set<string>();
+		const next: string[] = [];
+		for (const entry of value) {
+			const relationID = normalizeTaskRelationIdentifier(entry);
+			if (!relationID || seen.has(relationID)) {
+				continue;
+			}
+			seen.add(relationID);
+			next.push(relationID);
+		}
+		return next;
+	}
+
+	function normalizeDisplaySubtasks(value: unknown) {
+		if (!Array.isArray(value)) {
+			return [] as DisplaySubtask[];
+		}
+		const seen = new Set<string>();
+		const next: DisplaySubtask[] = [];
+		for (const entry of value) {
+			if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+				continue;
+			}
+			const source = entry as Record<string, unknown>;
+			const id = normalizeTaskRelationIdentifier(source.id ?? source.subtask_id ?? source.subtaskId);
+			if (!id || seen.has(id)) {
+				continue;
+			}
+			seen.add(id);
+			const content = toStringValue(source.content ?? source.title).trim() || 'Subtask';
+			const completed = Boolean(source.completed);
+			const positionRaw = source.position ?? source.order ?? source.index;
+			let position = 0;
+			if (typeof positionRaw === 'number' && Number.isFinite(positionRaw)) {
+				position = Math.max(0, Math.floor(positionRaw));
+			} else if (typeof positionRaw === 'string') {
+				const parsed = Number(positionRaw);
+				if (Number.isFinite(parsed)) {
+					position = Math.max(0, Math.floor(parsed));
+				}
+			}
+			next.push({
+				id,
+				content,
+				completed,
+				position
+			});
+		}
+		next.sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
+		return next;
+	}
+
+	function cloneDisplaySubtasks(subtasks: DisplaySubtask[]) {
+		return subtasks.map((subtask) => ({
+			id: subtask.id,
+			content: subtask.content,
+			completed: subtask.completed,
+			position: subtask.position
+		}));
+	}
+
+	function calculateSubtaskCompletionPercent(subtasks: DisplaySubtask[]) {
+		if (subtasks.length === 0) {
+			return undefined;
+		}
+		const completedCount = subtasks.filter((subtask) => subtask.completed).length;
+		return Math.round((completedCount / subtasks.length) * 100);
+	}
+
+	function normalizeCustomFieldPatchValue(schema: FieldSchema, value: unknown) {
+		const fieldType = normalizeCustomFieldType(schema.fieldType);
+		if (fieldType === 'checkbox') {
+			return Boolean(value);
+		}
+		if (fieldType === 'number') {
+			const parsed = parseBudgetValue(toStringValue(value));
+			if (parsed == null) {
+				if (toStringValue(value).trim()) {
+					throw new Error(`${schema.name} must be a valid number.`);
+				}
+				return null;
+			}
+			return parsed;
+		}
+		if (fieldType === 'multi_select') {
+			const list = Array.isArray(value)
+				? value.map((entry) => toStringValue(entry).trim()).filter(Boolean)
+				: toStringValue(value)
+						.split(',')
+						.map((entry) => entry.trim())
+						.filter(Boolean);
+			const unique = [...new Set(list)];
+			if (schema.options && schema.options.length > 0) {
+				const allowed = new Set(schema.options.map((option) => option.toLowerCase()));
+				for (const option of unique) {
+					if (!allowed.has(option.toLowerCase())) {
+						throw new Error(`"${option}" is not a valid option for ${schema.name}.`);
+					}
+				}
+			}
+			return unique.length > 0 ? unique : null;
+		}
+
+		const normalized = toStringValue(value).trim();
+		if (!normalized) {
+			return null;
+		}
+		if (fieldType === 'select' && schema.options && schema.options.length > 0) {
+			const allowed = new Set(schema.options.map((option) => option.toLowerCase()));
+			if (!allowed.has(normalized.toLowerCase())) {
+				throw new Error(`"${normalized}" is not a valid option for ${schema.name}.`);
+			}
+		}
+		if (fieldType === 'url') {
+			try {
+				const parsed = new URL(normalized);
+				if (!parsed.protocol.startsWith('http')) {
+					throw new Error('Invalid URL protocol');
+				}
+			} catch {
+				throw new Error(`${schema.name} must be a valid URL.`);
+			}
+		}
+		if (fieldType === 'date') {
+			const parsedDate = new Date(normalized);
+			if (Number.isNaN(parsedDate.getTime())) {
+				throw new Error(`${schema.name} must be a valid date.`);
+			}
+		}
+		return normalized;
+	}
+
+	function customFieldValueSignature(value: unknown) {
+		if (Array.isArray(value)) {
+			return JSON.stringify(value.map((entry) => toStringValue(entry).trim()).filter(Boolean));
+		}
+		if (value == null) {
+			return '';
+		}
+		if (typeof value === 'object') {
+			try {
+				return JSON.stringify(value);
+			} catch {
+				return '';
+			}
+		}
+		return toStringValue(value).trim();
+	}
+
+	function buildTaskCustomFieldPatch() {
+		const patch: Record<string, unknown> = {};
+		for (const schema of roomFieldSchemas) {
+			const fieldID = schema.fieldId;
+			const baselineValue = editingCustomFieldsBaseline[fieldID];
+			const nextRawValue = editingCustomFields[fieldID];
+			const nextValue = normalizeCustomFieldPatchValue(schema, nextRawValue);
+			if (customFieldValueSignature(baselineValue) === customFieldValueSignature(nextValue)) {
+				continue;
+			}
+			patch[fieldID] = nextValue;
+		}
+		return patch;
+	}
+
+	function applyCustomFieldPatch(
+		base: Record<string, unknown>,
+		patch: Record<string, unknown>
+	): Record<string, unknown> {
+		const next = cloneCustomFieldMap(base);
+		for (const [fieldID, value] of Object.entries(patch)) {
+			if (value == null || value === '' || (Array.isArray(value) && value.length === 0)) {
+				delete next[fieldID];
+				continue;
+			}
+			next[fieldID] = value;
+		}
+		return next;
+	}
+
+	function isCustomFieldOptionSelected(fieldID: string, option: string) {
+		const current = editingCustomFields[fieldID];
+		if (!Array.isArray(current)) {
+			return false;
+		}
+		return current.some(
+			(entry) => toStringValue(entry).trim().toLowerCase() === option.trim().toLowerCase()
+		);
+	}
+
+	function toggleCustomFieldOption(fieldID: string, option: string, checked: boolean) {
+		const current = Array.isArray(editingCustomFields[fieldID])
+			? editingCustomFields[fieldID].map((entry) => toStringValue(entry).trim()).filter(Boolean)
+			: [];
+		const normalizedOption = option.trim();
+		const nextSet = new Set(current.map((entry) => entry.toLowerCase()));
+		if (checked) {
+			nextSet.add(normalizedOption.toLowerCase());
+		} else {
+			nextSet.delete(normalizedOption.toLowerCase());
+		}
+		const ordered = [
+			...new Set(
+				checked
+					? [...current, normalizedOption]
+					: current.filter((entry) => entry.toLowerCase() !== normalizedOption.toLowerCase())
+			)
+		];
+		const next = ordered.filter((entry) => nextSet.has(entry.toLowerCase()));
+		editingCustomFields = {
+			...editingCustomFields,
+			[fieldID]: next
+		};
+	}
+
 	function normalizePersonalItem(raw: unknown): DisplayTask | null {
 		if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
 			return null;
@@ -1249,6 +1592,11 @@
 			title: displayTitle,
 			description: description || (content !== displayTitle ? content : ''),
 			status: toStringValue(source.status) || 'pending',
+			customFields: {},
+			blockedBy: [],
+			blocks: [],
+			subtasks: [],
+			completionPercent: undefined,
 			budget: undefined,
 			spent: undefined,
 			sprintName: '',
@@ -1281,14 +1629,31 @@
 					source.spent_cost ??
 					source.spentCost
 			) ?? parseSpentFromDescription(description);
+		const blockedBy = normalizeTaskRelationIdentifiers(source.blocked_by ?? source.blockedBy);
+		const blocks = normalizeTaskRelationIdentifiers(source.blocks);
+		const subtasks = normalizeDisplaySubtasks(source.subtasks);
+		const completionPercent =
+			parseBudgetValue(source.completion_percent ?? source.completionPercent) ??
+			calculateSubtaskCompletionPercent(subtasks);
+		const taskTypeRaw = toStringValue(source.task_type ?? source.taskType).trim().toLowerCase();
+		const dueDate = parseTimestamp(source.due_date ?? source.dueDate) || undefined;
+		const startDate = parseTimestamp(source.start_date ?? source.startDate) || undefined;
 		return {
 			id: taskID,
 			roomId: normalizeRoomIDValue(normalizedRoomId || $activeContext.id),
 			title: toStringValue(source.title) || 'Untitled Task',
 			description,
 			status: toStringValue(source.status) || 'todo',
+			taskType: taskTypeRaw === 'support' ? 'support' : 'sprint',
+			customFields: parseTaskCustomFieldsValue(source.custom_fields ?? source.customFields),
+			blockedBy,
+			blocks,
+			subtasks,
+			completionPercent,
 			budget,
 			spent,
+			dueDate: dueDate && dueDate > 0 ? dueDate : undefined,
+			startDate: startDate && startDate > 0 ? startDate : undefined,
 			sprintName: toStringValue(source.sprint_name ?? source.sprintName),
 			assigneeId: toStringValue(source.assignee_id ?? source.assigneeId),
 			statusActorId: toStringValue(source.status_actor_id ?? source.statusActorId) || undefined,
@@ -1740,6 +2105,16 @@
 		return savingCellKey === makeCellKey(taskId, field);
 	}
 
+	function shouldUseInlineGridEditor(field: EditableField, mode: 'auto' | 'inline' | 'panel') {
+		if (mode === 'inline') {
+			return true;
+		}
+		if (mode === 'panel') {
+			return false;
+		}
+		return boardView === 'table' && INLINE_GRID_EDIT_FIELDS.includes(field);
+	}
+
 	function canEditTaskField(task: DisplayTask, field: EditableField) {
 		if (field === 'title') {
 			return true;
@@ -1779,7 +2154,11 @@
 		return String(value).trim();
 	}
 
-	async function startEditing(task: DisplayTask, field: EditableField) {
+	async function startEditing(
+		task: DisplayTask,
+		field: EditableField,
+		mode: 'auto' | 'inline' | 'panel' = 'auto'
+	) {
 		if (!canEditTaskField(task, field)) {
 			return;
 		}
@@ -1798,12 +2177,22 @@
 		} else {
 			editingValue = baseValue;
 		}
-		quickEditVisible = true;
+		editingCustomFields = cloneCustomFieldMap(task.customFields ?? {});
+		editingCustomFieldsBaseline = cloneCustomFieldMap(task.customFields ?? {});
+		editingBlockedBy = [...(task.blockedBy ?? [])];
+		editingBlockedByBaseline = [...(task.blockedBy ?? [])];
+		editingSubtasks = cloneDisplaySubtasks(task.subtasks ?? []);
+		editingSubtasksBaseline = cloneDisplaySubtasks(task.subtasks ?? []);
+		const useInlineEditor = shouldUseInlineGridEditor(field, mode);
+		quickEditVisible = !useInlineEditor;
 		await tick();
-		quickEditorElement?.focus();
-		if (quickEditorElement instanceof HTMLInputElement) {
-			quickEditorElement.select();
-		}
+		setTimeout(() => {
+			const activeEditorElement = useInlineEditor ? inlineEditorElement : quickEditorElement;
+			activeEditorElement?.focus();
+			if (activeEditorElement instanceof HTMLInputElement) {
+				activeEditorElement.select();
+			}
+		}, 0);
 	}
 
 	function closeQuickEditor() {
@@ -1811,8 +2200,417 @@
 		cancelEditing();
 	}
 
+	function openTaskModal(task: DisplayTask) {
+		taskEditModal = task;
+		taskEditVals = {
+			title: task.title || '',
+			assigneeId: task.assigneeId || '',
+			status: resolveColumn(task.status) || 'todo',
+			budget: task.budget != null ? String(task.budget) : '',
+			spent: task.spent != null ? String(task.spent) : ''
+		};
+		taskModalSaving = false;
+		statusMenuTaskId = '';
+		cancelEditing();
+	}
+
+	function closeTaskModal() {
+		taskEditModal = null;
+		taskEditVals = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '' };
+		taskModalSaving = false;
+	}
+
+	async function saveTaskModal() {
+		const task = taskEditModal;
+		if (!task) return;
+		if (!taskEditVals.title.trim()) {
+			setBoardError('Task name cannot be empty');
+			return;
+		}
+		taskModalSaving = true;
+		clearBoardError();
+		try {
+			const current = ($taskStore.find((t) => t.id === task.id) ?? task) as DisplayTask;
+			if (taskEditVals.title.trim() !== (current.title || '').trim())
+				await updateRoomTaskField(current, 'title', taskEditVals.title.trim());
+			if (taskEditVals.assigneeId !== (current.assigneeId || ''))
+				await updateRoomTaskField(current, 'assigneeId', taskEditVals.assigneeId);
+			const curBudget = current.budget != null ? String(current.budget) : '';
+			if (String(taskEditVals.budget ?? '').trim() !== curBudget.trim())
+				await updateRoomTaskField(current, 'budget', String(taskEditVals.budget ?? ''));
+			const curSpent = current.spent != null ? String(current.spent) : '';
+			if (String(taskEditVals.spent ?? '').trim() !== curSpent.trim())
+				await updateRoomTaskField(current, 'spent', String(taskEditVals.spent ?? ''));
+			if (taskEditVals.status !== resolveColumn(current.status as ColumnKey))
+				await applyStatus(current, taskEditVals.status as ColumnKey);
+			closeTaskModal();
+		} catch (err) {
+			setBoardError(err instanceof Error ? err.message : 'Failed to update task');
+		} finally {
+			taskModalSaving = false;
+		}
+	}
+
+	function relationTaskOptions(task: DisplayTask) {
+		return boardTasks
+			.filter((entry) => entry.source === 'room' && entry.id !== task.id)
+			.sort((left, right) => left.title.localeCompare(right.title, undefined, { sensitivity: 'base' }));
+	}
+
+	function isEditingDependencySelected(taskID: string) {
+		return editingBlockedBy.includes(taskID);
+	}
+
+	function toggleEditingDependency(taskID: string, checked: boolean) {
+		const normalizedTaskID = taskID.trim();
+		if (!normalizedTaskID) {
+			return;
+		}
+		const nextSet = new Set(editingBlockedBy.map((entry) => entry.trim()).filter(Boolean));
+		if (checked) {
+			nextSet.add(normalizedTaskID);
+		} else {
+			nextSet.delete(normalizedTaskID);
+		}
+		editingBlockedBy = [...nextSet];
+	}
+
+	function createDraftSubtask(content = ''): DisplaySubtask {
+		return {
+			id: `temp-subtask-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+			content: content.trim() || 'Subtask',
+			completed: false,
+			position: editingSubtasks.length
+		};
+	}
+
+	function addEditingSubtask() {
+		editingSubtasks = [...editingSubtasks, createDraftSubtask('Subtask')].map((subtask, index) => ({
+			...subtask,
+			position: index
+		}));
+	}
+
+	function removeEditingSubtask(subtaskID: string) {
+		editingSubtasks = editingSubtasks
+			.filter((subtask) => subtask.id !== subtaskID)
+			.map((subtask, index) => ({
+				...subtask,
+				position: index
+			}));
+	}
+
+	function updateEditingSubtaskContent(subtaskID: string, nextValue: string) {
+		editingSubtasks = editingSubtasks.map((subtask) =>
+			subtask.id !== subtaskID
+				? subtask
+				: {
+						...subtask,
+						content: nextValue.trim() || 'Subtask'
+					}
+		);
+	}
+
+	function updateEditingSubtaskCompleted(subtaskID: string, completed: boolean) {
+		editingSubtasks = editingSubtasks.map((subtask) =>
+			subtask.id !== subtaskID
+				? subtask
+				: {
+						...subtask,
+						completed
+					}
+		);
+	}
+
+	function normalizeEditingSubtasks(subtasks: DisplaySubtask[]) {
+		return subtasks
+			.map((subtask, index) => ({
+				id: normalizeTaskRelationIdentifier(subtask.id) || `temp-subtask-${index + 1}`,
+				content: subtask.content.trim() || `Subtask ${index + 1}`,
+				completed: Boolean(subtask.completed),
+				position: index
+			}))
+			.filter((subtask) => Boolean(subtask.id));
+	}
+
+	function dependencySignature(values: string[]) {
+		return normalizeTaskRelationIdentifiers(values).sort().join('|');
+	}
+
+	function subtasksSignature(subtasks: DisplaySubtask[]) {
+		const normalized = normalizeEditingSubtasks(subtasks);
+		return JSON.stringify(normalized);
+	}
+
+	function taskSubtaskSummary(task: DisplayTask) {
+		const subtasks = task.subtasks ?? [];
+		if (subtasks.length === 0) {
+			return null;
+		}
+		const completedCount = subtasks.filter((subtask) => subtask.completed).length;
+		const percent =
+			typeof task.completionPercent === 'number'
+				? Math.max(0, Math.min(100, Math.round(task.completionPercent)))
+				: Math.round((completedCount / subtasks.length) * 100);
+		return {
+			completedCount,
+			totalCount: subtasks.length,
+			percent
+		};
+	}
+
+	function taskSubtaskSummaryLabel(task: DisplayTask) {
+		const summary = taskSubtaskSummary(task);
+		if (!summary) {
+			return '';
+		}
+		return `${summary.completedCount}/${summary.totalCount} subtasks`;
+	}
+
+	function taskSubtaskPercentLabel(task: DisplayTask) {
+		const summary = taskSubtaskSummary(task);
+		if (!summary) {
+			return '';
+		}
+		return `${summary.percent}% subtasks`;
+	}
+
+	function applyRoomTaskMutationPayload(
+		payload: unknown,
+		targetRoomID: string,
+		source: TaskSource
+	): DisplayTask {
+		const normalizedUpdatedTask = normalizeRoomTask(payload);
+		if (!normalizedUpdatedTask) {
+			throw new Error('Invalid task relation response');
+		}
+		const nextTask = { ...normalizedUpdatedTask, source };
+		if (contextAware && source === 'room' && $activeContext.type === 'room') {
+			contextTasks = contextTasks.map((entry) => (entry.id === nextTask.id ? nextTask : entry));
+		} else {
+			upsertTaskStoreEntry(payload, targetRoomID);
+		}
+		return nextTask;
+	}
+
+	async function createTaskRelation(
+		targetRoomID: string,
+		taskID: string,
+		body: Record<string, unknown>,
+		source: TaskSource
+	) {
+		const response = await fetch(
+			`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomID)}/tasks/${encodeURIComponent(taskID)}/relations`,
+			{
+				method: 'POST',
+				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+				credentials: 'include',
+				body: JSON.stringify(body)
+			}
+		);
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+		const payload = await response.json().catch(() => null);
+		return applyRoomTaskMutationPayload(payload, targetRoomID, source);
+	}
+
+	async function updateTaskRelation(
+		targetRoomID: string,
+		taskID: string,
+		relationTargetID: string,
+		body: Record<string, unknown>,
+		source: TaskSource
+	) {
+		const response = await fetch(
+			`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomID)}/tasks/${encodeURIComponent(taskID)}/relations/${encodeURIComponent(relationTargetID)}`,
+			{
+				method: 'PATCH',
+				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+				credentials: 'include',
+				body: JSON.stringify(body)
+			}
+		);
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+		const payload = await response.json().catch(() => null);
+		return applyRoomTaskMutationPayload(payload, targetRoomID, source);
+	}
+
+	async function deleteTaskRelation(
+		targetRoomID: string,
+		taskID: string,
+		relationTargetID: string,
+		source: TaskSource
+	) {
+		const response = await fetch(
+			`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomID)}/tasks/${encodeURIComponent(taskID)}/relations/${encodeURIComponent(relationTargetID)}`,
+			{
+				method: 'DELETE',
+				headers: withSessionUserHeaders(),
+				credentials: 'include'
+			}
+		);
+		if (!response.ok) {
+			throw new Error(await parseErrorMessage(response));
+		}
+		const payload = await response.json().catch(() => null);
+		return applyRoomTaskMutationPayload(payload, targetRoomID, source);
+	}
+
+	async function persistEditingTaskRelations(task: DisplayTask) {
+		if (task.source !== 'room') {
+			return true;
+		}
+
+		const targetRoomID = contextAware
+			? normalizeRoomIDValue($activeContext.id)
+			: normalizeRoomIDValue(task.roomId || normalizedRoomId);
+		if (!targetRoomID) {
+			setBoardError('Invalid room id');
+			return false;
+		}
+
+		const nextBlockedBy = normalizeTaskRelationIdentifiers(editingBlockedBy);
+		const baselineBlockedBy = normalizeTaskRelationIdentifiers(editingBlockedByBaseline);
+		const nextSubtasks = normalizeEditingSubtasks(editingSubtasks);
+		const baselineSubtasks = normalizeEditingSubtasks(editingSubtasksBaseline);
+
+		const dependenciesChanged = dependencySignature(nextBlockedBy) !== dependencySignature(baselineBlockedBy);
+		const subtasksChanged = subtasksSignature(nextSubtasks) !== subtasksSignature(baselineSubtasks);
+		if (!dependenciesChanged && !subtasksChanged) {
+			return true;
+		}
+
+		savingRelations = true;
+		try {
+			let latestTask: DisplayTask | null = null;
+
+			if (dependenciesChanged) {
+				const dependenciesToRemove = baselineBlockedBy.filter(
+					(dependencyID) => !nextBlockedBy.includes(dependencyID)
+				);
+				const dependenciesToAdd = nextBlockedBy.filter(
+					(dependencyID) => !baselineBlockedBy.includes(dependencyID)
+				);
+
+				for (const dependencyID of dependenciesToRemove) {
+					latestTask = await deleteTaskRelation(targetRoomID, task.id, dependencyID, task.source);
+				}
+				for (const dependencyID of dependenciesToAdd) {
+					latestTask = await createTaskRelation(
+						targetRoomID,
+						task.id,
+						{
+							relation_type: 'blocked_by',
+							to_task_id: dependencyID
+						},
+						task.source
+					);
+				}
+			}
+
+			if (subtasksChanged) {
+				const baselineByID = new Map(baselineSubtasks.map((subtask) => [subtask.id, subtask]));
+				const nextByID = new Map(nextSubtasks.map((subtask) => [subtask.id, subtask]));
+
+				for (const baselineSubtask of baselineSubtasks) {
+					if (nextByID.has(baselineSubtask.id)) {
+						continue;
+					}
+					latestTask = await deleteTaskRelation(
+						targetRoomID,
+						task.id,
+						baselineSubtask.id,
+						task.source
+					);
+				}
+
+				for (const nextSubtask of nextSubtasks) {
+					const baselineSubtask = baselineByID.get(nextSubtask.id);
+					if (!baselineSubtask) {
+						continue;
+					}
+					const changed =
+						baselineSubtask.content !== nextSubtask.content ||
+						baselineSubtask.completed !== nextSubtask.completed ||
+						baselineSubtask.position !== nextSubtask.position;
+					if (!changed) {
+						continue;
+					}
+					latestTask = await updateTaskRelation(
+						targetRoomID,
+						task.id,
+						nextSubtask.id,
+						{
+							relation_type: 'subtask',
+							content: nextSubtask.content,
+							completed: nextSubtask.completed,
+							position: nextSubtask.position
+						},
+						task.source
+					);
+				}
+
+				for (const nextSubtask of nextSubtasks) {
+					if (baselineByID.has(nextSubtask.id)) {
+						continue;
+					}
+					const body: Record<string, unknown> = {
+						relation_type: 'subtask',
+						content: nextSubtask.content,
+						completed: nextSubtask.completed,
+						position: nextSubtask.position
+					};
+					if (!nextSubtask.id.startsWith('temp-subtask-')) {
+						body.to_task_id = nextSubtask.id;
+					}
+					latestTask = await createTaskRelation(targetRoomID, task.id, body, task.source);
+				}
+			}
+
+			if (latestTask) {
+				editingBlockedBy = [...(latestTask.blockedBy ?? [])];
+				editingBlockedByBaseline = [...(latestTask.blockedBy ?? [])];
+				editingSubtasks = cloneDisplaySubtasks(latestTask.subtasks ?? []);
+				editingSubtasksBaseline = cloneDisplaySubtasks(latestTask.subtasks ?? []);
+			} else {
+				editingBlockedByBaseline = [...nextBlockedBy];
+				editingSubtasksBaseline = cloneDisplaySubtasks(nextSubtasks);
+			}
+			return true;
+		} catch (error) {
+			setBoardError(error instanceof Error ? error.message : 'Failed to save task relations');
+			return false;
+		} finally {
+			savingRelations = false;
+		}
+	}
+
 	async function saveQuickEditor() {
 		if (!editingTask || !editingField) {
+			return;
+		}
+		const nextValue = normalizeEditableValue(editingValue);
+		if (editingField === 'title' && !nextValue) {
+			setBoardError('Task name cannot be empty');
+			return;
+		}
+		if (
+			(editingField === 'budget' || editingField === 'spent') &&
+			nextValue &&
+			isNaN(Number(nextValue.replace(/[$,]/g, '')))
+		) {
+			setBoardError(`${fieldLabel(editingField)} must be a number`);
+			return;
+		}
+		const customFieldsSaved = await persistEditingCustomFields(editingTask);
+		if (!customFieldsSaved) {
+			return;
+		}
+		const relationsSaved = await persistEditingTaskRelations(editingTask);
+		if (!relationsSaved) {
 			return;
 		}
 		await commitEditing(editingTask, editingField);
@@ -1822,12 +2620,19 @@
 		editingTaskId = '';
 		editingField = '';
 		editingValue = '';
+		editingCustomFields = {};
+		editingCustomFieldsBaseline = {};
+		editingBlockedBy = [];
+		editingBlockedByBaseline = [];
+		editingSubtasks = [];
+		editingSubtasksBaseline = [];
+		savingRelations = false;
 	}
 
 	function fieldLabel(field: EditableField) {
 		if (field === 'title') return 'task name';
 		if (field === 'description') return 'description';
-		if (field === 'assigneeId') return 'owner';
+		if (field === 'assigneeId') return 'assignee';
 		if (field === 'budget') return 'budget';
 		if (field === 'spent') return 'spent';
 		return 'sprint';
@@ -2023,6 +2828,100 @@
 		sendSocketPayload(buildTaskSocketPayload('task_update', targetRoomId, updatedTask));
 	}
 
+	async function persistEditingCustomFields(task: DisplayTask) {
+		if (roomFieldSchemas.length === 0) {
+			return true;
+		}
+
+		let patch: Record<string, unknown> = {};
+		try {
+			patch = buildTaskCustomFieldPatch();
+		} catch (error) {
+			setBoardError(error instanceof Error ? error.message : 'Invalid custom field values');
+			return false;
+		}
+		if (Object.keys(patch).length === 0) {
+			return true;
+		}
+
+		if (contextAware && task.source === 'personal') {
+			const patchedFields = applyCustomFieldPatch(task.customFields ?? {}, patch);
+			contextTasks = contextTasks.map((entry) =>
+				entry.id === task.id
+					? {
+							...entry,
+							customFields: patchedFields,
+							updatedAt: Date.now()
+						}
+					: entry
+			);
+			editingCustomFieldsBaseline = cloneCustomFieldMap(patchedFields);
+			editingCustomFields = cloneCustomFieldMap(patchedFields);
+			return true;
+		}
+
+		const targetRoomID = contextAware
+			? normalizeRoomIDValue($activeContext.id)
+			: normalizeRoomIDValue(task.roomId || normalizedRoomId);
+		if (!targetRoomID) {
+			setBoardError('Invalid room id');
+			return false;
+		}
+
+		try {
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomID)}/tasks/${encodeURIComponent(task.id)}`,
+				{
+					method: 'PUT',
+					headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+					credentials: 'include',
+					body: JSON.stringify({ custom_fields: patch })
+				}
+			);
+			if (!response.ok) {
+				throw new Error(await parseErrorMessage(response));
+			}
+
+			const payload = await response.json().catch(() => null);
+			if (contextAware && task.source === 'room' && $activeContext.type === 'room') {
+				const normalizedUpdatedTask = normalizeRoomTask(payload);
+				if (!normalizedUpdatedTask) {
+					throw new Error('Invalid task update response');
+				}
+				const nextTask = { ...normalizedUpdatedTask, source: task.source };
+				contextTasks = contextTasks.map((entry) => (entry.id === task.id ? nextTask : entry));
+				sendSocketPayload(buildTaskSocketPayload('task_update', targetRoomID, nextTask));
+				publishRoomBoardActivity(targetRoomID, {
+					type: 'task_modified',
+					title: `Updated ${nextTask.title}`,
+					subtitle: 'Edited custom fields',
+					actor: sessionUsername || sessionUserID || 'Unknown'
+				});
+				editingCustomFieldsBaseline = cloneCustomFieldMap(nextTask.customFields ?? {});
+				editingCustomFields = cloneCustomFieldMap(nextTask.customFields ?? {});
+				return true;
+			}
+
+			const updatedTask = upsertTaskStoreEntry(payload, targetRoomID);
+			if (!updatedTask) {
+				throw new Error('Invalid task update response');
+			}
+			publishRoomBoardActivity(targetRoomID, {
+				type: 'task_modified',
+				title: `Updated ${updatedTask.title}`,
+				subtitle: 'Edited custom fields',
+				actor: sessionUsername || sessionUserID || 'Unknown'
+			});
+			sendSocketPayload(buildTaskSocketPayload('task_update', targetRoomID, updatedTask));
+			editingCustomFieldsBaseline = cloneCustomFieldMap(updatedTask.customFields ?? {});
+			editingCustomFields = cloneCustomFieldMap(updatedTask.customFields ?? {});
+			return true;
+		} catch (error) {
+			setBoardError(error instanceof Error ? error.message : 'Failed to update custom fields');
+			return false;
+		}
+	}
+
 	async function commitEditing(task: DisplayTask, field: EditableField) {
 		if (!isEditing(task.id, field)) {
 			return;
@@ -2088,6 +2987,14 @@
 		}
 		if (event.key === 'Enter') {
 			event.preventDefault();
+			if (editingTaskId === task.id && editingField === field) {
+				if (quickEditVisible) {
+					void saveQuickEditor();
+				} else {
+					void commitEditing(task, field);
+				}
+				return;
+			}
 			void commitEditing(task, field);
 		}
 	}
@@ -2100,8 +3007,23 @@
 		}
 		if (event.key === 'Enter') {
 			event.preventDefault();
+			if (editingTaskId === task.id && editingField === 'assigneeId') {
+				if (quickEditVisible) {
+					void saveQuickEditor();
+				} else {
+					void commitEditing(task, 'assigneeId');
+				}
+				return;
+			}
 			void commitEditing(task, 'assigneeId');
 		}
+	}
+
+	function onInlineEditorBlur(task: DisplayTask, field: EditableField) {
+		if (!isEditing(task.id, field) || quickEditVisible) {
+			return;
+		}
+		void commitEditing(task, field);
 	}
 
 	function toggleStatusMenu(event: MouseEvent, task: DisplayTask) {
@@ -2352,7 +3274,8 @@
 						title: requestTitle,
 						description,
 						sprint_name: sprintName,
-						status: 'todo'
+						status: 'todo',
+						task_type: 'support'
 					})
 				}
 			);
@@ -2614,6 +3537,21 @@
 		targetForm.querySelector<HTMLInputElement>("input[type='text']")?.focus();
 	}
 
+	function handleBoardSubviewEditTask(event: CustomEvent<{ taskId?: string }>) {
+		if (!canEdit) {
+			return;
+		}
+		const taskID = event.detail?.taskId?.trim() || '';
+		if (!taskID) {
+			return;
+		}
+		const task = boardTasks.find((entry) => entry.id === taskID);
+		if (!task) {
+			return;
+		}
+		void startEditing(task, 'title', 'inline');
+	}
+
 	function onWindowClick() {
 		statusMenuTaskId = '';
 	}
@@ -2625,15 +3563,17 @@
 	{#if boardToastMessage}
 		<div class="board-toast" role="status" aria-live="polite">{boardToastMessage}</div>
 	{/if}
-	<header class="board-header">
-		<div class="header-main">
-			<h2>{boardTitle}</h2>
-			<p>{boardTasks.length} tasks</p>
-		</div>
-		<div class="header-meta">
-			<span>Latest update {formatCellTime(boardLastUpdatedAt)}</span>
-		</div>
-	</header>
+	{#if boardView === 'table' || boardView === 'kanban'}
+		<header class="board-header">
+			<div class="header-main">
+				<h2>{boardTitle}</h2>
+				<p>{boardTasks.length} tasks</p>
+			</div>
+			<div class="header-meta">
+				<span>Latest update {formatCellTime(boardLastUpdatedAt)}</span>
+			</div>
+		</header>
+	{/if}
 
 	{#if boardView === 'table'}
 		<section class="task-search" aria-label="Search tasks">
@@ -2643,7 +3583,7 @@
 					id="task-search-input"
 					type="search"
 					bind:value={taskSearchQuery}
-					placeholder="Sprint, task, owner, status, budget, spent, updated, description…"
+					placeholder="Sprint, task, assignee, status, budget, cost, updated, description…"
 					autocomplete="off"
 				/>
 			</label>
@@ -2655,6 +3595,7 @@
 		</section>
 	{/if}
 
+	{#if boardView === 'table' || boardView === 'kanban'}
 	<section class="sprint-composer" aria-label="Create sprint">
 		<div class="sprint-composer-head">
 			<button
@@ -2694,9 +3635,9 @@
 					<div class="sprint-preview-head">
 						<span>Task</span>
 						<span>Status</span>
-						<span>Owner</span>
+						<span>Assignee</span>
 						<span>Budget</span>
-						<span>Spent</span>
+						<span>Cost</span>
 						<span>Updated</span>
 					</div>
 					<div class="sprint-preview-body">
@@ -2789,6 +3730,7 @@
 			</form>
 		{/if}
 	</section>
+	{/if}
 
 	{#if quickEditVisible && editingTask && editingField}
 		<section class="quick-edit-panel" aria-label="Task quick editor">
@@ -2817,7 +3759,7 @@
 							class="quick-edit-input"
 							type="text"
 							bind:value={editingValue}
-							placeholder="Owner"
+							placeholder="Assignee"
 							on:keydown={(event) => onEditorKeyDown(event, editingTask, 'assigneeId')}
 						/>
 					{/if}
@@ -2848,30 +3790,196 @@
 					type="button"
 					class="quick-edit-btn quick-edit-save"
 					on:click={() => void saveQuickEditor()}
-					disabled={isSaving(editingTask.id, editingField)}
+					disabled={isSaving(editingTask.id, editingField) || savingRelations}
 				>
 					Save
 				</button>
 				<button type="button" class="quick-edit-btn" on:click={closeQuickEditor}>Cancel</button>
 			</div>
+			{#if editingTask.source === 'room' && roomFieldSchemas.length > 0}
+				<div class="quick-custom-fields">
+					<h4>Custom fields</h4>
+					<div class="quick-custom-fields-grid">
+						{#each roomFieldSchemas as schema (schema.fieldId)}
+							<label class="quick-custom-field">
+								<span>{schema.name}</span>
+								{#if normalizeCustomFieldType(schema.fieldType) === 'checkbox'}
+									<input
+										type="checkbox"
+										checked={Boolean(editingCustomFields[schema.fieldId])}
+										on:change={(event) => {
+											const target = event.currentTarget as HTMLInputElement;
+											editingCustomFields = {
+												...editingCustomFields,
+												[schema.fieldId]: target.checked
+											};
+										}}
+									/>
+								{:else if normalizeCustomFieldType(schema.fieldType) === 'select'}
+									<select
+										value={toStringValue(editingCustomFields[schema.fieldId])}
+										on:change={(event) => {
+											const target = event.currentTarget as HTMLSelectElement;
+											editingCustomFields = {
+												...editingCustomFields,
+												[schema.fieldId]: target.value
+											};
+										}}
+									>
+										<option value="">Select</option>
+										{#each schema.options ?? [] as option (option)}
+											<option value={option}>{option}</option>
+										{/each}
+									</select>
+								{:else if normalizeCustomFieldType(schema.fieldType) === 'multi_select'}
+									<div class="quick-custom-options">
+										{#if schema.options && schema.options.length > 0}
+											{#each schema.options as option (option)}
+												<label class="quick-custom-option">
+													<input
+														type="checkbox"
+														checked={isCustomFieldOptionSelected(schema.fieldId, option)}
+														on:change={(event) => {
+															const target = event.currentTarget as HTMLInputElement;
+															toggleCustomFieldOption(schema.fieldId, option, target.checked);
+														}}
+													/>
+													<span>{option}</span>
+												</label>
+											{/each}
+										{:else}
+											<span class="quick-custom-empty">No options configured</span>
+										{/if}
+									</div>
+								{:else}
+									<input
+										type={normalizeCustomFieldType(schema.fieldType) === 'number'
+											? 'number'
+											: normalizeCustomFieldType(schema.fieldType) === 'date'
+												? 'date'
+												: normalizeCustomFieldType(schema.fieldType) === 'url'
+													? 'url'
+													: 'text'}
+										value={toStringValue(editingCustomFields[schema.fieldId])}
+										on:input={(event) => {
+											const target = event.currentTarget as HTMLInputElement;
+											editingCustomFields = {
+												...editingCustomFields,
+												[schema.fieldId]: target.value
+											};
+										}}
+									/>
+								{/if}
+							</label>
+						{/each}
+					</div>
+				</div>
+			{/if}
+			{#if editingTask.source === 'room'}
+				<div class="quick-relations">
+					<h4>Dependencies</h4>
+					{#if relationTaskOptions(editingTask).length === 0}
+						<p class="quick-custom-empty">No other tasks available for dependencies.</p>
+					{:else}
+						<div class="quick-relation-list">
+							{#each relationTaskOptions(editingTask) as dependencyTask (dependencyTask.id)}
+								<label class="quick-relation-option">
+									<input
+										type="checkbox"
+										checked={isEditingDependencySelected(dependencyTask.id)}
+										on:change={(event) =>
+											toggleEditingDependency(
+												dependencyTask.id,
+												(event.currentTarget as HTMLInputElement).checked
+											)}
+									/>
+									<span>{dependencyTask.title}</span>
+								</label>
+							{/each}
+						</div>
+					{/if}
+
+					<h4>Subtasks</h4>
+					<div class="quick-subtask-list">
+						{#if editingSubtasks.length === 0}
+							<p class="quick-custom-empty">No subtasks yet.</p>
+						{:else}
+							{#each editingSubtasks as subtask (subtask.id)}
+								<div class="quick-subtask-row">
+									<input
+										type="checkbox"
+										checked={subtask.completed}
+										on:change={(event) =>
+											updateEditingSubtaskCompleted(
+												subtask.id,
+												(event.currentTarget as HTMLInputElement).checked
+											)}
+									/>
+									<input
+										type="text"
+										value={subtask.content}
+										on:input={(event) =>
+											updateEditingSubtaskContent(
+												subtask.id,
+												(event.currentTarget as HTMLInputElement).value
+											)}
+									/>
+									<button
+										type="button"
+										class="quick-subtask-remove"
+										on:click={() => removeEditingSubtask(subtask.id)}
+										aria-label="Remove subtask"
+									>
+										Remove
+									</button>
+								</div>
+							{/each}
+						{/if}
+					</div>
+					<div class="quick-subtask-actions">
+						<button
+							type="button"
+							class="quick-edit-btn"
+							on:click={addEditingSubtask}
+							disabled={savingRelations}
+						>
+							+ Add subtask
+						</button>
+					</div>
+				</div>
+			{/if}
 		</section>
 	{/if}
 
-		<div class="board-content-slot">
-			{#if boardLoading}
-				<div class="board-state">Loading tasks...</div>
-			{:else if boardError}
-				<div class="board-state error">Unable to load tasks: {boardError}</div>
-			{:else if !hasBoardDataForView}
-				<div class="board-state">
-					{#if boardView === 'table' && hasActiveTaskSearch}
-						No tasks matched "{taskSearchQuery.trim()}".
-					{:else if contextAware}
-						No tasks yet. Use + Add Sprint to start planning.
-					{:else}
-						No tasks yet. Add one to start planning.
-					{/if}
-				</div>
+	<div class="board-content-slot">
+		{#if boardLoading}
+			<div class="board-state">Loading tasks...</div>
+		{:else if boardError}
+			<div class="board-state error">Unable to load tasks: {boardError}</div>
+		{:else if !hasBoardDataForView}
+			<div class="board-state">
+				{#if boardView === 'table' && hasActiveTaskSearch}
+					No tasks matched "{taskSearchQuery.trim()}".
+				{:else if contextAware}
+					No tasks yet. Use + Add Sprint to start planning.
+				{:else}
+					No tasks yet. Add one to start planning.
+				{/if}
+			</div>
+		{:else if boardView === 'calendar'}
+			<CalendarView
+				tasks={boardTasks}
+				fieldSchemas={roomFieldSchemas}
+				{onlineMembers}
+				on:editTask={handleBoardSubviewEditTask}
+			/>
+		{:else if boardView === 'workload'}
+			<WorkloadView
+				tasks={boardTasks}
+				fieldSchemas={roomFieldSchemas}
+				{onlineMembers}
+				on:editTask={handleBoardSubviewEditTask}
+			/>
 		{:else if boardView === 'support'}
 			<div class="support-view" aria-label="Support ticket board">
 				<section class="support-composer">
@@ -3089,6 +4197,16 @@
 												+
 											</button>
 										</div>
+										<div class="task-relation-badges kanban-relation-badges">
+											{#if task.blockedBy.length > 0}
+												<span class="task-badge task-badge-blocked">Blocked</span>
+											{/if}
+											{#if taskSubtaskSummary(task)}
+												<span class="task-badge task-badge-subtasks">
+													{taskSubtaskPercentLabel(task)}
+												</span>
+											{/if}
+										</div>
 
 										<div class="kanban-status-row">
 											<div class="status-wrap">
@@ -3125,7 +4243,7 @@
 												on:click|stopPropagation={() => void startEditing(task, 'assigneeId')}
 												on:dblclick|stopPropagation={() => void startEditing(task, 'assigneeId')}
 											>
-												<span class="meta-label">Owner</span>
+												<span class="meta-label">Assignee</span>
 												<span class="owner-chip">
 													<span class="owner-avatar" style={`--owner-hue:${ownerHue(task)};`}>
 														{initials(ownerLabel(task))}
@@ -3150,7 +4268,7 @@
 												on:click|stopPropagation={() => void startEditing(task, 'spent')}
 												on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
 											>
-												<span class="meta-label">Spent</span>
+												<span class="meta-label">Cost</span>
 												<span class="meta-value budget-val"
 													>{formatSpentCell(task.spent, task.budget)}</span
 												>
@@ -3253,93 +4371,93 @@
 													aria-label="Select all in sprint"
 												/>
 											</th>
-											{/if}
-											<th scope="col" class="th-sort th-task">
-												<button
-													type="button"
-													class="th-sort-btn"
-													class:is-active={sprintSortDirection(sprintGroup.key, 'title') !== ''}
-													on:click={() => toggleSprintSort(sprintGroup.key, 'title')}
-													aria-label={`Sort ${sprintGroup.name} by task name`}
+										{/if}
+										<th scope="col" class="th-sort th-task">
+											<button
+												type="button"
+												class="th-sort-btn"
+												class:is-active={sprintSortDirection(sprintGroup.key, 'title') !== ''}
+												on:click={() => toggleSprintSort(sprintGroup.key, 'title')}
+												aria-label={`Sort ${sprintGroup.name} by task name`}
+											>
+												<span>Task</span>
+												<span class="th-sort-icon" aria-hidden="true"
+													>{sprintSortIcon(sprintGroup.key, 'title')}</span
 												>
-													<span>Task</span>
-													<span class="th-sort-icon" aria-hidden="true"
-														>{sprintSortIcon(sprintGroup.key, 'title')}</span
-													>
-												</button>
-											</th>
-											<th scope="col" class="th-sort th-status">
-												<button
-													type="button"
-													class="th-sort-btn"
-													class:is-active={sprintSortDirection(sprintGroup.key, 'status') !== ''}
-													on:click={() => toggleSprintSort(sprintGroup.key, 'status')}
-													aria-label={`Sort ${sprintGroup.name} by status`}
+											</button>
+										</th>
+										<th scope="col" class="th-sort th-status">
+											<button
+												type="button"
+												class="th-sort-btn"
+												class:is-active={sprintSortDirection(sprintGroup.key, 'status') !== ''}
+												on:click={() => toggleSprintSort(sprintGroup.key, 'status')}
+												aria-label={`Sort ${sprintGroup.name} by status`}
+											>
+												<span>Status</span>
+												<span class="th-sort-icon" aria-hidden="true"
+													>{sprintSortIcon(sprintGroup.key, 'status')}</span
 												>
-													<span>Status</span>
-													<span class="th-sort-icon" aria-hidden="true"
-														>{sprintSortIcon(sprintGroup.key, 'status')}</span
-													>
-												</button>
-											</th>
-											<th scope="col" class="th-sort th-owner">
-												<button
-													type="button"
-													class="th-sort-btn"
-													class:is-active={sprintSortDirection(sprintGroup.key, 'owner') !== ''}
-													on:click={() => toggleSprintSort(sprintGroup.key, 'owner')}
-													aria-label={`Sort ${sprintGroup.name} by owner`}
+											</button>
+										</th>
+										<th scope="col" class="th-sort th-owner">
+											<button
+												type="button"
+												class="th-sort-btn"
+												class:is-active={sprintSortDirection(sprintGroup.key, 'owner') !== ''}
+												on:click={() => toggleSprintSort(sprintGroup.key, 'owner')}
+												aria-label={`Sort ${sprintGroup.name} by assignee`}
+											>
+												<span>Assignee</span>
+												<span class="th-sort-icon" aria-hidden="true"
+													>{sprintSortIcon(sprintGroup.key, 'owner')}</span
 												>
-													<span>Owner</span>
-													<span class="th-sort-icon" aria-hidden="true"
-														>{sprintSortIcon(sprintGroup.key, 'owner')}</span
-													>
-												</button>
-											</th>
-											<th scope="col" class="th-sort th-budget">
-												<button
-													type="button"
-													class="th-sort-btn"
-													class:is-active={sprintSortDirection(sprintGroup.key, 'budget') !== ''}
-													on:click={() => toggleSprintSort(sprintGroup.key, 'budget')}
-													aria-label={`Sort ${sprintGroup.name} by budget`}
+											</button>
+										</th>
+										<th scope="col" class="th-sort th-budget">
+											<button
+												type="button"
+												class="th-sort-btn"
+												class:is-active={sprintSortDirection(sprintGroup.key, 'budget') !== ''}
+												on:click={() => toggleSprintSort(sprintGroup.key, 'budget')}
+												aria-label={`Sort ${sprintGroup.name} by budget`}
+											>
+												<span>Budget</span>
+												<span class="th-sort-icon" aria-hidden="true"
+													>{sprintSortIcon(sprintGroup.key, 'budget')}</span
 												>
-													<span>Budget</span>
-													<span class="th-sort-icon" aria-hidden="true"
-														>{sprintSortIcon(sprintGroup.key, 'budget')}</span
-													>
-												</button>
-											</th>
-											<th scope="col" class="th-sort th-spent">
-												<button
-													type="button"
-													class="th-sort-btn"
-													class:is-active={sprintSortDirection(sprintGroup.key, 'spent') !== ''}
-													on:click={() => toggleSprintSort(sprintGroup.key, 'spent')}
-													aria-label={`Sort ${sprintGroup.name} by spent`}
+											</button>
+										</th>
+										<th scope="col" class="th-sort th-spent">
+											<button
+												type="button"
+												class="th-sort-btn"
+												class:is-active={sprintSortDirection(sprintGroup.key, 'spent') !== ''}
+												on:click={() => toggleSprintSort(sprintGroup.key, 'spent')}
+												aria-label={`Sort ${sprintGroup.name} by spent`}
+											>
+												<span>Cost</span>
+												<span class="th-sort-icon" aria-hidden="true"
+													>{sprintSortIcon(sprintGroup.key, 'spent')}</span
 												>
-													<span>Spent</span>
-													<span class="th-sort-icon" aria-hidden="true"
-														>{sprintSortIcon(sprintGroup.key, 'spent')}</span
-													>
-												</button>
-											</th>
-											<th scope="col" class="th-sort th-updated">
-												<button
-													type="button"
-													class="th-sort-btn"
-													class:is-active={sprintSortDirection(sprintGroup.key, 'updated') !== ''}
-													on:click={() => toggleSprintSort(sprintGroup.key, 'updated')}
-													aria-label={`Sort ${sprintGroup.name} by updated time`}
+											</button>
+										</th>
+										<th scope="col" class="th-sort th-updated">
+											<button
+												type="button"
+												class="th-sort-btn"
+												class:is-active={sprintSortDirection(sprintGroup.key, 'updated') !== ''}
+												on:click={() => toggleSprintSort(sprintGroup.key, 'updated')}
+												aria-label={`Sort ${sprintGroup.name} by updated time`}
+											>
+												<span>Updated</span>
+												<span class="th-sort-icon" aria-hidden="true"
+													>{sprintSortIcon(sprintGroup.key, 'updated')}</span
 												>
-													<span>Updated</span>
-													<span class="th-sort-icon" aria-hidden="true"
-														>{sprintSortIcon(sprintGroup.key, 'updated')}</span
-													>
-												</button>
-											</th>
-										</tr>
-									</thead>
+											</button>
+										</th>
+									</tr>
+								</thead>
 								<tbody>
 									{#if sprintGroup.tasks.length === 0}
 										<tr>
@@ -3349,15 +4467,14 @@
 										</tr>
 									{:else}
 										{#each sprintGroup.tasks as task (task.id)}
+											<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
 											<tr
 												class:row-done={resolveColumn(task.status) === 'done'}
 												class:row-selected={isEditMode && isTaskSelected(task.id)}
-												on:mouseenter={() => {
-													hoveredTaskId = task.id;
-												}}
-												on:mouseleave={() => {
-													hoveredTaskId = '';
-												}}
+												class:row-modal-open={taskEditModal?.id === task.id}
+												on:mouseenter={() => { hoveredTaskId = task.id; }}
+												on:mouseleave={() => { hoveredTaskId = ''; }}
+												on:click={() => openTaskModal(task)}
 											>
 												<!-- Checkbox -->
 												{#if isEditMode}
@@ -3373,11 +4490,7 @@
 												{/if}
 
 												<!-- Task name -->
-												<td
-													class="cell task-cell"
-													on:click={() => void startEditing(task, 'title')}
-													on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
-												>
+												<td class="cell task-cell">
 													<button
 														type="button"
 														class="row-check"
@@ -3394,14 +4507,19 @@
 														</svg>
 													</button>
 													<div class="task-content">
-														<button
-															type="button"
-															class="cell-trigger task-title-trigger"
-															on:click|stopPropagation={() => void startEditing(task, 'title')}
-															on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
-														>
-															{task.title}
-														</button>
+														<span class="cell-trigger task-title-trigger">{task.title}</span>
+														<div class="task-relation-badges">
+															{#if task.blockedBy.length > 0}
+																<span class="task-badge task-badge-blocked">
+																	Blocked by {task.blockedBy.length}
+																</span>
+															{/if}
+															{#if taskSubtaskSummary(task)}
+																<span class="task-badge task-badge-subtasks">
+																	{taskSubtaskSummaryLabel(task)}
+																</span>
+															{/if}
+														</div>
 														<div class="task-actions">
 															<button
 																type="button"
@@ -3414,7 +4532,7 @@
 												</td>
 
 												<!-- Status -->
-												<td class="cell status-cell">
+												<td class="cell status-cell" on:click|stopPropagation>
 													<div class="status-wrap">
 														<button
 															type="button"
@@ -3440,66 +4558,79 @@
 													</div>
 												</td>
 
-												<!-- Owner -->
-												<td
-													class="cell owner-cell"
-													on:click={() => void startEditing(task, 'assigneeId')}
-													on:dblclick|stopPropagation={() => void startEditing(task, 'assigneeId')}
-												>
-													<button
-														type="button"
-														class="cell-trigger owner-trigger"
-														on:click|stopPropagation={() => void startEditing(task, 'assigneeId')}
-														on:dblclick|stopPropagation={() =>
-															void startEditing(task, 'assigneeId')}
-													>
-														<div class="owner-chip">
-															<span class="owner-avatar" style={`--owner-hue:${ownerHue(task)};`}
-																>{initials(ownerLabel(task))}</span
-															>
-															<span class="owner-name">{ownerLabel(task)}</span>
-														</div>
-													</button>
-												</td>
-
-												<!-- Budget (editable) -->
-												<td
-													class="cell budget-cell"
-													on:click={() => void startEditing(task, 'budget')}
-													on:dblclick|stopPropagation={() => void startEditing(task, 'budget')}
-												>
-													<button
-														type="button"
-														class="cell-trigger budget-trigger"
-														on:click|stopPropagation={() => void startEditing(task, 'budget')}
-														on:dblclick|stopPropagation={() => void startEditing(task, 'budget')}
-														title="Click to edit budget"
-													>
-														<span class="budget-val">{formatBudgetCell(task.budget)}</span>
-													</button>
-												</td>
-
-												<!-- Spent (editable) -->
-												<td
-													class="cell spent-cell"
-													on:click={() => void startEditing(task, 'spent')}
-													on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
-												>
-													<button
-														type="button"
-														class="cell-trigger spent-trigger"
-														on:click|stopPropagation={() => void startEditing(task, 'spent')}
-														on:dblclick|stopPropagation={() => void startEditing(task, 'spent')}
-														title="Click to edit spent amount"
-													>
-														<span class="budget-val"
-															>{formatSpentCell(task.spent, task.budget)}</span
+												<!-- Assignee -->
+												<td class="cell owner-cell">
+													<div class="owner-chip">
+														<span class="owner-avatar" style={`--owner-hue:${ownerHue(task)};`}
+															>{initials(ownerLabel(task))}</span
 														>
-													</button>
+														<span class="owner-name">{ownerLabel(task)}</span>
+													</div>
+												</td>
+
+												<!-- Budget -->
+												<td class="cell budget-cell">
+													<span class="budget-val">{formatBudgetCell(task.budget)}</span>
+												</td>
+
+												<!-- Cost -->
+												<td class="cell spent-cell">
+													<span class="budget-val">{formatSpentCell(task.spent, task.budget)}</span>
 												</td>
 
 												<td class="cell updated-cell">{formatCellTime(task.updatedAt)}</td>
 											</tr>
+											{#if taskEditModal?.id === task.id}
+												<tr class="edit-expand-row">
+													<td class="edit-expand-cell" colspan={isEditMode ? 8 : 7}>
+														<div class="edit-expand-inner">
+															<div class="edit-expand-fields">
+																<div class="eef eef-wide">
+																	<label class="eef-label" for="eef-title-{task.id}">Title</label>
+																	<input
+																		id="eef-title-{task.id}"
+																		class="eef-input"
+																		type="text"
+																		bind:value={taskEditVals.title}
+																		on:keydown={(e) => { if (e.key === 'Escape') closeTaskModal(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void saveTaskModal(); }}
+																	/>
+																</div>
+																<div class="eef">
+																	<label class="eef-label" for="eef-status-{task.id}">Status</label>
+																	<select id="eef-status-{task.id}" class="eef-select" bind:value={taskEditVals.status}>
+																		{#each STATUS_OPTIONS as opt (opt.value)}
+																			<option value={opt.value}>{opt.label}</option>
+																		{/each}
+																	</select>
+																</div>
+																<div class="eef">
+																	<label class="eef-label" for="eef-assignee-{task.id}">Assignee</label>
+																	<select id="eef-assignee-{task.id}" class="eef-select" bind:value={taskEditVals.assigneeId}>
+																		<option value="">— unassigned —</option>
+																		{#each ownerOptions as opt (opt.id)}
+																			<option value={opt.id}>{opt.label}{opt.isOnline ? '' : ' (offline)'}</option>
+																		{/each}
+																	</select>
+																</div>
+																<div class="eef">
+																	<label class="eef-label" for="eef-budget-{task.id}">Budget ($)</label>
+																	<input id="eef-budget-{task.id}" class="eef-input eef-num" type="number" min="0" step="0.01" bind:value={taskEditVals.budget} />
+																</div>
+																<div class="eef">
+																	<label class="eef-label" for="eef-spent-{task.id}">Cost ($)</label>
+																	<input id="eef-spent-{task.id}" class="eef-input eef-num" type="number" min="0" step="0.01" bind:value={taskEditVals.spent} />
+																</div>
+															</div>
+															<div class="edit-expand-actions">
+																<button type="button" class="eef-save" on:click={() => void saveTaskModal()} disabled={taskModalSaving}>
+																	{taskModalSaving ? 'Saving…' : 'Save'}
+																</button>
+																<button type="button" class="eef-cancel" on:click={closeTaskModal}>Cancel</button>
+															</div>
+														</div>
+													</td>
+												</tr>
+											{/if}
 										{/each}
 									{/if}
 								</tbody>
@@ -3507,13 +4638,13 @@
 						</div>
 
 						<!-- Per-sprint add task form -->
-							{#if sprintAddKey === sprintGroup.key}
-								<form
-									class="sprint-add-form"
-									use:registerSprintAddForm={sprintGroup.key}
-									on:submit|preventDefault={() =>
-										void handleCreateRoomTaskInSprint(sprintAddContent, sprintGroup.name)}
-								>
+						{#if sprintAddKey === sprintGroup.key}
+							<form
+								class="sprint-add-form"
+								use:registerSprintAddForm={sprintGroup.key}
+								on:submit|preventDefault={() =>
+									void handleCreateRoomTaskInSprint(sprintAddContent, sprintGroup.name)}
+							>
 								<!-- svelte-ignore a11y-autofocus -->
 								<input
 									type="text"
@@ -3540,96 +4671,107 @@
 			</div>
 		{/if}
 	</div>
+
 </section>
 
 <style>
 	:global(:root) {
-		--workspace-taskboard-bg: #f2f4f8;
-		--workspace-taskboard-column-border: #d9dee8;
-		--workspace-taskboard-item-bg: #ffffff;
-		--workspace-taskboard-item-border: #dfe4ed;
-		--workspace-taskboard-item-text: #202636;
-		--workspace-taskboard-meta: #5d6678;
+		--workspace-taskboard-bg: #efeff1;
+		--workspace-taskboard-column-border: #d4d5da;
+		--workspace-taskboard-item-bg: rgba(255, 255, 255, 0.9);
+		--workspace-taskboard-item-border: rgba(43, 46, 56, 0.14);
+		--workspace-taskboard-item-text: #17181c;
+		--workspace-taskboard-meta: #555963;
 
-		--tb-panel-bg: #ffffff;
-		--tb-panel-border: #d7dde8;
-		--tb-form-bg: #ffffff;
-		--tb-form-border: #d4dae5;
-		--tb-input-bg: #ffffff;
-		--tb-input-border: #c7ceda;
-		--tb-input-text: #172134;
-		--tb-input-placeholder: #6b7488;
-		--tb-btn-bg: #ecf1fa;
-		--tb-btn-border: #c8d2e2;
-		--tb-btn-text: #22314d;
-		--tb-state-bg: #ffffff;
-		--tb-state-border: #d4dbe8;
-		--tb-state-text: #4d5a74;
-		--tb-error-text: #b42318;
+		--tb-panel-bg: rgba(255, 255, 255, 0.8);
+		--tb-panel-border: rgba(43, 46, 56, 0.2);
+		--tb-form-bg: rgba(255, 255, 255, 0.82);
+		--tb-form-border: rgba(43, 46, 56, 0.22);
+		--tb-input-bg: rgba(252, 254, 255, 0.94);
+		--tb-input-border: #ccced6;
+		--tb-input-text: #1c1e23;
+		--tb-input-placeholder: #717580;
+		--tb-btn-bg: #ececef;
+		--tb-btn-border: #cfd1d8;
+		--tb-btn-text: #2a2d34;
+		--tb-state-bg: rgba(255, 255, 255, 0.82);
+		--tb-state-border: rgba(43, 46, 56, 0.2);
+		--tb-state-text: #4a4e58;
+		--tb-error-text: #2d3036;
 
-		--tb-grid-bg: #ffffff;
-		--tb-grid-border: #d3dae7;
-		--tb-grid-head-bg: #1e2430;
-		--tb-grid-head-text: #f3f6ff;
-		--tb-grid-head-muted: #ccd6eb;
-		--tb-grid-row-border: rgba(33, 45, 68, 0.12);
-		--tb-grid-col-border: rgba(33, 45, 68, 0.1);
-		--tb-grid-row-hover: rgba(30, 41, 59, 0.06);
-		--tb-grid-row-done: rgba(14, 159, 110, 0.06);
-		--tb-cell-text: #1f293d;
-		--tb-cell-muted: #6a7388;
-		--tb-editor-bg: #ffffff;
-		--tb-editor-border: #9aa9c3;
-		--tb-editor-ring: rgba(37, 99, 235, 0.16);
+		--tb-grid-bg: rgba(255, 255, 255, 0.86);
+		--tb-grid-border: rgba(43, 46, 56, 0.24);
+		--tb-grid-head-bg: #1a1b1f;
+		--tb-grid-head-text: #f6f7fa;
+		--tb-grid-head-muted: #d0d2d8;
+		--tb-grid-row-border: rgba(43, 46, 56, 0.16);
+		--tb-grid-col-border: rgba(43, 46, 56, 0.12);
+		--tb-grid-row-hover: rgba(35, 37, 44, 0.1);
+		--tb-grid-row-done: rgba(35, 37, 44, 0.14);
+		--tb-cell-text: #1f2127;
+		--tb-cell-muted: #666a75;
+		--tb-editor-bg: #fefefe;
+		--tb-editor-border: #8c909a;
+		--tb-editor-ring: rgba(35, 37, 44, 0.2);
 		--tb-avatar-text: #ffffff;
-		--tb-icon-bg: rgba(38, 52, 84, 0.08);
-		--tb-icon-bg-hover: rgba(38, 52, 84, 0.2);
-		--tb-icon-text: #2c3c60;
+		--tb-icon-bg: rgba(34, 36, 44, 0.12);
+		--tb-icon-bg-hover: rgba(34, 36, 44, 0.24);
+		--tb-icon-text: #2b2e36;
+
+		--tb-accent: #2f3138;
+		--tb-accent-strong: #1f2127;
+		--tb-accent-soft: rgba(47, 49, 56, 0.14);
+		--tb-panel-shadow: 0 18px 32px rgba(16, 17, 20, 0.12);
 	}
 
 	:global(:root[data-theme='dark']),
 	:global(.theme-dark) {
-		--workspace-taskboard-bg: #18181b;
-		--workspace-taskboard-column-border: rgba(255, 255, 255, 0.11);
-		--workspace-taskboard-item-bg: #1f2025;
-		--workspace-taskboard-item-border: rgba(255, 255, 255, 0.11);
-		--workspace-taskboard-item-text: #f1f4fb;
-		--workspace-taskboard-meta: #a2a9b8;
+		--workspace-taskboard-bg: #0f1014;
+		--workspace-taskboard-column-border: rgba(231, 233, 239, 0.2);
+		--workspace-taskboard-item-bg: rgba(17, 18, 24, 0.9);
+		--workspace-taskboard-item-border: rgba(231, 233, 239, 0.14);
+		--workspace-taskboard-item-text: #eef0f5;
+		--workspace-taskboard-meta: #a4a8b2;
 
-		--tb-panel-bg: #1f2025;
-		--tb-panel-border: rgba(255, 255, 255, 0.12);
-		--tb-form-bg: #1e2025;
-		--tb-form-border: rgba(255, 255, 255, 0.12);
-		--tb-input-bg: #17181c;
-		--tb-input-border: rgba(255, 255, 255, 0.14);
-		--tb-input-text: #f2f5fb;
-		--tb-input-placeholder: #8e97ab;
-		--tb-btn-bg: #2a2d35;
-		--tb-btn-border: rgba(255, 255, 255, 0.17);
-		--tb-btn-text: #eef2ff;
-		--tb-state-bg: #1d1e23;
-		--tb-state-border: rgba(255, 255, 255, 0.14);
-		--tb-state-text: #b9c0d0;
-		--tb-error-text: #ffb4b4;
+		--tb-panel-bg: rgba(17, 18, 24, 0.86);
+		--tb-panel-border: rgba(231, 233, 239, 0.2);
+		--tb-form-bg: rgba(14, 15, 20, 0.88);
+		--tb-form-border: rgba(231, 233, 239, 0.18);
+		--tb-input-bg: rgba(10, 11, 16, 0.92);
+		--tb-input-border: rgba(231, 233, 239, 0.26);
+		--tb-input-text: #f1f3f8;
+		--tb-input-placeholder: #8f949f;
+		--tb-btn-bg: rgba(41, 42, 48, 0.94);
+		--tb-btn-border: rgba(231, 233, 239, 0.24);
+		--tb-btn-text: #eceef4;
+		--tb-state-bg: rgba(14, 15, 20, 0.9);
+		--tb-state-border: rgba(231, 233, 239, 0.18);
+		--tb-state-text: #c4c8d2;
+		--tb-error-text: #d0d3da;
 
-		--tb-grid-bg: #1a1b20;
-		--tb-grid-border: rgba(255, 255, 255, 0.12);
-		--tb-grid-head-bg: #14171d;
-		--tb-grid-head-text: #f5f7ff;
-		--tb-grid-head-muted: #aeb8cc;
-		--tb-grid-row-border: rgba(255, 255, 255, 0.1);
-		--tb-grid-col-border: rgba(255, 255, 255, 0.08);
-		--tb-grid-row-hover: rgba(255, 255, 255, 0.06);
-		--tb-grid-row-done: rgba(12, 97, 70, 0.25);
-		--tb-cell-text: #edf2ff;
-		--tb-cell-muted: #a8b1c4;
-		--tb-editor-bg: #101217;
-		--tb-editor-border: rgba(140, 168, 222, 0.56);
-		--tb-editor-ring: rgba(111, 145, 214, 0.24);
+		--tb-grid-bg: rgba(14, 15, 20, 0.92);
+		--tb-grid-border: rgba(231, 233, 239, 0.2);
+		--tb-grid-head-bg: #090a0d;
+		--tb-grid-head-text: #f5f6f9;
+		--tb-grid-head-muted: #b5b9c2;
+		--tb-grid-row-border: rgba(231, 233, 239, 0.14);
+		--tb-grid-col-border: rgba(231, 233, 239, 0.12);
+		--tb-grid-row-hover: rgba(231, 233, 239, 0.08);
+		--tb-grid-row-done: rgba(231, 233, 239, 0.12);
+		--tb-cell-text: #eef0f5;
+		--tb-cell-muted: #a5a9b3;
+		--tb-editor-bg: rgba(8, 9, 13, 0.96);
+		--tb-editor-border: rgba(231, 233, 239, 0.35);
+		--tb-editor-ring: rgba(231, 233, 239, 0.2);
 		--tb-avatar-text: #ffffff;
-		--tb-icon-bg: rgba(208, 219, 255, 0.14);
-		--tb-icon-bg-hover: rgba(208, 219, 255, 0.26);
-		--tb-icon-text: #dce6ff;
+		--tb-icon-bg: rgba(231, 233, 239, 0.16);
+		--tb-icon-bg-hover: rgba(231, 233, 239, 0.24);
+		--tb-icon-text: #dde0e8;
+
+		--tb-accent: #d0d3da;
+		--tb-accent-strong: #f1f2f5;
+		--tb-accent-soft: rgba(231, 233, 239, 0.2);
+		--tb-panel-shadow: 0 22px 34px rgba(0, 0, 0, 0.36);
 	}
 
 	.task-board {
@@ -3640,7 +4782,11 @@
 		display: grid;
 		grid-template-rows: auto auto auto minmax(0, 1fr);
 		gap: 0.8rem;
-		background: var(--workspace-taskboard-bg);
+		background:
+			radial-gradient(circle at 0% 0%, rgba(20, 21, 27, 0.12), transparent 38%),
+			radial-gradient(circle at 100% 0%, rgba(20, 21, 27, 0.09), transparent 34%),
+			var(--workspace-taskboard-bg);
+		font-family: 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
 	}
 
 	.board-toast {
@@ -3658,10 +4804,12 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.8rem;
-		padding: 0.85rem 1rem;
-		border-radius: 14px;
+		padding: 0.92rem 1.06rem;
+		border-radius: 16px;
 		background: var(--tb-panel-bg);
 		border: 1px solid var(--tb-panel-border);
+		backdrop-filter: blur(14px);
+		box-shadow: var(--tb-panel-shadow);
 	}
 
 	.header-main {
@@ -3705,10 +4853,12 @@
 		display: flex;
 		align-items: center;
 		gap: 0.6rem;
-		padding: 0.62rem 0.72rem;
-		border-radius: 12px;
+		padding: 0.68rem 0.76rem;
+		border-radius: 14px;
 		border: 1px solid var(--tb-form-border);
 		background: var(--tb-form-bg);
+		backdrop-filter: blur(10px);
+		box-shadow: var(--tb-panel-shadow);
 	}
 
 	.task-search-field {
@@ -3756,10 +4906,12 @@
 	.sprint-composer {
 		display: grid;
 		gap: 0.62rem;
-		padding: 0.7rem;
-		border-radius: 14px;
+		padding: 0.78rem;
+		border-radius: 16px;
 		border: 1px solid var(--tb-form-border);
 		background: var(--tb-form-bg);
+		backdrop-filter: blur(10px);
+		box-shadow: var(--tb-panel-shadow);
 	}
 
 	.sprint-composer-head {
@@ -3997,14 +5149,118 @@
 		cursor: not-allowed;
 	}
 
+	/* ── inline expand edit row ── */
+	.edit-expand-row {
+		background: color-mix(in srgb, var(--tb-grid-head-bg) 5%, var(--tb-grid-bg));
+	}
+
+	.edit-expand-cell {
+		padding: 0.6rem 0.9rem 0.8rem !important;
+		border-bottom: 2px solid color-mix(in srgb, var(--tb-accent) 30%, transparent) !important;
+		height: auto !important;
+	}
+
+	.edit-expand-inner {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+	}
+
+	.edit-expand-fields {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 0.75rem;
+		align-items: flex-end;
+	}
+
+	.eef {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		min-width: 110px;
+	}
+
+	.eef-wide {
+		flex: 1 1 220px;
+	}
+
+	.eef-label {
+		font-size: 0.68rem;
+		font-weight: 700;
+		color: var(--tb-cell-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		white-space: nowrap;
+	}
+
+	.eef-input,
+	.eef-select {
+		padding: 0.32rem 0.5rem;
+		border: 1px solid var(--tb-editor-border);
+		border-radius: 7px;
+		background: var(--tb-editor-bg);
+		color: var(--tb-cell-text);
+		font-size: 0.84rem;
+		font-family: inherit;
+		outline: none;
+		box-sizing: border-box;
+		width: 100%;
+		transition: border-color 0.12s, box-shadow 0.12s;
+	}
+
+	.eef-input:focus,
+	.eef-select:focus {
+		border-color: var(--tb-accent-strong);
+		box-shadow: 0 0 0 2px var(--tb-editor-ring);
+	}
+
+	.eef-num { text-align: right; }
+
+	.edit-expand-actions {
+		display: flex;
+		gap: 0.45rem;
+	}
+
+	.eef-save {
+		padding: 0.3rem 0.8rem;
+		border-radius: 7px;
+		border: none;
+		background: var(--tb-grid-head-bg);
+		color: var(--tb-grid-head-text);
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.eef-save:disabled { opacity: 0.5; cursor: not-allowed; }
+	.eef-save:not(:disabled):hover { opacity: 0.82; }
+
+	.eef-cancel {
+		padding: 0.3rem 0.7rem;
+		border-radius: 7px;
+		border: 1px solid var(--tb-editor-border);
+		background: transparent;
+		color: var(--tb-cell-muted);
+		font-size: 0.78rem;
+		cursor: pointer;
+	}
+	.eef-cancel:hover { color: var(--tb-cell-text); }
+
+	/* highlight the row above the edit row */
+	.task-grid tbody tr.row-modal-open {
+		background: color-mix(in srgb, var(--tb-grid-head-bg) 8%, transparent);
+		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tb-accent) 35%, transparent);
+	}
+
 	.quick-edit-panel {
 		grid-row: 3;
 		display: grid;
 		gap: 0.55rem;
 		padding: 0.72rem;
-		border-radius: 12px;
+		border-radius: 14px;
 		border: 1px solid var(--tb-panel-border);
 		background: var(--tb-panel-bg);
+		backdrop-filter: blur(10px);
+		box-shadow: var(--tb-panel-shadow);
 	}
 
 	.board-content-slot {
@@ -4062,6 +5318,150 @@
 		background: color-mix(in srgb, var(--tb-btn-bg) 64%, #ffffff 36%);
 	}
 
+	.quick-custom-fields {
+		display: grid;
+		gap: 0.58rem;
+		padding-top: 0.25rem;
+		border-top: 1px solid var(--tb-grid-col-border);
+	}
+
+	.quick-custom-fields h4 {
+		margin: 0;
+		font-size: 0.75rem;
+		font-weight: 700;
+		color: var(--tb-cell-muted);
+	}
+
+	.quick-custom-fields-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+		gap: 0.55rem;
+	}
+
+	.quick-custom-field {
+		display: grid;
+		gap: 0.32rem;
+	}
+
+	.quick-custom-field > span {
+		font-size: 0.7rem;
+		color: var(--tb-cell-muted);
+	}
+
+	.quick-custom-field input,
+	.quick-custom-field select {
+		height: 2rem;
+		padding: 0 0.58rem;
+		border-radius: 9px;
+		border: 1px solid var(--tb-input-border);
+		background: var(--tb-input-bg);
+		color: var(--tb-input-text);
+		font-size: 0.76rem;
+	}
+
+	.quick-custom-field input[type='checkbox'] {
+		width: 1.02rem;
+		height: 1.02rem;
+		padding: 0;
+	}
+
+	.quick-custom-options {
+		display: grid;
+		gap: 0.3rem;
+		padding: 0.42rem 0.5rem;
+		border-radius: 9px;
+		border: 1px solid var(--tb-input-border);
+		background: var(--tb-input-bg);
+		max-height: 118px;
+		overflow: auto;
+	}
+
+	.quick-custom-option {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.74rem;
+	}
+
+	.quick-custom-option input[type='checkbox'] {
+		width: 0.9rem;
+		height: 0.9rem;
+	}
+
+	.quick-custom-empty {
+		font-size: 0.72rem;
+		color: var(--tb-cell-muted);
+	}
+
+	.quick-relations {
+		display: grid;
+		gap: 0.56rem;
+		padding-top: 0.3rem;
+		border-top: 1px solid var(--tb-grid-col-border);
+	}
+
+	.quick-relations h4 {
+		margin: 0;
+		font-size: 0.75rem;
+		font-weight: 700;
+		color: var(--tb-cell-muted);
+	}
+
+	.quick-relation-list {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+		gap: 0.36rem;
+		max-height: 130px;
+		overflow: auto;
+		padding: 0.1rem 0.05rem;
+	}
+
+	.quick-relation-option {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.45rem;
+		font-size: 0.74rem;
+		color: var(--tb-cell-text);
+	}
+
+	.quick-subtask-list {
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.quick-subtask-row {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
+	.quick-subtask-row input[type='text'] {
+		height: 1.85rem;
+		padding: 0 0.58rem;
+		border-radius: 8px;
+		border: 1px solid var(--tb-input-border);
+		background: var(--tb-input-bg);
+		color: var(--tb-input-text);
+		font-size: 0.75rem;
+	}
+
+	.quick-subtask-remove {
+		height: 1.8rem;
+		padding: 0 0.54rem;
+		border-radius: 8px;
+		border: 1px solid var(--tb-btn-border);
+		background: var(--tb-btn-bg);
+		color: var(--tb-btn-text);
+		font-size: 0.71rem;
+		font-weight: 650;
+		cursor: pointer;
+	}
+
+	.quick-subtask-actions {
+		display: inline-flex;
+	}
+
 	.board-state {
 		height: 100%;
 		min-height: 220px;
@@ -4095,9 +5495,11 @@
 		min-height: 0;
 		display: grid;
 		grid-template-rows: auto minmax(0, 1fr);
-		border-radius: 14px;
+		border-radius: 16px;
 		border: 1px solid var(--tb-grid-border);
 		background: var(--tb-panel-bg);
+		backdrop-filter: blur(10px);
+		box-shadow: var(--tb-panel-shadow);
 	}
 
 	.kanban-column-head {
@@ -4156,10 +5558,24 @@
 		display: grid;
 		gap: 0.54rem;
 		padding: 0.62rem;
-		border-radius: 12px;
+		border-radius: 14px;
 		border: 1px solid var(--tb-grid-col-border);
 		background: var(--tb-grid-bg);
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+		box-shadow:
+			0 10px 20px rgba(14, 24, 46, 0.12),
+			inset 0 1px 0 rgba(255, 255, 255, 0.18);
+		transition:
+			transform 180ms ease,
+			box-shadow 180ms ease,
+			border-color 180ms ease;
+	}
+
+	.kanban-card:hover {
+		transform: translateY(-2px);
+		border-color: color-mix(in srgb, var(--tb-accent) 42%, var(--tb-grid-col-border));
+		box-shadow:
+			0 14px 28px rgba(14, 24, 46, 0.18),
+			inset 0 1px 0 rgba(255, 255, 255, 0.22);
 	}
 
 	.kanban-card-top {
@@ -4216,6 +5632,10 @@
 	.kanban-status-row {
 		display: flex;
 		align-items: center;
+	}
+
+	.kanban-relation-badges {
+		margin-top: -0.15rem;
 	}
 
 	.kanban-meta-grid {
@@ -4284,9 +5704,11 @@
 		align-content: start;
 		gap: 0.65rem;
 		border: 1px solid var(--tb-grid-border);
-		border-radius: 14px;
+		border-radius: 16px;
 		background: var(--tb-panel-bg);
 		padding: 0.72rem;
+		backdrop-filter: blur(10px);
+		box-shadow: var(--tb-panel-shadow);
 	}
 
 	.support-composer {
@@ -4528,11 +5950,14 @@
 		grid-template-rows: auto auto 1fr auto auto;
 		gap: 0.42rem;
 		border: 1px solid var(--tb-grid-col-border);
-		border-radius: 12px;
+		border-radius: 14px;
 		background: var(--tb-grid-bg);
 		padding: 0.58rem;
 		aspect-ratio: 1 / 1;
 		min-height: 170px;
+		box-shadow:
+			0 12px 22px rgba(16, 24, 40, 0.12),
+			inset 0 1px 0 rgba(255, 255, 255, 0.15);
 	}
 
 	.support-ticket-top {
@@ -4555,23 +5980,23 @@
 	}
 
 	.priority-critical {
-		background: rgba(181, 35, 56, 0.16);
-		color: #b52338;
+		background: rgba(19, 20, 23, 0.2);
+		color: #1f2126;
 	}
 
 	.priority-high {
-		background: rgba(194, 110, 24, 0.18);
-		color: #b96618;
+		background: rgba(36, 38, 44, 0.18);
+		color: #2a2d34;
 	}
 
 	.priority-medium {
-		background: rgba(46, 97, 178, 0.16);
-		color: #2e61b2;
+		background: rgba(56, 59, 68, 0.18);
+		color: #343842;
 	}
 
 	.priority-low {
-		background: rgba(23, 132, 88, 0.16);
-		color: #178458;
+		background: rgba(74, 78, 89, 0.16);
+		color: #414651;
 	}
 
 	.support-ticket-top time {
@@ -4626,7 +6051,7 @@
 		height: 1.3rem;
 		border-radius: 999px;
 		border: 2px solid var(--tb-grid-bg);
-		background: hsl(var(--owner-hue) 62% 47%);
+		background: linear-gradient(160deg, #4a4d56, #26282f);
 		color: var(--tb-avatar-text);
 		display: inline-grid;
 		place-items: center;
@@ -4678,6 +6103,12 @@
 	.sprint-group {
 		display: grid;
 		gap: 0.45rem;
+		padding: 0.65rem 0.65rem 0.55rem;
+		border-radius: 18px;
+		border: 1px solid var(--tb-grid-border);
+		background: var(--tb-panel-bg);
+		backdrop-filter: blur(10px);
+		box-shadow: var(--tb-panel-shadow);
 	}
 
 	.sprint-group-header {
@@ -4747,13 +6178,13 @@
 	}
 
 	.sgh-done {
-		color: #1a73e8;
-		background: rgba(26, 115, 232, 0.1);
-		border-color: rgba(26, 115, 232, 0.35);
+		color: var(--tb-btn-text);
+		background: color-mix(in srgb, var(--tb-accent) 14%, transparent);
+		border-color: color-mix(in srgb, var(--tb-accent) 38%, transparent);
 		font-weight: 700;
 	}
 	.sgh-done:hover:not(:disabled) {
-		background: rgba(26, 115, 232, 0.18);
+		background: color-mix(in srgb, var(--tb-accent) 22%, transparent);
 	}
 
 	.sgh-add {
@@ -4829,10 +6260,13 @@
 	.grid-shell {
 		min-height: 0;
 		overflow: auto;
-		border-radius: 14px;
+		border-radius: 16px;
 		border: 1px solid var(--tb-grid-border);
 		background: var(--tb-grid-bg);
 		scrollbar-width: thin;
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.08),
+			0 10px 18px rgba(20, 33, 59, 0.1);
 	}
 
 	.task-grid {
@@ -4855,7 +6289,11 @@
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
 		color: var(--tb-grid-head-text);
-		background: var(--tb-grid-head-bg);
+		background: linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--tb-grid-head-bg) 90%, #ffffff 10%),
+			var(--tb-grid-head-bg)
+		);
 		white-space: nowrap;
 		border-bottom: 1px solid var(--tb-grid-row-border);
 	}
@@ -4903,11 +6341,14 @@
 	}
 
 	.task-grid tbody tr {
-		transition: background 0.18s ease;
+		transition:
+			background 0.18s ease,
+			box-shadow 0.18s ease;
 	}
 
 	.task-grid tbody tr:hover {
 		background: var(--tb-grid-row-hover);
+		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tb-accent) 24%, transparent);
 	}
 
 	.task-grid tbody tr.row-done {
@@ -4938,7 +6379,7 @@
 	}
 
 	.task-grid tbody td {
-		height: 2.7rem;
+		height: 2.82rem;
 		padding: 0.35rem 0.65rem;
 		font-size: 0.84rem;
 		color: var(--tb-cell-text);
@@ -5016,7 +6457,7 @@
 
 	.task-title {
 		display: block;
-		max-width: 150px;
+		max-width: 230px;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -5048,6 +6489,37 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-weight: 600;
+	}
+
+	.task-relation-badges {
+		display: inline-flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.26rem;
+	}
+
+	.task-badge {
+		display: inline-flex;
+		align-items: center;
+		height: 1.18rem;
+		padding: 0 0.42rem;
+		border-radius: 999px;
+		font-size: 0.64rem;
+		font-weight: 700;
+		letter-spacing: 0.01em;
+		white-space: nowrap;
+	}
+
+	.task-badge-blocked {
+		background: color-mix(in srgb, #ef4444 20%, transparent);
+		color: color-mix(in srgb, #b91c1c 72%, var(--tb-cell-text));
+		border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+	}
+
+	.task-badge-subtasks {
+		background: color-mix(in srgb, var(--tb-grid-head-bg) 10%, transparent);
+		color: var(--tb-cell-muted);
+		border: 1px solid color-mix(in srgb, var(--tb-grid-head-bg) 20%, transparent);
 	}
 
 	.owner-trigger {
@@ -5177,36 +6649,36 @@
 	}
 
 	.status-todo {
-		background: #5a6478;
-		color: #f7f9ff;
+		background: #595c64;
+		color: #f4f5f7;
 	}
 
 	.status-in_progress {
-		background: #f59e0b;
-		color: #241300;
+		background: #facc15;
+		color: #2e2302;
 	}
 
 	.status-done {
-		background: #12a06f;
-		color: #052417;
+		background: #22c55e;
+		color: #082714;
 	}
 
 	:global(:root[data-theme='dark']) .status-todo,
 	:global(.theme-dark) .status-todo {
-		background: #6a748c;
-		color: #f4f7ff;
+		background: #6b6f78;
+		color: #f6f7fa;
 	}
 
 	:global(:root[data-theme='dark']) .status-in_progress,
 	:global(.theme-dark) .status-in_progress {
-		background: #f6b03f;
-		color: #2c1800;
+		background: #facc15;
+		color: #2e2302;
 	}
 
 	:global(:root[data-theme='dark']) .status-done,
 	:global(.theme-dark) .status-done {
-		background: #33b784;
-		color: #0a2f1f;
+		background: #22c55e;
+		color: #082714;
 	}
 
 	.status-menu {
@@ -5254,7 +6726,7 @@
 		font-weight: 700;
 		letter-spacing: 0.02em;
 		text-transform: uppercase;
-		background: hsl(var(--owner-hue) 64% 48%);
+		background: linear-gradient(160deg, #4a4d56, #26282f);
 		color: var(--tb-avatar-text);
 		flex: 0 0 auto;
 	}
@@ -5288,6 +6760,61 @@
 	.cell-editor:focus-visible {
 		outline: none;
 		box-shadow: 0 0 0 3px var(--tb-editor-ring);
+	}
+
+	.task-board > * {
+		animation: board-fade-in 260ms ease both;
+	}
+
+	.task-board > *:nth-child(2) {
+		animation-delay: 40ms;
+	}
+
+	.task-board > *:nth-child(3) {
+		animation-delay: 80ms;
+	}
+
+	.task-board > *:nth-child(4) {
+		animation-delay: 120ms;
+	}
+
+	@keyframes board-fade-in {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	@media (max-width: 640px) {
+		.task-board {
+			height: auto;
+			min-height: 100%;
+			grid-template-rows: auto auto auto auto;
+		}
+
+		.board-content-slot > .sprint-groups,
+		.board-content-slot > .kanban-board,
+		.board-content-slot > .support-view,
+		.board-content-slot > .board-state {
+			height: auto;
+			min-height: 320px;
+			overflow: visible;
+		}
+
+		.sprint-groups {
+			overflow: visible;
+		}
+
+		.kanban-board {
+			height: auto;
+			min-height: 400px;
+			overflow-x: auto;
+			overflow-y: visible;
+		}
 	}
 
 	@media (max-width: 920px) {

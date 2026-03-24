@@ -537,176 +537,213 @@
 		</div>
 	</section>
 
-	<!-- ▸ Tools — cinematic scenes -->
+	<!-- ▸ Tools — full-viewport scenes, text bottom, raw UI floating -->
 	<section class="tools-section" id="tools">
 
-		<!-- Scene 1: Chat -->
+		<!-- ── Scene 1: Chat ── -->
 		<div class="scene">
-			<div class="scene-cards">
-				<!-- Back card -->
-				<div class="scard scard-back">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">Tora — chat</span></div>
-					<div class="scard-body">
-						<div class="sc-msg-row sc-other"><div class="sc-av" style="background:rgba(99,102,241,0.18);color:#818cf8">J</div><div class="sc-bubble sc-other-b">Let's finalize the auth flow before we push</div></div>
-						<div class="sc-msg-row sc-me"><div class="sc-bubble sc-me-b">Agreed. Should we bring ToraAI in to review?</div></div>
-						<div class="sc-typing"><span></span><span></span><span></span></div>
+			<!-- Floating UI — raw, no chrome, bleeding right -->
+			<div class="float-zone float-right">
+				<!-- Main chat panel -->
+				<div class="fp fp-main">
+					<div class="fp-header">
+						<div class="fp-title-row">
+							<span class="fp-room-name"># v1-auth-sprint</span>
+							<span class="fp-member-dots">
+								<span style="background:#818cf8"></span>
+								<span style="background:#34d399"></span>
+								<span style="background:#f59e0b"></span>
+							</span>
+						</div>
 					</div>
+					<div class="fp-msgs">
+						<div class="fmsg fmsg-other"><span class="fmsg-av" style="background:rgba(99,102,241,0.2);color:#818cf8">J</span><div><span class="fmsg-name">Jordan</span><div class="fmsg-b fmsg-b-other">Let's review the auth flow before the push</div></div></div>
+						<div class="fmsg fmsg-me"><div class="fmsg-b fmsg-b-me">Agreed — I'll ask ToraAI to check it</div></div>
+						<div class="fmsg fmsg-other"><span class="fmsg-av" style="background:rgba(52,211,153,0.15);color:#34d399">K</span><div><span class="fmsg-name">Kai</span><div class="fmsg-b fmsg-b-other">@ToraAI check the JWT handling</div></div></div>
+					</div>
+					<div class="fp-input"><span class="fp-input-text">Message #v1-auth-sprint</span></div>
 				</div>
-				<!-- Front card -->
-				<div class="scard scard-front">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">@ToraAI</span></div>
-					<div class="scard-body">
-						<div class="sc-ai-header"><span class="sc-ai-pill">ToraAI</span><span class="sc-ai-ctx">Reading room context…</span></div>
-						<p class="sc-ai-para">I've reviewed your auth flow. Here are <strong>3 issues</strong> I found:</p>
-						<div class="sc-ai-item"><span class="sc-ai-num">01</span><span>JWT expiry not handled on the client — users get silent 401s</span></div>
-						<div class="sc-ai-item"><span class="sc-ai-num">02</span><span>Refresh token stored in localStorage — move to httpOnly cookie</span></div>
-						<div class="sc-ai-item"><span class="sc-ai-num">03</span><span>No rate-limiting on <code>/api/auth/login</code></span></div>
-						<div class="sc-ai-actions"><button class="sc-ai-btn">Apply fixes</button><button class="sc-ai-btn sc-ai-btn-ghost">Explain more</button></div>
-					</div>
+				<!-- AI response card — overlapping -->
+				<div class="fp fp-ai fp-overlap-right">
+					<div class="fp-ai-tag"><span class="fp-ai-badge">ToraAI</span><span class="fp-ai-sub">reading room context…</span></div>
+					<p class="fp-ai-body">I found <strong>3 issues</strong> in your JWT handling:</p>
+					<div class="fp-ai-row"><span class="fp-ai-n">01</span><span>Expiry not handled — silent 401s on client</span></div>
+					<div class="fp-ai-row"><span class="fp-ai-n">02</span><span>Refresh token in localStorage — use httpOnly</span></div>
+					<div class="fp-ai-row"><span class="fp-ai-n">03</span><span>No rate-limit on <code>/api/auth/login</code></span></div>
+					<div class="fp-ai-btns"><button class="fp-btn-solid">Apply fixes</button><button class="fp-btn-outline">Explain</button></div>
 				</div>
 			</div>
-			<div class="scene-text">
+			<!-- Text: bottom-left -->
+			<div class="scene-copy">
 				<p class="scene-tag">Chat</p>
 				<h2 class="scene-h2">Your AI agent attends<br />every conversation.</h2>
-				<p class="scene-sub">Mention @ToraAI in any message and it reads your entire room history — chat, code, tasks — to give you answers that actually fit your context. Private AI mode lets you ask without the team seeing.</p>
+				<p class="scene-body">Mention @ToraAI in any message — it reads your entire room history to answer in context. Private AI mode lets you ask without the team seeing.</p>
 			</div>
 		</div>
 
-		<!-- Scene 2: Code Canvas -->
-		<div class="scene scene-flip">
-			<div class="scene-text scene-text-right">
+		<!-- ── Scene 2: Code Canvas ── -->
+		<div class="scene scene-r">
+			<!-- Text: bottom-right -->
+			<div class="scene-copy scene-copy-r">
 				<p class="scene-tag" style="color:#34d399">Code Canvas</p>
 				<h2 class="scene-h2">Write, run, and ship<br />code — together.</h2>
-				<p class="scene-sub">Monaco-powered editor with real-time multi-cursor sync via Yjs. Run Python, JavaScript, Go and more without leaving the room. AI sees your whole project — not just the open file.</p>
+				<p class="scene-body">Monaco editor with real-time multi-cursor sync via Yjs. Run Python and JavaScript in-browser. AI sees your whole project — not just the open file.</p>
 			</div>
-			<div class="scene-cards scene-cards-left">
-				<div class="scard scard-back scard-code-back">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">terminal</span></div>
-					<div class="scard-body sc-terminal">
-						<div class="term-line"><span class="term-prompt">›</span> <span class="term-cmd">python main.py</span></div>
-						<div class="term-line term-out">Running test suite...</div>
-						<div class="term-line term-ok">✓ 24 tests passed</div>
-						<div class="term-line term-err">✗ 1 test failed: auth_flow_test.py:44</div>
-						<div class="term-cursor">▌</div>
+			<!-- Floating UI — bleeding left -->
+			<div class="float-zone float-left">
+				<!-- Editor panel -->
+				<div class="fp fp-editor">
+					<div class="fp-tab-bar">
+						<span class="fp-tab fp-tab-active">auth.py</span>
+						<span class="fp-tab">models.py</span>
+						<span class="fp-tab">routes.py</span>
+						<span class="fp-live-pill">● 2 editing</span>
+					</div>
+					<div class="fp-code">
+						<div class="fcl"><span class="fln">1</span><span class="fkw">async def</span> <span class="ffn">authenticate</span><span class="fpu">(token: </span><span class="fvr">str</span><span class="fpu">) -></span> <span class="fvr">User</span><span class="fpu">:</span></div>
+						<div class="fcl"><span class="fln">2</span><span class="fi"> </span><span class="fkw">try</span><span class="fpu">:</span></div>
+						<div class="fcl"><span class="fln">3</span><span class="fi"> </span><span class="fi"> </span><span class="fvr">payload</span> <span class="fpu">= await</span> <span class="ffn">verify_jwt</span><span class="fpu">(token)</span></div>
+						<div class="fcl"><span class="fln">4</span><span class="fi"> </span><span class="fi"> </span><span class="fkw">return</span> <span class="ffn">User</span><span class="fpu">.</span><span class="ffn">from_payload</span><span class="fpu">(payload)</span></div>
+						<div class="fcl"><span class="fln">5</span><span class="fi"> </span><span class="fkw">except</span> <span class="fvr">JWTExpiredError</span><span class="fpu">:</span></div>
+						<div class="fcl fcl-hl"><span class="fln">6</span><span class="fi"> </span><span class="fi"> </span><span class="fkw">raise</span> <span class="ffn">HTTPException</span><span class="fpu">(401)</span><span class="fgh">  # AI: add refresh here</span></div>
+						<div class="fcl"><span class="fln">7</span><span class="fi"> </span><span class="fkw">except</span> <span class="fvr">Exception</span> <span class="fkw">as</span> <span class="fvr">e</span><span class="fpu">:</span></div>
+						<div class="fcl"><span class="fln">8</span><span class="fi"> </span><span class="fi"> </span><span class="ffn">logger</span><span class="fpu">.</span><span class="ffn">error</span><span class="fpu">(</span><span class="fvr">e</span><span class="fpu">)</span></div>
+					</div>
+					<div class="fp-ai-bar" style="border-color:rgba(52,211,153,0.15);color:#6ee7b7;background:rgba(52,211,153,0.04)">
+						<span style="color:#34d399;font-weight:800;font-size:0.68rem">ToraAI</span> &nbsp;Add token refresh — based on your auth_flow.py
 					</div>
 				</div>
-				<div class="scard scard-front scard-code-front">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">main.py</span><span class="sc-live-badge">● 2 editing</span></div>
-					<div class="scard-body sc-code-body">
-						<div class="cline"><span class="ln">1</span><span class="ck">async def</span> <span class="cf">authenticate</span><span class="cp">(token: </span><span class="cv">str</span><span class="cp">):</span></div>
-						<div class="cline"><span class="ln">2</span><span class="ci"></span><span class="ck">try</span><span class="cp">:</span></div>
-						<div class="cline"><span class="ln">3</span><span class="ci"></span><span class="ci"></span><span class="cv">payload</span> <span class="cp">= await</span> <span class="cf">verify_jwt</span><span class="cp">(token)</span></div>
-						<div class="cline"><span class="ln">4</span><span class="ci"></span><span class="ci"></span><span class="ck">return</span> <span class="cf">User</span><span class="cp">.</span><span class="cf">from_payload</span><span class="cp">(payload)</span></div>
-						<div class="cline"><span class="ln">5</span><span class="ci"></span><span class="ck">except</span> <span class="cv">JWTExpiredError</span><span class="cp">:</span></div>
-						<div class="cline cline-ai"><span class="ln">6</span><span class="ci"></span><span class="ci"></span><span class="cp">raise</span> <span class="cf">HTTPException</span><span class="cp">(401)</span><span class="sc-ghost"> # ← AI suggestion</span></div>
+				<!-- Terminal — lower, offset -->
+				<div class="fp fp-term fp-overlap-bottom">
+					<div class="fp-term-bar"><span class="fp-term-title">terminal</span></div>
+					<div class="fp-term-body">
+						<div class="ftl"><span class="ftp">›</span> <span class="ftc">python -m pytest</span></div>
+						<div class="ftl fto">Running 25 tests...</div>
+						<div class="ftl ftok">✓ 24 passed</div>
+						<div class="ftl fter">✗ 1 failed: auth_flow_test.py:44</div>
 					</div>
-					<div class="sc-ai-suggestion-bar"><span class="sc-ai-pill" style="font-size:0.65rem">ToraAI</span> Add token refresh logic here — based on your auth_flow.py</div>
 				</div>
 			</div>
 		</div>
 
-		<!-- Scene 3: Whiteboard -->
+		<!-- ── Scene 3: Whiteboard ── -->
 		<div class="scene">
-			<div class="scene-cards">
-				<div class="scard scard-back scard-board-back">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">whiteboard</span></div>
-					<div class="scard-body">
-						<div class="sc-prompt-bar"><span class="sc-prompt-icon">✦</span> Generate system architecture for a real-time chat app</div>
+			<!-- Whiteboard surface with character texture bg + SVG diagram floating -->
+			<div class="float-zone float-right">
+				<!-- Raw canvas surface — no frame -->
+				<div class="fp-canvas">
+					<div class="fp-canvas-bg"></div>
+					<!-- Floating prompt chip -->
+					<div class="fp-canvas-prompt">
+						<span style="color:#f59e0b;font-size:0.85rem">✦</span>
+						Generate system architecture for real-time collaboration
 					</div>
-				</div>
-				<div class="scard scard-front scard-board-front">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">whiteboard — AI generated</span></div>
-					<div class="scard-body">
-						<svg viewBox="0 0 420 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
-							<rect x="10" y="80" width="80" height="36" rx="6" fill="none" stroke="#f59e0b" stroke-width="1.2" opacity="0.7"/>
-							<text x="50" y="102" text-anchor="middle" fill="#f59e0b" font-size="11" font-family="inherit">Client</text>
-							<rect x="170" y="40" width="80" height="36" rx="6" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.7"/>
-							<text x="210" y="62" text-anchor="middle" fill="#6366f1" font-size="11" font-family="inherit">WebSocket</text>
-							<rect x="170" y="120" width="80" height="36" rx="6" fill="none" stroke="#6366f1" stroke-width="1.2" opacity="0.7"/>
-							<text x="210" y="142" text-anchor="middle" fill="#6366f1" font-size="11" font-family="inherit">API Server</text>
-							<rect x="330" y="40" width="76" height="36" rx="6" fill="none" stroke="#34d399" stroke-width="1.2" opacity="0.7"/>
-							<text x="368" y="62" text-anchor="middle" fill="#34d399" font-size="11" font-family="inherit">Redis</text>
-							<rect x="330" y="120" width="76" height="36" rx="6" fill="none" stroke="#34d399" stroke-width="1.2" opacity="0.7"/>
-							<text x="368" y="142" text-anchor="middle" fill="#34d399" font-size="11" font-family="inherit">ScyllaDB</text>
-							<line x1="90" y1="98" x2="170" y2="58" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
-							<line x1="90" y1="98" x2="170" y2="138" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
-							<line x1="250" y1="58" x2="330" y2="58" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
-							<line x1="250" y1="138" x2="330" y2="138" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
-							<text x="210" y="205" text-anchor="middle" fill="rgba(255,255,255,0.25)" font-size="10" font-family="inherit">✦ Generated by ToraAI from your prompt</text>
-						</svg>
-					</div>
+					<!-- Diagram — raw, on canvas -->
+					<svg viewBox="0 0 500 300" xmlns="http://www.w3.org/2000/svg" class="fp-canvas-svg">
+						<rect x="20" y="120" width="90" height="40" rx="8" fill="none" stroke="#f59e0b" stroke-width="1.5" opacity="0.8"/>
+						<text x="65" y="144" text-anchor="middle" fill="#f59e0b" font-size="12" font-family="inherit">Client</text>
+						<rect x="200" y="60" width="100" height="40" rx="8" fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.8"/>
+						<text x="250" y="84" text-anchor="middle" fill="#a78bfa" font-size="12" font-family="inherit">WebSocket Hub</text>
+						<rect x="200" y="180" width="100" height="40" rx="8" fill="none" stroke="#a78bfa" stroke-width="1.5" opacity="0.8"/>
+						<text x="250" y="204" text-anchor="middle" fill="#a78bfa" font-size="12" font-family="inherit">Go API Server</text>
+						<rect x="380" y="60" width="80" height="40" rx="8" fill="none" stroke="#34d399" stroke-width="1.5" opacity="0.8"/>
+						<text x="420" y="84" text-anchor="middle" fill="#34d399" font-size="12" font-family="inherit">Redis</text>
+						<rect x="380" y="180" width="80" height="40" rx="8" fill="none" stroke="#34d399" stroke-width="1.5" opacity="0.8"/>
+						<text x="420" y="204" text-anchor="middle" fill="#34d399" font-size="12" font-family="inherit">ScyllaDB</text>
+						<line x1="110" y1="140" x2="200" y2="80" stroke="rgba(255,255,255,0.15)" stroke-width="1.5" stroke-dasharray="4 3"/>
+						<line x1="110" y1="140" x2="200" y2="200" stroke="rgba(255,255,255,0.15)" stroke-width="1.5" stroke-dasharray="4 3"/>
+						<line x1="300" y1="80" x2="380" y2="80" stroke="rgba(255,255,255,0.15)" stroke-width="1.5" stroke-dasharray="4 3"/>
+						<line x1="300" y1="200" x2="380" y2="200" stroke="rgba(255,255,255,0.15)" stroke-width="1.5" stroke-dasharray="4 3"/>
+						<text x="250" y="275" text-anchor="middle" fill="rgba(255,255,255,0.2)" font-size="10" font-family="inherit">✦ AI generated · Tora Whiteboard</text>
+					</svg>
+					<!-- Cursor trails -->
+					<div class="fp-cursor" style="top:28%;left:38%;color:#f59e0b">▸ <span>Alex</span></div>
+					<div class="fp-cursor" style="top:58%;left:62%;color:#818cf8">▸ <span>Kai</span></div>
 				</div>
 			</div>
-			<div class="scene-text">
+			<div class="scene-copy">
 				<p class="scene-tag" style="color:#f59e0b">Whiteboard</p>
 				<h2 class="scene-h2">From prompt to diagram<br />in seconds.</h2>
-				<p class="scene-sub">Sketch freely on a shared infinite canvas with live cursors. Or just describe what you want — ToraAI will generate the diagram, flowchart, or wireframe directly onto the board.</p>
+				<p class="scene-body">A shared infinite canvas with live cursors and real-time drawing. Describe what you want and ToraAI generates the diagram directly onto the board.</p>
 			</div>
 		</div>
 
-		<!-- Scene 4: Task Management -->
-		<div class="scene scene-flip">
-			<div class="scene-text scene-text-right">
+		<!-- ── Scene 4: Task Management ── -->
+		<div class="scene scene-r">
+			<div class="scene-copy scene-copy-r">
 				<p class="scene-tag" style="color:#ec4899">Task Management</p>
 				<h2 class="scene-h2">A full sprint plan<br />from one prompt.</h2>
-				<p class="scene-sub">Room-scoped Kanban that lives next to your chat and code. Ask ToraAI to generate a sprint, break down an epic, or surface what's blocking the team — without opening another tool.</p>
+				<p class="scene-body">Room-scoped Kanban next to your chat and code. Ask ToraAI to generate a sprint, break down epics, or surface what's blocking — no extra tool needed.</p>
 			</div>
-			<div class="scene-cards scene-cards-left">
-				<div class="scard scard-back">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">ToraAI — task generation</span></div>
-					<div class="scard-body">
-						<div class="sc-prompt-bar" style="border-color:rgba(236,72,153,0.3)"><span class="sc-prompt-icon" style="color:#ec4899">✦</span> Build a sprint for v1 auth feature</div>
-						<p style="font-size:0.78rem;color:var(--text-3);margin:12px 0 6px">Generated 6 tasks:</p>
-						{#each ['Design login & signup screens','Implement JWT auth backend','Add Google OAuth flow','Write auth middleware','Unit tests for token handling','QA pass + staging deploy'] as t, i}
-							<div class="sc-gen-task"><span class="sc-gen-num">{i+1}</span>{t}</div>
-						{/each}
+			<div class="float-zone float-left">
+				<!-- Kanban board — raw, full width -->
+				<div class="fp-kanban">
+					<div class="fp-k-col">
+						<div class="fp-k-head">Backlog</div>
+						<div class="fp-k-card">Add Google OAuth</div>
+						<div class="fp-k-card">QA pass + staging deploy</div>
+						<div class="fp-k-card">Write API docs</div>
 					</div>
-				</div>
-				<div class="scard scard-front">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">task board</span></div>
-					<div class="scard-body">
-						<div class="sc-kanban">
-							<div class="sc-col"><div class="sc-col-h">Backlog</div><div class="sc-card-item">Add Google OAuth flow</div><div class="sc-card-item">QA pass + staging</div></div>
-							<div class="sc-col"><div class="sc-col-h" style="color:#ec4899">In Progress</div><div class="sc-card-item sc-card-active" style="border-color:rgba(236,72,153,0.4)">JWT auth backend<span class="sc-card-badge" style="color:#ec4899;background:rgba(236,72,153,0.12)">AI</span></div></div>
-							<div class="sc-col"><div class="sc-col-h" style="color:#34d399">Done</div><div class="sc-card-item sc-card-done">Design screens ✓</div><div class="sc-card-item sc-card-done">Auth middleware ✓</div></div>
+					<div class="fp-k-col">
+						<div class="fp-k-head" style="color:#ec4899">In Progress</div>
+						<div class="fp-k-card fp-k-active">
+							<div style="display:flex;justify-content:space-between;align-items:flex-start">
+								JWT auth backend
+								<span class="fp-k-badge">AI</span>
+							</div>
+							<div class="fp-k-assignee"><span class="fp-k-av" style="background:rgba(99,102,241,0.2);color:#818cf8">J</span> Jordan</div>
+						</div>
+						<div class="fp-k-card">
+							<div>Auth middleware</div>
+							<div class="fp-k-assignee"><span class="fp-k-av" style="background:rgba(245,158,11,0.2);color:#f59e0b">K</span> Kai</div>
 						</div>
 					</div>
+					<div class="fp-k-col">
+						<div class="fp-k-head" style="color:#34d399">Done</div>
+						<div class="fp-k-card fp-k-done">Design login screens ✓</div>
+						<div class="fp-k-card fp-k-done">DB schema ✓</div>
+					</div>
+				</div>
+				<!-- AI generation chip — floating above -->
+				<div class="fp fp-task-ai">
+					<span class="fp-ai-badge">ToraAI</span>
+					<span style="font-size:0.78rem;color:var(--text-2)">Generated 6 tasks for <strong style="color:var(--text)">v1 auth sprint</strong></span>
 				</div>
 			</div>
 		</div>
 
-		<!-- Scene 5: Dashboard -->
+		<!-- ── Scene 5: Dashboard ── -->
 		<div class="scene">
-			<div class="scene-cards">
-				<div class="scard scard-back">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">rooms</span></div>
-					<div class="scard-body">
-						{#each [['v1-auth-sprint','5 members','12 tasks'],['design-review','3 members','4 tasks'],['infra-setup','2 members','7 tasks']] as [name, m, t]}
-							<div class="sc-room-row"><div class="sc-room-dot"></div><div class="sc-room-info"><span class="sc-room-name">{name}</span><span class="sc-room-meta">{m} · {t}</span></div><span class="sc-room-live">live</span></div>
-						{/each}
-					</div>
+			<!-- Character rain bg (like image 3) -->
+			<div class="scene-char-bg" aria-hidden="true"></div>
+			<div class="float-zone float-right">
+				<!-- Stat cards — clean, no frame, floating independently -->
+				<div class="fp-stat-cluster">
+					<div class="fp-stat-card"><span class="fp-stat-v" style="color:#38bdf8">3</span><span class="fp-stat-l">Active rooms</span></div>
+					<div class="fp-stat-card"><span class="fp-stat-v" style="color:#38bdf8">23</span><span class="fp-stat-l">Open tasks</span></div>
+					<div class="fp-stat-card"><span class="fp-stat-v" style="color:#38bdf8">8</span><span class="fp-stat-l">Online now</span></div>
 				</div>
-				<div class="scard scard-front">
-					<div class="scard-chrome"><span class="cdot r"></span><span class="cdot y"></span><span class="cdot g"></span><span class="ctitle">dashboard</span></div>
-					<div class="scard-body">
-						<div class="sc-stats-row">
-							<div class="sc-stat"><span class="sc-stat-v" style="color:#38bdf8">3</span><span class="sc-stat-l">Active rooms</span></div>
-							<div class="sc-stat"><span class="sc-stat-v" style="color:#38bdf8">23</span><span class="sc-stat-l">Open tasks</span></div>
-							<div class="sc-stat"><span class="sc-stat-v" style="color:#38bdf8">8</span><span class="sc-stat-l">Members online</span></div>
+				<!-- AI notice — floating below stats -->
+				<div class="fp fp-notice" style="border-left-color:#38bdf8">
+					<span class="fp-notice-tag" style="color:#38bdf8">ToraAI</span>
+					<p>2 tasks in <strong>v1-auth-sprint</strong> are overdue and blocking the staging deploy.</p>
+					<a class="fp-notice-link">View tasks →</a>
+				</div>
+				<!-- Room list — offset -->
+				<div class="fp fp-rooms">
+					{#each [['v1-auth-sprint','5 members · 12 tasks'],['design-review','3 members · 4 tasks'],['infra-setup','2 members · 7 tasks']] as [n,m]}
+						<div class="fp-room-row">
+							<span class="fp-room-dot"></span>
+							<div class="fp-room-info"><span class="fp-room-n">{n}</span><span class="fp-room-m">{m}</span></div>
+							<span class="fp-room-live">live</span>
 						</div>
-						<div class="sc-notice" style="border-left-color:#38bdf8;background:rgba(56,189,248,0.05)">
-							<span style="color:#38bdf8;font-weight:800">ToraAI</span> — 2 tasks in <em>v1-auth-sprint</em> are overdue and blocking the deploy.
-						</div>
-						<div class="sc-notice" style="border-left-color:rgba(255,255,255,0.1);margin-top:8px">
-							<span style="color:var(--text-2)">Jordan</span> pinned a message in <em>design-review</em>
-						</div>
-					</div>
+					{/each}
 				</div>
 			</div>
-			<div class="scene-text">
+			<div class="scene-copy">
 				<p class="scene-tag" style="color:#38bdf8">Dashboard</p>
-				<h2 class="scene-h2">Command centre for<br />every session.</h2>
-				<p class="scene-sub">See every active room, task, and member at a glance. ToraAI surfaces blockers, summarises activity, and tells you exactly where your attention is needed — so nothing slips through.</p>
+				<h2 class="scene-h2">Everything your team<br />needs, at a glance.</h2>
+				<p class="scene-body">All rooms, tasks, and members in one view. ToraAI surfaces blockers and tells you exactly where your attention is needed — so nothing slips.</p>
 			</div>
 		</div>
 
@@ -1273,307 +1310,242 @@
 		margin: 0;
 	}
 
-	/* ── Tools — cinematic scenes ────────────────────── */
-	.tools-section {
-		position: relative;
-		z-index: 1;
-	}
+	/* ── Tools section ────────────────────────────────── */
+	.tools-section { position: relative; z-index: 1; }
 
-	/* Each scene is full-width, tall, overflow hidden so cards can bleed */
+	/* Full-viewport dark canvas. UI fills it. Text floats on top. */
 	.scene {
 		position: relative;
-		min-height: 680px;
+		min-height: 720px;
 		overflow: hidden;
 		border-top: 1px solid var(--border);
-		display: flex;
-		align-items: flex-end;
-		padding: 0 0 72px 80px;
+		background: var(--page-bg);
 	}
-	.scene-flip {
-		padding: 0 80px 72px 0;
-		justify-content: flex-end;
-	}
+	.scene-r { background: var(--page-bg); }
 
-	/* Bold claim text — bottom-left like Thesys */
-	.scene-text {
-		position: relative;
-		z-index: 2;
-		max-width: 480px;
-		flex-shrink: 0;
+	/* Text: absolutely on top of everything, bottom-left — like Thesys */
+	.scene-copy {
+		position: absolute;
+		bottom: 64px;
+		left: 72px;
+		z-index: 10;
+		max-width: 500px;
+		/* Subtle gradient behind text so it reads over busy UI */
+		padding: 32px 40px 0 0;
 	}
-	.scene-text-right {
+	.scene-copy::before {
+		content: '';
+		position: absolute;
+		inset: -40px -60px -20px -80px;
+		background: radial-gradient(ellipse at 30% 70%, rgba(7,7,12,0.92) 0%, rgba(7,7,12,0.7) 45%, transparent 75%);
+		pointer-events: none;
+		z-index: -1;
+	}
+	/* Right-aligned text (scenes 2 & 4) */
+	.scene-copy-r {
+		left: auto;
+		right: 72px;
 		text-align: right;
+		padding: 32px 0 0 40px;
+	}
+	.scene-copy-r::before {
+		background: radial-gradient(ellipse at 70% 70%, rgba(7,7,12,0.92) 0%, rgba(7,7,12,0.7) 45%, transparent 75%);
 	}
 	.scene-tag {
-		font-size: 0.7rem;
+		font-size: 0.68rem;
 		font-weight: 800;
-		letter-spacing: 0.1em;
+		letter-spacing: 0.12em;
 		text-transform: uppercase;
 		color: #6366f1;
-		margin: 0 0 16px;
+		margin: 0 0 14px;
+		display: block;
 	}
 	.scene-h2 {
-		font-size: clamp(2rem, 3.5vw, 3rem);
+		font-size: clamp(2.2rem, 3.8vw, 3.2rem);
 		font-weight: 800;
-		letter-spacing: -0.035em;
-		line-height: 1.1;
-		color: var(--text);
-		margin: 0 0 18px;
+		letter-spacing: -0.04em;
+		line-height: 1.08;
+		color: #ffffff;
+		margin: 0 0 16px;
 	}
-	.scene-sub {
-		font-size: 0.95rem;
-		color: var(--text-2);
+	.scene-body {
+		font-size: 0.93rem;
+		color: rgba(255,255,255,0.5);
 		line-height: 1.7;
 		margin: 0;
 		font-weight: 400;
+		max-width: 400px;
 	}
+	.scene-copy-r .scene-body { margin-left: auto; }
 
-	/* Cards cluster — positioned to fill the right side, bleeding off */
-	.scene-cards {
+	/* Float zone: fills the whole scene, UI positioned within */
+	.float-zone {
 		position: absolute;
-		top: 48px;
-		right: -32px;
-		width: 62%;
-		height: calc(100% - 48px);
+		inset: 0;
 		pointer-events: none;
 	}
-	.scene-cards-left {
-		right: auto;
-		left: -32px;
-	}
 
-	/* Individual floating dark card */
-	.scard {
+	/* Raw floating panel — no chrome, just dark surface with content */
+	.fp {
 		position: absolute;
-		background: #141418;
-		border: 1px solid rgba(255,255,255,0.09);
-		border-radius: 14px;
-		overflow: hidden;
-		box-shadow: 0 24px 64px rgba(0,0,0,0.7), 0 0 0 0.5px rgba(255,255,255,0.05);
-	}
-	.scard-back {
-		width: 58%;
-		top: 0;
-		left: 0;
-		opacity: 0.72;
-		transform: translateY(24px) scale(0.97);
-		z-index: 1;
-	}
-	.scard-front {
-		width: 70%;
-		top: 60px;
-		right: 0;
-		z-index: 2;
-	}
-
-	/* Code canvas specific positioning */
-	.scard-code-back {
-		width: 52%;
-		top: auto;
-		bottom: 0;
-		left: 8%;
-		transform: none;
-		opacity: 0.7;
-	}
-	.scard-code-front {
-		width: 72%;
-		top: 0;
-		right: 0;
-	}
-
-	/* Board specific */
-	.scard-board-back {
-		width: 55%;
-		top: 0;
-		left: 0;
-		transform: translateY(20px) scale(0.96);
-	}
-	.scard-board-front {
-		width: 72%;
-		top: 48px;
-		right: 0;
-	}
-
-	/* Card chrome bar */
-	.scard-chrome {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 10px 14px;
-		background: rgba(255,255,255,0.025);
-		border-bottom: 1px solid rgba(255,255,255,0.06);
-	}
-	.cdot { width: 10px; height: 10px; border-radius: 50%; opacity: 0.85; flex-shrink: 0; }
-	.cdot.r { background: #ff5f57; }
-	.cdot.y { background: #febc2e; }
-	.cdot.g { background: #28c840; }
-	.ctitle {
-		margin-left: 4px;
-		font-size: 0.72rem;
-		font-weight: 600;
-		color: rgba(255,255,255,0.3);
-		letter-spacing: 0.02em;
-	}
-	.sc-live-badge {
-		margin-left: auto;
-		font-size: 0.65rem;
-		font-weight: 700;
-		color: #34d399;
-		background: rgba(52,211,153,0.12);
-		padding: 2px 8px;
-		border-radius: 999px;
-	}
-
-	/* Card body */
-	.scard-body {
-		padding: 18px 20px;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	/* ── Chat card internals ── */
-	.sc-msg-row {
-		display: flex;
-		align-items: flex-end;
-		gap: 8px;
-	}
-	.sc-me { flex-direction: row-reverse; }
-	.sc-av {
-		width: 26px; height: 26px;
-		border-radius: 50%;
-		font-size: 0.65rem; font-weight: 800;
-		display: flex; align-items: center; justify-content: center;
-		flex-shrink: 0;
-	}
-	.sc-bubble {
-		max-width: 78%;
-		padding: 8px 12px;
-		border-radius: 10px;
-		font-size: 0.78rem;
-		line-height: 1.5;
-	}
-	.sc-other-b { background: rgba(255,255,255,0.05); color: var(--text-2); border-radius: 3px 10px 10px 10px; }
-	.sc-me-b    { background: rgba(255,255,255,0.09); color: var(--text); border-radius: 10px 3px 10px 10px; }
-	.sc-typing {
-		display: flex; gap: 4px; align-items: center; padding: 4px 2px;
-	}
-	.sc-typing span {
-		width: 5px; height: 5px; border-radius: 50%;
-		background: rgba(255,255,255,0.25);
-		animation: blink 1.2s ease-in-out infinite;
-	}
-	.sc-typing span:nth-child(2) { animation-delay: 0.2s; }
-	.sc-typing span:nth-child(3) { animation-delay: 0.4s; }
-	@keyframes blink { 0%,80%,100%{opacity:0.25} 40%{opacity:1} }
-	.sc-ai-header { display: flex; align-items: center; gap: 8px; }
-	.sc-ai-pill {
-		display: inline-flex; align-items: center;
-		font-size: 0.68rem; font-weight: 800;
-		background: rgba(99,102,241,0.2); color: #a5b4fc;
-		padding: 3px 9px; border-radius: 999px;
-		letter-spacing: 0.03em;
-	}
-	.sc-ai-ctx { font-size: 0.72rem; color: var(--text-3); }
-	.sc-ai-para { font-size: 0.82rem; color: var(--text-2); margin: 0; line-height: 1.5; }
-	.sc-ai-para strong { color: var(--text); }
-	.sc-ai-item {
-		display: flex; gap: 12px; align-items: flex-start;
-		font-size: 0.78rem; color: var(--text-2); line-height: 1.5;
-	}
-	.sc-ai-num {
-		font-size: 0.65rem; font-weight: 800; color: var(--text-3);
-		padding-top: 1px; flex-shrink: 0;
-	}
-	.sc-ai-item code { font-family: ui-monospace, monospace; font-size: 0.72rem; background: rgba(255,255,255,0.07); border-radius: 3px; padding: 1px 5px; color: #c7d2fe; }
-	.sc-ai-actions { display: flex; gap: 8px; margin-top: 4px; }
-	.sc-ai-btn {
-		font-family: var(--font); font-size: 0.72rem; font-weight: 700;
-		padding: 6px 14px; border-radius: 7px;
-		background: var(--text); color: var(--page-bg);
-		border: none; cursor: pointer;
-	}
-	.sc-ai-btn-ghost {
-		background: transparent; color: var(--text-2);
-		border: 1px solid rgba(255,255,255,0.1);
-	}
-
-	/* ── Code card internals ── */
-	.sc-terminal { font-family: ui-monospace, monospace; font-size: 0.75rem; line-height: 1.9; }
-	.term-line { display: flex; gap: 8px; }
-	.term-prompt { color: rgba(255,255,255,0.3); }
-	.term-cmd { color: var(--text); }
-	.term-out { color: var(--text-3); padding-left: 16px; }
-	.term-ok  { color: #34d399; padding-left: 16px; }
-	.term-err { color: #f87171; padding-left: 16px; }
-	.term-cursor { color: rgba(255,255,255,0.6); animation: blink-cur 1s step-end infinite; }
-	@keyframes blink-cur { 0%,100%{opacity:1} 50%{opacity:0} }
-	.sc-code-body { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.76rem; line-height: 1.85; padding-bottom: 0; }
-	.cline { display: flex; gap: 14px; }
-	.cline-ai { background: rgba(52,211,153,0.06); border-radius: 3px; }
-	.ln   { color: rgba(255,255,255,0.18); min-width: 14px; }
-	.ci   { width: 18px; flex-shrink: 0; display: inline-block; }
-	.ck   { color: #818cf8; }
-	.cf   { color: #34d399; }
-	.cv   { color: #f3c67e; }
-	.cp   { color: rgba(255,255,255,0.55); }
-	.sc-ghost { color: rgba(52,211,153,0.5); font-style: italic; }
-	.sc-ai-suggestion-bar {
-		border-top: 1px solid rgba(255,255,255,0.06);
-		padding: 10px 20px;
-		font-size: 0.73rem; color: #6ee7b7;
-		background: rgba(52,211,153,0.04);
-		display: flex; align-items: center; gap: 8px;
-	}
-	.sc-prompt-bar {
-		display: flex; align-items: center; gap: 10px;
-		background: rgba(255,255,255,0.04);
+		background: #111115;
 		border: 1px solid rgba(255,255,255,0.08);
-		border-radius: 8px;
-		padding: 9px 13px;
-		font-size: 0.8rem; color: var(--text-2);
+		border-radius: 12px;
+		overflow: hidden;
+		box-shadow: 0 32px 80px rgba(0,0,0,0.75);
 	}
-	.sc-prompt-icon { color: #6366f1; font-size: 0.85rem; }
 
-	/* ── Task card internals ── */
-	.sc-gen-task {
-		display: flex; align-items: center; gap: 10px;
-		font-size: 0.76rem; color: var(--text-2); line-height: 1.4; padding: 2px 0;
+	/* ── Chat panels ── */
+	.fp-main {
+		width: 44%;
+		top: 60px; right: 8%;
+		opacity: 0.75;
+		transform: rotate(-1.5deg);
 	}
-	.sc-gen-num {
-		font-size: 0.62rem; font-weight: 800; color: var(--text-3);
-		min-width: 16px;
+	.fp-header { padding: 14px 18px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+	.fp-title-row { display: flex; align-items: center; justify-content: space-between; }
+	.fp-room-name { font-size: 0.82rem; font-weight: 700; color: var(--text); }
+	.fp-member-dots { display: flex; }
+	.fp-member-dots span { width: 22px; height: 22px; border-radius: 50%; display: inline-block; border: 2px solid #111115; margin-left: -6px; }
+	.fp-member-dots span:first-child { margin-left: 0; }
+	.fp-msgs { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+	.fmsg { display: flex; align-items: flex-start; gap: 9px; }
+	.fmsg-me { flex-direction: row-reverse; }
+	.fmsg-av { width: 26px; height: 26px; border-radius: 50%; font-size: 0.62rem; font-weight: 800; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+	.fmsg-name { font-size: 0.65rem; color: var(--text-3); font-weight: 600; display: block; margin-bottom: 3px; }
+	.fmsg-b { padding: 8px 11px; border-radius: 10px; font-size: 0.78rem; line-height: 1.5; max-width: 82%; }
+	.fmsg-b-other { background: rgba(255,255,255,0.05); color: var(--text-2); border-radius: 3px 10px 10px 10px; }
+	.fmsg-b-me { background: rgba(255,255,255,0.09); color: var(--text); border-radius: 10px 3px 10px 10px; }
+	.fp-input { padding: 10px 16px; border-top: 1px solid rgba(255,255,255,0.05); }
+	.fp-input-text { font-size: 0.75rem; color: var(--text-3); }
+	/* AI panel: front, overlapping chat, slightly right */
+	.fp-ai {
+		width: 46%; top: 40px; right: -2%;
+		padding: 18px 20px; display: flex; flex-direction: column; gap: 11px;
+		z-index: 2; box-shadow: 0 40px 100px rgba(0,0,0,0.85);
 	}
-	.sc-kanban { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
-	.sc-col { display: flex; flex-direction: column; gap: 7px; }
-	.sc-col-h { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); margin-bottom: 3px; }
-	.sc-card-item {
-		background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
-		border-radius: 7px; padding: 8px 9px;
-		font-size: 0.73rem; color: var(--text-2); line-height: 1.4;
-	}
-	.sc-card-active { background: rgba(236,72,153,0.06); color: var(--text); display: flex; align-items: center; justify-content: space-between; }
-	.sc-card-done { opacity: 0.4; text-decoration: line-through; }
-	.sc-card-badge { font-size: 0.6rem; font-weight: 800; padding: 2px 5px; border-radius: 4px; }
+	.fp-overlap-right { z-index: 2; }
+	.fp-ai-tag { display: flex; align-items: center; gap: 9px; }
+	.fp-ai-badge { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.04em; background: rgba(99,102,241,0.2); color: #a5b4fc; padding: 3px 9px; border-radius: 999px; }
+	.fp-ai-sub { font-size: 0.72rem; color: var(--text-3); }
+	.fp-ai-body { font-size: 0.82rem; color: var(--text-2); margin: 0; line-height: 1.5; }
+	.fp-ai-body strong { color: var(--text); }
+	.fp-ai-row { display: flex; gap: 12px; align-items: flex-start; font-size: 0.78rem; color: var(--text-2); line-height: 1.5; }
+	.fp-ai-n { font-size: 0.62rem; font-weight: 800; color: var(--text-3); padding-top: 2px; flex-shrink: 0; }
+	.fp-ai-row code { font-family: ui-monospace, monospace; font-size: 0.7rem; background: rgba(255,255,255,0.07); border-radius: 3px; padding: 1px 4px; color: #c7d2fe; }
+	.fp-ai-btns { display: flex; gap: 8px; margin-top: 2px; }
+	.fp-btn-solid { font-family: var(--font); font-size: 0.72rem; font-weight: 700; padding: 6px 14px; border-radius: 7px; background: var(--text); color: var(--page-bg); border: none; cursor: pointer; }
+	.fp-btn-outline { font-family: var(--font); font-size: 0.72rem; font-weight: 600; padding: 6px 14px; border-radius: 7px; background: transparent; color: var(--text-2); border: 1px solid rgba(255,255,255,0.1); cursor: pointer; }
 
-	/* ── Dashboard card internals ── */
-	.sc-stats-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; }
-	.sc-stat { display: flex; flex-direction: column; gap: 3px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 12px 14px; }
-	.sc-stat-v { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.04em; line-height: 1; }
-	.sc-stat-l { font-size: 0.7rem; color: var(--text-3); font-weight: 500; }
-	.sc-notice {
-		border-left: 2px solid; border-radius: 0 7px 7px 0;
-		padding: 10px 12px; font-size: 0.78rem;
-		color: var(--text-2); line-height: 1.5;
+	/* ── Code editor panels ── */
+	.fp-editor { width: 58%; top: 40px; right: -1%; }
+	.fp-tab-bar { display: flex; align-items: center; gap: 2px; padding: 8px 12px 0; background: rgba(255,255,255,0.02); border-bottom: 1px solid rgba(255,255,255,0.06); }
+	.fp-tab { font-size: 0.72rem; font-weight: 500; color: var(--text-3); padding: 6px 12px; border-radius: 6px 6px 0 0; }
+	.fp-tab-active { background: rgba(255,255,255,0.06); color: var(--text); }
+	.fp-live-pill { margin-left: auto; font-size: 0.62rem; font-weight: 700; color: #34d399; background: rgba(52,211,153,0.12); padding: 2px 8px; border-radius: 999px; }
+	.fp-code { padding: 16px 18px; font-family: ui-monospace, monospace; font-size: 0.76rem; line-height: 1.85; }
+	.fcl { display: flex; gap: 14px; padding: 0 2px; }
+	.fcl-hl { background: rgba(52,211,153,0.06); border-radius: 3px; margin: 0 -2px; padding: 0 2px; }
+	.fln { color: rgba(255,255,255,0.15); min-width: 14px; flex-shrink: 0; }
+	.fi { width: 16px; flex-shrink: 0; display: inline-block; }
+	.fkw { color: #818cf8; } .ffn { color: #34d399; } .fvr { color: #f3c67e; } .fpu { color: rgba(255,255,255,0.5); } .fgh { color: rgba(52,211,153,0.45); font-style: italic; }
+	.fp-ai-bar { padding: 9px 18px; border-top: 1px solid rgba(255,255,255,0.06); font-size: 0.72rem; display: flex; align-items: center; gap: 8px; }
+	/* Terminal lower-left, overlapping */
+	.fp-term { width: 40%; top: auto; bottom: 80px; left: 5%; opacity: 0.82; z-index: 2; }
+	.fp-overlap-bottom { z-index: 2; }
+	.fp-term-bar { padding: 9px 14px; border-bottom: 1px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.02); }
+	.fp-term-title { font-size: 0.7rem; color: var(--text-3); font-weight: 600; letter-spacing: 0.03em; }
+	.fp-term-body { padding: 12px 16px; font-family: ui-monospace, monospace; font-size: 0.74rem; line-height: 1.9; display: flex; flex-direction: column; }
+	.ftl { display: flex; gap: 8px; } .ftp { color: rgba(255,255,255,0.3); } .ftc { color: var(--text); }
+	.fto { color: var(--text-3); padding-left: 14px; } .ftok { color: #34d399; padding-left: 14px; } .fter { color: #f87171; padding-left: 14px; }
+
+	/* ── Whiteboard canvas fills entire scene ── */
+	.fp-canvas { position: absolute; inset: 0; }
+	.fp-canvas-bg {
+		position: absolute; inset: 0;
+		background-image: radial-gradient(circle, rgba(255,255,255,0.04) 1px, transparent 1px);
+		background-size: 28px 28px;
 	}
-	.sc-notice em { font-style: normal; color: var(--text); }
-	.sc-room-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
-	.sc-room-row:last-child { border-bottom: none; }
-	.sc-room-dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; flex-shrink: 0; }
-	.sc-room-info { display: flex; flex-direction: column; gap: 2px; flex: 1; }
-	.sc-room-name { font-size: 0.8rem; font-weight: 600; color: var(--text); font-family: ui-monospace, monospace; }
-	.sc-room-meta { font-size: 0.7rem; color: var(--text-3); }
-	.sc-room-live { font-size: 0.62rem; font-weight: 800; color: #34d399; background: rgba(52,211,153,0.1); padding: 2px 8px; border-radius: 999px; }
+	.fp-canvas-prompt {
+		position: absolute; top: 22px; right: 8%;
+		display: flex; align-items: center; gap: 9px;
+		background: rgba(20,20,26,0.92); border: 1px solid rgba(255,255,255,0.09); border-radius: 8px;
+		padding: 9px 16px; font-size: 0.78rem; color: var(--text-2);
+		box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 2; max-width: 380px;
+	}
+	.fp-canvas-svg {
+		position: absolute;
+		top: 50%; right: 4%; transform: translateY(-50%);
+		width: 54%; height: auto;
+	}
+	.fp-cursor { position: absolute; font-size: 0.68rem; font-weight: 700; display: flex; align-items: center; gap: 4px; white-space: nowrap; z-index: 3; }
+	.fp-cursor span { background: rgba(0,0,0,0.6); padding: 1px 5px; border-radius: 3px; }
+
+	/* ── Kanban fills right side of scene ── */
+	.fp-kanban {
+		position: absolute; top: 48px; right: -20px;
+		width: 58%; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+		padding: 20px; background: #0e0e13;
+		border: 1px solid rgba(255,255,255,0.07); border-radius: 14px;
+		box-shadow: 0 32px 80px rgba(0,0,0,0.75);
+	}
+	.fp-k-col { display: flex; flex-direction: column; gap: 8px; }
+	.fp-k-head { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); margin-bottom: 6px; padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+	.fp-k-card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07); border-radius: 8px; padding: 10px 12px; font-size: 0.76rem; color: var(--text-2); line-height: 1.45; }
+	.fp-k-active { background: rgba(236,72,153,0.06); border-color: rgba(236,72,153,0.3); color: var(--text); }
+	.fp-k-done { opacity: 0.38; text-decoration: line-through; }
+	.fp-k-badge { font-size: 0.58rem; font-weight: 800; background: rgba(236,72,153,0.15); color: #ec4899; padding: 2px 6px; border-radius: 4px; }
+	.fp-k-assignee { display: flex; align-items: center; gap: 5px; margin-top: 7px; font-size: 0.68rem; color: var(--text-3); }
+	.fp-k-av { width: 18px; height: 18px; border-radius: 50%; font-size: 0.55rem; font-weight: 800; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+	.fp-task-ai {
+		position: absolute; bottom: 80px; right: 4%;
+		padding: 10px 16px; display: flex; align-items: center; gap: 10px;
+		background: rgba(236,72,153,0.07); border: 1px solid rgba(236,72,153,0.18);
+		border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); white-space: nowrap;
+	}
+
+	/* ── Dashboard panels scattered across scene ── */
+	.fp-stat-cluster {
+		position: absolute; top: 52px; right: 6%;
+		display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 52%;
+	}
+	.fp-stat-card { background: #111115; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 18px 20px; display: flex; flex-direction: column; gap: 4px; box-shadow: 0 12px 32px rgba(0,0,0,0.5); }
+	.fp-stat-v { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.04em; line-height: 1; }
+	.fp-stat-l { font-size: 0.72rem; color: var(--text-3); font-weight: 500; }
+	.fp-notice {
+		position: absolute; top: 200px; right: -1%; width: 40%;
+		padding: 14px 18px; border-left: 2px solid;
+		border-radius: 0 10px 10px 0; background: rgba(17,17,21,0.95);
+		border-top: 1px solid rgba(255,255,255,0.06); border-right: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);
+		box-shadow: 0 12px 32px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 6px;
+	}
+	.fp-notice-tag { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.06em; }
+	.fp-notice p { font-size: 0.82rem; color: var(--text-2); margin: 0; line-height: 1.55; }
+	.fp-notice p strong { color: var(--text); }
+	.fp-notice-link { font-size: 0.72rem; color: var(--text-3); font-weight: 600; cursor: pointer; }
+	.fp-rooms {
+		position: absolute; top: 80px; left: 36%; width: 34%;
+		background: #111115; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px;
+		overflow: hidden; box-shadow: 0 16px 40px rgba(0,0,0,0.6); opacity: 0.82;
+	}
+	.fp-room-row { display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+	.fp-room-row:last-child { border-bottom: none; }
+	.fp-room-dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; flex-shrink: 0; }
+	.fp-room-info { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+	.fp-room-n { font-size: 0.78rem; font-weight: 600; color: var(--text); font-family: ui-monospace, monospace; }
+	.fp-room-m { font-size: 0.68rem; color: var(--text-3); }
+	.fp-room-live { font-size: 0.6rem; font-weight: 800; color: #34d399; background: rgba(52,211,153,0.1); padding: 2px 8px; border-radius: 999px; }
+
+	/* Character rain bg (scene 5) */
+	.scene-char-bg {
+		position: absolute; inset: 0; z-index: 0; overflow: hidden; opacity: 0.12;
+		font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.5;
+		color: rgba(255,255,255,0.8); pointer-events: none; word-break: break-all; padding: 12px;
+	}
+	.scene-char-bg::before {
+		content: "01101010011010010110101001101010011010100111010101110010011000010010000001110100011001010110000101101101001000000100000101001001010000010111001101110000011000010110001101100101001000000111001101100101011000110111010101110010011010010111010001111001001000000110000101101110011001000010000001000001010010010010000001110111011011110111001001101011011100110111000001100001011000110110010100100000001100000011000100110001001100000011000100110001001100010011000000110001001100010011000100110001001100000011000101110110001100010011000001100001011000010111001001100011011010000011000000110001001100000011000100110001001100100100000101010000010010010011010100110010001101000011000100110011001100110011010001000010";
+	}
+
 
 	/* ── Pricing section ──────────────────────────────── */
 	.pricing-section {

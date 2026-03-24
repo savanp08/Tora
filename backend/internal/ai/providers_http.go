@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	defaultVertexModel  = "gemini-2.5-flash-lite"
+	defaultVertexModel  = "gemini-3.1-flash-lite"
 	defaultOpenAIModel  = "gpt-4o-mini"
 	defaultCohereModel  = "command-r"
 	defaultMistralModel = "codestral-latest"
@@ -26,9 +26,9 @@ const (
 
 var (
 	defaultVertexModels = []string{
-		defaultVertexModel,
-		"gemini-2.5-flash",
-		"gemini-2.5-pro",
+		defaultVertexModel,   // gemini-3.1-flash-lite  $0.25/1M — default
+		"gemini-3-flash",     // $0.50/1M
+		"gemini-3.1-pro",     // $2.00/1M — fallback for capability
 	}
 	defaultGeminiModels = []string{
 		"gemini-3.1-pro",
@@ -48,6 +48,50 @@ var (
 		"grok-beta",
 	}
 )
+
+// Per-tier model preference lists — models are tried in order within each
+// tier, then the provider's full configured cascade catches anything missed.
+//
+// Vertex Gemini 3 tiers (cost-optimised, staying under 140 K input tokens):
+//   light    → gemini-3.1-flash-lite  $0.25/1M input — conversational replies
+//   standard → gemini-3-flash         $0.50/1M input — data synthesis
+//   heavy    → gemini-3.1-pro         $2.00/1M input — reports / analysis
+//
+// Gemini Direct tiers — same cost logic, different model name set.
+//
+// Groq tiers (free, Llama):
+//   light    → 8b (instant responses)
+//   standard → 70b versatile
+//   heavy    → 70b versatile (best available on free Groq)
+var (
+	vertexTierModels = map[string][]string{
+		AIModelTierLight:    {"gemini-3.1-flash-lite"},
+		AIModelTierStandard: {"gemini-3-flash", "gemini-3.1-flash-lite"},
+		AIModelTierHeavy:    {"gemini-3.1-pro", "gemini-3-flash"},
+	}
+	geminiTierModels = map[string][]string{
+		AIModelTierLight:    {"gemini-3.1-flash-lite", "gemini-3.1-flash"},
+		AIModelTierStandard: {"gemini-3.1-flash", "gemini-3.1-flash-lite"},
+		AIModelTierHeavy:    {"gemini-3.1-pro", "gemini-3.1-flash"},
+	}
+	groqTierModels = map[string][]string{
+		AIModelTierLight:    {"llama-3.1-8b-instant", "llama-3.3-70b-versatile"},
+		AIModelTierStandard: {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"},
+		AIModelTierHeavy:    {"llama-3.3-70b-versatile", "llama-3.1-8b-instant"},
+	}
+)
+
+// buildTieredModelList returns a model list with tier-preferred models first,
+// followed by the provider's full configured cascade (deduplicated).
+// If the tier is unknown or empty, the original configured list is returned.
+func buildTieredModelList(configured []string, tier string, tierMaps map[string][]string) []string {
+	preferred, ok := tierMaps[tier]
+	if !ok || len(preferred) == 0 {
+		return configured
+	}
+	// mergeModelCascade deduplicates and preserves order: preferred → configured
+	return mergeModelCascade(preferred, configured)
+}
 
 // buildDefaultProvidersFromEnv returns providers in fixed fallback order:
 // Vertex Gemini -> Gemini -> Mistral -> Groq.
@@ -97,6 +141,11 @@ func NewVertexGeminiProvider(apiKey string, models []string) *VertexGeminiProvid
 	}
 }
 
+// MaxInputTokens satisfies ContextLimiter.
+// Capped at 140 K to keep prompt costs predictable — well below the 1 M
+// hard limit but leaving 10 K headroom over the 150 K global default.
+func (p *VertexGeminiProvider) MaxInputTokens() int { return 140_000 }
+
 func (p *VertexGeminiProvider) GenerateRollingSummary(
 	ctx context.Context,
 	previousState []byte,
@@ -110,13 +159,24 @@ func (p *VertexGeminiProvider) GenerateRollingSummary(
 }
 
 func (p *VertexGeminiProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	return p.generateWithModels(ctx, prompt, p.models)
+}
+
+// GenerateChatResponseWithModelHint satisfies ModelHintProvider.
+// It reorders the model cascade to prefer the tier-appropriate model,
+// then falls back to the full configured cascade.
+func (p *VertexGeminiProvider) GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error) {
+	return p.generateWithModels(ctx, prompt, buildTieredModelList(p.models, tier, vertexTierModels))
+}
+
+func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt string, models []string) (string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return "", fmt.Errorf("vertex prompt is empty")
 	}
 
 	providerLabel := "google_vertex"
-	for _, model := range p.models {
+	for _, model := range models {
 		endpoint := fmt.Sprintf(
 			"https://aiplatform.googleapis.com/v1/publishers/google/models/%s:streamGenerateContent?key=%s",
 			url.PathEscape(model),
@@ -160,7 +220,7 @@ func (p *VertexGeminiProvider) GenerateChatResponse(ctx context.Context, prompt 
 		recordAIRequest(providerLabel, "success")
 		return strings.TrimSpace(text), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+	return "", newModelCascadeExhaustedError(providerLabel, models)
 }
 
 type GeminiProvider struct {
@@ -177,6 +237,11 @@ func NewGeminiProvider(apiKey string, models []string) *GeminiProvider {
 	}
 }
 
+// MaxInputTokens satisfies ContextLimiter.
+// Capped at 140 K to keep prompt costs predictable — well below the 1 M
+// hard limit but leaving 10 K headroom over the 150 K global default.
+func (p *GeminiProvider) MaxInputTokens() int { return 140_000 }
+
 func (p *GeminiProvider) GenerateRollingSummary(
 	ctx context.Context,
 	previousState []byte,
@@ -190,17 +255,24 @@ func (p *GeminiProvider) GenerateRollingSummary(
 }
 
 func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	return p.generateWithModels(ctx, prompt, p.models)
+}
+
+func (p *GeminiProvider) GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error) {
+	return p.generateWithModels(ctx, prompt, buildTieredModelList(p.models, tier, geminiTierModels))
+}
+
+func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, models []string) (string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return "", fmt.Errorf("gemini prompt is empty")
 	}
 
 	providerLabel := "gemini"
-	for _, model := range p.models {
-		modelPath := url.PathEscape(model)
+	for _, model := range models {
 		endpoint := fmt.Sprintf(
 			"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-			modelPath,
+			url.PathEscape(model),
 			url.QueryEscape(strings.TrimSpace(p.apiKey)),
 		)
 
@@ -241,7 +313,7 @@ func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string
 		recordAIRequest(providerLabel, "success")
 		return strings.TrimSpace(text), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+	return "", newModelCascadeExhaustedError(providerLabel, models)
 }
 
 type MistralProvider struct {
@@ -257,6 +329,12 @@ func NewMistralProvider(apiKey string, models []string) *MistralProvider {
 		client: newProviderHTTPClient(),
 	}
 }
+
+// MaxInputTokens satisfies ContextLimiter.
+// codestral-latest has a 32 K context window; we cap at 28 K to leave room
+// for the completion. mistral-small-latest supports 128 K but we use the
+// conservative bound for the default model.
+func (p *MistralProvider) MaxInputTokens() int { return 28_000 }
 
 func (p *MistralProvider) GenerateRollingSummary(
 	ctx context.Context,
@@ -510,6 +588,11 @@ func NewGroqProvider(apiKey string, models []string) *GroqProvider {
 	}
 }
 
+// MaxInputTokens satisfies ContextLimiter.
+// Both llama-3.3-70b-versatile and llama-3.1-8b-instant have 128 K context
+// windows on Groq; cap at 100 K to leave headroom for the completion.
+func (p *GroqProvider) MaxInputTokens() int { return 100_000 }
+
 func (p *GroqProvider) GenerateRollingSummary(
 	ctx context.Context,
 	previousState []byte,
@@ -523,13 +606,21 @@ func (p *GroqProvider) GenerateRollingSummary(
 }
 
 func (p *GroqProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	return p.generateWithModels(ctx, prompt, p.models)
+}
+
+func (p *GroqProvider) GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error) {
+	return p.generateWithModels(ctx, prompt, buildTieredModelList(p.models, tier, groqTierModels))
+}
+
+func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, models []string) (string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return "", fmt.Errorf("groq prompt is empty")
 	}
 
 	providerLabel := "groq"
-	for _, model := range p.models {
+	for _, model := range models {
 		payload := map[string]any{
 			"model": model,
 			"messages": []map[string]string{
@@ -584,7 +675,7 @@ func (p *GroqProvider) GenerateChatResponse(ctx context.Context, prompt string) 
 		recordAIRequest(providerLabel, "success")
 		return text, nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+	return "", newModelCascadeExhaustedError(providerLabel, models)
 }
 
 type CohereProvider struct {

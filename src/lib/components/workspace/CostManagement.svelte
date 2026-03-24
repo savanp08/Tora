@@ -6,6 +6,7 @@
 	const dispatch = createEventDispatcher<{
 		requestTaskEdit: { taskId: string };
 	}>();
+	export let canEdit = true;
 
 	type BudgetSegment = {
 		key: 'done' | 'in_progress' | 'todo';
@@ -79,12 +80,35 @@
 	}
 
 	function resolveTaskType(task: Task) {
+		const customFieldType = readTaskTypeFromCustomFields(task.customFields);
+		if (customFieldType) {
+			return customFieldType;
+		}
 		const entries = parseDescriptionMetadata(task.description || '');
 		const typeFromMetadata = entries.find((entry) => entry.key === 'type')?.value || '';
-		const normalized = typeFromMetadata.trim().toLowerCase();
-		if (!normalized) {
+		if (!typeFromMetadata.trim()) {
 			return 'General';
 		}
+		return toTitleLabel(typeFromMetadata);
+	}
+
+	function readTaskTypeFromCustomFields(fields: Task['customFields']) {
+		if (!fields || typeof fields !== 'object') {
+			return '';
+		}
+		for (const key of ['type', 'task_type', 'taskType', 'category', 'workstream']) {
+			const candidate = toStringValue((fields as Record<string, unknown>)[key]).trim();
+			if (!candidate) {
+				continue;
+			}
+			return toTitleLabel(candidate);
+		}
+		return '';
+	}
+
+	function toTitleLabel(rawValue: string) {
+		const normalized = rawValue.trim().toLowerCase();
+		if (!normalized) return 'General';
 		return normalized.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
 	}
 
@@ -148,6 +172,9 @@
 	}
 
 	function openTaskEditor(taskID: string) {
+		if (!canEdit) {
+			return;
+		}
 		const normalized = taskID.trim();
 		if (!normalized) {
 			return;
@@ -224,7 +251,12 @@
 		{:else}
 			<div class="quick-edit-list">
 				{#each topExpensiveTasks as task (task.id)}
-					<button type="button" class="quick-task" on:click={() => openTaskEditor(task.id)}>
+					<button
+						type="button"
+						class="quick-task"
+						disabled={!canEdit}
+						on:click={() => openTaskEditor(task.id)}
+					>
 						<div>
 							<strong>{task.title}</strong>
 							<small>{normalizeStatus(task.status).replace(/_/g, ' ')}</small>
@@ -409,6 +441,13 @@
 	.quick-task:hover {
 		border-color: color-mix(in srgb, var(--ws-accent) 52%, var(--ws-border));
 		transform: translateY(-1px);
+	}
+
+	.quick-task:disabled {
+		opacity: 0.62;
+		cursor: not-allowed;
+		transform: none;
+		border-color: color-mix(in srgb, var(--ws-border) 90%, transparent);
 	}
 
 	.quick-task strong {

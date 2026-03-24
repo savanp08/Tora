@@ -231,29 +231,48 @@ func (c *Client) LoadHistory(ctx context.Context, service *MessageService, roomI
 }
 
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	requestedUserID := normalizeUsername(r.URL.Query().Get("userId"))
 	if hub != nil && hub.tracker != nil && hub.tracker.IsSleeping() {
+		log.Printf("[ws] reject sleep-mode user=%s remote=%s", requestedUserID, r.RemoteAddr)
 		http.Error(w, "Server is in safety sleep mode", http.StatusServiceUnavailable)
 		return
 	}
 
 	clientIP := extractClientIP(r)
 	if !wsConnectLimiter.Allow(clientIP) {
+		log.Printf("[ws] reject connect-limiter user=%s ip=%s remote=%s", requestedUserID, clientIP, r.RemoteAddr)
 		http.Error(w, "Too many socket connection attempts", http.StatusTooManyRequests)
 		return
 	}
-	requestedUserID := normalizeUsername(r.URL.Query().Get("userId"))
 	rateLimitDeviceID := extractSocketDeviceID(r)
 	if limitErr := enforceWSConnectionRateLimits(r.Context(), requestedUserID, clientIP, rateLimitDeviceID); limitErr != nil {
 		var exceeded *wsRateLimitExceededError
 		if errors.As(limitErr, &exceeded) {
+			log.Printf(
+				"[ws] reject fixed-window-rate-limit user=%s ip=%s device=%s scope=%s window=%s limit=%d",
+				requestedUserID,
+				clientIP,
+				rateLimitDeviceID,
+				exceeded.Scope,
+				exceeded.Window,
+				exceeded.Limit,
+			)
 			http.Error(w, exceeded.PublicMessage(), http.StatusTooManyRequests)
 			return
 		}
+		log.Printf("[ws] reject limiter-unavailable user=%s ip=%s err=%v", requestedUserID, clientIP, limitErr)
 		http.Error(w, "WebSocket limiter unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	releaseReservation, status, rejectReason := reserveWSConnection(clientIP)
 	if releaseReservation == nil {
+		log.Printf(
+			"[ws] reject capacity user=%s ip=%s status=%d reason=%s",
+			requestedUserID,
+			clientIP,
+			status,
+			rejectReason,
+		)
 		http.Error(w, rejectReason, status)
 		return
 	}

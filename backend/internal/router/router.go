@@ -43,7 +43,7 @@ func New(
 			"https://tora.monokenos.com",
 			"http://192.168.1.165:5173",
 		},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{
 			"Accept",
 			"Authorization",
@@ -151,6 +151,7 @@ func New(
 		r.Post("/execute", handlers.HandleCodeExecution)
 		r.Post("/ai/chat", handlers.HandlePrivateAIChat)
 		r.Post("/ai/private-chat", handlers.HandlePrivateAIChat)
+		r.Get("/templates", roomHandler.GetIndustryTemplates)
 		r.Post("/auth/register", authHandler.Register)
 		r.Post("/auth/signup", authHandler.SignUp)
 		r.Post("/auth/login", authHandler.Login)
@@ -178,7 +179,24 @@ func New(
 		r.Delete("/rooms/{roomId}/tasks", roomHandler.DeleteRoomTasks)
 		r.Delete("/rooms/{roomId}/tasks/{taskId}", roomHandler.DeleteRoomTask)
 		r.Put("/rooms/{roomId}/tasks/{taskId}", roomHandler.UpdateRoomTask)
+		r.Patch("/rooms/{roomId}/tasks/{taskId}", roomHandler.UpdateRoomTask)
 		r.Put("/rooms/{roomId}/tasks/{taskId}/status", roomHandler.UpdateRoomTaskStatus)
+		r.Post("/rooms/{roomId}/tasks/{taskId}/relations", roomHandler.CreateRoomTaskRelation)
+		r.Patch("/rooms/{roomId}/tasks/{taskId}/relations/{toTaskId}", roomHandler.UpdateRoomTaskRelation)
+		r.Delete("/rooms/{roomId}/tasks/{taskId}/relations/{toTaskId}", roomHandler.DeleteRoomTaskRelation)
+		r.Get("/rooms/{roomId}/field-schemas", roomHandler.GetRoomFieldSchemas)
+		r.Post("/rooms/{roomId}/field-schemas", roomHandler.CreateRoomFieldSchema)
+		r.Patch("/rooms/{roomId}/field-schemas/{fieldId}", roomHandler.UpdateRoomFieldSchema)
+		r.Delete("/rooms/{roomId}/field-schemas/{fieldId}", roomHandler.DeleteRoomFieldSchema)
+		r.Post("/rooms/{roomId}/apply-template", roomHandler.ApplyRoomTemplate)
+		r.Get("/rooms/{roomId}/forms", roomHandler.GetRoomIntakeForms)
+		r.Post("/rooms/{roomId}/forms", roomHandler.CreateRoomIntakeForm)
+		r.Patch("/rooms/{roomId}/forms/{formId}", roomHandler.UpdateRoomIntakeForm)
+		r.Delete("/rooms/{roomId}/forms/{formId}", roomHandler.DeleteRoomIntakeForm)
+		r.Get("/rooms/{roomId}/forms/{formId}/submissions", roomHandler.GetRoomIntakeFormSubmissions)
+		r.Get("/f/{formId}", roomHandler.GetPublicIntakeForm)
+		r.Post("/f/{formId}", roomHandler.SubmitPublicIntakeForm)
+		r.Get("/rooms/{roomId}/ai-context", roomHandler.GetRoomAIContext)
 
 		r.Post("/rooms", roomHandler.CreateRoom)
 		r.Post("/rooms/revive", roomHandler.ReviveRoom)
