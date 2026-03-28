@@ -7,7 +7,8 @@
 	import { activeContext } from '$lib/stores/jiraContext';
 	import { addBoardActivity, type BoardActivityInput } from '$lib/stores/boardActivity';
 	import { fieldSchemaStore, type FieldSchema } from '$lib/stores/fieldSchema';
-	import { applyTimelineTaskStatusUpdate } from '$lib/stores/timeline';
+	import { applyTimelineTaskStatusUpdate, projectTimeline } from '$lib/stores/timeline';
+	import type { ProjectTimeline } from '$lib/types/timeline';
 	import {
 		moveTaskOptimistic,
 		removeTaskStoreEntry,
@@ -19,9 +20,14 @@
 	import { normalizeIdentifier, normalizeRoomIDValue, toStringValue } from '$lib/utils/chat/core';
 	import { sendSocketPayload } from '$lib/ws';
 	import { buildBoardActivitySocketPayload, buildTaskSocketPayload } from '$lib/ws/client';
+	import ChangeRequestModal from './ChangeRequestModal.svelte';
+	import { submitChangeRequest, type ChangeRequestAction } from '$lib/stores/changeRequests';
 
 	export let roomId = '';
 	export let canEdit = true;
+	export let isAdmin = false;
+	export let sessionUserID = '';
+	export let sessionUserName = '';
 	export let contextAware = false;
 	export let onlineMembers: OnlineMember[] = [];
 	export let boardView: BoardView = 'table';
@@ -48,7 +54,15 @@
 		column: SprintSortColumn;
 		direction: SprintSortDirection;
 	};
-	type EditableField = 'title' | 'description' | 'assigneeId' | 'sprintName' | 'budget' | 'spent';
+	type EditableField =
+		| 'title'
+		| 'description'
+		| 'assigneeId'
+		| 'sprintName'
+		| 'budget'
+		| 'spent'
+		| 'dueDate'
+		| 'startDate';
 	type EditableCellKey = EditableField | 'status';
 	type TaskSource = 'personal' | 'room';
 	type SupportPriority = 'critical' | 'high' | 'medium' | 'low';
@@ -233,7 +247,9 @@
 		status: string;
 		budget: string;
 		spent: string;
-	} = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '' };
+		dueDate: string;
+		startDate: string;
+	} = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '', dueDate: '', startDate: '' };
 	let taskModalSaving = false;
 	let hoveredTaskId = '';
 	let newTaskInput: HTMLInputElement | null = null;
@@ -246,10 +262,24 @@
 	let sprintComposerTaskInputValue = '';
 	let sprintComposerActiveTaskIndex = -1;
 	let sprintComposerSaving = false;
+	type SprintComposerMeta = { status: string; assigneeId: string; budget: string; spent: string };
+	let sprintComposerRowMeta: Record<number, SprintComposerMeta> = {};
 	let sprintDraftGroupsByContext: Record<string, string[]> = {};
 
 	// Sprint add task state
 	let sprintAddKey = '';
+	let crModalOpen = false;
+	let searchExpanded = false;
+	let crModalAction: ChangeRequestAction = 'edit_task';
+	let crModalTargetLabel = '';
+	let crModalPayload: Record<string, unknown> = {};
+
+	function openCR(action: ChangeRequestAction, targetLabel: string, payload: Record<string, unknown> = {}) {
+		crModalAction = action;
+		crModalTargetLabel = targetLabel;
+		crModalPayload = payload;
+		crModalOpen = true;
+	}
 	let sprintAddContent = '';
 	let sprintAddCreating = false;
 	let taskSearchQuery = '';
@@ -296,6 +326,7 @@
 		sprintComposerTaskDrafts = [];
 		sprintComposerTaskInputValue = '';
 		sprintComposerActiveTaskIndex = -1;
+		sprintComposerRowMeta = {};
 		void loadContextTasks();
 	}
 
@@ -330,6 +361,17 @@
 	).sort(compareTasksForGrid);
 	$: contextGridTasks = dedupeDisplayTasksById([...contextTasks]).sort(compareTasksForGrid);
 	$: boardTasks = contextAware ? contextGridTasks : roomTasks;
+	$: timelineDateMap = buildTimelineDateMap($projectTimeline);
+	$: calendarWorkloadTasks = boardTasks.map((task) => {
+		if (task.dueDate || task.startDate) return task;
+		const tl = timelineDateMap.get(task.id);
+		if (!tl) return task;
+		return {
+			...task,
+			dueDate: tl.endDate > 0 ? tl.endDate : undefined,
+			startDate: tl.startDate > 0 ? tl.startDate : undefined
+		};
+	});
 	$: if (
 		boardView !== 'table' &&
 		boardView !== 'kanban' &&
@@ -368,7 +410,7 @@
 	$: ownerOptions = buildOwnerOptions(onlineMembers, boardTasks);
 	$: canCreateSprintTask = canEdit && (!contextAware || $activeContext.type === 'room');
 	$: sprintDraftGroups = sprintDraftGroupsByContext[sprintContextKey] ?? [];
-	$: sprintComposerPreviewRows = buildSprintComposerPreviewRows(sprintComposerTaskDrafts);
+	$: sprintComposerPreviewRows = buildSprintComposerPreviewRows(sprintComposerTaskDrafts, sprintComposerRowMeta, sprintComposerActiveTaskIndex);
 	$: normalizedTaskSearchQuery = normalizeSearchQuery(taskSearchQuery);
 	$: taskSearchTokens = buildSearchTokens(normalizedTaskSearchQuery);
 	$: hasActiveTaskSearch = normalizedTaskSearchQuery.length > 0;
@@ -1061,19 +1103,34 @@
 		return next;
 	}
 
-	function buildSprintComposerPreviewRows(taskDrafts: string[]) {
+	function buildSprintComposerPreviewRows(taskDrafts: string[], rowMeta: Record<number, SprintComposerMeta>, activeIndex: number) {
 		const normalizedDrafts = parseSprintComposerTasks(taskDrafts);
-		const maxRows = Math.min(
-			SPRINT_COMPOSER_MAX_TASKS,
-			Math.max(
-				3,
-				normalizedDrafts.length + (normalizedDrafts.length < SPRINT_COMPOSER_MAX_TASKS ? 1 : 0)
-			)
-		);
-		return Array.from({ length: maxRows }, (_, index) => ({
+		// Always show at least 1 row; grow with committed drafts; also show the row being actively edited
+		const count = Math.max(1, normalizedDrafts.length, activeIndex >= 0 ? activeIndex + 1 : 0);
+		return Array.from({ length: count }, (_, index) => ({
 			index,
-			title: normalizedDrafts[index] ?? ''
+			title: normalizedDrafts[index] ?? '',
+			status: rowMeta[index]?.status ?? 'todo',
+			assigneeId: rowMeta[index]?.assigneeId ?? '',
+			budget: rowMeta[index]?.budget ?? '',
+			spent: rowMeta[index]?.spent ?? ''
 		}));
+	}
+
+	function addSprintComposerRow() {
+		if (sprintComposerSaving) return;
+		// Commit any in-progress title edit first
+		if (sprintComposerActiveTaskIndex >= 0) commitSprintComposerTaskEdit();
+		const drafts = parseSprintComposerTasks(sprintComposerTaskDrafts);
+		if (drafts.length >= SPRINT_COMPOSER_MAX_TASKS) return;
+		// Add blank slot by appending a placeholder then immediately starting its edit
+		const nextIndex = drafts.length;
+		void startSprintComposerTaskEdit(nextIndex);
+	}
+
+	function setSprintComposerMeta(index: number, field: keyof SprintComposerMeta, value: string) {
+		const current = sprintComposerRowMeta[index] ?? { status: 'todo', assigneeId: '', budget: '', spent: '' };
+		sprintComposerRowMeta = { ...sprintComposerRowMeta, [index]: { ...current, [field]: value } };
 	}
 
 	async function startSprintComposerTaskEdit(index: number, prefill = '') {
@@ -1179,6 +1236,7 @@
 		sprintComposerTaskDrafts = [];
 		sprintComposerTaskInputValue = '';
 		sprintComposerActiveTaskIndex = -1;
+		sprintComposerRowMeta = {};
 	}
 
 	function readSupportMetadataValue(task: DisplayTask, keys: string[]) {
@@ -2163,6 +2221,8 @@
 		}
 		if (field === 'budget') return task.budget != null ? String(task.budget) : '';
 		if (field === 'spent') return task.spent != null ? String(task.spent) : '';
+		if (field === 'dueDate') return msToDateInput(task.dueDate);
+		if (field === 'startDate') return msToDateInput(task.startDate);
 		return task.sprintName;
 	}
 
@@ -2232,7 +2292,9 @@
 			assigneeId: task.assigneeId || '',
 			status: resolveColumn(task.status) || 'todo',
 			budget: task.budget != null ? String(task.budget) : '',
-			spent: task.spent != null ? String(task.spent) : ''
+			spent: task.spent != null ? String(task.spent) : '',
+			dueDate: msToDateInput(task.dueDate),
+			startDate: msToDateInput(task.startDate)
 		};
 		taskModalSaving = false;
 		statusMenuTaskId = '';
@@ -2241,7 +2303,7 @@
 
 	function closeTaskModal() {
 		taskEditModal = null;
-		taskEditVals = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '' };
+		taskEditVals = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '', dueDate: '', startDate: '' };
 		taskModalSaving = false;
 	}
 
@@ -2252,6 +2314,23 @@
 			setBoardError('Task name cannot be empty');
 			return;
 		}
+
+		// Non-admins submit a change request instead of saving directly
+		if (!isAdmin) {
+			const current = ($taskStore.find((t) => t.id === task.id) ?? task) as DisplayTask;
+			const diff: Record<string, unknown> = { taskId: task.id, taskTitle: task.title };
+			if (taskEditVals.title.trim() !== (current.title || '').trim()) { diff.title = taskEditVals.title.trim(); diff.before_title = current.title; }
+			if (taskEditVals.assigneeId !== (current.assigneeId || '')) { diff.assigneeId = taskEditVals.assigneeId; diff.before_assigneeId = current.assigneeId; }
+			if (String(taskEditVals.budget ?? '').trim() !== String(current.budget ?? '').trim()) { diff.budget = taskEditVals.budget; diff.before_budget = current.budget; }
+			if (String(taskEditVals.spent ?? '').trim() !== String(current.spent ?? '').trim()) { diff.spent = taskEditVals.spent; diff.before_spent = current.spent; }
+			if (taskEditVals.dueDate !== msToDateInput(current.dueDate)) { diff.dueDate = taskEditVals.dueDate; diff.before_dueDate = msToDateInput(current.dueDate); }
+			if (taskEditVals.startDate !== msToDateInput(current.startDate)) { diff.startDate = taskEditVals.startDate; diff.before_startDate = msToDateInput(current.startDate); }
+			if (taskEditVals.status !== resolveColumn(current.status as ColumnKey)) { diff.status = taskEditVals.status; diff.before_status = resolveColumn(current.status as ColumnKey); }
+			submitChangeRequest(roomId, sessionUserID, sessionUserName, 'edit_task', task.title, diff);
+			closeTaskModal();
+			return;
+		}
+
 		taskModalSaving = true;
 		clearBoardError();
 		try {
@@ -2266,6 +2345,12 @@
 			const curSpent = current.spent != null ? String(current.spent) : '';
 			if (String(taskEditVals.spent ?? '').trim() !== curSpent.trim())
 				await updateRoomTaskField(current, 'spent', String(taskEditVals.spent ?? ''));
+			const curDueDate = msToDateInput(current.dueDate);
+			if (taskEditVals.dueDate !== curDueDate)
+				await updateRoomTaskField(current, 'dueDate', taskEditVals.dueDate);
+			const curStartDate = msToDateInput(current.startDate);
+			if (taskEditVals.startDate !== curStartDate)
+				await updateRoomTaskField(current, 'startDate', taskEditVals.startDate);
 			if (taskEditVals.status !== resolveColumn(current.status as ColumnKey))
 				await applyStatus(current, taskEditVals.status as ColumnKey);
 			closeTaskModal();
@@ -2657,12 +2742,41 @@
 		savingRelations = false;
 	}
 
+	function msToDateInput(ms?: number): string {
+		if (!ms) return '';
+		return new Date(ms).toISOString().slice(0, 10);
+	}
+
+	function formatDateCell(ms?: number): string {
+		if (!ms) return '—';
+		return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+	}
+
+	function buildTimelineDateMap(
+		timeline: ProjectTimeline | null
+	): Map<string, { startDate: number; endDate: number }> {
+		const map = new Map<string, { startDate: number; endDate: number }>();
+		if (!timeline) return map;
+		for (const sprint of timeline.sprints) {
+			for (const task of sprint.tasks) {
+				const s = task.start_date ? Date.parse(task.start_date) : 0;
+				const e = task.end_date ? Date.parse(task.end_date) : 0;
+				if ((s > 0 || e > 0) && task.id) {
+					map.set(task.id, { startDate: s > 0 ? s : 0, endDate: e > 0 ? e : 0 });
+				}
+			}
+		}
+		return map;
+	}
+
 	function fieldLabel(field: EditableField) {
 		if (field === 'title') return 'task name';
 		if (field === 'description') return 'description';
 		if (field === 'assigneeId') return 'assignee';
 		if (field === 'budget') return 'budget';
 		if (field === 'spent') return 'spent';
+		if (field === 'dueDate') return 'due date';
+		if (field === 'startDate') return 'start date';
 		return 'sprint';
 	}
 
@@ -2824,6 +2938,10 @@
 			body.budget = parseBudgetValue(nextValue) ?? 0;
 		} else if (field === 'spent') {
 			body.actual_cost = parseBudgetValue(nextValue) ?? 0;
+		} else if (field === 'dueDate') {
+			body.due_date = nextValue ? new Date(nextValue).toISOString() : null;
+		} else if (field === 'startDate') {
+			body.start_date = nextValue ? new Date(nextValue).toISOString() : null;
 		} else {
 			body.sprint_name = nextValue;
 		}
@@ -2983,6 +3101,16 @@
 			return;
 		}
 
+		// Non-admins submit a change request instead of saving directly
+		if (!isAdmin) {
+			submitChangeRequest(roomId, sessionUserID, sessionUserName, 'edit_task', task.title, {
+				taskId: task.id, taskTitle: task.title,
+				field, value: nextValue, before: currentValue
+			});
+			cancelEditing();
+			return;
+		}
+
 		savingCellKey = cellKey;
 		clearBoardError();
 		try {
@@ -3068,6 +3196,16 @@
 			return;
 		}
 		if (resolveColumn(task.status) === nextStatus) {
+			statusMenuTaskId = '';
+			return;
+		}
+
+		// Non-admins submit a change request for status changes
+		if (!isAdmin) {
+			submitChangeRequest(roomId, sessionUserID, sessionUserName, 'edit_task', task.title, {
+				taskId: task.id, taskTitle: task.title,
+				field: 'status', value: nextStatus, before: resolveColumn(task.status)
+			});
 			statusMenuTaskId = '';
 			return;
 		}
@@ -3406,6 +3544,21 @@
 		if (!canEdit) return;
 		const toDelete = group.tasks.filter((t) => selectedTaskIds.includes(t.id));
 		if (!toDelete.length) return;
+
+		// Non-admins submit change requests for each selected task deletion
+		if (!isAdmin) {
+			for (const t of toDelete) {
+				submitChangeRequest(roomId, sessionUserID, sessionUserName, 'delete_task', t.title, {
+					taskId: t.id, taskTitle: t.title, sprintName: group.name
+				});
+			}
+			// Clear selection and exit edit mode
+			const selectedNext = new Set(selectedTaskIds);
+			toDelete.forEach((t) => selectedNext.delete(t.id));
+			selectedTaskIds = Array.from(selectedNext);
+			return;
+		}
+
 		const deletingNext = new Set(deletingTaskIds);
 		toDelete.forEach((t) => deletingNext.add(t.id));
 		deletingTaskIds = Array.from(deletingNext);
@@ -3424,7 +3577,7 @@
 		}
 	}
 
-	async function createRoomTaskInSprint(content: string, sprintName: string) {
+	async function createRoomTaskInSprint(content: string, sprintName: string, meta?: SprintComposerMeta) {
 		const normalizedContent = content.trim();
 		if (!normalizedContent) {
 			return;
@@ -3436,13 +3589,18 @@
 			throw new Error('Invalid room id');
 		}
 		const normalizedSprintName = sprintName.trim();
+		const body: Record<string, unknown> = { content: normalizedContent, sprint_name: normalizedSprintName };
+		if (meta?.status && meta.status !== 'todo') body.status = meta.status;
+		if (meta?.assigneeId) body.assignee_id = meta.assigneeId;
+		if (meta?.budget) { const b = parseFloat(meta.budget); if (!isNaN(b) && b > 0) body.budget = b; }
+		if (meta?.spent) { const s = parseFloat(meta.spent); if (!isNaN(s) && s > 0) body.spent = s; }
 		const response = await fetch(
 			`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomId)}/tasks`,
 			{
 				method: 'POST',
 				headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
 				credentials: 'include',
-				body: JSON.stringify({ content: normalizedContent, sprint_name: normalizedSprintName })
+				body: JSON.stringify(body)
 			}
 		);
 		if (!response.ok) {
@@ -3481,9 +3639,8 @@
 		if (sprintComposerSaving || !canCreateSprintTask || !canEdit) {
 			return;
 		}
-		if (sprintComposerActiveTaskIndex >= 0) {
-			commitSprintComposerTaskEdit();
-		}
+		// Always flush in-progress title edit regardless of whether blur already fired
+		commitSprintComposerTaskEdit();
 		const normalizedSprintName = sprintComposerName.trim();
 		if (!normalizedSprintName) {
 			setBoardError('Sprint name is required');
@@ -3493,18 +3650,39 @@
 		}
 
 		const taskTitles = parseSprintComposerTasks(sprintComposerTaskDrafts);
+		const capturedMeta = { ...sprintComposerRowMeta };
+
+		// Non-admins submit a change request with the full sprint data
+		if (!isAdmin) {
+			const tasks = taskTitles.map((title, i) => {
+				const meta = capturedMeta[i];
+				return { title, status: meta?.status ?? 'todo', assigneeId: meta?.assigneeId ?? '', budget: meta?.budget ?? '' };
+			});
+			submitChangeRequest(roomId, sessionUserID, sessionUserName, 'add_sprint', normalizedSprintName, {
+				sprintName: normalizedSprintName, tasks
+			});
+			sprintComposerOpen = false;
+			sprintComposerName = '';
+			sprintComposerTaskDrafts = [];
+			sprintComposerTaskInputValue = '';
+			sprintComposerActiveTaskIndex = -1;
+			sprintComposerRowMeta = {};
+			return;
+		}
+
 		sprintComposerSaving = true;
 		clearBoardError();
 		try {
 			rememberSprintDraftGroup(normalizedSprintName);
-			for (const taskTitle of taskTitles) {
-				await createRoomTaskInSprint(taskTitle, normalizedSprintName);
+			for (let i = 0; i < taskTitles.length; i++) {
+				await createRoomTaskInSprint(taskTitles[i], normalizedSprintName, capturedMeta[i]);
 			}
 			sprintComposerOpen = false;
 			sprintComposerName = '';
 			sprintComposerTaskDrafts = [];
 			sprintComposerTaskInputValue = '';
 			sprintComposerActiveTaskIndex = -1;
+			sprintComposerRowMeta = {};
 		} catch (error) {
 			setBoardError(error instanceof Error ? error.message : 'Failed to create sprint');
 		} finally {
@@ -3514,6 +3692,17 @@
 
 	async function handleCreateRoomTaskInSprint(content: string, sprintName: string) {
 		if (sprintAddCreating || !content.trim()) return;
+
+		// Non-admins submit a change request for task addition
+		if (!isAdmin) {
+			submitChangeRequest(roomId, sessionUserID, sessionUserName, 'add_task', content.trim(), {
+				taskTitle: content.trim(), sprintName
+			});
+			sprintAddContent = '';
+			sprintAddKey = '';
+			return;
+		}
+
 		sprintAddCreating = true;
 		clearBoardError();
 		try {
@@ -3592,56 +3781,80 @@
 		<div class="board-toast" role="status" aria-live="polite">{boardToastMessage}</div>
 	{/if}
 	{#if boardView === 'table' || boardView === 'kanban'}
-		<header class="board-header">
-			<div class="header-main">
-				<h2>{boardTitle}</h2>
-				<p>{boardTasks.length} tasks</p>
-			</div>
-			<div class="header-meta">
-				<span>Latest update {formatCellTime(boardLastUpdatedAt)}</span>
-			</div>
+		<!-- ── Unified Board Toolbar ─────────────────────────── -->
+		<header class="board-toolbar" aria-label="Board toolbar">
+			{#if searchExpanded && boardView === 'table'}
+				<div class="btb-search-bar">
+					<svg class="btb-search-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"/></svg>
+					<input
+						type="search"
+						class="btb-search-input"
+						bind:value={taskSearchQuery}
+						placeholder="Search sprint, task, assignee, status…"
+						autocomplete="off"
+						autofocus
+					/>
+					<button
+						type="button"
+						class="btb-search-close"
+						on:click={() => { searchExpanded = false; taskSearchQuery = ''; }}
+						aria-label="Close search"
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+					</button>
+				</div>
+			{:else}
+				<div class="btb-title">
+					<h2>{boardTitle}</h2>
+					<div class="btb-meta">
+						<span class="btb-count">{boardTasks.length} task{boardTasks.length === 1 ? '' : 's'}</span>
+						{#if boardLastUpdatedAt > 0}
+							<span class="btb-sep" aria-hidden="true">·</span>
+							<span class="btb-updated">{formatCellTime(boardLastUpdatedAt)}</span>
+						{/if}
+					</div>
+				</div>
+				<div class="btb-actions">
+					{#if boardView === 'table'}
+						<button
+							type="button"
+							class="btb-icon-btn"
+							class:is-active={hasActiveTaskSearch}
+							on:click={() => (searchExpanded = true)}
+							aria-label="Search tasks"
+							title="Search tasks"
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"/></svg>
+						</button>
+					{/if}
+					{#if isAdmin}
+						<button
+							type="button"
+							class="btb-add-sprint"
+							on:click={() => void openSprintComposer()}
+							disabled={!canEdit || !canCreateSprintTask || sprintComposerSaving}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+							<span>Add Sprint</span>
+						</button>
+					{:else if canEdit}
+						<button
+							type="button"
+							class="btb-add-sprint btb-request-sprint"
+							on:click={() => void openSprintComposer()}
+							disabled={sprintComposerSaving}
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/></svg>
+							<span>Request Sprint</span>
+						</button>
+					{/if}
+				</div>
+			{/if}
 		</header>
 	{/if}
 
-	{#if boardView === 'table'}
-		<section class="task-search" aria-label="Search tasks">
-			<label class="task-search-field" for="task-search-input">
-				<span>Search</span>
-				<input
-					id="task-search-input"
-					type="search"
-					bind:value={taskSearchQuery}
-					placeholder="Sprint, task, assignee, status, budget, cost, updated, description…"
-					autocomplete="off"
-				/>
-			</label>
-			{#if hasActiveTaskSearch}
-				<button type="button" class="task-search-clear" on:click={() => (taskSearchQuery = '')}>
-					Clear
-				</button>
-			{/if}
-		</section>
-	{/if}
-
-	{#if boardView === 'table' || boardView === 'kanban'}
+	{#if (boardView === 'table' || boardView === 'kanban') && sprintComposerOpen}
 		<section class="sprint-composer" aria-label="Create sprint">
-			<div class="sprint-composer-head">
-				<button
-					type="button"
-					class="sprint-composer-trigger"
-					on:click={() => void openSprintComposer()}
-					disabled={!canEdit || !canCreateSprintTask || sprintComposerSaving}
-				>
-					+ Add Sprint
-				</button>
-				<p>
-					{#if canCreateSprintTask}
-						Set a sprint name and optionally add task titles on separate lines.
-					{:else}
-						Select a room workspace to create sprint tasks.
-					{/if}
-				</p>
-			</div>
 			{#if sprintComposerOpen}
 				<form
 					class="sprint-composer-form"
@@ -3696,69 +3909,104 @@
 											</button>
 										{/if}
 									</div>
-									<button
-										type="button"
-										class="sprint-preview-cell sprint-preview-meta-cell"
-										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-										disabled={sprintComposerSaving || !canCreateSprintTask}
-									>
-										To Do
-									</button>
-									<button
-										type="button"
-										class="sprint-preview-cell sprint-preview-meta-cell"
-										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-										disabled={sprintComposerSaving || !canCreateSprintTask}
-									>
-										Unassigned
-									</button>
-									<button
-										type="button"
-										class="sprint-preview-cell sprint-preview-meta-cell"
-										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-										disabled={sprintComposerSaving || !canCreateSprintTask}
-									>
-										$0
-									</button>
-									<button
-										type="button"
-										class="sprint-preview-cell sprint-preview-meta-cell"
-										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-										disabled={sprintComposerSaving || !canCreateSprintTask}
-									>
-										$0
-									</button>
-									<button
-										type="button"
-										class="sprint-preview-cell sprint-preview-meta-cell"
-										on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
-										disabled={sprintComposerSaving || !canCreateSprintTask}
-									>
-										--
-									</button>
+									<!-- Status -->
+									<div class="sprint-preview-cell">
+										<select
+											class="spc-select"
+											value={previewRow.status}
+											on:change={(e) => setSprintComposerMeta(previewRow.index, 'status', e.currentTarget.value)}
+											disabled={sprintComposerSaving || !canCreateSprintTask}
+										>
+											{#each STATUS_OPTIONS as opt (opt.value)}
+												<option value={opt.value}>{opt.label}</option>
+											{/each}
+										</select>
+									</div>
+									<!-- Assignee -->
+									<div class="sprint-preview-cell">
+										<select
+											class="spc-select"
+											value={previewRow.assigneeId}
+											on:change={(e) => setSprintComposerMeta(previewRow.index, 'assigneeId', e.currentTarget.value)}
+											disabled={sprintComposerSaving || !canCreateSprintTask}
+										>
+											<option value="">Unassigned</option>
+											{#each ownerOptions as opt (opt.id)}
+												<option value={opt.id}>{opt.label}</option>
+											{/each}
+										</select>
+									</div>
+									<!-- Budget -->
+									<div class="sprint-preview-cell">
+										<input
+											class="spc-num-input"
+											type="number"
+											min="0"
+											step="0.01"
+											placeholder="0"
+											value={previewRow.budget}
+											on:change={(e) => setSprintComposerMeta(previewRow.index, 'budget', e.currentTarget.value)}
+											disabled={sprintComposerSaving || !canCreateSprintTask}
+										/>
+									</div>
+									<!-- Cost / Spent -->
+									<div class="sprint-preview-cell">
+										<input
+											class="spc-num-input"
+											type="number"
+											min="0"
+											step="0.01"
+											placeholder="0"
+											value={previewRow.spent}
+											on:change={(e) => setSprintComposerMeta(previewRow.index, 'spent', e.currentTarget.value)}
+											disabled={sprintComposerSaving || !canCreateSprintTask}
+										/>
+									</div>
+									<!-- Updated — not settable at creation -->
+									<div class="sprint-preview-cell spc-static">—</div>
 								</div>
 							{/each}
 						</div>
 					</section>
-					<p class="sprint-composer-hint">
-						Click any preview row cell to add tasks. Press Enter to save a cell.
-					</p>
 					<div class="sprint-composer-actions">
 						<button
-							type="submit"
-							class="sprint-composer-submit"
-							disabled={sprintComposerSaving || !sprintComposerName.trim()}
+							type="button"
+							class="spc-add-row-btn"
+							on:click={addSprintComposerRow}
+							disabled={sprintComposerSaving || !canCreateSprintTask || parseSprintComposerTasks(sprintComposerTaskDrafts).length >= SPRINT_COMPOSER_MAX_TASKS}
 						>
-							{sprintComposerSaving ? 'Creating…' : 'Create sprint'}
+							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+							Add task
 						</button>
-						<button type="button" class="sprint-composer-cancel" on:click={closeSprintComposer}>
-							Cancel
-						</button>
+						<div class="spc-actions-right">
+							<button type="button" class="sprint-composer-cancel" on:click={closeSprintComposer}>
+								Cancel
+							</button>
+							<button
+								type="submit"
+								class="sprint-composer-submit"
+								disabled={sprintComposerSaving || !sprintComposerName.trim()}
+							>
+								{sprintComposerSaving ? 'Submitting…' : isAdmin ? 'Create sprint' : 'Request Add Sprint'}
+							</button>
+						</div>
 					</div>
 				</form>
 			{/if}
 		</section>
 	{/if}
+
+	<ChangeRequestModal
+		open={crModalOpen}
+		{roomId}
+		userId={sessionUserID}
+		userName={sessionUserName}
+		action={crModalAction}
+		targetLabel={crModalTargetLabel}
+		payload={crModalPayload}
+		on:submitted={() => (crModalOpen = false)}
+		on:cancel={() => (crModalOpen = false)}
+	/>
 
 	{#if quickEditVisible && editingTask && editingField}
 		<section class="quick-edit-panel" aria-label="Task quick editor">
@@ -3803,6 +4051,19 @@
 						placeholder="0"
 						on:keydown={(event) =>
 							onEditorKeyDown(event, editingTask, editingField === 'spent' ? 'spent' : 'budget')}
+					/>
+				{:else if editingField === 'dueDate' || editingField === 'startDate'}
+					<input
+						bind:this={quickEditorElement}
+						class="quick-edit-input"
+						type="date"
+						bind:value={editingValue}
+						on:keydown={(event) =>
+							onEditorKeyDown(
+								event,
+								editingTask,
+								editingField === 'dueDate' ? 'dueDate' : 'startDate'
+							)}
 					/>
 				{:else}
 					<input
@@ -3996,14 +4257,14 @@
 			</div>
 		{:else if boardView === 'calendar'}
 			<CalendarView
-				tasks={boardTasks}
+				tasks={calendarWorkloadTasks}
 				fieldSchemas={roomFieldSchemas}
 				{onlineMembers}
 				on:editTask={handleBoardSubviewEditTask}
 			/>
 		{:else if boardView === 'workload'}
 			<WorkloadView
-				tasks={boardTasks}
+				tasks={calendarWorkloadTasks}
 				fieldSchemas={roomFieldSchemas}
 				{onlineMembers}
 				on:editTask={handleBoardSubviewEditTask}
@@ -4301,6 +4562,24 @@
 													>{formatSpentCell(task.spent, task.budget)}</span
 												>
 											</button>
+											<button
+												type="button"
+												class="kanban-meta-btn"
+												on:click|stopPropagation={() => void startEditing(task, 'startDate')}
+												on:dblclick|stopPropagation={() => void startEditing(task, 'startDate')}
+											>
+												<span class="meta-label">Start</span>
+												<span class="meta-value date-val">{formatDateCell(task.startDate)}</span>
+											</button>
+											<button
+												type="button"
+												class="kanban-meta-btn"
+												on:click|stopPropagation={() => void startEditing(task, 'dueDate')}
+												on:dblclick|stopPropagation={() => void startEditing(task, 'dueDate')}
+											>
+												<span class="meta-label">Due</span>
+												<span class="meta-value date-val">{formatDateCell(task.dueDate)}</span>
+											</button>
 										</div>
 
 										{#if task.roles?.length}
@@ -4349,7 +4628,7 @@
 										on:click={() => void deleteSelectedInSprint(sprintGroup)}
 										disabled={!canEdit || deletingTaskIds.length > 0}
 									>
-										Delete selected{selCount > 0 ? ` (${selCount})` : ''}
+										{isAdmin ? 'Delete' : 'Request Delete'}{selCount > 0 ? ` (${selCount})` : ''}
 									</button>
 									{#if canCreateSprintTask}
 										<button
@@ -4478,6 +4757,8 @@
 												>
 											</button>
 										</th>
+										<th scope="col" class="th-date th-start-date">Start</th>
+										<th scope="col" class="th-date th-due-date">Due</th>
 										<th scope="col" class="th-sort th-updated">
 											<button
 												type="button"
@@ -4497,7 +4778,7 @@
 								<tbody>
 									{#if sprintGroup.tasks.length === 0}
 										<tr>
-											<td class="cell empty-sprint-row" colspan={isEditMode ? 8 : 7}>
+											<td class="cell empty-sprint-row" colspan={isEditMode ? 10 : 9}>
 												No tasks in this sprint yet. Use + Add row or + Add Sprint.
 											</td>
 										</tr>
@@ -4620,11 +4901,31 @@
 													<span class="budget-val">{formatSpentCell(task.spent, task.budget)}</span>
 												</td>
 
+												<!-- Start Date -->
+												<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+												<td
+													class="cell date-cell"
+													class:is-editing={isEditing(task.id, 'startDate')}
+													on:click|stopPropagation={() => void startEditing(task, 'startDate')}
+												>
+													<span class="date-val">{formatDateCell(task.startDate)}</span>
+												</td>
+
+												<!-- Due Date -->
+												<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
+												<td
+													class="cell date-cell"
+													class:is-editing={isEditing(task.id, 'dueDate')}
+													on:click|stopPropagation={() => void startEditing(task, 'dueDate')}
+												>
+													<span class="date-val">{formatDateCell(task.dueDate)}</span>
+												</td>
+
 												<td class="cell updated-cell">{formatCellTime(task.updatedAt)}</td>
 											</tr>
 											{#if taskEditModal?.id === task.id}
 												<tr class="edit-expand-row">
-													<td class="edit-expand-cell" colspan={isEditMode ? 8 : 7}>
+													<td class="edit-expand-cell" colspan={isEditMode ? 10 : 9}>
 														<div class="edit-expand-inner">
 															<div class="edit-expand-fields">
 																<div class="eef eef-wide">
@@ -4695,6 +4996,28 @@
 																		bind:value={taskEditVals.spent}
 																	/>
 																</div>
+																<div class="eef">
+																	<label class="eef-label" for="eef-startdate-{task.id}"
+																		>Start Date</label
+																	>
+																	<input
+																		id="eef-startdate-{task.id}"
+																		class="eef-input"
+																		type="date"
+																		bind:value={taskEditVals.startDate}
+																	/>
+																</div>
+																<div class="eef">
+																	<label class="eef-label" for="eef-duedate-{task.id}"
+																		>Due Date</label
+																	>
+																	<input
+																		id="eef-duedate-{task.id}"
+																		class="eef-input"
+																		type="date"
+																		bind:value={taskEditVals.dueDate}
+																	/>
+																</div>
 															</div>
 															<div class="edit-expand-actions">
 																<button
@@ -4703,7 +5026,7 @@
 																	on:click={() => void saveTaskModal()}
 																	disabled={taskModalSaving}
 																>
-																	{taskModalSaving ? 'Saving…' : 'Save'}
+																	{taskModalSaving ? 'Submitting…' : isAdmin ? 'Save' : 'Request Save'}
 																</button>
 																<button type="button" class="eef-cancel" on:click={closeTaskModal}
 																	>Cancel</button
@@ -4737,7 +5060,7 @@
 									autofocus
 								/>
 								<button type="submit" disabled={sprintAddCreating || !sprintAddContent.trim()}>
-									{sprintAddCreating ? 'Adding…' : 'Add'}
+									{sprintAddCreating ? 'Submitting…' : isAdmin ? 'Add' : 'Request Add'}
 								</button>
 								<button
 									type="button"
@@ -4881,7 +5204,7 @@
 		width: 100%;
 		padding: 1rem;
 		display: grid;
-		grid-template-rows: auto auto auto minmax(0, 1fr);
+		grid-template-rows: auto auto minmax(0, 1fr);
 		gap: 0.8rem;
 		background: var(--workspace-taskboard-bg);
 		font-family: 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
@@ -4897,15 +5220,14 @@
 		font-weight: 600;
 	}
 
-	.board-header {
+	/* ── Unified Board Toolbar ─────────────────────────── */
+	.board-toolbar {
 		position: relative;
-		overflow: hidden;
 		isolation: isolate;
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 0.8rem;
-		padding: 0.92rem 1.06rem;
+		gap: 0.6rem;
+		padding: 0.75rem 0.9rem;
 		border-radius: 16px;
 		background: linear-gradient(
 			135deg,
@@ -4915,133 +5237,237 @@
 		border: 1px solid color-mix(in srgb, var(--tb-accent) 20%, var(--tb-panel-border));
 		backdrop-filter: blur(14px);
 		box-shadow: var(--tb-panel-shadow);
+		overflow: hidden;
 	}
 
-	.board-header::before {
+	.board-toolbar::before {
 		content: '';
 		position: absolute;
 		inset: -40% auto auto 58%;
-		width: 240px;
-		height: 240px;
+		width: 220px;
+		height: 220px;
 		border-radius: 999px;
-		background: color-mix(in srgb, var(--tb-accent-soft) 76%, transparent);
+		background: color-mix(in srgb, var(--tb-accent-soft) 72%, transparent);
 		filter: blur(32px);
 		pointer-events: none;
 	}
 
-	.header-main {
-		position: relative;
-		z-index: 1;
-		display: grid;
-		gap: 0.15rem;
-		min-width: 0;
-	}
-
-	.header-main h2 {
-		margin: 0;
-		font-size: 1.03rem;
-		line-height: 1.2;
-		font-weight: 700;
-		color: var(--tb-accent-strong);
-		min-width: 0;
-	}
-
-	.header-main p {
-		margin: 0;
-		font-size: 0.82rem;
-		color: var(--workspace-taskboard-meta);
-	}
-
-	.header-meta {
+	/* Title group */
+	.btb-title {
 		position: relative;
 		z-index: 1;
 		display: flex;
-		flex-wrap: wrap;
-		justify-content: flex-end;
-		gap: 0.4rem;
-		align-items: center;
+		flex-direction: column;
+		gap: 0.1rem;
 		min-width: 0;
+		flex: 1;
 	}
 
-	.header-meta span {
-		font-size: 0.74rem;
-		font-weight: 600;
-		padding: 0.22rem 0.55rem;
-		border-radius: 999px;
+	.btb-title h2 {
+		margin: 0;
+		font-size: 1rem;
+		line-height: 1.2;
+		font-weight: 700;
 		color: var(--tb-accent-strong);
-		border: 1px solid color-mix(in srgb, var(--tb-accent) 20%, var(--tb-panel-border));
-		background: linear-gradient(
-			135deg,
-			color-mix(in srgb, var(--tb-accent-soft) 72%, var(--tb-panel-bg) 28%),
-			color-mix(in srgb, var(--tb-panel-bg) 86%, #ffffff 14%)
-		);
-		max-width: 100%;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
 
-	.task-search {
+	.btb-meta {
 		display: flex;
 		align-items: center;
-		gap: 0.6rem;
-		padding: 0.68rem 0.76rem;
-		border-radius: 14px;
-		border: 1px solid color-mix(in srgb, var(--tb-accent) 16%, var(--tb-form-border));
-		background: linear-gradient(
-			135deg,
-			color-mix(in srgb, var(--tb-accent-soft) 42%, var(--tb-form-bg) 58%),
-			var(--tb-form-bg)
-		);
-		backdrop-filter: blur(10px);
-		box-shadow: var(--tb-panel-shadow);
+		gap: 0.35rem;
 	}
 
-	.task-search-field {
-		display: grid;
-		gap: 0.24rem;
+	.btb-count {
+		font-size: 0.74rem;
+		font-weight: 700;
+		padding: 0.18rem 0.5rem;
+		border-radius: 999px;
+		color: var(--tb-accent-strong);
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 20%, var(--tb-panel-border));
+		background: color-mix(in srgb, var(--tb-accent-soft) 55%, var(--tb-panel-bg) 45%);
+		white-space: nowrap;
+	}
+
+	.btb-sep {
+		font-size: 0.7rem;
+		color: var(--workspace-taskboard-meta);
+	}
+
+	.btb-updated {
+		font-size: 0.7rem;
+		color: var(--workspace-taskboard-meta);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 180px;
+	}
+
+	/* Action buttons */
+	.btb-actions {
+		position: relative;
+		z-index: 1;
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		flex-shrink: 0;
+	}
+
+	.btb-icon-btn {
+		width: 2rem;
+		height: 2rem;
+		border-radius: 9px;
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 20%, var(--tb-btn-border));
+		background: color-mix(in srgb, var(--tb-accent-soft) 35%, var(--tb-panel-bg) 65%);
+		color: var(--tb-accent-strong);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		transition: background 0.15s, border-color 0.15s;
+	}
+
+	.btb-icon-btn svg {
+		width: 15px;
+		height: 15px;
+		stroke: currentColor;
+		fill: none;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.btb-icon-btn:hover {
+		background: color-mix(in srgb, var(--tb-accent-soft) 55%, var(--tb-panel-bg) 45%);
+		border-color: color-mix(in srgb, var(--tb-accent) 40%, var(--tb-btn-border));
+	}
+
+	.btb-icon-btn.is-active {
+		background: color-mix(in srgb, var(--tb-accent) 20%, var(--tb-panel-bg) 80%);
+		border-color: color-mix(in srgb, var(--tb-accent) 50%, var(--tb-btn-border));
+	}
+
+	.btb-add-sprint {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.32rem;
+		height: 2rem;
+		padding: 0 0.7rem;
+		border-radius: 9px;
+		border: 1px solid color-mix(in srgb, var(--tb-accent) 35%, var(--tb-btn-border));
+		background: color-mix(in srgb, var(--tb-accent-soft) 50%, var(--tb-panel-bg) 50%);
+		color: var(--tb-accent-strong);
+		font-size: 0.76rem;
+		font-weight: 700;
+		cursor: pointer;
+		transition: background 0.15s, border-color 0.15s;
+	}
+
+	.btb-add-sprint svg {
+		width: 13px;
+		height: 13px;
+		stroke: currentColor;
+		fill: none;
+		stroke-width: 2.5;
+		stroke-linecap: round;
+	}
+
+	.btb-add-sprint:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--tb-accent-soft) 70%, var(--tb-panel-bg) 30%);
+		border-color: color-mix(in srgb, var(--tb-accent) 55%, var(--tb-btn-border));
+	}
+
+	.btb-add-sprint:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.btb-request-sprint {
+		color: #d97706;
+		background: color-mix(in srgb, #f59e0b 12%, var(--tb-panel-bg) 88%);
+		border-color: color-mix(in srgb, #f59e0b 40%, var(--tb-btn-border));
+	}
+	.btb-request-sprint:hover {
+		background: color-mix(in srgb, #f59e0b 22%, var(--tb-panel-bg) 78%);
+	}
+
+	/* Expanded search bar */
+	.btb-search-bar {
+		position: relative;
+		z-index: 1;
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		width: 100%;
+		animation: btb-expand 0.18s ease;
+	}
+
+	@keyframes btb-expand {
+		from { opacity: 0; transform: scaleX(0.92); }
+		to   { opacity: 1; transform: scaleX(1); }
+	}
+
+	.btb-search-icon {
+		width: 15px;
+		height: 15px;
+		flex-shrink: 0;
+		stroke: var(--tb-accent-strong);
+		fill: none;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.btb-search-input {
 		flex: 1;
 		min-width: 0;
-	}
-
-	.task-search-field span {
-		font-size: 0.72rem;
-		font-weight: 700;
-		color: var(--tb-accent-strong);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-	}
-
-	.task-search-field input {
-		width: 100%;
-		height: 2.08rem;
+		height: 1.9rem;
 		border: 1px solid var(--tb-input-border);
-		border-radius: 10px;
+		border-radius: 9px;
 		background: var(--tb-input-bg);
 		color: var(--tb-input-text);
-		font-size: 0.84rem;
-		padding: 0 0.7rem;
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+		font-size: 0.82rem;
+		padding: 0 0.65rem;
+		outline: none;
+		transition: border-color 0.15s;
 	}
 
-	.task-search-field input::placeholder {
+	.btb-search-input:focus {
+		border-color: color-mix(in srgb, var(--tb-accent) 55%, var(--tb-input-border));
+	}
+
+	.btb-search-input::placeholder {
 		color: var(--tb-input-placeholder);
 	}
 
-	.task-search-clear {
-		height: 2.08rem;
-		border-radius: 10px;
-		border: 1px solid color-mix(in srgb, var(--tb-accent) 18%, var(--tb-btn-border));
-		background: linear-gradient(
-			135deg,
-			color-mix(in srgb, var(--tb-accent-soft) 58%, var(--tb-btn-bg) 42%),
-			color-mix(in srgb, var(--tb-btn-bg) 84%, #ffffff 16%)
-		);
+	.btb-search-close {
+		width: 1.9rem;
+		height: 1.9rem;
+		border-radius: 8px;
+		border: 1px solid color-mix(in srgb, var(--tb-btn-border) 80%, transparent);
+		background: transparent;
 		color: var(--tb-btn-text);
-		font-size: 0.76rem;
-		font-weight: 700;
-		padding: 0 0.68rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		cursor: pointer;
+		flex-shrink: 0;
+		transition: background 0.14s;
+	}
+
+	.btb-search-close svg {
+		width: 13px;
+		height: 13px;
+		stroke: currentColor;
+		fill: none;
+		stroke-width: 2.2;
+		stroke-linecap: round;
+	}
+
+	.btb-search-close:hover {
+		background: color-mix(in srgb, var(--tb-btn-bg) 80%, #ffffff 20%);
 	}
 
 	.sprint-composer {
@@ -5084,6 +5510,15 @@
 
 	.sprint-composer-trigger:hover:not(:disabled) {
 		background: color-mix(in srgb, var(--tb-btn-bg) 50%, #ffffff 50%);
+	}
+
+	.sprint-composer-request {
+		border-color: color-mix(in srgb, #f59e0b 45%, transparent);
+		background: color-mix(in srgb, #f59e0b 10%, transparent);
+		color: #d97706;
+	}
+	.sprint-composer-request:hover {
+		background: color-mix(in srgb, #f59e0b 18%, transparent);
 	}
 
 	.sprint-composer-trigger:disabled {
@@ -5247,35 +5682,109 @@
 		box-shadow: 0 0 0 3px var(--tb-editor-ring);
 	}
 
-	.sprint-composer-hint {
-		margin: 0;
-		font-size: 0.72rem;
+	.spc-select,
+	.spc-num-input {
+		width: 100%;
+		height: 1.75rem;
+		border: 1px solid var(--tb-input-border);
+		border-radius: 7px;
+		background: var(--tb-input-bg);
+		color: var(--tb-cell-text);
+		font-size: 0.73rem;
+		padding: 0 0.45rem;
+		transition: border-color 0.15s ease, box-shadow 0.15s ease;
+		-webkit-appearance: none;
+		appearance: none;
+	}
+	.spc-select {
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+		background-repeat: no-repeat;
+		background-position: right 0.35rem center;
+		background-size: 0.85rem;
+		padding-right: 1.4rem;
+	}
+	.spc-select:focus,
+	.spc-num-input:focus {
+		outline: none;
+		border-color: var(--tb-accent, #6366f1);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--tb-accent, #6366f1) 22%, transparent);
+	}
+	.spc-select:disabled,
+	.spc-num-input:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+	.spc-static {
+		font-size: 0.7rem;
 		color: var(--tb-cell-muted);
+		padding-left: 0.5rem;
 	}
 
 	.sprint-composer-actions {
 		display: flex;
 		align-items: center;
-		justify-content: flex-end;
-		gap: 0.45rem;
-		flex-wrap: wrap;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.spc-actions-right {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.spc-add-row-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.32rem;
+		height: 2rem;
+		padding: 0 0.7rem;
+		border-radius: 9px;
+		border: 1px dashed var(--tb-grid-col-border);
+		background: transparent;
+		color: var(--tb-cell-muted);
+		font-size: 0.78rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+	}
+	.spc-add-row-btn svg {
+		width: 0.88rem;
+		height: 0.88rem;
+		stroke: currentColor;
+		stroke-width: 2.2;
+		fill: none;
+		stroke-linecap: round;
+	}
+	.spc-add-row-btn:hover:not(:disabled) {
+		color: var(--tb-accent, #6366f1);
+		border-color: var(--tb-accent, #6366f1);
+		background: color-mix(in srgb, var(--tb-accent, #6366f1) 7%, transparent);
+	}
+	.spc-add-row-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
 	}
 
 	.sprint-composer-submit,
 	.sprint-composer-cancel {
 		height: 2rem;
-		padding: 0 0.72rem;
+		padding: 0 0.82rem;
 		border-radius: 9px;
 		border: 1px solid var(--tb-btn-border);
-		background: var(--tb-btn-bg);
-		color: var(--tb-btn-text);
 		font-size: 0.78rem;
-		font-weight: 700;
+		font-weight: 600;
 		cursor: pointer;
+		transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 	}
 
 	.sprint-composer-submit {
-		background: color-mix(in srgb, var(--tb-btn-bg) 66%, #ffffff 34%);
+		background: var(--tb-accent, #6366f1);
+		border-color: var(--tb-accent, #6366f1);
+		color: #fff;
+	}
+	.sprint-composer-submit:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--tb-accent, #6366f1) 85%, #000 15%);
 	}
 
 	.sprint-composer-cancel {
@@ -5283,10 +5792,14 @@
 		color: var(--tb-cell-muted);
 		border-color: var(--tb-grid-col-border);
 	}
+	.sprint-composer-cancel:hover:not(:disabled) {
+		color: var(--tb-cell-text);
+		border-color: var(--tb-input-border);
+	}
 
 	.sprint-composer-submit:disabled,
 	.sprint-composer-cancel:disabled {
-		opacity: 0.52;
+		opacity: 0.45;
 		cursor: not-allowed;
 	}
 
@@ -6397,6 +6910,15 @@
 		background: color-mix(in srgb, var(--tb-accent) 22%, transparent);
 	}
 
+	.sgh-request {
+		color: #d97706;
+		background: color-mix(in srgb, #f59e0b 10%, transparent);
+		border-color: color-mix(in srgb, #f59e0b 40%, transparent);
+	}
+	.sgh-request:hover:not(:disabled) {
+		background: color-mix(in srgb, #f59e0b 18%, transparent);
+	}
+
 	.sgh-add {
 		color: var(--tb-btn-text);
 		background: var(--tb-btn-bg);
@@ -6647,6 +7169,9 @@
 	.th-status,
 	.status-cell {
 		width: 14%;
+		max-width: 0;
+		overflow: hidden;
+		padding: 0.3rem 0.4rem;
 	}
 
 	.th-owner,
@@ -6682,12 +7207,33 @@
 		background: color-mix(in srgb, var(--tb-grid-head-bg) 5%, transparent);
 	}
 
+	.th-date,
+	.th-start-date,
+	.th-due-date,
+	.date-cell {
+		width: 9%;
+		font-size: 0.8rem;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.date-cell:not(.is-editing):hover {
+		background: color-mix(in srgb, var(--tb-grid-head-bg) 5%, transparent);
+	}
+	.date-val {
+		font-size: 0.8rem;
+		color: var(--tb-cell-muted);
+	}
+
 	.th-updated,
 	.updated-cell {
 		width: 8%;
-		font-size: 0.78rem;
+		max-width: 0;
+		overflow: hidden;
+		font-size: 0.72rem;
 		color: var(--tb-cell-muted);
 		white-space: nowrap;
+		text-overflow: ellipsis;
+		padding: 0.3rem 0.4rem;
 	}
 
 	.task-content {
@@ -6870,20 +7416,25 @@
 
 	.status-wrap {
 		position: relative;
-		display: inline-flex;
+		display: flex;
+		width: 100%;
+		overflow: visible;
 	}
 
 	.status-pill {
-		min-width: 7.25rem;
-		height: 1.72rem;
-		padding: 0 0.75rem;
-		border-radius: 999px;
+		width: 100%;
+		height: 1.6rem;
+		padding: 0 0.4rem;
+		border-radius: 6px;
 		border: none;
-		font-size: 0.73rem;
+		font-size: 0.7rem;
 		font-weight: 700;
 		letter-spacing: 0.01em;
 		text-align: center;
 		cursor: pointer;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.status-pill:disabled {

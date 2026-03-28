@@ -4,12 +4,14 @@
 	import TaskCard from '$lib/components/chat/TaskCard.svelte';
 	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
-	import type { ChatMessage, MessageActionMode } from '$lib/types/chat';
-	import { normalizeIdentifier } from '$lib/utils/chat/core';
+	import type { ChatMessage, MessageActionMode, ToraWorkflowEvent } from '$lib/types/chat';
+	import { normalizeIdentifier, normalizeMessageID } from '$lib/utils/chat/core';
 	import { formatBeaconTimestamp, parseBeaconMessagePayload } from '$lib/utils/chat/beacon';
 	import { resolveSenderNameColor } from '$lib/utils/chat/senderNameColors';
 	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 	import ToraBotActionCard from '$lib/components/chat/ToraBotActionCard.svelte';
+	import ToraBotCanvasActionCard from '$lib/components/chat/ToraBotCanvasActionCard.svelte';
+	import ToraWorkflowTrace from '$lib/components/chat/ToraWorkflowTrace.svelte';
 
 	type ReplyPreview = {
 		messageId: string;
@@ -34,13 +36,7 @@
 		users: string[];
 	};
 
-	type MessageContextAction =
-		| 'reply'
-		| 'edit'
-		| 'delete'
-		| 'discussion'
-		| 'pin'
-		| 'branch';
+	type MessageContextAction = 'reply' | 'edit' | 'delete' | 'discussion' | 'pin' | 'branch';
 
 	export let messages: ChatMessage[] = [];
 	export let roomId = '';
@@ -66,6 +62,20 @@
 	export let chatAuthToken = '';
 	export let toraAutoApply = false;
 	export let currentUserName = '';
+	export let hiddenContextActions: MessageContextAction[] = [];
+	export let applyCanvasChanges:
+		| ((payload: { text: string; changes: Record<string, unknown>[] }) => Promise<void>)
+		| null = null;
+	export let toraLiveAgentEventsByOrigin: Record<string, ToraWorkflowEvent[]> = {};
+
+	type PersistedToraWorkflow = {
+		id: string;
+		originMessageId: string;
+		summary: string;
+		workflowKind: string;
+		status: string;
+		events: ToraWorkflowEvent[];
+	};
 
 	const dispatch = createEventDispatcher<{
 		toggleExpand: { messageId: string };
@@ -134,6 +144,7 @@
 	let previousVisibleKey = '';
 	let previousRoomId = '';
 	let previousIsVisible = true;
+	let persistedToraWorkflowsByOrigin: Record<string, PersistedToraWorkflow> = {};
 	let unreadDividerAnchorId = '';
 	let unreadDividerCount = 0;
 	let scrollTopByRoomId: Record<string, number> = {};
@@ -201,6 +212,7 @@
 	}
 
 	$: visibleMessages = getVisibleMessages(messages, roomMessageSearch);
+	$: persistedToraWorkflowsByOrigin = buildPersistedToraWorkflowByOrigin(messages);
 	$: replyCountByMessageID = buildReplyCountByMessageID(messages);
 	$: safeUnreadCount = Math.max(0, Math.trunc(Number.isFinite(unreadCount) ? unreadCount : 0));
 	$: unreadDividerLabel =
@@ -414,19 +426,21 @@
 				continue;
 			}
 			const pinButton = row.querySelector<HTMLElement>('.message-gutter.mine .gutter-pin-btn');
-			const actionsWrap = row.querySelector<HTMLElement>('.message-gutter.mine .gutter-actions.mine-actions');
+			const actionsWrap = row.querySelector<HTMLElement>(
+				'.message-gutter.mine .gutter-actions.mine-actions'
+			);
 			if (!pinButton || !actionsWrap) {
 				continue;
 			}
 			const actionButton = actionsWrap.querySelector<HTMLElement>('.gutter-action-btn');
 			const pinHeight = pinButton.getBoundingClientRect().height;
-				const actionHeight = actionButton?.getBoundingClientRect().height ?? 28;
-				const bubbleHeight = bubble.getBoundingClientRect().height;
-				const verticalGap = 10;
-				const requiredVerticalHeight = pinHeight + actionHeight + verticalGap;
-				if (bubbleHeight < requiredVerticalHeight) {
-					next[messageID] = true;
-				}
+			const actionHeight = actionButton?.getBoundingClientRect().height ?? 28;
+			const bubbleHeight = bubble.getBoundingClientRect().height;
+			const verticalGap = 10;
+			const requiredVerticalHeight = pinHeight + actionHeight + verticalGap;
+			if (bubbleHeight < requiredVerticalHeight) {
+				next[messageID] = true;
+			}
 		}
 		if (!equalBooleanMap(compactMineActionsByMessageID, next)) {
 			compactMineActionsByMessageID = next;
@@ -697,11 +711,14 @@
 	}
 
 	function getVisibleMessages(input: ChatMessage[], query: string) {
+		const base = input.filter(
+			(message) => (message.type || '').trim().toLowerCase() !== 'tora_workflow'
+		);
 		const normalized = query.trim().toLowerCase();
 		if (!normalized) {
-			return input;
+			return base;
 		}
-		return input.filter((message) => {
+		return base.filter((message) => {
 			if (message.senderName.toLowerCase().includes(normalized)) {
 				return true;
 			}
@@ -729,9 +746,149 @@
 		});
 	}
 
+	function isCurrentUserMessage(message: ChatMessage) {
+		const normalizedSenderID = normalizeIdentifier(message.senderId);
+		const normalizedCurrentUserID = normalizeIdentifier(currentUserId);
+		if (normalizedSenderID && normalizedCurrentUserID) {
+			return normalizedSenderID === normalizedCurrentUserID;
+		}
+		const normalizedSenderName = (message.senderName || '').trim().toLowerCase();
+		const normalizedCurrentUserName = (currentUserName || '').trim().toLowerCase();
+		if (normalizedSenderName && normalizedCurrentUserName) {
+			return normalizedSenderName === normalizedCurrentUserName;
+		}
+		return false;
+	}
+
+	function buildPersistedToraWorkflowByOrigin(input: ChatMessage[]) {
+		const workflows: Record<string, PersistedToraWorkflow> = {};
+		for (const message of input) {
+			const parsed = parsePersistedToraWorkflow(message);
+			if (!parsed) {
+				continue;
+			}
+			const existing = workflows[parsed.originMessageId];
+			if (!existing || parsed.events.length >= existing.events.length || parsed.id > existing.id) {
+				workflows[parsed.originMessageId] = parsed;
+			}
+		}
+		return workflows;
+	}
+
+	function parsePersistedToraWorkflow(message: ChatMessage): PersistedToraWorkflow | null {
+		if ((message.type || '').trim().toLowerCase() !== 'tora_workflow') {
+			return null;
+		}
+		let payload: Record<string, unknown> = {};
+		try {
+			const parsed = JSON.parse(message.content || '{}');
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				payload = parsed as Record<string, unknown>;
+			}
+		} catch {
+			payload = {};
+		}
+
+		const originMessageId = normalizeMessageID(
+			String(
+				payload.originMessageId ?? payload.origin_message_id ?? message.replyToMessageId ?? ''
+			).trim()
+		);
+		if (!originMessageId) {
+			return null;
+		}
+
+		const eventsRaw = Array.isArray(payload.events)
+			? payload.events
+			: Array.isArray(payload.auditTrail)
+				? payload.auditTrail
+				: [];
+		const events = eventsRaw
+			.map((event, index) => parseWorkflowEvent(event, `${message.id}-${index}`, message.createdAt))
+			.filter(Boolean) as ToraWorkflowEvent[];
+
+		return {
+			id: message.id,
+			originMessageId,
+			summary: String(payload.summary ?? payload.text ?? '').trim(),
+			workflowKind: String(payload.workflowKind ?? payload.workflow_kind ?? '').trim(),
+			status: String(payload.status ?? '')
+				.trim()
+				.toLowerCase(),
+			events
+		};
+	}
+
+	function parseWorkflowEvent(
+		value: unknown,
+		fallbackId: string,
+		fallbackTimestamp: number
+	): ToraWorkflowEvent | null {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return null;
+		}
+		const source = value as Record<string, unknown>;
+		const kind = String(source.kind ?? '')
+			.trim()
+			.toLowerCase();
+		if (!['thinking', 'tool_call', 'tool_result', 'text', 'done'].includes(kind)) {
+			return null;
+		}
+		const turn = Math.max(1, Number(source.turn ?? 1) || 1);
+		const totalTurns = Math.max(
+			turn,
+			Number(source.totalTurns ?? source.total_turns ?? turn) || turn
+		);
+		const timestamp = Number(source.timestamp ?? fallbackTimestamp) || fallbackTimestamp;
+		return {
+			id: String(source.id ?? source.index ?? fallbackId).trim() || fallbackId,
+			kind: kind as ToraWorkflowEvent['kind'],
+			tool: String(source.tool ?? '').trim(),
+			input:
+				source.input && typeof source.input === 'object' && !Array.isArray(source.input)
+					? { ...(source.input as Record<string, unknown>) }
+					: undefined,
+			result: source.result,
+			text: String(source.text ?? '').trim(),
+			turn,
+			totalTurns,
+			error: String(source.error ?? '').trim(),
+			timestamp
+		};
+	}
+
+	function getToraWorkflowForMessage(message: ChatMessage) {
+		const originMessageId = normalizeMessageID(message.id);
+		if (!originMessageId) {
+			return null;
+		}
+		const persisted = persistedToraWorkflowsByOrigin[originMessageId];
+		if (persisted) {
+			return {
+				summary: persisted.summary,
+				workflowKind: persisted.workflowKind,
+				events: persisted.events,
+				isLive: false
+			};
+		}
+		const liveEvents = toraLiveAgentEventsByOrigin[originMessageId] ?? [];
+		if (liveEvents.length === 0) {
+			return null;
+		}
+		return {
+			summary: '',
+			workflowKind: liveEvents[liveEvents.length - 1]?.workflowKind || '',
+			events: liveEvents,
+			isLive: true
+		};
+	}
+
 	function buildReplyCountByMessageID(input: ChatMessage[]) {
 		const counts: Record<string, number> = {};
 		for (const message of input) {
+			if ((message.type || '').trim().toLowerCase() === 'tora_workflow') {
+				continue;
+			}
 			const targetID = (message.replyToMessageId || '').trim();
 			if (!targetID) {
 				continue;
@@ -1280,8 +1437,7 @@
 		if (!isMember || isDeletedMessage(message)) {
 			return;
 		}
-		reactionPopoverMessageId =
-			reactionPopoverMessageId === message.id ? '' : message.id;
+		reactionPopoverMessageId = reactionPopoverMessageId === message.id ? '' : message.id;
 	}
 
 	function hasCurrentUserReacted(users: string[]) {
@@ -1369,7 +1525,9 @@
 
 	async function copyMessage(message: ChatMessage) {
 		const snippetPayload = getSnippetPayload(message);
-		const copyContent = snippetPayload ? buildSnippetCopyText(snippetPayload) : getMessageDisplayText(message);
+		const copyContent = snippetPayload
+			? buildSnippetCopyText(snippetPayload)
+			: getMessageDisplayText(message);
 		if (!copyContent) {
 			return;
 		}
@@ -1477,8 +1635,7 @@
 				return;
 			}
 			suppressMessageClickUntil = Date.now() + MESSAGE_LONG_PRESS_CLICK_SUPPRESSION_MS;
-			suppressNativeMessageContextMenuUntil =
-				Date.now() + MESSAGE_NATIVE_CONTEXT_SUPPRESSION_MS;
+			suppressNativeMessageContextMenuUntil = Date.now() + MESSAGE_NATIVE_CONTEXT_SUPPRESSION_MS;
 			openMessageContextMenuAtPosition(messageId, clientX, clientY);
 		}, MESSAGE_LONG_PRESS_DELAY_MS);
 	}
@@ -1622,6 +1779,9 @@
 		message: ChatMessage | null,
 		isMine: boolean
 	) {
+		if (hiddenContextActions.includes(action)) {
+			return true;
+		}
 		if (!isMember || !message) {
 			return true;
 		}
@@ -1651,9 +1811,9 @@
 </script>
 
 <div
-	class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode ? 'theme-dark' : ''} {isMember
-		? ''
-		: 'readonly-mode'}"
+	class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode
+		? 'theme-dark'
+		: ''} {isMember ? '' : 'readonly-mode'}"
 >
 	<MonochromeRoomBackground seed={roomId || 'chat-room'} />
 	<div class="messages" bind:this={viewport} on:scroll={onMessagesScroll}>
@@ -1686,35 +1846,62 @@
 					<span>{unreadDividerLabel}</span>
 				</div>
 			{/if}
-				{@const isMine = message.senderId === currentUserId}
-				{@const totalReplies = getTotalReplies(message)}
-				{@const branchesCreated = getBranchesCreated(message)}
-				{@const replyPreview = getReplyPreview(message)}
-				{@const snippetPayload = getSnippetPayload(message)}
-				{@const beaconPayload = getBeaconPayload(message)}
-				{@const reactionEntries = !isDeletedMessage(message) ? getReactionEntries(message) : []}
-				{@const isMultiDeleteSelected =
-					messageActionMode === 'delete' &&
-					deleteMultiEnabled &&
-					selectedDeleteMessageIds.includes(message.id)}
-				<div
-					class="message-row {isMine ? 'mine' : 'theirs'} {compactMineActionsByMessageID[message.id]
-						? 'compact-gutter'
-						: ''}"
-				>
-						{#if isMine}
-							<aside class="message-gutter mine">
+			{@const isMine = isCurrentUserMessage(message)}
+			{@const totalReplies = getTotalReplies(message)}
+			{@const branchesCreated = getBranchesCreated(message)}
+			{@const replyPreview = getReplyPreview(message)}
+			{@const snippetPayload = getSnippetPayload(message)}
+			{@const beaconPayload = getBeaconPayload(message)}
+			{@const toraWorkflow = getToraWorkflowForMessage(message)}
+			{@const reactionEntries = !isDeletedMessage(message) ? getReactionEntries(message) : []}
+			{@const isMultiDeleteSelected =
+				messageActionMode === 'delete' &&
+				deleteMultiEnabled &&
+				selectedDeleteMessageIds.includes(message.id)}
+			<div
+				class="message-row {isMine ? 'mine' : 'theirs'} {compactMineActionsByMessageID[message.id]
+					? 'compact-gutter'
+					: ''}"
+			>
+				{#if isSelectionMode && messageActionMode === 'delete' && deleteMultiEnabled && isMine && !isDeletedMessage(message)}
+					<label class="delete-select-toggle mine" title="Select message for deletion">
+						<input
+							type="checkbox"
+							checked={isMultiDeleteSelected}
+							on:change={(event) => onDeleteCheckboxToggle(event, message)}
+						/>
+					</label>
+				{/if}
+				<div class="message-bubble-cluster {isMine ? 'mine' : 'theirs'}">
+					<div class="message-bubble-anchor {isMine ? 'mine' : 'theirs'}">
+						<div
+							class="message-side-rail {isMine ? 'mine' : 'theirs'}"
+							class:has-workflow={Boolean(toraWorkflow)}
+						>
+							{#if toraWorkflow}
+								<div class="message-workflow-slot {isMine ? 'mine' : 'theirs'}">
+									<ToraWorkflowTrace
+										summary={toraWorkflow.summary}
+										workflowKind={toraWorkflow.workflowKind}
+										events={toraWorkflow.events}
+										isLive={toraWorkflow.isLive}
+									/>
+								</div>
+							{/if}
+							<aside class="message-gutter {isMine ? 'mine' : 'theirs'}">
 								{#if message.isPinned}
-								<button
-									type="button"
-									class="gutter-pin-btn"
-									title="Open discussion"
-									aria-label="Open discussion"
-									on:click|stopPropagation={() =>
-										dispatch('openDiscussion', { messageId: message.id })}
-								>
-									<IconSet name="discussion" size={12} className="gutter-pin-emoji" />
-									</button>
+									{#if !hiddenContextActions.includes('discussion')}
+										<button
+											type="button"
+											class="gutter-pin-btn"
+											title="Open discussion"
+											aria-label="Open discussion"
+											on:click|stopPropagation={() =>
+												dispatch('openDiscussion', { messageId: message.id })}
+										>
+											<IconSet name="discussion" size={12} className="gutter-pin-emoji" />
+										</button>
+									{/if}
 								{/if}
 								{#if totalReplies > 1 || branchesCreated > 1}
 									<div
@@ -1735,161 +1922,189 @@
 										{/if}
 									</div>
 								{/if}
-							{#if !isDeletedMessage(message)}
-								<div class="gutter-actions mine-actions">
-									<button
-									type="button"
-									class="gutter-action-btn"
-									title="Reply"
-									aria-label="Reply"
-									on:click|stopPropagation={() =>
-										dispatch('reply', {
-											messageId: message.id,
-											senderName: message.senderName,
-											content: getReplyDispatchContent(message)
-										})}
-								>
-									<IconSet name="reply" size={12} className="gutter-action-icon" />
-								</button>
-							</div>
-						{/if}
-						</aside>
-					{/if}
-				{#if isSelectionMode && messageActionMode === 'delete' && deleteMultiEnabled && isMine && !isDeletedMessage(message)}
-					<label class="delete-select-toggle mine" title="Select message for deletion">
-						<input
-							type="checkbox"
-							checked={isMultiDeleteSelected}
-							on:change={(event) => onDeleteCheckboxToggle(event, message)}
-						/>
-					</label>
-				{/if}
-				<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-				<article
-					class="bubble {isMine ? 'mine' : 'theirs'} {message.pending
-						? 'pending'
-						: ''} {isSelectionMode ? 'selectable' : ''}"
-					class:media-bubble={isMediaBubble(message)}
-					class:sticker-bubble={isStickerMessage(message)}
-					class:call-log-bubble={isCallLogMessage(message)}
-					class:deleted={isDeletedMessage(message)}
-					class:has-reactions={reactionEntries.length > 0}
-					class:selected-target={selectedMessageId === message.id || isMultiDeleteSelected}
-					class:focused={focusedMessageId === message.id}
-					role={isSelectionMode ? 'button' : undefined}
-					tabindex={isSelectionMode ? 0 : undefined}
-					data-message-id={message.id}
-					on:click={() => onMessageClick(message)}
-					on:keydown={(event) => onMessageKeyDown(event, message)}
-					on:contextmenu={(event) => onMessageContextMenu(event, message)}
-					on:touchstart={(event) => onMessageTouchStart(event, message)}
-					on:touchmove={onMessageTouchMove}
-					on:touchend={onMessageTouchEnd}
-					on:touchcancel={onMessageTouchCancel}
-				>
+								{#if !isDeletedMessage(message)}
+									<div class="gutter-actions {isMine ? 'mine-actions' : ''}">
+										<button
+											type="button"
+											class="gutter-action-btn"
+											title="Reply"
+											aria-label="Reply"
+											on:click|stopPropagation={() =>
+												dispatch('reply', {
+													messageId: message.id,
+													senderName: message.senderName,
+													content: getReplyDispatchContent(message)
+												})}
+										>
+											<IconSet name="reply" size={12} className="gutter-action-icon" />
+										</button>
+									</div>
+								{/if}
+							</aside>
+						</div>
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<article
+							class="bubble {isMine ? 'mine' : 'theirs'} {message.pending
+								? 'pending'
+								: ''} {isSelectionMode ? 'selectable' : ''}"
+							class:media-bubble={isMediaBubble(message)}
+							class:sticker-bubble={isStickerMessage(message)}
+							class:call-log-bubble={isCallLogMessage(message)}
+							class:deleted={isDeletedMessage(message)}
+							class:has-reactions={reactionEntries.length > 0}
+							class:selected-target={selectedMessageId === message.id || isMultiDeleteSelected}
+							class:focused={focusedMessageId === message.id}
+							role={isSelectionMode ? 'button' : undefined}
+							tabindex={isSelectionMode ? 0 : undefined}
+							data-message-id={message.id}
+							on:click={() => onMessageClick(message)}
+							on:keydown={(event) => onMessageKeyDown(event, message)}
+							on:contextmenu={(event) => onMessageContextMenu(event, message)}
+							on:touchstart={(event) => onMessageTouchStart(event, message)}
+							on:touchmove={onMessageTouchMove}
+							on:touchend={onMessageTouchEnd}
+							on:touchcancel={onMessageTouchCancel}
+						>
 							<div class="bubble-meta">
 								<span
 									class="bubble-sender-name"
 									style={`color:${getSenderNameColor(message.senderId, message.senderName, isMine)};`}
 								>
-									{message.senderName}
+									{#if message.senderId === 'Tora-Bot'}<span class="tora-sender-icon" aria-hidden="true">🐼</span>{/if}{message.senderName}
 								</span>
 								<div class="meta-right">
-								<span class="time-meta">
-									<time>{formatClock(message.createdAt)}</time>
-									{#if beaconPayload}
-										<span class="beacon-meta" title={getBeaconLabel(message)}>
-											<IconSet name="beacon" size={11} />
-										</span>
-									{/if}
-									{#if message.isEdited && !isDeletedMessage(message)}
-										<span class="edited-meta">edited {formatEditedClock(message.editedAt)}</span>
-									{/if}
-									{#if copiedMessageId === message.id}
-										<span class="copied-tip">Copied</span>
-									{/if}
-									{#if message.type !== 'task'}
+									<span class="time-meta">
+										<time>{formatClock(message.createdAt)}</time>
+										{#if beaconPayload}
+											<span class="beacon-meta" title={getBeaconLabel(message)}>
+												<IconSet name="beacon" size={11} />
+											</span>
+										{/if}
+										{#if message.isEdited && !isDeletedMessage(message)}
+											<span class="edited-meta">edited {formatEditedClock(message.editedAt)}</span>
+										{/if}
+										{#if copiedMessageId === message.id}
+											<span class="copied-tip">Copied</span>
+										{/if}
+										{#if message.type !== 'task'}
+											<button
+												type="button"
+												class="copy-btn"
+												title="Copy message"
+												aria-label="Copy message"
+												on:click|stopPropagation={() => void copyMessage(message)}
+											>
+												<IconSet name="copy" size={12} className="copy-icon" />
+											</button>
+										{/if}
+									</span>
+									{#if message.hasBreakRoom && message.breakRoomId}
 										<button
 											type="button"
-											class="copy-btn"
-											title="Copy message"
-											aria-label="Copy message"
-											on:click|stopPropagation={() => void copyMessage(message)}
+											class="break-indicator"
+											title={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
+											aria-label={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
+											on:click|stopPropagation={() =>
+												dispatch('joinBreakRoom', { roomId: message.breakRoomId || '' })}
 										>
-											<IconSet name="copy" size={12} className="copy-icon" />
+											<IconSet name="break" size={12} className="break-indicator-icon" />
+											<span class="break-indicator-count"
+												>{formatBreakCount(message.breakJoinCount)}</span
+											>
 										</button>
 									{/if}
-								</span>
-								{#if message.hasBreakRoom && message.breakRoomId}
-									<button
-										type="button"
-										class="break-indicator"
-										title={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
-										aria-label={`Join break room (${formatBreakCount(message.breakJoinCount)} joined)`}
-										on:click|stopPropagation={() =>
-											dispatch('joinBreakRoom', { roomId: message.breakRoomId || '' })}
-									>
-										<IconSet name="break" size={12} className="break-indicator-icon" />
-										<span class="break-indicator-count">{formatBreakCount(message.breakJoinCount)}</span>
-									</button>
-								{/if}
+								</div>
 							</div>
-						</div>
-					{#if replyPreview}
-						<button
-							type="button"
-							class="reply-snippet"
-							title="Jump to original message"
-							aria-label="Jump to original message"
-							on:click|stopPropagation={() => jumpToReplyTarget(message)}
-						>
-							<span class="reply-snippet-author">{replyPreview.author}</span>
-							<span class="reply-snippet-content">{replyPreview.content}</span>
-						</button>
-					{/if}
-						<div
-						class="bubble-content"
-						class:deleted-text={isDeletedMessage(message)}
-						class:collapsed={!snippetPayload &&
-							message.type === 'text' &&
-							isLongMessage(getMessageDisplayText(message)) &&
-							!Boolean(expandedMessages[message.id])}
-						>
-							{#if isDeletedMessage(message)}
-								This message was deleted
-							{:else if snippetPayload}
-								{@const snippetCodeNeedsCollapse = isLongSnippetCode(snippetPayload.snippet)}
-								{@const snippetCodeExpanded = Boolean(expandedSnippetCodeByMessageID[message.id])}
-								{@const snippetMessageNeedsCollapse = isLongSnippetMessage(snippetPayload.message)}
-								{@const snippetMessageExpanded = Boolean(
-									expandedSnippetMessageByMessageID[message.id]
-								)}
-								<div class="snippet-card">
-									<div class="snippet-card-header">
-										<span class="snippet-card-label">Code Snippet</span>
-										{#if snippetPayload.fileName}
-											<span class="snippet-card-file">{snippetPayload.fileName}</span>
+							{#if replyPreview}
+								<button
+									type="button"
+									class="reply-snippet"
+									title="Jump to original message"
+									aria-label="Jump to original message"
+									on:click|stopPropagation={() => jumpToReplyTarget(message)}
+								>
+									<span class="reply-snippet-author">{replyPreview.author}</span>
+									<span class="reply-snippet-content">{replyPreview.content}</span>
+								</button>
+							{/if}
+							<div
+								class="bubble-content"
+								class:deleted-text={isDeletedMessage(message)}
+								class:collapsed={!snippetPayload &&
+									message.type === 'text' &&
+									isLongMessage(getMessageDisplayText(message)) &&
+									!Boolean(expandedMessages[message.id])}
+							>
+								{#if isDeletedMessage(message)}
+									This message was deleted
+								{:else if snippetPayload}
+									{@const snippetCodeNeedsCollapse = isLongSnippetCode(snippetPayload.snippet)}
+									{@const snippetCodeExpanded = Boolean(expandedSnippetCodeByMessageID[message.id])}
+									{@const snippetMessageNeedsCollapse = isLongSnippetMessage(
+										snippetPayload.message
+									)}
+									{@const snippetMessageExpanded = Boolean(
+										expandedSnippetMessageByMessageID[message.id]
+									)}
+									<div class="snippet-card">
+										<div class="snippet-card-header">
+											<span class="snippet-card-label">Code Snippet</span>
+											{#if snippetPayload.fileName}
+												<span class="snippet-card-file">{snippetPayload.fileName}</span>
+											{/if}
+										</div>
+										<pre
+											class="snippet-code"
+											class:collapsed={snippetCodeNeedsCollapse && !snippetCodeExpanded}><code
+												>{snippetPayload.snippet}</code
+											></pre>
+										{#if snippetCodeNeedsCollapse}
+											<button
+												type="button"
+												class="read-more-btn snippet-read-more-btn"
+												on:click|stopPropagation={() => toggleSnippetCodeExpanded(message.id)}
+											>
+												{snippetCodeExpanded ? 'Collapse code' : 'Read more code'}
+											</button>
+										{/if}
+										{#if snippetPayload.message}
+											<div
+												class="snippet-caption"
+												class:collapsed={snippetMessageNeedsCollapse && !snippetMessageExpanded}
+											>
+												{#each splitMessageTextByEmoji(snippetPayload.message) as segment}
+													{#if segment.isEmoji}
+														<span class="emoji-boost">{segment.value}</span>
+													{:else if segment.isMention}
+														<span class="mention-tag">{segment.value}</span>
+													{:else}
+														{segment.value}
+													{/if}
+												{/each}
+											</div>
+											{#if snippetMessageNeedsCollapse}
+												<button
+													type="button"
+													class="read-more-btn snippet-read-more-btn"
+													on:click|stopPropagation={() => toggleSnippetMessageExpanded(message.id)}
+												>
+													{snippetMessageExpanded ? 'Collapse note' : 'Read more note'}
+												</button>
+											{/if}
 										{/if}
 									</div>
-									<pre
-										class="snippet-code"
-										class:collapsed={snippetCodeNeedsCollapse && !snippetCodeExpanded}
-									><code>{snippetPayload.snippet}</code></pre>
-									{#if snippetCodeNeedsCollapse}
-										<button
-											type="button"
-											class="read-more-btn snippet-read-more-btn"
-											on:click|stopPropagation={() => toggleSnippetCodeExpanded(message.id)}
-										>
-											{snippetCodeExpanded ? 'Collapse code' : 'Read more code'}
-										</button>
-									{/if}
-									{#if snippetPayload.message}
-										<div
-											class="snippet-caption"
-											class:collapsed={snippetMessageNeedsCollapse && !snippetMessageExpanded}
-										>
-											{#each splitMessageTextByEmoji(snippetPayload.message) as segment}
+								{:else if message.type === 'image' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
+									<img
+										src={getMediaURL(message)}
+										alt={getFileName(message)}
+										class="media-preview image-preview"
+										class:sticker-preview={isStickerMessage(message)}
+										loading="lazy"
+										on:error={() => onMediaError(message.id)}
+									/>
+									{#if getMediaCaption(message)}
+										<div class="media-caption">
+											{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
 												{#if segment.isEmoji}
 													<span class="emoji-boost">{segment.value}</span>
 												{:else if segment.isMention}
@@ -1899,180 +2114,218 @@
 												{/if}
 											{/each}
 										</div>
-										{#if snippetMessageNeedsCollapse}
-											<button
-												type="button"
-												class="read-more-btn snippet-read-more-btn"
-												on:click|stopPropagation={() => toggleSnippetMessageExpanded(message.id)}
-											>
-												{snippetMessageExpanded ? 'Collapse note' : 'Read more note'}
-											</button>
-										{/if}
 									{/if}
-								</div>
-							{:else if message.type === 'image' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
-								<img
-									src={getMediaURL(message)}
-									alt={getFileName(message)}
-									class="media-preview image-preview"
-									class:sticker-preview={isStickerMessage(message)}
-									loading="lazy"
-									on:error={() => onMediaError(message.id)}
-								/>
-								{#if getMediaCaption(message)}
-									<div class="media-caption">
-										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
-											{#if segment.isEmoji}
-												<span class="emoji-boost">{segment.value}</span>
-											{:else if segment.isMention}
-												<span class="mention-tag">{segment.value}</span>
-											{:else}
-												{segment.value}
-											{/if}
-										{/each}
-									</div>
-								{/if}
-							{:else if message.type === 'video' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
-								<!-- svelte-ignore a11y_media_has_caption -->
-								<video
-									src={getMediaURL(message)}
-									class="media-preview video-preview"
-									controls
-									preload="metadata"
-									on:error={() => onMediaError(message.id)}
-								></video>
-								{#if getMediaCaption(message)}
-									<div class="media-caption">
-										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
-											{#if segment.isEmoji}
-												<span class="emoji-boost">{segment.value}</span>
-											{:else if segment.isMention}
-												<span class="mention-tag">{segment.value}</span>
-											{:else}
-												{segment.value}
-											{/if}
-										{/each}
-									</div>
-								{/if}
-							{:else if message.type === 'audio' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
-								<!-- svelte-ignore a11y_media_has_caption -->
-								<audio
-									src={getMediaURL(message)}
-									class="audio-preview"
-									controls
-									preload="metadata"
-									on:error={() => onMediaError(message.id)}
-								></audio>
-								{#if getMediaCaption(message)}
-									<div class="media-caption">
-										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
-											{#if segment.isEmoji}
-												<span class="emoji-boost">{segment.value}</span>
-											{:else if segment.isMention}
-												<span class="mention-tag">{segment.value}</span>
-											{:else}
-												{segment.value}
-											{/if}
-										{/each}
-									</div>
-								{/if}
-							{:else if (message.type === 'file' || mediaLoadFailedById[message.id]) && getMediaURL(message)}
-								{#if isPDFMessage(message)}
-									<iframe
-										class="pdf-preview"
-										src={getMediaURL(message)}
-										title={getFileName(message)}
-										loading="lazy"
-									></iframe>
-								{/if}
-								{#if isImageFileMessage(message) && !mediaLoadFailedById[message.id]}
-									<img
-										src={getMediaURL(message)}
-										alt={getFileName(message)}
-										class="media-preview image-preview file-inline-preview"
-										class:sticker-preview={isStickerMessage(message)}
-										loading="lazy"
-										on:error={() => onMediaError(message.id)}
-									/>
-								{:else if isVideoFileMessage(message) && !mediaLoadFailedById[message.id]}
+								{:else if message.type === 'video' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
 									<!-- svelte-ignore a11y_media_has_caption -->
 									<video
 										src={getMediaURL(message)}
-										class="media-preview video-preview file-inline-preview"
+										class="media-preview video-preview"
 										controls
 										preload="metadata"
 										on:error={() => onMediaError(message.id)}
 									></video>
-								{/if}
-								<div class="file-card">
-									<div class="file-meta">
-										<IconSet name="file" size={16} />
-										<div>
-											<div class="file-name">{getFileName(message)}</div>
-											<div class="file-ext">{getFileExtension(message).toUpperCase() || 'FILE'}</div>
+									{#if getMediaCaption(message)}
+										<div class="media-caption">
+											{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
+												{#if segment.isEmoji}
+													<span class="emoji-boost">{segment.value}</span>
+												{:else if segment.isMention}
+													<span class="mention-tag">{segment.value}</span>
+												{:else}
+													{segment.value}
+												{/if}
+											{/each}
+										</div>
+									{/if}
+								{:else if message.type === 'audio' && getMediaURL(message) && !mediaLoadFailedById[message.id]}
+									<!-- svelte-ignore a11y_media_has_caption -->
+									<audio
+										src={getMediaURL(message)}
+										class="audio-preview"
+										controls
+										preload="metadata"
+										on:error={() => onMediaError(message.id)}
+									></audio>
+									{#if getMediaCaption(message)}
+										<div class="media-caption">
+											{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
+												{#if segment.isEmoji}
+													<span class="emoji-boost">{segment.value}</span>
+												{:else if segment.isMention}
+													<span class="mention-tag">{segment.value}</span>
+												{:else}
+													{segment.value}
+												{/if}
+											{/each}
+										</div>
+									{/if}
+								{:else if (message.type === 'file' || mediaLoadFailedById[message.id]) && getMediaURL(message)}
+									{#if isPDFMessage(message)}
+										<iframe
+											class="pdf-preview"
+											src={getMediaURL(message)}
+											title={getFileName(message)}
+											loading="lazy"
+										></iframe>
+									{/if}
+									{#if isImageFileMessage(message) && !mediaLoadFailedById[message.id]}
+										<img
+											src={getMediaURL(message)}
+											alt={getFileName(message)}
+											class="media-preview image-preview file-inline-preview"
+											class:sticker-preview={isStickerMessage(message)}
+											loading="lazy"
+											on:error={() => onMediaError(message.id)}
+										/>
+									{:else if isVideoFileMessage(message) && !mediaLoadFailedById[message.id]}
+										<!-- svelte-ignore a11y_media_has_caption -->
+										<video
+											src={getMediaURL(message)}
+											class="media-preview video-preview file-inline-preview"
+											controls
+											preload="metadata"
+											on:error={() => onMediaError(message.id)}
+										></video>
+									{/if}
+									<div class="file-card">
+										<div class="file-meta">
+											<IconSet name="file" size={16} />
+											<div>
+												<div class="file-name">{getFileName(message)}</div>
+												<div class="file-ext">
+													{getFileExtension(message).toUpperCase() || 'FILE'}
+												</div>
+											</div>
+										</div>
+										<div class="file-actions">
+											<a
+												href={getMediaURL(message)}
+												target="_blank"
+												rel="noreferrer"
+												class="file-link">Open</a
+											>
+											<a
+												href={getMediaURL(message)}
+												target="_blank"
+												rel="noreferrer"
+												download
+												class="file-link"
+											>
+												Download
+											</a>
 										</div>
 									</div>
-									<div class="file-actions">
-										<a href={getMediaURL(message)} target="_blank" rel="noreferrer" class="file-link"
-											>Open</a
-										>
-										<a
-											href={getMediaURL(message)}
-											target="_blank"
-											rel="noreferrer"
-											download
-											class="file-link"
-										>
-											Download
-										</a>
+									{#if getMediaCaption(message)}
+										<div class="media-caption">
+											{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
+												{#if segment.isEmoji}
+													<span class="emoji-boost">{segment.value}</span>
+												{:else if segment.isMention}
+													<span class="mention-tag">{segment.value}</span>
+												{:else}
+													{segment.value}
+												{/if}
+											{/each}
+										</div>
+									{/if}
+								{:else if message.type === 'task'}
+									<TaskCard
+										{message}
+										showAddTaskControl={isMember}
+										canEditTasks={isMember}
+										on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
+										on:addTask={(event) => dispatch('addTask', event.detail)}
+									/>
+								{:else if message.type === 'tora_action'}
+									{@const toraPayload = (() => {
+										try {
+											return JSON.parse(message.content);
+										} catch {
+											return null;
+										}
+									})()}
+									{#if toraPayload}
+										<ToraBotActionCard
+											text={toraPayload.text ?? ''}
+											actionsJson={toraPayload.actionsJson ?? ''}
+											auditTrail={Array.isArray(toraPayload.auditTrail)
+												? toraPayload.auditTrail
+												: []}
+											{roomId}
+											{apiBase}
+											authToken={chatAuthToken}
+											autoApply={toraAutoApply}
+											{currentUserName}
+										/>
+									{:else}
+										{message.content}
+									{/if}
+								{:else if message.type === 'tora_canvas_action'}
+									{@const toraCanvasPayload = (() => {
+										try {
+											return JSON.parse(message.content);
+										} catch {
+											return null;
+										}
+									})()}
+									{#if toraCanvasPayload}
+										<ToraBotCanvasActionCard
+											text={toraCanvasPayload.text ?? ''}
+											changesJson={toraCanvasPayload.changesJson ?? '[]'}
+											auditTrail={Array.isArray(toraCanvasPayload.auditTrail)
+												? toraCanvasPayload.auditTrail
+												: []}
+											applyChanges={applyCanvasChanges}
+										/>
+									{:else}
+										{message.content}
+									{/if}
+								{:else if beaconPayload}
+									<div class="beacon-card">
+										<div class="beacon-card-head">
+											<span class="beacon-card-kind">
+												<IconSet name="beacon" size={13} />
+												Beacon
+											</span>
+											<span class="beacon-card-time">{getBeaconLabel(message)}</span>
+										</div>
+										<div class="beacon-card-text">
+											{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
+												{#if segment.isEmoji}
+													<span class="emoji-boost">{segment.value}</span>
+												{:else if segment.isMention}
+													<span class="mention-tag">{segment.value}</span>
+												{:else}
+													{segment.value}
+												{/if}
+											{/each}
+										</div>
 									</div>
-								</div>
-								{#if getMediaCaption(message)}
-									<div class="media-caption">
-										{#each splitMessageTextByEmoji(getMediaCaption(message)) as segment}
-											{#if segment.isEmoji}
-												<span class="emoji-boost">{segment.value}</span>
-											{:else if segment.isMention}
-												<span class="mention-tag">{segment.value}</span>
-											{:else}
-												{segment.value}
-											{/if}
-										{/each}
+								{:else if isCallLogMessage(message)}
+									<div class="call-log-entry">
+										<svg
+											class="call-log-icon {isNegativeCallMessage(message)
+												? 'missed'
+												: 'completed'}"
+											viewBox="0 0 24 24"
+											aria-hidden="true"
+										>
+											<path
+												d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
+											/>
+										</svg>
+										<div class="call-log-copy">
+											<div class="call-log-title">{getCallLogModeLabel(message)}</div>
+											<div class="call-log-status" class:rung={isRungCallMessage(message)}>
+												{message.content}
+											</div>
+										</div>
 									</div>
-								{/if}
-							{:else if message.type === 'task'}
-							<TaskCard
-								{message}
-								showAddTaskControl={isMember}
-								canEditTasks={isMember}
-								on:toggleTask={(event) => dispatch('toggleTask', event.detail)}
-								on:addTask={(event) => dispatch('addTask', event.detail)}
-							/>
-						{:else if message.type === 'tora_action'}
-							{@const toraPayload = (() => { try { return JSON.parse(message.content); } catch { return null; } })()}
-							{#if toraPayload}
-								<ToraBotActionCard
-									text={toraPayload.text ?? ''}
-									actionsJson={toraPayload.actionsJson ?? ''}
-									{roomId}
-									{apiBase}
-									authToken={chatAuthToken}
-									autoApply={toraAutoApply}
-									{currentUserName}
-								/>
-							{:else}
-								{message.content}
-							{/if}
-						{:else if beaconPayload}
-							<div class="beacon-card">
-								<div class="beacon-card-head">
-									<span class="beacon-card-kind">
-										<IconSet name="beacon" size={13} />
-										Beacon
-									</span>
-									<span class="beacon-card-time">{getBeaconLabel(message)}</span>
-								</div>
-								<div class="beacon-card-text">
+								{:else if isCodeBlock(getMessageDisplayText(message))}
+									<pre class="code-block"><code
+											>{getCodeContent(getMessageDisplayText(message))}</code
+										></pre>
+								{:else}
 									{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
 										{#if segment.isEmoji}
 											<span class="emoji-boost">{segment.value}</span>
@@ -2082,127 +2335,108 @@
 											{segment.value}
 										{/if}
 									{/each}
-								</div>
+								{/if}
 							</div>
-						{:else if isCallLogMessage(message)}
-							<div class="call-log-entry">
-								<svg
-									class="call-log-icon {isNegativeCallMessage(message) ? 'missed' : 'completed'}"
-									viewBox="0 0 24 24"
-									aria-hidden="true"
+							{#if !isDeletedMessage(message)}
+								{@const isReactionPopoverOpen = reactionPopoverMessageId === message.id}
+								<div
+									class="reaction-row {isMine ? 'mine' : 'theirs'} {reactionEntries.length > 0
+										? 'has-reactions'
+										: ''} {isReactionPopoverOpen ? 'open' : ''} {touchReactionRevealMessageId ===
+									message.id
+										? 'touch-visible'
+										: ''}"
 								>
-									<path
-										d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
-									/>
-								</svg>
-								<div class="call-log-copy">
-									<div class="call-log-title">{getCallLogModeLabel(message)}</div>
-									<div class="call-log-status" class:rung={isRungCallMessage(message)}>
-										{message.content}
-									</div>
-								</div>
-							</div>
-						{:else if isCodeBlock(getMessageDisplayText(message))}
-							<pre class="code-block"><code>{getCodeContent(getMessageDisplayText(message))}</code></pre>
-						{:else}
-							{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
-								{#if segment.isEmoji}
-									<span class="emoji-boost">{segment.value}</span>
-								{:else if segment.isMention}
-									<span class="mention-tag">{segment.value}</span>
-								{:else}
-									{segment.value}
-								{/if}
-							{/each}
-						{/if}
-					</div>
-					{#if !isDeletedMessage(message)}
-						{@const isReactionPopoverOpen = reactionPopoverMessageId === message.id}
-						<div class="reaction-row {isMine ? 'mine' : 'theirs'} {reactionEntries.length > 0
-							? 'has-reactions'
-							: ''} {isReactionPopoverOpen ? 'open' : ''} {touchReactionRevealMessageId === message.id
-							? 'touch-visible'
-							: ''}">
-							<button
-								type="button"
-								class="reaction-trigger {reactionEntries.length > 0 ? 'has-reactions' : 'empty'}"
-								title={reactionEntries.length > 0 ? 'View reactions' : ''}
-								aria-label={reactionEntries.length > 0 ? 'View reactions' : 'Add reaction'}
-								aria-expanded={isReactionPopoverOpen}
-								on:click|stopPropagation={() => toggleReactionPopover(message)}
-							>
-								{#if reactionEntries.length > 0}
-									{@const reactionStackEntries = getReactionStackEntries(reactionEntries)}
-									<span
-										class="reaction-stack"
-										aria-hidden="true"
-										style={`--reaction-stack-count:${reactionStackEntries.length};`}
+									<button
+										type="button"
+										class="reaction-trigger {reactionEntries.length > 0
+											? 'has-reactions'
+											: 'empty'}"
+										title={reactionEntries.length > 0 ? 'View reactions' : ''}
+										aria-label={reactionEntries.length > 0 ? 'View reactions' : 'Add reaction'}
+										aria-expanded={isReactionPopoverOpen}
+										on:click|stopPropagation={() => toggleReactionPopover(message)}
 									>
-										{#each reactionStackEntries as reaction, stackIndex (`${reaction.emoji}-${stackIndex}`)}
+										{#if reactionEntries.length > 0}
+											{@const reactionStackEntries = getReactionStackEntries(reactionEntries)}
 											<span
-												class="reaction-stack-item"
-												style={`--reaction-index:${stackIndex}; z-index:${10 - stackIndex};`}
+												class="reaction-stack"
+												aria-hidden="true"
+												style={`--reaction-stack-count:${reactionStackEntries.length};`}
 											>
-												{reaction.emoji}
+												{#each reactionStackEntries as reaction, stackIndex (`${reaction.emoji}-${stackIndex}`)}
+													<span
+														class="reaction-stack-item"
+														style={`--reaction-index:${stackIndex}; z-index:${10 - stackIndex};`}
+													>
+														{reaction.emoji}
+													</span>
+												{/each}
 											</span>
-										{/each}
-									</span>
-									<span class="reaction-trigger-count">{getReactionTotalCount(reactionEntries)}</span>
-								{:else}
-									<span class="reaction-trigger-icon" aria-hidden="true">🙂</span>
-								{/if}
-							</button>
-							{#if isReactionPopoverOpen}
-								<div class="reaction-popover {isMine ? 'mine' : 'theirs'}" role="dialog" aria-label="Message reactions">
-									<div class="reaction-popover-quick">
-										{#each QUICK_REACTIONS as reactionEmoji}
-											<button
-												type="button"
-												class="reaction-popover-quick-btn"
-												title={``}
-												aria-label={`Add ${reactionEmoji} reaction`}
-												on:click|stopPropagation={() => toggleReaction(message, reactionEmoji)}
+											<span class="reaction-trigger-count"
+												>{getReactionTotalCount(reactionEntries)}</span
 											>
-												{reactionEmoji}
-											</button>
-										{/each}
-									</div>
-									{#if reactionEntries.length > 0}
-										<div class="reaction-popover-list">
-											{#each reactionEntries as reaction (reaction.emoji)}
-												<button
-													type="button"
-													class="reaction-popover-item"
-													class:reacted={hasCurrentUserReacted(reaction.users)}
-													title={reaction.users.length === 1
-														? `1 reaction`
-														: `${reaction.users.length} reactions`}
-													aria-label={`${reaction.emoji} ${reaction.users.length} reactions`}
-													on:click|stopPropagation={() => toggleReaction(message, reaction.emoji)}
-												>
-													<span class="reaction-popover-emoji">{reaction.emoji}</span>
-													<span class="reaction-popover-count">{reaction.users.length}</span>
-												</button>
-											{/each}
+										{:else}
+											<span class="reaction-trigger-icon" aria-hidden="true">🙂</span>
+										{/if}
+									</button>
+									{#if isReactionPopoverOpen}
+										<div
+											class="reaction-popover {isMine ? 'mine' : 'theirs'}"
+											role="dialog"
+											aria-label="Message reactions"
+										>
+											<div class="reaction-popover-quick">
+												{#each QUICK_REACTIONS as reactionEmoji}
+													<button
+														type="button"
+														class="reaction-popover-quick-btn"
+														title={``}
+														aria-label={`Add ${reactionEmoji} reaction`}
+														on:click|stopPropagation={() => toggleReaction(message, reactionEmoji)}
+													>
+														{reactionEmoji}
+													</button>
+												{/each}
+											</div>
+											{#if reactionEntries.length > 0}
+												<div class="reaction-popover-list">
+													{#each reactionEntries as reaction (reaction.emoji)}
+														<button
+															type="button"
+															class="reaction-popover-item"
+															class:reacted={hasCurrentUserReacted(reaction.users)}
+															title={reaction.users.length === 1
+																? `1 reaction`
+																: `${reaction.users.length} reactions`}
+															aria-label={`${reaction.emoji} ${reaction.users.length} reactions`}
+															on:click|stopPropagation={() =>
+																toggleReaction(message, reaction.emoji)}
+														>
+															<span class="reaction-popover-emoji">{reaction.emoji}</span>
+															<span class="reaction-popover-count">{reaction.users.length}</span>
+														</button>
+													{/each}
+												</div>
+											{/if}
 										</div>
 									{/if}
 								</div>
 							{/if}
-						</div>
-					{/if}
-					{#if !snippetPayload && message.type === 'text' && isLongMessage(getMessageDisplayText(message))}
-						<button
-							type="button"
-							class="read-more-btn"
-							on:click|stopPropagation={() => dispatch('toggleExpand', { messageId: message.id })}
-						>
-							{Boolean(expandedMessages[message.id]) ? 'Read less' : 'Read more'}
-						</button>
-					{/if}
-				</article>
-				{#if selectedMessageId === message.id &&
-					(messageActionMode === 'edit' ||
-						(messageActionMode === 'delete' && !deleteMultiEnabled))}
+							{#if !snippetPayload && message.type === 'text' && isLongMessage(getMessageDisplayText(message))}
+								<button
+									type="button"
+									class="read-more-btn"
+									on:click|stopPropagation={() =>
+										dispatch('toggleExpand', { messageId: message.id })}
+								>
+									{Boolean(expandedMessages[message.id]) ? 'Read less' : 'Read more'}
+								</button>
+							{/if}
+						</article>
+					</div>
+				</div>
+				{#if selectedMessageId === message.id && (messageActionMode === 'edit' || (messageActionMode === 'delete' && !deleteMultiEnabled))}
 					<div class="selected-message-actions {isMine ? 'mine' : 'theirs'}">
 						{#if messageActionMode === 'edit'}
 							<button
@@ -2222,81 +2456,29 @@
 						</button>
 					</div>
 				{/if}
-					{#if !isMine}
-							<aside class="message-gutter theirs">
-								{#if message.isPinned}
-								<button
-									type="button"
-									class="gutter-pin-btn"
-									title="Open discussion"
-									aria-label="Open discussion"
-									on:click|stopPropagation={() =>
-										dispatch('openDiscussion', { messageId: message.id })}
-								>
-									<IconSet name="discussion" size={12} className="gutter-pin-emoji" />
-									</button>
-								{/if}
-								{#if totalReplies > 1 || branchesCreated > 1}
-									<div
-										class="gutter-stat"
-										title={totalReplies > 1 && branchesCreated > 1
-											? `${totalReplies} replies • ${branchesCreated} branches`
-											: totalReplies > 1
-												? `${totalReplies} replies`
-												: `${branchesCreated} branches`}
-									>
-										{#if totalReplies > 1}
-											<IconSet name="reply" size={10} className="gutter-icon" />
-											<strong>{totalReplies}</strong>
-										{/if}
-										{#if branchesCreated > 1}
-											<IconSet name="break" size={10} className="gutter-icon" />
-											<strong>{branchesCreated}</strong>
-										{/if}
-									</div>
-								{/if}
-							{#if !isDeletedMessage(message)}
-								<div class="gutter-actions">
-									<button
-									type="button"
-									class="gutter-action-btn"
-									title="Reply"
-									aria-label="Reply"
-									on:click|stopPropagation={() =>
-										dispatch('reply', {
-											messageId: message.id,
-											senderName: message.senderName,
-											content: getReplyDispatchContent(message)
-										})}
-								>
-									<IconSet name="reply" size={12} className="gutter-action-icon" />
-								</button>
-							</div>
-						{/if}
-					</aside>
-				{/if}
 			</div>
 		{/each}
-		</div>
-		{#if messageContextMenu.open}
-			{@const contextMenuMessage = getVisibleMessageById(messageContextMenu.messageId)}
-			{@const contextMenuIsMine = Boolean(
-				contextMenuMessage &&
-					normalizeIdentifier(contextMenuMessage.senderId) === normalizeIdentifier(currentUserId)
-			)}
-			<div
-				class="message-context-menu-backdrop"
-				aria-hidden="true"
-				on:click={closeMessageContextMenu}
-				on:contextmenu|preventDefault={closeMessageContextMenu}
-			></div>
-			<div
-				class="message-context-menu"
-				role="menu"
-				tabindex="-1"
-				aria-label="Message actions"
-				style={`left: ${messageContextMenu.x}px; top: ${messageContextMenu.y}px;`}
-			>
+	</div>
+	{#if messageContextMenu.open}
+		{@const contextMenuMessage = getVisibleMessageById(messageContextMenu.messageId)}
+		{@const contextMenuIsMine = Boolean(
+			contextMenuMessage &&
+			normalizeIdentifier(contextMenuMessage.senderId) === normalizeIdentifier(currentUserId)
+		)}
+		<div
+			class="message-context-menu-backdrop"
+			aria-hidden="true"
+			on:click={closeMessageContextMenu}
+			on:contextmenu|preventDefault={closeMessageContextMenu}
+		></div>
+		<div
+			class="message-context-menu"
+			role="menu"
+			tabindex="-1"
+			aria-label="Message actions"
+			style={`left: ${messageContextMenu.x}px; top: ${messageContextMenu.y}px;`}
+		>
+			{#if !hiddenContextActions.includes('reply')}
 				<button
 					type="button"
 					class="message-context-menu-item"
@@ -2307,6 +2489,8 @@
 					<IconSet name="reply" size={14} />
 					<span>Reply</span>
 				</button>
+			{/if}
+			{#if !hiddenContextActions.includes('edit')}
 				<button
 					type="button"
 					class="message-context-menu-item"
@@ -2317,6 +2501,8 @@
 					<IconSet name="edit" size={14} />
 					<span>Edit</span>
 				</button>
+			{/if}
+			{#if !hiddenContextActions.includes('delete')}
 				<button
 					type="button"
 					class="message-context-menu-item danger"
@@ -2327,16 +2513,24 @@
 					<IconSet name="trash" size={14} />
 					<span>Delete</span>
 				</button>
+			{/if}
+			{#if !hiddenContextActions.includes('discussion')}
 				<button
 					type="button"
 					class="message-context-menu-item"
 					role="menuitem"
-					disabled={isContextMenuActionDisabled('discussion', contextMenuMessage, contextMenuIsMine)}
+					disabled={isContextMenuActionDisabled(
+						'discussion',
+						contextMenuMessage,
+						contextMenuIsMine
+					)}
 					on:click={() => onMessageContextAction('discussion')}
 				>
 					<IconSet name="discussion" size={14} />
 					<span>Discussion</span>
 				</button>
+			{/if}
+			{#if !hiddenContextActions.includes('pin')}
 				<button
 					type="button"
 					class="message-context-menu-item"
@@ -2347,6 +2541,8 @@
 					<IconSet name="pin" size={14} />
 					<span>Pin to dashboard</span>
 				</button>
+			{/if}
+			{#if !hiddenContextActions.includes('branch')}
 				<button
 					type="button"
 					class="message-context-menu-item"
@@ -2357,19 +2553,20 @@
 					<IconSet name="break" size={14} />
 					<span>Create branch</span>
 				</button>
-			</div>
-		{/if}
-		{#if showScrollToBottom}
-			<button
-				type="button"
-				class="scroll-bottom-button"
-				on:click={() => scrollToBottom('smooth')}
-				aria-label="Scroll to latest message"
-				title="Scroll to latest"
-			>
-				<IconSet name="chevron-down" size={20} />
-			</button>
-		{/if}
+			{/if}
+		</div>
+	{/if}
+	{#if showScrollToBottom}
+		<button
+			type="button"
+			class="scroll-bottom-button"
+			on:click={() => scrollToBottom('smooth')}
+			aria-label="Scroll to latest message"
+			title="Scroll to latest"
+		>
+			<IconSet name="chevron-down" size={20} />
+		</button>
+	{/if}
 
 	{#if !isMember}
 		<div class="join-footer">
@@ -2530,9 +2727,8 @@
 		position: sticky;
 		bottom: 0;
 		z-index: 4;
-		padding: 0.7rem max(0.7rem, env(safe-area-inset-right)) calc(
-				0.7rem + env(safe-area-inset-bottom)
-			) max(0.7rem, env(safe-area-inset-left));
+		padding: 0.7rem max(0.7rem, env(safe-area-inset-right))
+			calc(0.7rem + env(safe-area-inset-bottom)) max(0.7rem, env(safe-area-inset-left));
 		display: flex;
 		justify-content: center;
 		flex-shrink: 0;
@@ -2600,6 +2796,80 @@
 		justify-content: flex-start;
 	}
 
+	.message-bubble-cluster {
+		display: flex;
+		flex: 1 1 auto;
+		align-items: flex-start;
+		width: 100%;
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	.message-bubble-cluster.mine {
+		justify-content: flex-end;
+		margin-left: auto;
+	}
+
+	.message-bubble-cluster.theirs {
+		justify-content: flex-start;
+		margin-right: auto;
+	}
+
+	.message-bubble-anchor {
+		position: relative;
+		display: flex;
+		flex: 0 1 auto;
+		align-items: flex-start;
+		width: fit-content;
+		min-width: 0;
+		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--bubble-max-width));
+	}
+
+	.message-side-rail {
+		position: absolute;
+		top: 0;
+		z-index: 2;
+		display: flex;
+		flex-direction: column;
+		gap: 0.34rem;
+		align-items: flex-start;
+		width: fit-content;
+		min-width: 0;
+		max-width: min(26rem, calc(100vw - 12rem));
+	}
+
+	.message-side-rail.mine {
+		right: calc(100% + 0.5rem);
+		align-items: flex-end;
+	}
+
+	.message-side-rail.theirs {
+		left: calc(100% + 0.5rem);
+		align-items: flex-start;
+	}
+
+	.message-workflow-slot {
+		flex: 0 1 auto;
+		display: flex;
+		align-items: flex-start;
+		min-width: 0;
+		max-width: min(26rem, calc(100vw - 12rem));
+	}
+
+	.message-workflow-slot :global(.workflow-shell) {
+		width: auto;
+		max-width: 100%;
+	}
+
+	.message-workflow-slot :global(.workflow-toggle) {
+		max-width: 100%;
+	}
+
+	.message-workflow-slot :global(.workflow-panel) {
+		width: min(26rem, calc(100vw - 9rem));
+		max-width: 100%;
+	}
+
 	.delete-select-toggle {
 		display: inline-flex;
 		align-items: center;
@@ -2619,7 +2889,7 @@
 	.message-gutter {
 		flex: 0 0 var(--meta-gutter-size);
 		width: var(--meta-gutter-size);
-		min-height: 1rem;
+
 		padding-top: 0.2rem;
 		display: flex;
 		flex-direction: column;
@@ -2692,6 +2962,14 @@
 		background: rgba(79, 94, 118, 0.94);
 		border-color: rgba(105, 120, 145, 0.46);
 		color: #fca5a5;
+	}
+
+	.message-row.mine .message-workflow-slot :global(.workflow-shell) {
+		align-items: flex-end;
+	}
+
+	.message-row.theirs .message-workflow-slot :global(.workflow-shell) {
+		align-items: flex-start;
 	}
 
 	:global(.gutter-pin-emoji) {
@@ -2843,7 +3121,7 @@
 
 	.bubble {
 		position: relative;
-		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--bubble-max-width));
+		max-width: 100%;
 		width: fit-content;
 		border-radius: 12px;
 		padding: 0.76rem 0.86rem;
@@ -2879,6 +3157,7 @@
 	}
 
 	.bubble.mine {
+		margin-left: auto;
 		background: #4f5f78;
 		border-color: #4f5f78;
 		color: #edf2fa;
@@ -2898,14 +3177,14 @@
 
 	.bubble.media-bubble {
 		display: block;
-		width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--media-bubble-max-width));
-		max-width: min(calc(100% - var(--meta-gutter-size) - 0.6rem), var(--media-bubble-max-width));
+		width: min(100%, var(--media-bubble-max-width));
+		max-width: min(100%, var(--media-bubble-max-width));
 		min-width: 0;
 	}
 
 	.bubble.media-bubble.sticker-bubble {
 		width: fit-content;
-		max-width: min(148px, calc(100% - var(--meta-gutter-size) - 0.6rem));
+		max-width: min(148px, 100%);
 	}
 
 	.bubble.media-bubble .bubble-content {
@@ -3027,9 +3306,9 @@
 
 	.bubble-meta {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(5.5rem, 1fr) auto;
 		align-items: center;
-		column-gap: 0.75rem;
+		column-gap: 0.55rem;
 		font-size: 0.74rem;
 		color: #5f6d83;
 		margin-bottom: 0.44rem;
@@ -3044,6 +3323,13 @@
 		white-space: nowrap;
 		font-weight: 600;
 		letter-spacing: 0.01em;
+	}
+
+	.tora-sender-icon {
+		font-size: 0.82em;
+		margin-right: 0.25em;
+		vertical-align: middle;
+		line-height: 1;
 	}
 
 	.bubble.mine .bubble-meta {
@@ -3071,7 +3357,7 @@
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 3rem;
+		min-width: auto;
 	}
 
 	.time-meta time {
@@ -4177,18 +4463,16 @@
 			padding: 0.82rem 0.68rem;
 		}
 
-		.bubble {
+		.message-bubble-anchor {
 			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--bubble-max-width));
+		}
+
+		.bubble {
 			padding: 0.68rem 0.72rem;
 		}
 
-		.bubble.media-bubble {
-			width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--media-bubble-max-width));
-			max-width: min(calc(100% - var(--meta-gutter-size) - 0.45rem), var(--media-bubble-max-width));
-		}
-
 		.bubble.media-bubble.sticker-bubble {
-			max-width: min(118px, calc(100% - var(--meta-gutter-size) - 0.45rem));
+			max-width: min(118px, 100%);
 		}
 
 		.gutter-stat {
@@ -4208,7 +4492,7 @@
 		.pdf-preview {
 			height: 170px;
 		}
-		
+
 		.scroll-bottom-button {
 			right: 0.8rem;
 			bottom: 0.8rem;

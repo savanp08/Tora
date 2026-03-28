@@ -295,7 +295,7 @@
 							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
 								<path d="M8 7h11M8 12h11M8 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01" />
 							</svg>
-							<span>{isTaskBoardView ? 'Close tasks board' : 'Open tasks board'}</span>
+							<span>{isTaskBoardView ? 'Close Project' : 'Open Project'}</span>
 						</span>
 					</button>
 					<button

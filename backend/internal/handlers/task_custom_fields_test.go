@@ -46,3 +46,24 @@ func TestMarshalTaskCustomFieldsRejectsUnsupportedValues(t *testing.T) {
 		t.Fatalf("expected marshalTaskCustomFields to fail for unsupported value types")
 	}
 }
+
+func TestNormalizeTaskTypeValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "support", input: "support", want: "support"},
+		{name: "sprint", input: "sprint", want: "sprint"},
+		{name: "general", input: "general", want: "sprint"},
+		{name: "empty", input: "", want: "sprint"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeTaskTypeValue(tc.input); got != tc.want {
+				t.Fatalf("normalizeTaskTypeValue(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

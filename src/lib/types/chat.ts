@@ -70,6 +70,20 @@ export type ChatMessage = {
 	pending?: boolean;
 };
 
+export type ToraWorkflowEvent = {
+	id: string;
+	kind: 'thinking' | 'tool_call' | 'tool_result' | 'text' | 'done';
+	tool?: string;
+	input?: Record<string, unknown>;
+	result?: unknown;
+	text?: string;
+	turn: number;
+	totalTurns: number;
+	error?: string;
+	timestamp?: number;
+	workflowKind?: string;
+};
+
 export type TaskChecklistItem = {
 	text: string;
 	completed: boolean;

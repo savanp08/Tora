@@ -190,15 +190,21 @@
 	transition: transform 0.15s;
 	user-select: none;
 }
-.tora-panda-btn:hover { transform: scale(1.15); }
+.tora-panda-btn:hover {
+	transform: scale(1.15);
+}
 
 .tora-panda-thinking .panda-emoji {
 	animation: panda-bounce 0.6s ease-in-out infinite alternate;
 }
 
 @keyframes panda-bounce {
-	from { transform: translateY(0); }
-	to   { transform: translateY(-4px); }
+	from {
+		transform: translateY(0);
+	}
+	to {
+		transform: translateY(-4px);
+	}
 }
 
 .panda-pulse {
@@ -211,8 +217,14 @@
 }
 
 @keyframes panda-ring {
-	0%   { opacity: 0.8; transform: scale(0.85); }
-	100% { opacity: 0;   transform: scale(1.4); }
+	0% {
+		opacity: 0.8;
+		transform: scale(0.85);
+	}
+	100% {
+		opacity: 0;
+		transform: scale(1.4);
+	}
 }
 
 /* ── Panda progress panel ─────────────────────────────────── */
@@ -220,12 +232,12 @@
 	position: absolute;
 	bottom: calc(100% + 8px);
 	right: 0.78rem;
-	width: 280px;
+	width: 320px;
 	background: #1c1c2e;
 	color: #e2e8f0;
-	border: 1px solid rgba(255,255,255,0.1);
+	border: 1px solid rgba(255, 255, 255, 0.1);
 	border-radius: 10px;
-	box-shadow: 0 12px 36px rgba(0,0,0,0.45);
+	box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
 	z-index: 900;
 	overflow: hidden;
 }
@@ -234,13 +246,29 @@
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
+	gap: 0.5rem;
 	padding: 8px 12px 6px;
-	border-bottom: 1px solid rgba(255,255,255,0.08);
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 	font-size: 0.8rem;
 	font-weight: 700;
 	color: #f1f5f9;
 }
 
+.panda-panel-summary {
+	flex: 1;
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.panda-panel-actions {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.panda-panel-clear,
 .panda-panel-close {
 	background: none;
 	border: none;
@@ -250,12 +278,134 @@
 	padding: 2px 4px;
 	border-radius: 3px;
 }
-.panda-panel-close:hover { color: #f1f5f9; }
+.panda-panel-clear {
+	color: #c7d2fe;
+}
+.panda-panel-clear:hover {
+	color: #eef2ff;
+}
+.panda-panel-close:hover {
+	color: #f1f5f9;
+}
 
 .panda-panel-log {
-	max-height: 200px;
+	max-height: 260px;
 	overflow-y: auto;
-	padding: 6px 0;
+	padding: 4px 0 6px;
+}
+
+.agent-progress-bar {
+	height: 2px;
+	background: #6366f1;
+	transition: width 400ms ease;
+}
+
+.agent-event-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 4px 10px;
+	font-size: 0.78em;
+	border-bottom: 1px solid rgba(128, 128, 128, 0.1);
+	cursor: default;
+}
+
+.agent-event-row-button {
+	width: 100%;
+	border: none;
+	background: transparent;
+	color: inherit;
+	text-align: left;
+	font: inherit;
+}
+
+.agent-event-row-button:hover {
+	background: rgba(99, 102, 241, 0.08);
+}
+
+.agent-event-row-button:focus-visible {
+	outline: 1px solid rgba(129, 140, 248, 0.8);
+	outline-offset: -1px;
+}
+
+.agent-event-row.is-error,
+.agent-event-row-button.is-error {
+	color: #fda4af;
+}
+
+.agent-event-icon {
+	flex-shrink: 0;
+	width: 16px;
+}
+
+.agent-event-main {
+	flex: 1;
+	min-width: 0;
+}
+
+.agent-event-label-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.agent-event-label {
+	color: #dbe7ff;
+	word-break: break-word;
+}
+
+.agent-event-meta {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 2px;
+	flex-shrink: 0;
+}
+
+.agent-event-tool-chip {
+	padding: 1px 6px;
+	border-radius: 10px;
+	font-size: 0.72em;
+	font-weight: 600;
+}
+
+.chip-create {
+	background: rgba(22, 163, 74, 0.12);
+	color: #16a34a;
+}
+.chip-update {
+	background: rgba(59, 130, 246, 0.12);
+	color: #3b82f6;
+}
+.chip-delete {
+	background: rgba(220, 38, 38, 0.12);
+	color: #dc2626;
+}
+
+.agent-turn-badge {
+	font-size: 0.68em;
+	opacity: 0.5;
+}
+
+.agent-detail-drawer {
+	padding: 4px 8px;
+	background: rgba(255, 255, 255, 0.06);
+	border-radius: 4px;
+	font-size: 0.75em;
+	margin-top: 6px;
+}
+
+.agent-detail-row {
+	display: flex;
+	gap: 6px;
+	padding: 1px 0;
+}
+
+.agent-detail-key {
+	flex-shrink: 0;
+	color: #a5b4fc;
+	font-weight: 600;
 }
 
 .panda-log-entry {
@@ -283,8 +433,13 @@
 	animation: dot-pulse 1s ease-in-out infinite;
 }
 @keyframes dot-pulse {
-	0%, 100% { opacity: 1; }
-	50%       { opacity: 0.3; }
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.3;
+	}
 }
 
 .panda-log-text {

@@ -24,18 +24,14 @@
 		role="presentation"
 		on:click={onBackdropClick}
 	>
-		<div
-			class="ai-disclaimer-card"
-			role="dialog"
-			aria-modal="true"
-			aria-label="AI terms notice"
-		>
+		<div class="ai-disclaimer-card" role="dialog" aria-modal="true" aria-label="AI terms notice">
 			<h3>AI Assistant Notice</h3>
 			<p>
-				Using the AI assistant requires collecting your Username, IP Address, and Device ID for
-				security and rate-limiting purposes.
+				To provide the AI assistant securely, Converse processes your username, IP address, and
+				device identifier to help prevent abuse, enforce usage limits, and protect the service, as
+				described in our Privacy Policy.
 			</p>
-			<a href={privacyPolicyUrl} target="_blank" rel="noreferrer noopener">Read More</a>
+			<a href={privacyPolicyUrl} target="_blank" rel="noreferrer noopener">Privacy Policy</a>
 			<div class="ai-disclaimer-actions">
 				<button type="button" class="cancel" on:click={() => dispatch('cancel')}>Cancel</button>
 				<button type="button" class="agree" on:click={() => dispatch('agree')}>I Agree</button>

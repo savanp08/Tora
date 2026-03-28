@@ -1021,6 +1021,13 @@
 					></div>
 				{/if}
 
+				<div class="ai-entry-note" role="note">
+					<span class="ai-entry-note-badge">AI enabled</span>
+					<span>
+						Tora, @Project, and @Canvas are available in supported rooms. Workspace AI rules and
+						disclosures apply when used.
+					</span>
+				</div>
 				<div class="action-row">
 					<button
 						class="btn-primary-action"
@@ -1412,6 +1419,35 @@
 		display: grid;
 		grid-template-columns: 1fr 1fr;
 		gap: 10px;
+	}
+
+	.ai-entry-note {
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		margin-bottom: 0.55rem;
+		padding: 0.65rem 0.8rem;
+		border-radius: 0.9rem;
+		border: 1px solid color-mix(in srgb, var(--home-action-border) 24%, transparent);
+		background: color-mix(in srgb, var(--home-action-primary) 10%, var(--surface-primary));
+		color: var(--text-secondary);
+		font-size: 0.76rem;
+		line-height: 1.45;
+	}
+
+	.ai-entry-note-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.16rem 0.48rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--home-action-primary) 18%, transparent);
+		color: var(--text-primary);
+		font-size: 0.66rem;
+		font-weight: 800;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		white-space: nowrap;
 	}
 
 	.action-lockout-note {

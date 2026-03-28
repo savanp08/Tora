@@ -806,3 +806,103 @@ func HandleCanvasSnapshotSave(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+type canvasMirrorSyncFile struct {
+	Path     string `json:"path"`
+	Language string `json:"language,omitempty"`
+	Content  string `json:"content"`
+}
+
+type canvasMirrorSyncRequest struct {
+	Files []canvasMirrorSyncFile `json:"files"`
+}
+
+func ensureCanvasFilesTable(ctx context.Context, scyllaStore *database.ScyllaStore) error {
+	if scyllaStore == nil || scyllaStore.Session == nil {
+		return fmt.Errorf("canvas storage unavailable")
+	}
+	tableName := scyllaStore.Table("canvas_files")
+	query := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		room_id text,
+		path text,
+		language text,
+		content text,
+		updated_at timestamp,
+		PRIMARY KEY (room_id, path)
+	) WITH CLUSTERING ORDER BY (path ASC)`, tableName)
+	return scyllaStore.Session.Query(query).WithContext(ctx).Exec()
+}
+
+func HandleCanvasFileMirrorSync(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(chi.URLParam(r, "roomId"))
+	if roomID == "" && r != nil {
+		roomID = strings.TrimSpace(r.URL.Query().Get("roomId"))
+		if roomID == "" {
+			roomID = strings.TrimSpace(r.URL.Query().Get("room"))
+		}
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		http.Error(w, "missing room id", http.StatusBadRequest)
+		return
+	}
+
+	_, scyllaStore, _, _ := DefaultCanvasManager.activeStores()
+	if scyllaStore == nil || scyllaStore.Session == nil {
+		http.Error(w, "canvas storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req canvasMirrorSyncRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, "invalid canvas mirror payload", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), canvasSnapshotWriteTimeout)
+	defer cancel()
+
+	if err := ensureCanvasFilesTable(ctx, scyllaStore); err != nil {
+		http.Error(w, "failed to ensure canvas mirror storage", http.StatusInternalServerError)
+		return
+	}
+
+	deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ?`, scyllaStore.Table("canvas_files"))
+	if err := scyllaStore.Session.Query(deleteQuery, normalizedRoomID).WithContext(ctx).Exec(); err != nil {
+		http.Error(w, "failed to clear previous canvas mirror", http.StatusInternalServerError)
+		return
+	}
+
+	insertQuery := fmt.Sprintf(
+		`INSERT INTO %s (room_id, path, language, content, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		scyllaStore.Table("canvas_files"),
+	)
+	now := time.Now().UTC()
+	writtenCount := 0
+	for _, file := range req.Files {
+		normalizedPath, err := normalizeExecutionWorkspacePath(file.Path)
+		if err != nil || normalizedPath == "" {
+			continue
+		}
+		if err := scyllaStore.Session.Query(
+			insertQuery,
+			normalizedRoomID,
+			normalizedPath,
+			nullableTrimmedText(file.Language),
+			file.Content,
+			now,
+		).WithContext(ctx).Exec(); err != nil {
+			http.Error(w, "failed to write canvas mirror", http.StatusInternalServerError)
+			return
+		}
+		writtenCount++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"room_id": normalizedRoomID,
+		"files":   writtenCount,
+	})
+}

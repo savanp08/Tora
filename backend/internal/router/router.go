@@ -230,6 +230,7 @@ func New(
 		r.Get("/upload/object/*", uploadHandler.ServeObject)
 		r.Get("/canvas/{roomId}/snapshot", handlers.HandleCanvasSnapshotLoad)
 		r.Post("/canvas/{roomId}/snapshot", handlers.HandleCanvasSnapshotSave)
+		r.Post("/canvas/{roomId}/files", handlers.HandleCanvasFileMirrorSync)
 		r.Get("/canvas/snapshot", handlers.HandleCanvasSnapshotLoad)
 		r.Post("/canvas/snapshot", handlers.HandleCanvasSnapshotSave)
 		r.Get("/canvas/github-archive", handlers.ProxyGitHubRepoArchive)

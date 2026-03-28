@@ -7,6 +7,10 @@
 	export let selectedModule: WorkspaceModule | null = null;
 	export let addableModules: WorkspaceModule[] = [];
 	export let isDarkMode = false;
+	export let isAdmin = false;
+	export let roomId = '';
+	export let crPendingCount = 0;
+	export let onCRClick: (() => void) | null = null;
 
 	const dispatch = createEventDispatcher<{
 		selectModule: { module: WorkspaceModule };
@@ -287,8 +291,23 @@
 		on:keydown={onMainButtonKeydown}
 	>
 		<img class="main-logo" src={toraLogo} alt="" aria-hidden="true" />
+		{#if isAdmin && crPendingCount > 0}
+			<span class="fab-cr-badge" aria-label="{crPendingCount} pending change requests">{crPendingCount > 9 ? '9+' : crPendingCount}</span>
+		{/if}
 	</button>
 </div>
+
+{#if expanded && isAdmin && crPendingCount > 0}
+	<button
+		type="button"
+		class="fab-cr-notif-btn"
+		on:click={() => { onCRClick?.(); }}
+		title="View {crPendingCount} pending change request{crPendingCount === 1 ? '' : 's'}"
+	>
+		<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9l2 2 4-4" stroke="currentColor" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+		<span>{crPendingCount} pending request{crPendingCount === 1 ? '' : 's'}</span>
+	</button>
+{/if}
 
 {#if expanded}
 	<button
@@ -459,6 +478,63 @@
 			transform 180ms ease,
 			box-shadow 220ms ease,
 			border-color 220ms ease;
+	}
+
+	.fab-cr-badge {
+		position: absolute;
+		top: -4px;
+		right: -4px;
+		min-width: 17px;
+		height: 17px;
+		padding: 0 4px;
+		border-radius: 9px;
+		background: #ef4444;
+		color: #fff;
+		font-size: 0.6rem;
+		font-weight: 800;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+		z-index: 2;
+		border: 2px solid rgba(0,0,0,0.3);
+	}
+
+	.fab-cr-notif-btn {
+		position: fixed;
+		bottom: calc(var(--fab-bottom, 80px) + 4px);
+		right: 12px;
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		height: 2rem;
+		padding: 0 0.75rem;
+		border-radius: 20px;
+		border: 1px solid color-mix(in srgb, #6366f1 45%, transparent);
+		background: color-mix(in srgb, #6366f1 15%, rgba(0,0,0,0.7));
+		color: #c7d2fe;
+		font-size: 0.7rem;
+		font-weight: 700;
+		cursor: pointer;
+		z-index: 1500;
+		backdrop-filter: blur(8px);
+		box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+		animation: fab-slide-up 0.18s ease;
+	}
+
+	@keyframes fab-slide-up {
+		from { opacity: 0; transform: translateY(8px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+
+	.fab-cr-notif-btn svg {
+		width: 13px;
+		height: 13px;
+		flex-shrink: 0;
+	}
+
+	.fab-cr-notif-btn:hover {
+		background: color-mix(in srgb, #6366f1 25%, rgba(0,0,0,0.7));
 	}
 
 	.activity-box-main::before {

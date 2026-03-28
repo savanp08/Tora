@@ -6355,7 +6355,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		const verticalBorder =
 			parseCanvasAIPromptPixel(styles.borderTopWidth) + parseCanvasAIPromptPixel(styles.borderBottomWidth);
 		const minHeight = lineHeight + verticalPadding + verticalBorder;
-		const maxHeight = lineHeight * 2 + verticalPadding + verticalBorder;
+		const maxHeight = lineHeight * 3 + verticalPadding + verticalBorder;
 		promptElement.style.height = 'auto';
 		const nextHeight = Math.max(minHeight, Math.min(promptElement.scrollHeight, maxHeight));
 		promptElement.style.height = `${nextHeight}px`;
@@ -6376,10 +6376,24 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			closeCanvasAIPromptPanel();
 			return;
 		}
-		if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+		if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+			if (!canvasAIPrompt.trim()) {
+				return;
+			}
 			event.preventDefault();
 			void sendCanvasAIMessage();
 		}
+	}
+
+	function canClearCanvasAIConversation() {
+		if (isCanvasAIGenerating) {
+			return false;
+		}
+		return canvasAIChatMessages.length > 0 || Object.keys(canvasAITempDiffFiles).length > 0;
+	}
+
+	function canSendCanvasAIPrompt() {
+		return !isCanvasAIGenerating && Boolean(canvasAIPrompt.trim()) && Boolean(currentFileEntry());
 	}
 
 	function handleSnippetComposerWindowKeydown(event: KeyboardEvent) {
@@ -8409,72 +8423,97 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			{:else if aiEnabled}
 				<div class="canvas-ai-sidebar">
 					<div class="canvas-ai-panel-header">
-						<div class="canvas-ai-panel-head-main">
-							<span>Canvas AI</span>
-							{#if currentFile}
-								<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
-							{/if}
+						<div class="canvas-ai-panel-head-top">
+							<div class="canvas-ai-panel-head-main">
+								<span class="canvas-ai-panel-icon" aria-hidden="true">✦</span>
+								<div class="canvas-ai-panel-head-copy">
+									<span class="canvas-ai-panel-title">Canvas AI</span>
+									<span class="canvas-ai-panel-subtitle">Review changes before applying</span>
+								</div>
+							</div>
 						</div>
+						{#if currentFile}
+							<div class="canvas-ai-panel-meta">
+								<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
+							</div>
+						{/if}
 					</div>
 					<div class="canvas-ai-thread" bind:this={canvasAISidebarThreadElement}>
 						{#if canvasAIChatMessages.length === 0}
 							<div class="canvas-ai-empty">
-								<p>Chat with AI about the currently selected file.</p>
-								<p>AI proposes file-level changes. Use Show Diff to open a temp diff tab, then apply or cancel.</p>
+								<span class="canvas-ai-empty-chip">Canvas workflow</span>
+								<p class="canvas-ai-empty-title">Talk to Tora about the file you have open.</p>
+								<p class="canvas-ai-empty-copy">
+									Ask for fixes, refactors, or features. Every reply stays reviewable with file
+									proposals you can inspect in diff view before applying.
+								</p>
 							</div>
 						{:else}
 							{#each canvasAIChatMessages as message (message.id)}
 								<article class="canvas-ai-message" class:user={message.role === 'user'}>
-									<header class="canvas-ai-message-header">
-										<strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
-										<time>
-											{new Date(message.timestamp).toLocaleTimeString([], {
-												hour: '2-digit',
-												minute: '2-digit'
-											})}
-										</time>
-									</header>
-									<p class="canvas-ai-message-text">{message.text}</p>
-									{#if message.changes && message.changes.length > 0}
-										<div class="canvas-ai-change-list">
-											<div class="canvas-ai-change-list-header">
-												<span>{message.changes.length} proposed file change(s)</span>
+									<div class="canvas-ai-message-avatar" aria-hidden="true">
+										{message.role === 'user' ? 'Y' : '✦'}
+									</div>
+									<div class="canvas-ai-message-body">
+										<header class="canvas-ai-message-header">
+											<div class="canvas-ai-message-title-row">
+												<strong>{message.role === 'user' ? 'You' : 'Tora'}</strong>
+												<span class="canvas-ai-message-role-pill">
+													{message.role === 'user' ? 'Prompt' : 'Canvas AI'}
+												</span>
 											</div>
-											{#each message.changes as change (change.id)}
-												<section
-													class="canvas-ai-code-block"
-													class:is-applied={change.applyState === 'applied'}
-													class:is-failed={change.applyState === 'failed'}
-													class:is-cancelled={change.applyState === 'cancelled'}
-												>
-													<div class="canvas-ai-change-headline">
-														<div class="canvas-ai-change-meta">
-															<strong class="canvas-ai-change-file">{change.filePath}</strong>
-															<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
+											<time>
+												{new Date(message.timestamp).toLocaleTimeString([], {
+													hour: '2-digit',
+													minute: '2-digit'
+												})}
+											</time>
+										</header>
+										<p class="canvas-ai-message-text">{message.text}</p>
+										{#if message.changes && message.changes.length > 0}
+											<div class="canvas-ai-change-list">
+												<div class="canvas-ai-change-list-header">
+													<span>Proposed changes</span>
+													<span class="canvas-ai-change-count">
+														{message.changes.length} file{message.changes.length === 1 ? '' : 's'}
+													</span>
+												</div>
+												{#each message.changes as change (change.id)}
+													<section
+														class="canvas-ai-code-block"
+														class:is-applied={change.applyState === 'applied'}
+														class:is-failed={change.applyState === 'failed'}
+														class:is-cancelled={change.applyState === 'cancelled'}
+													>
+														<div class="canvas-ai-change-headline">
+															<div class="canvas-ai-change-meta">
+																<strong class="canvas-ai-change-file">{change.filePath}</strong>
+																<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
+															</div>
+															<span class="canvas-ai-change-location">{change.locationHint}</span>
 														</div>
-														<span class="canvas-ai-change-location">{change.locationHint}</span>
-													</div>
-													<p class="canvas-ai-change-summary">{change.summary}</p>
-													<div class="canvas-ai-code-actions">
-														<button
-															type="button"
-															class="canvas-ai-action secondary canvas-ai-show-diff"
-															on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
-															disabled={isCanvasAIGenerating}
-														>
-															Show Diff <span aria-hidden="true">↗</span>
-														</button>
-														<span class={`canvas-ai-change-state state-${change.applyState}`}>
-															{change.applyState}
-														</span>
-													</div>
-													{#if change.applyError}
-														<div class="canvas-ai-change-error">{change.applyError}</div>
-													{/if}
-												</section>
-											{/each}
-										</div>
-									{/if}
+														<p class="canvas-ai-change-summary">{change.summary}</p>
+														<div class="canvas-ai-code-actions">
+															<button
+																type="button"
+																class="canvas-ai-action secondary canvas-ai-show-diff"
+																on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
+																disabled={isCanvasAIGenerating}
+															>
+																Show Diff <span aria-hidden="true">↗</span>
+															</button>
+															<span class={`canvas-ai-change-state state-${change.applyState}`}>
+																{change.applyState}
+															</span>
+														</div>
+														{#if change.applyError}
+															<div class="canvas-ai-change-error">{change.applyError}</div>
+														{/if}
+													</section>
+												{/each}
+											</div>
+										{/if}
+									</div>
 								</article>
 							{/each}
 						{/if}
@@ -8482,51 +8521,57 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 					{#if canvasAIError}
 						<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
 					{/if}
-					<textarea
-						bind:this={canvasAISidebarPromptElement}
-						bind:value={canvasAIPrompt}
-						rows="2"
-						class="canvas-ai-input"
-						placeholder={currentFileEntry()
-							? 'Ask AI what to change in this file...'
-							: 'Open a file from Explorer to start code-aware AI chat...'}
-						on:input={handleCanvasAIPromptInput}
-						on:keydown={handleCanvasAIPromptKeydown}
-						disabled={isCanvasAIGenerating || !currentFileEntry()}
-					></textarea>
-					<div class="canvas-ai-actions">
-						<button
-							type="button"
-							class="canvas-ai-action secondary"
-							on:click={() => {
-								canvasAIPrompt = '';
-								canvasAIError = '';
-								resizeCanvasAIPromptInput(canvasAISidebarPromptElement);
-							}}
-							disabled={isCanvasAIGenerating || (!canvasAIPrompt.trim() && !canvasAIError)}
+					<div class="canvas-ai-composer">
+						<div
+							class="canvas-ai-input-shell"
+							class:is-disabled={isCanvasAIGenerating || !currentFileEntry()}
 						>
-							Clear Input
-						</button>
-						<button
-							type="button"
-							class="canvas-ai-action secondary"
-							on:click={() => void clearCanvasAIConversation()}
-							disabled={
-								isCanvasAIGenerating ||
-								(canvasAIChatMessages.length === 0 &&
-									Object.keys(canvasAITempDiffFiles).length === 0)
-							}
-						>
-							Clear Chat
-						</button>
-						<button
-							type="button"
-							class="canvas-ai-action primary"
-							on:click={() => void sendCanvasAIMessage()}
-							disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFileEntry()}
-						>
-							{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
-						</button>
+							<textarea
+								bind:this={canvasAISidebarPromptElement}
+								bind:value={canvasAIPrompt}
+								rows="1"
+								class="canvas-ai-input"
+								placeholder={currentFileEntry()
+									? 'Ask AI what to change in this file...'
+									: 'Open a file from Explorer to start code-aware AI chat...'}
+								on:input={handleCanvasAIPromptInput}
+								on:keydown={handleCanvasAIPromptKeydown}
+								disabled={isCanvasAIGenerating || !currentFileEntry()}
+							></textarea>
+							<button
+								type="button"
+								class="canvas-ai-send-button"
+								on:click={() => void sendCanvasAIMessage()}
+								disabled={!canSendCanvasAIPrompt()}
+								aria-label={isCanvasAIGenerating ? 'AI is thinking' : 'Send AI prompt'}
+								title={isCanvasAIGenerating ? 'AI is thinking' : 'Send'}
+							>
+								{#if isCanvasAIGenerating}
+									<span class="canvas-ai-send-spinner" aria-hidden="true"></span>
+								{:else}
+									<svg viewBox="0 0 14 14" aria-hidden="true">
+										<path d="M2 7h10M8 3l4 4-4 4"></path>
+									</svg>
+								{/if}
+								<span class="canvas-ai-sr-only">Send</span>
+							</button>
+						</div>
+						<div class="canvas-ai-composer-footer">
+							<button
+								type="button"
+								class="canvas-ai-clear-button"
+								on:click={() => void clearCanvasAIConversation()}
+								disabled={!canClearCanvasAIConversation()}
+							>
+								<svg viewBox="0 0 20 20" aria-hidden="true">
+									<path
+										d="M7.5 2.5h5l.7 1.7h3.1a.8.8 0 1 1 0 1.6h-.8l-.7 9.1A2.1 2.1 0 0 1 12.7 17H7.3a2.1 2.1 0 0 1-2.1-2.1l-.7-9.1h-.8a.8.8 0 1 1 0-1.6h3.1L7.5 2.5Zm-1.4 3.3.7 8.9c0 .3.2.6.5.6h5.4c.3 0 .5-.2.5-.6l.7-8.9H6.1Zm2 1.8c.4 0 .8.3.8.8v4.7a.8.8 0 1 1-1.6 0V8.4c0-.5.3-.8.8-.8Zm3.8 0c.4 0 .8.3.8.8v4.7a.8.8 0 1 1-1.6 0V8.4c0-.5.4-.8.8-.8Z"
+										fill="currentColor"
+									></path>
+								</svg>
+								<span>Clear chat</span>
+							</button>
+						</div>
 					</div>
 				</div>
 			{/if}
@@ -8700,80 +8745,107 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 						<div class="canvas-ai-overlay" role="presentation">
 							<div class="canvas-ai-panel" role="dialog" aria-modal="true" aria-label="AI code prompt">
 								<div class="canvas-ai-panel-header">
-									<div class="canvas-ai-panel-head-main">
-										<span>AI in Editor</span>
-										{#if currentFile}
-											<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
-										{/if}
+									<div class="canvas-ai-panel-head-top">
+										<div class="canvas-ai-panel-head-main">
+											<span class="canvas-ai-panel-icon" aria-hidden="true">✦</span>
+											<div class="canvas-ai-panel-head-copy">
+												<span class="canvas-ai-panel-title">AI in Editor</span>
+												<span class="canvas-ai-panel-subtitle">Review changes before applying</span>
+											</div>
+										</div>
+										<div class="canvas-ai-panel-head-actions">
+											<button
+												type="button"
+												class="canvas-ai-close"
+												on:click={closeCanvasAIPromptPanel}
+												aria-label="Close AI prompt"
+											>
+												×
+											</button>
+										</div>
 									</div>
-									<button
-										type="button"
-										class="canvas-ai-close"
-										on:click={closeCanvasAIPromptPanel}
-										aria-label="Close AI prompt"
-									>
-										×
-									</button>
+									{#if currentFile}
+										<div class="canvas-ai-panel-meta">
+											<span class="canvas-ai-file-pill">{getTabLabel(currentFile)}</span>
+										</div>
+									{/if}
 								</div>
 								<div class="canvas-ai-thread" bind:this={canvasAIThreadElement}>
 									{#if canvasAIChatMessages.length === 0}
 										<div class="canvas-ai-empty">
-											<p>Chat with AI about this file. Ask for refactors, fixes, or new features.</p>
-											<p>AI responses include structured file changes. Use Show Diff to review in a temp diff tab.</p>
+											<span class="canvas-ai-empty-chip">Canvas workflow</span>
+											<p class="canvas-ai-empty-title">Talk to Tora about the file you have open.</p>
+											<p class="canvas-ai-empty-copy">
+												Ask for refactors, fixes, or features. Each response stays reviewable with
+												proposed file edits you can inspect in diff view first.
+											</p>
 										</div>
 									{:else}
 										{#each canvasAIChatMessages as message (message.id)}
 											<article class="canvas-ai-message" class:user={message.role === 'user'}>
-												<header class="canvas-ai-message-header">
-													<strong>{message.role === 'user' ? 'You' : 'AI'}</strong>
-													<time>
-														{new Date(message.timestamp).toLocaleTimeString([], {
-															hour: '2-digit',
-															minute: '2-digit'
-														})}
-													</time>
-												</header>
-												<p class="canvas-ai-message-text">{message.text}</p>
-												{#if message.changes && message.changes.length > 0}
-													<div class="canvas-ai-change-list">
-														<div class="canvas-ai-change-list-header">
-															<span>{message.changes.length} proposed file change(s)</span>
+												<div class="canvas-ai-message-avatar" aria-hidden="true">
+													{message.role === 'user' ? 'Y' : '✦'}
+												</div>
+												<div class="canvas-ai-message-body">
+													<header class="canvas-ai-message-header">
+														<div class="canvas-ai-message-title-row">
+															<strong>{message.role === 'user' ? 'You' : 'Tora'}</strong>
+															<span class="canvas-ai-message-role-pill">
+																{message.role === 'user' ? 'Prompt' : 'Canvas AI'}
+															</span>
 														</div>
-														{#each message.changes as change (change.id)}
-															<section
-																class="canvas-ai-code-block"
-																class:is-applied={change.applyState === 'applied'}
-																class:is-failed={change.applyState === 'failed'}
-																class:is-cancelled={change.applyState === 'cancelled'}
-															>
-																<div class="canvas-ai-change-headline">
-																	<div class="canvas-ai-change-meta">
-																		<strong class="canvas-ai-change-file">{change.filePath}</strong>
-																		<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
+														<time>
+															{new Date(message.timestamp).toLocaleTimeString([], {
+																hour: '2-digit',
+																minute: '2-digit'
+															})}
+														</time>
+													</header>
+													<p class="canvas-ai-message-text">{message.text}</p>
+													{#if message.changes && message.changes.length > 0}
+														<div class="canvas-ai-change-list">
+															<div class="canvas-ai-change-list-header">
+																<span>Proposed changes</span>
+																<span class="canvas-ai-change-count">
+																	{message.changes.length} file{message.changes.length === 1 ? '' : 's'}
+																</span>
+															</div>
+															{#each message.changes as change (change.id)}
+																<section
+																	class="canvas-ai-code-block"
+																	class:is-applied={change.applyState === 'applied'}
+																	class:is-failed={change.applyState === 'failed'}
+																	class:is-cancelled={change.applyState === 'cancelled'}
+																>
+																	<div class="canvas-ai-change-headline">
+																		<div class="canvas-ai-change-meta">
+																			<strong class="canvas-ai-change-file">{change.filePath}</strong>
+																			<span class="canvas-ai-change-chip">{change.action.toUpperCase()}</span>
+																		</div>
+																		<span class="canvas-ai-change-location">{change.locationHint}</span>
 																	</div>
-																	<span class="canvas-ai-change-location">{change.locationHint}</span>
-																</div>
-																<p class="canvas-ai-change-summary">{change.summary}</p>
-																<div class="canvas-ai-code-actions">
-																	<button
-																		type="button"
-																		class="canvas-ai-action secondary canvas-ai-show-diff"
-																		on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
-																		disabled={isCanvasAIGenerating}
-																	>
-																		Show Diff <span aria-hidden="true">↗</span>
-																	</button>
-																	<span class={`canvas-ai-change-state state-${change.applyState}`}>
-																		{change.applyState}
-																	</span>
-																</div>
-																{#if change.applyError}
-																	<div class="canvas-ai-change-error">{change.applyError}</div>
-																{/if}
-															</section>
-														{/each}
-													</div>
-												{/if}
+																	<p class="canvas-ai-change-summary">{change.summary}</p>
+																	<div class="canvas-ai-code-actions">
+																		<button
+																			type="button"
+																			class="canvas-ai-action secondary canvas-ai-show-diff"
+																			on:click={() => openCanvasAIDiffPreview(message.id, change.id)}
+																			disabled={isCanvasAIGenerating}
+																		>
+																			Show Diff <span aria-hidden="true">↗</span>
+																		</button>
+																		<span class={`canvas-ai-change-state state-${change.applyState}`}>
+																			{change.applyState}
+																		</span>
+																	</div>
+																	{#if change.applyError}
+																		<div class="canvas-ai-change-error">{change.applyError}</div>
+																	{/if}
+																</section>
+															{/each}
+														</div>
+													{/if}
+												</div>
 											</article>
 										{/each}
 									{/if}
@@ -8781,45 +8853,55 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 								{#if canvasAIError}
 									<div class="canvas-ai-error" role="status" aria-live="polite">{canvasAIError}</div>
 								{/if}
-								<textarea
-									bind:this={canvasAIPromptElement}
-									bind:value={canvasAIPrompt}
-									rows="2"
-									class="canvas-ai-input"
-									placeholder="Ask AI what to change in this file..."
-									on:input={handleCanvasAIPromptInput}
-									on:keydown={handleCanvasAIPromptKeydown}
-									disabled={isCanvasAIGenerating || !currentFileEntry()}
-								></textarea>
-								<div class="canvas-ai-actions">
-									<button
-										type="button"
-										class="canvas-ai-action secondary"
-										on:click={closeCanvasAIPromptPanel}
-										disabled={isCanvasAIGenerating}
+								<div class="canvas-ai-composer">
+									<div
+										class="canvas-ai-input-shell"
+										class:is-disabled={isCanvasAIGenerating || !currentFileEntry()}
 									>
-										Cancel
-									</button>
-									<button
-										type="button"
-										class="canvas-ai-action secondary"
-										on:click={() => void clearCanvasAIConversation()}
-										disabled={
-											isCanvasAIGenerating ||
-											(canvasAIChatMessages.length === 0 &&
-												Object.keys(canvasAITempDiffFiles).length === 0)
-										}
-									>
-										Clear Chat
-									</button>
-									<button
-										type="button"
-										class="canvas-ai-action primary"
-										on:click={() => void sendCanvasAIMessage()}
-										disabled={isCanvasAIGenerating || !canvasAIPrompt.trim() || !currentFileEntry()}
-									>
-										{isCanvasAIGenerating ? 'Thinking...' : 'Send'}
-									</button>
+										<textarea
+											bind:this={canvasAIPromptElement}
+											bind:value={canvasAIPrompt}
+											rows="1"
+											class="canvas-ai-input"
+											placeholder="Ask AI what to change in this file..."
+											on:input={handleCanvasAIPromptInput}
+											on:keydown={handleCanvasAIPromptKeydown}
+											disabled={isCanvasAIGenerating || !currentFileEntry()}
+										></textarea>
+										<button
+											type="button"
+											class="canvas-ai-send-button"
+											on:click={() => void sendCanvasAIMessage()}
+											disabled={!canSendCanvasAIPrompt()}
+											aria-label={isCanvasAIGenerating ? 'AI is thinking' : 'Send AI prompt'}
+											title={isCanvasAIGenerating ? 'AI is thinking' : 'Send'}
+										>
+											{#if isCanvasAIGenerating}
+												<span class="canvas-ai-send-spinner" aria-hidden="true"></span>
+											{:else}
+												<svg viewBox="0 0 14 14" aria-hidden="true">
+													<path d="M2 7h10M8 3l4 4-4 4"></path>
+												</svg>
+											{/if}
+											<span class="canvas-ai-sr-only">Send</span>
+										</button>
+									</div>
+									<div class="canvas-ai-composer-footer">
+										<button
+											type="button"
+											class="canvas-ai-clear-button"
+											on:click={() => void clearCanvasAIConversation()}
+											disabled={!canClearCanvasAIConversation()}
+										>
+											<svg viewBox="0 0 20 20" aria-hidden="true">
+												<path
+													d="M7.5 2.5h5l.7 1.7h3.1a.8.8 0 1 1 0 1.6h-.8l-.7 9.1A2.1 2.1 0 0 1 12.7 17H7.3a2.1 2.1 0 0 1-2.1-2.1l-.7-9.1h-.8a.8.8 0 1 1 0-1.6h3.1L7.5 2.5Zm-1.4 3.3.7 8.9c0 .3.2.6.5.6h5.4c.3 0 .5-.2.5-.6l.7-8.9H6.1Zm2 1.8c.4 0 .8.3.8.8v4.7a.8.8 0 1 1-1.6 0V8.4c0-.5.3-.8.8-.8Zm3.8 0c.4 0 .8.3.8.8v4.7a.8.8 0 1 1-1.6 0V8.4c0-.5.4-.8.8-.8Z"
+													fill="currentColor"
+												></path>
+											</svg>
+											<span>Clear chat</span>
+										</button>
+									</div>
 								</div>
 							</div>
 						</div>
@@ -9383,12 +9465,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-panel-header {
-		font-size: 0.78rem;
-		padding: 0.24rem 0.2rem 0.16rem;
+		padding: 0.24rem 0.2rem 0.2rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-file-pill {
-		max-width: 11.5rem;
+		max-width: min(11.5rem, 100%);
 		font-size: 0.63rem;
 	}
 
@@ -9397,24 +9478,45 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		padding-right: 0.08rem;
 	}
 
-	.canvas-ai-sidebar .canvas-ai-empty p {
-		font-size: 0.72rem;
+	.canvas-ai-sidebar .canvas-ai-empty {
+		padding: 0.72rem 0.76rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-message {
-		padding: 0.54rem 0.58rem;
-		gap: 0.3rem;
+		padding: 0.6rem;
+		gap: 0.5rem;
 	}
 
-	.canvas-ai-sidebar .canvas-ai-message-header strong {
+	.canvas-ai-sidebar .canvas-ai-message-avatar {
+		width: 1.7rem;
+		height: 1.7rem;
+		font-size: 0.68rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-message-header strong,
+	.canvas-ai-sidebar .canvas-ai-message-role-pill {
 		font-size: 0.64rem;
 	}
 
-	.canvas-ai-sidebar .canvas-ai-message-header time {
+	.canvas-ai-sidebar .canvas-ai-message-header time,
+	.canvas-ai-sidebar .canvas-ai-panel-subtitle,
+	.canvas-ai-sidebar .canvas-ai-empty-copy,
+	.canvas-ai-sidebar .canvas-ai-change-summary {
 		font-size: 0.6rem;
 	}
 
-	.canvas-ai-sidebar .canvas-ai-message-text {
+	.canvas-ai-sidebar .canvas-ai-panel-head-main {
+		gap: 0.44rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-panel-icon {
+		width: 1.74rem;
+		height: 1.74rem;
+		font-size: 0.78rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-message-text,
+	.canvas-ai-sidebar .canvas-ai-empty-title {
 		font-size: 0.75rem;
 		line-height: 1.5;
 	}
@@ -9426,7 +9528,6 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 	.canvas-ai-sidebar .canvas-ai-input {
 		font-size: 0.76rem;
-		padding: 0.52rem 0.58rem;
 	}
 
 	.canvas-ai-sidebar .canvas-ai-error {
@@ -9434,13 +9535,17 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		padding: 0.32rem 0.46rem;
 	}
 
-	.canvas-ai-sidebar .canvas-ai-actions {
-		gap: 0.38rem;
+	.canvas-ai-sidebar .canvas-ai-input-shell {
+		padding: 0.4rem 0.44rem 0.4rem 0.62rem;
 	}
 
-	.canvas-ai-sidebar .canvas-ai-action {
+	.canvas-ai-sidebar .canvas-ai-send-button {
+		width: 2rem;
+		height: 2rem;
+	}
+
+	.canvas-ai-sidebar .canvas-ai-clear-button {
 		font-size: 0.68rem;
-		padding: 0.36rem 0.6rem;
 	}
 
 	.canvas-sidebar.drag-over {
@@ -10467,35 +10572,90 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	}
 
 	.canvas-ai-panel-header {
+		display: grid;
+		gap: 0.5rem;
+		color: #e8eaed;
+		padding: 0.1rem 0 0.3rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+	}
+
+	.canvas-ai-panel-head-top {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 0.5rem;
-		color: #e8eaed;
-		font-size: 0.88rem;
-		font-weight: 600;
-		letter-spacing: 0.02em;
-		padding-bottom: 0.15rem;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+		gap: 0.75rem;
+		min-width: 0;
 	}
 
 	.canvas-ai-panel-head-main {
 		display: inline-flex;
 		align-items: center;
+		gap: 0.58rem;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.canvas-ai-panel-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 2rem;
+		height: 2rem;
+		flex-shrink: 0;
+		border-radius: 999px;
+		background: linear-gradient(135deg, rgba(79, 70, 229, 0.22), rgba(37, 99, 235, 0.28));
+		border: 1px solid rgba(129, 140, 248, 0.28);
+		color: #c7d2fe;
+		font-size: 0.92rem;
+	}
+
+	.canvas-ai-panel-head-copy {
+		display: inline-flex;
+		align-items: baseline;
 		gap: 0.45rem;
+		min-width: 0;
+	}
+
+	.canvas-ai-panel-title {
+		font-size: 0.9rem;
+		font-weight: 700;
+		color: #f8fafc;
+		letter-spacing: 0.01em;
+		white-space: nowrap;
+	}
+
+	.canvas-ai-panel-subtitle {
+		font-size: 0.72rem;
+		line-height: 1.2;
+		color: #94a3b8;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.canvas-ai-panel-head-actions {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-shrink: 0;
+	}
+
+	.canvas-ai-panel-meta {
+		display: flex;
+		justify-content: flex-end;
 		min-width: 0;
 	}
 
 	.canvas-ai-file-pill {
 		display: inline-flex;
 		align-items: center;
-		max-width: min(38rem, 70vw);
-		padding: 0.22rem 0.52rem;
+		max-width: min(38rem, 66vw);
+		padding: 0.32rem 0.62rem;
 		border-radius: 999px;
-		border: 1px solid rgba(255, 255, 255, 0.12);
-		background: rgba(255, 255, 255, 0.05);
-		color: #bdc1c6;
-		font-size: 0.68rem;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(15, 23, 42, 0.44);
+		color: #cbd5e1;
+		font-size: 0.7rem;
 		font-weight: 600;
 		white-space: nowrap;
 		overflow: hidden;
@@ -10528,39 +10688,102 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		overflow-y: auto;
 		display: grid;
 		align-content: start;
-		gap: 0.72rem;
+		gap: 0.82rem;
 		padding-right: 0.2rem;
 		overscroll-behavior: contain;
 	}
 
 	.canvas-ai-empty {
-		border: 1px dashed rgba(255, 255, 255, 0.18);
-		border-radius: 0.8rem;
-		background: rgba(255, 255, 255, 0.03);
-		padding: 0.82rem 0.88rem;
+		border: 1px solid rgba(99, 102, 241, 0.14);
+		border-radius: 1rem;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
+			rgba(15, 23, 42, 0.54);
+		padding: 0.95rem 1rem;
 		display: grid;
-		gap: 0.48rem;
+		gap: 0.52rem;
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+	}
+
+	.canvas-ai-empty-chip {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: fit-content;
+		padding: 0.18rem 0.5rem;
+		border-radius: 999px;
+		background: rgba(79, 70, 229, 0.16);
+		color: #c7d2fe;
+		font-size: 0.66rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
 	}
 
 	.canvas-ai-empty p {
 		margin: 0;
-		font-size: 0.8rem;
-		line-height: 1.5;
-		color: #9aa0a6;
+	}
+
+	.canvas-ai-empty-title {
+		font-size: 0.86rem;
+		font-weight: 700;
+		line-height: 1.45;
+		color: #f8fafc;
+	}
+
+	.canvas-ai-empty-copy {
+		font-size: 0.78rem;
+		line-height: 1.55;
+		color: #94a3b8;
 	}
 
 	.canvas-ai-message {
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 0.9rem;
-		background: rgba(255, 255, 255, 0.03);
-		padding: 0.66rem 0.72rem;
 		display: grid;
-		gap: 0.32rem;
+		grid-template-columns: auto minmax(0, 1fr);
+		align-items: flex-start;
+		gap: 0.6rem;
+		border: 1px solid rgba(148, 163, 184, 0.14);
+		border-radius: 1rem;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.018)),
+			rgba(15, 23, 42, 0.58);
+		padding: 0.78rem 0.82rem;
+		box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
 	}
 
 	.canvas-ai-message.user {
-		border-color: rgba(26, 115, 232, 0.28);
-		background: rgba(26, 115, 232, 0.14);
+		border-color: rgba(59, 130, 246, 0.26);
+		background:
+			linear-gradient(180deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.08)),
+			rgba(15, 23, 42, 0.62);
+	}
+
+	.canvas-ai-message-avatar {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.95rem;
+		height: 1.95rem;
+		flex-shrink: 0;
+		border-radius: 999px;
+		border: 1px solid rgba(148, 163, 184, 0.18);
+		background: rgba(30, 41, 59, 0.82);
+		color: #dbeafe;
+		font-size: 0.78rem;
+		font-weight: 700;
+		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+	}
+
+	.canvas-ai-message.user .canvas-ai-message-avatar {
+		border-color: rgba(96, 165, 250, 0.3);
+		background: rgba(29, 78, 216, 0.76);
+		color: #eff6ff;
+	}
+
+	.canvas-ai-message-body {
+		display: grid;
+		gap: 0.4rem;
+		min-width: 0;
 	}
 
 	.canvas-ai-message-header {
@@ -10570,34 +10793,54 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		gap: 0.5rem;
 	}
 
+	.canvas-ai-message-title-row {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.42rem;
+		min-width: 0;
+		flex-wrap: wrap;
+	}
+
 	.canvas-ai-message-header strong {
-		font-size: 0.7rem;
+		font-size: 0.72rem;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
-		color: #bdc1c6;
+		color: #e2e8f0;
+	}
+
+	.canvas-ai-message-role-pill {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.16rem 0.46rem;
+		border-radius: 999px;
+		background: rgba(79, 70, 229, 0.14);
+		color: #c7d2fe;
+		font-size: 0.64rem;
+		font-weight: 700;
+		letter-spacing: 0.03em;
 	}
 
 	.canvas-ai-message-header time {
-		font-size: 0.66rem;
-		color: #9aa0a6;
+		font-size: 0.68rem;
+		color: #94a3b8;
 	}
 
 	.canvas-ai-message-text {
 		margin: 0;
-		font-size: 0.84rem;
-		line-height: 1.56;
-		color: #e8eaed;
+		font-size: 0.85rem;
+		line-height: 1.62;
+		color: #e2e8f0;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
 
 	.canvas-ai-code-block {
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		border-radius: 0.72rem;
-		background: rgba(0, 0, 0, 0.22);
+		border: 1px solid rgba(148, 163, 184, 0.16);
+		border-radius: 0.88rem;
+		background: rgba(2, 6, 23, 0.34);
 		display: grid;
-		gap: 0.42rem;
-		padding: 0.56rem;
+		gap: 0.5rem;
+		padding: 0.72rem;
 	}
 
 	.canvas-ai-code-block.is-applied {
@@ -10625,9 +10868,20 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.6rem;
-		font-size: 0.72rem;
+		font-size: 0.74rem;
 		font-weight: 600;
-		color: #bdc1c6;
+		color: #dbeafe;
+	}
+
+	.canvas-ai-change-count {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.16rem 0.46rem;
+		border-radius: 999px;
+		background: rgba(59, 130, 246, 0.14);
+		color: #bfdbfe;
+		font-size: 0.66rem;
+		font-weight: 700;
 	}
 
 	.canvas-ai-change-headline {
@@ -10655,12 +10909,13 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: 0.08rem 0.34rem;
+		padding: 0.14rem 0.42rem;
 		border-radius: 999px;
-		border: 1px solid rgba(255, 255, 255, 0.12);
-		background: rgba(255, 255, 255, 0.06);
-		color: #bdc1c6;
-		font-size: 0.6rem;
+		border: 1px solid rgba(129, 140, 248, 0.18);
+		background: rgba(79, 70, 229, 0.14);
+		color: #c7d2fe;
+		font-size: 0.62rem;
+		font-weight: 700;
 		letter-spacing: 0.03em;
 	}
 
@@ -10671,9 +10926,9 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 	.canvas-ai-change-summary {
 		margin: 0;
-		font-size: 0.76rem;
-		line-height: 1.5;
-		color: #bdc1c6;
+		font-size: 0.78rem;
+		line-height: 1.56;
+		color: #cbd5e1;
 	}
 
 	.canvas-ai-change-state {
@@ -10860,29 +11115,66 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		background: rgba(127, 29, 29, 0.44);
 	}
 
+	.canvas-ai-composer {
+		display: flex;
+		flex-direction: column;
+		gap: 0.46rem;
+	}
+
+	.canvas-ai-input-shell {
+		display: flex;
+		align-items: flex-end;
+		gap: 0.56rem;
+		width: 100%;
+		padding: 0.5rem 0.54rem 0.5rem 0.82rem;
+		border-radius: 1.05rem;
+		border: 1px solid rgba(145, 179, 255, 0.16);
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03)),
+			rgba(9, 14, 22, 0.86);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.04),
+			0 8px 24px rgba(0, 0, 0, 0.18);
+		transition:
+			border-color 160ms ease,
+			box-shadow 160ms ease,
+			background 160ms ease;
+	}
+
+	.canvas-ai-input-shell:focus-within {
+		border-color: rgba(96, 165, 250, 0.62);
+		box-shadow:
+			inset 0 1px 0 rgba(255, 255, 255, 0.06),
+			0 0 0 3px rgba(59, 130, 246, 0.14),
+			0 10px 28px rgba(15, 23, 42, 0.3);
+	}
+
+	.canvas-ai-input-shell.is-disabled {
+		opacity: 0.72;
+	}
+
 	.canvas-ai-input {
+		flex: 1;
 		width: 100%;
 		min-height: 0;
-		border: 1px solid rgba(255, 255, 255, 0.08);
-		background: rgba(255, 255, 255, 0.04);
+		border: none;
+		background: transparent;
 		color: #e8eaed;
-		border-radius: 0.85rem;
-		padding: 0.66rem 0.76rem;
+		padding: 0;
 		font-size: 0.88rem;
 		line-height: 1.5;
 		resize: none;
 		overflow-y: hidden;
-		box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 	}
 
 	.canvas-ai-input::placeholder {
-		color: #5f6368;
+		color: #718096;
 	}
 
 	.canvas-ai-input:focus {
 		outline: none;
-		border-color: rgba(26, 115, 232, 0.5);
-		box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.18);
+		border: none;
+		box-shadow: none;
 	}
 
 	.canvas-ai-error {
@@ -10895,13 +11187,110 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		padding: 0.42rem 0.58rem;
 	}
 
-	.canvas-ai-actions {
+	.canvas-ai-composer-footer {
 		display: flex;
 		align-items: center;
 		justify-content: flex-end;
 		gap: 0.5rem;
-		padding-top: 0.1rem;
 		flex-wrap: wrap;
+	}
+
+	.canvas-ai-send-button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		width: 2rem;
+		height: 2rem;
+		border: none;
+		border-radius: 999px;
+		background: #1a73e8;
+		color: #f8fbff;
+		cursor: pointer;
+		box-shadow: 0 2px 10px rgba(26, 115, 232, 0.38);
+		transition:
+			background 180ms ease,
+			transform 180ms ease,
+			box-shadow 180ms ease,
+			opacity 140ms ease;
+	}
+
+	.canvas-ai-send-button svg {
+		width: 0.88rem;
+		height: 0.88rem;
+		display: block;
+		stroke: currentColor;
+		stroke-width: 1.5;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.canvas-ai-send-button:hover:not(:disabled) {
+		background: #1967d2;
+		transform: scale(1.05);
+		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.48);
+	}
+
+	.canvas-ai-send-button:disabled {
+		background: rgba(255, 255, 255, 0.08);
+		opacity: 1;
+		cursor: not-allowed;
+		box-shadow: none;
+		transform: none;
+	}
+
+	.canvas-ai-send-spinner {
+		display: inline-block;
+		width: 0.92rem;
+		height: 0.92rem;
+		border-radius: 999px;
+		border: 2px solid rgba(255, 255, 255, 0.34);
+		border-top-color: rgba(255, 255, 255, 0.98);
+		animation: canvas-ai-send-spin 0.85s linear infinite;
+	}
+
+	.canvas-ai-clear-button {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.42rem;
+		border: none;
+		background: transparent;
+		color: #bdc9dd;
+		padding: 0.16rem 0.1rem;
+		font-size: 0.76rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			color 140ms ease,
+			opacity 140ms ease;
+	}
+
+	.canvas-ai-clear-button svg {
+		width: 0.92rem;
+		height: 0.92rem;
+		display: block;
+	}
+
+	.canvas-ai-clear-button:hover:not(:disabled) {
+		color: #f3f7ff;
+	}
+
+	.canvas-ai-clear-button:disabled {
+		opacity: 0.44;
+		cursor: not-allowed;
+	}
+
+	.canvas-ai-sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
 	}
 
 	.canvas-ai-action {
@@ -10954,6 +11343,10 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			font-size: 0.82rem;
 		}
 
+		.canvas-ai-panel-head-copy {
+			gap: 0.35rem;
+		}
+
 		.canvas-ai-file-pill {
 			font-size: 0.66rem;
 		}
@@ -10966,13 +11359,35 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			font-size: 0.8rem;
 		}
 
+		.canvas-ai-input-shell {
+			padding: 0.42rem 0.46rem 0.42rem 0.72rem;
+		}
+
 		.canvas-ai-input {
 			font-size: 0.82rem;
+		}
+
+		.canvas-ai-send-button {
+			width: 1.92rem;
+			height: 1.92rem;
+		}
+
+		.canvas-ai-clear-button {
+			font-size: 0.72rem;
 		}
 
 		.canvas-ai-action {
 			font-size: 0.74rem;
 			padding: 0.42rem 0.72rem;
+		}
+	}
+
+	@keyframes canvas-ai-send-spin {
+		from {
+			transform: rotate(0deg);
+		}
+		to {
+			transform: rotate(360deg);
 		}
 	}
 

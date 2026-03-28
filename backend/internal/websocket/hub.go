@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/savanp08/converse/internal/ai"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/monitor"
@@ -46,6 +47,9 @@ type Hub struct {
 
 	msgService *MessageService
 	tracker    *monitor.UsageTracker
+
+	contextBuilder *ai.ContextBuilder
+	agentEngine    *ai.AgentEngineFactory
 
 	toraTypingMu     sync.Mutex
 	toraTypingByRoom map[string]int
@@ -185,6 +189,11 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		msgService:           service,
 		tracker:              tracker,
 		toraTypingByRoom:     make(map[string]int),
+	}
+
+	if service != nil && service.Scylla != nil {
+		hub.contextBuilder = ai.NewContextBuilder(service.Scylla)
+		hub.agentEngine = ai.NewAgentEngineFactory(hub.contextBuilder, resolveToraAgentProvider)
 	}
 
 	if service != nil && service.CanPersistToDisk() {
@@ -740,6 +749,7 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 		}
 
 		if canWrite && (!alreadySubscribed || !alreadyWritable) {
+			joinedIsAdmin, _ := h.isClientRoomAdmin(client.UserID, roomID)
 			joinedPayload := map[string]interface{}{
 				"type":   "user_joined",
 				"roomId": roomID,
@@ -747,6 +757,7 @@ func (h *Hub) handleSubscription(subscription *ClientSubscription) {
 					"id":       client.UserID,
 					"name":     client.Username,
 					"joinedAt": client.JoinedAt.UnixMilli(),
+					"isAdmin":  joinedIsAdmin,
 				},
 			}
 			for roomClient := range roomClients {
@@ -1912,6 +1923,21 @@ func (h *Hub) removeRoom(roomID string) {
 func (h *Hub) collectWritableOnlineMembers(roomID string) []map[string]interface{} {
 	roomClients := h.rooms[roomID]
 	onlineMembers := make([]map[string]interface{}, 0, len(roomClients))
+
+	// Fetch the full admin set once so we can tag each member without N Redis calls.
+	adminSet := map[string]struct{}{}
+	if h.msgService != nil && h.msgService.Redis != nil && h.msgService.Redis.Client != nil {
+		adminsKey := "room:" + normalizeRoomID(roomID) + ":admins"
+		adminMembers, err := h.msgService.Redis.Client.SMembers(context.Background(), adminsKey).Result()
+		if err == nil {
+			for _, a := range adminMembers {
+				if id := normalizeUsername(a); id != "" {
+					adminSet[id] = struct{}{}
+				}
+			}
+		}
+	}
+
 	for roomClient := range roomClients {
 		if roomClient.canWriteToRoom(roomID) && !h.isClientRoomMember(roomClient.UserID, roomID) {
 			roomClient.subscribeToRoom(roomID, false)
@@ -1924,10 +1950,12 @@ func (h *Hub) collectWritableOnlineMembers(roomID string) []map[string]interface
 		if joinedAt.IsZero() {
 			joinedAt = time.Now().UTC()
 		}
+		_, isAdmin := adminSet[normalizeUsername(roomClient.UserID)]
 		onlineMembers = append(onlineMembers, map[string]interface{}{
 			"id":       roomClient.UserID,
 			"name":     roomClient.Username,
 			"joinedAt": joinedAt.UnixMilli(),
+			"isAdmin":  isAdmin,
 		})
 	}
 	sort.SliceStable(onlineMembers, func(i, j int) bool {

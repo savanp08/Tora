@@ -191,6 +191,9 @@ export function getMessagePreviewText(message: ChatMessage) {
 		const mode = (message.mediaType || '').trim().toLowerCase() === 'video' ? 'Video call' : 'Voice call';
 		return `${mode}: ${content || 'Call ended'}`;
 	}
+	if (messageType === 'tora_workflow') {
+		return 'AI workflow';
+	}
 	return content;
 }
 

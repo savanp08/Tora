@@ -9,6 +9,7 @@
 		title: string;
 		status?: string;
 		assigneeId?: string;
+		description?: string;
 		customFields?: Record<string, unknown>;
 		dueDate?: number | string | null;
 		startDate?: number | string | null;
@@ -153,6 +154,20 @@
 		return trimmed.replace(/[_-]+/g, ' ');
 	}
 
+	function readOwnerFromDescription(description?: string): string {
+		const text = (description ?? '').trim();
+		if (!text) return '';
+		// Description metadata format: lines like "Key: Value" inside a fenced block or inline
+		const lines = text.split('\n');
+		for (const line of lines) {
+			const match = line.match(/^owner\s*:\s*(.+)$/i);
+			if (match) {
+				return match[1].trim();
+			}
+		}
+		return '';
+	}
+
 	function buildMemberNameByKey(members: OnlineMember[]) {
 		const map = new Map<string, string>();
 		for (const member of members) {
@@ -199,11 +214,13 @@
 			const title = task.title?.trim() || 'Untitled task';
 			const status = normalizeStatus(task.status);
 			const assigneeRaw = task.assigneeId?.trim() ?? '';
-			const assigneeKey = normalizeMemberKey(assigneeRaw);
+			const descriptionOwner = assigneeRaw ? '' : readOwnerFromDescription(task.description);
+			const effectiveAssignee = assigneeRaw || descriptionOwner;
+			const assigneeKey = normalizeMemberKey(effectiveAssignee);
 			const assigneeLabel =
 				assigneeKey === UNASSIGNED_KEY
 					? 'Unassigned'
-					: (memberMap.get(assigneeKey) ?? readableName(assigneeRaw));
+					: (memberMap.get(assigneeKey) ?? readableName(effectiveAssignee));
 			const startDate = readCustomDate(
 				task,
 				startFieldId,
@@ -273,14 +290,16 @@
 
 		for (const task of sourceTasks) {
 			const assigneeId = task.assigneeId?.trim() ?? '';
-			const key = normalizeMemberKey(assigneeId);
-			if (!assigneeId || key === UNASSIGNED_KEY || rowsByKey.has(key)) {
+			const descOwner = assigneeId ? '' : readOwnerFromDescription(task.description);
+			const effectiveId = assigneeId || descOwner;
+			const key = normalizeMemberKey(effectiveId);
+			if (!effectiveId || key === UNASSIGNED_KEY || rowsByKey.has(key)) {
 				continue;
 			}
 			rowsByKey.set(key, {
 				key,
-				id: assigneeId,
-				name: memberMap.get(key) ?? readableName(assigneeId),
+				id: effectiveId,
+				name: memberMap.get(key) ?? readableName(effectiveId),
 				isOnline: false
 			});
 		}

@@ -202,10 +202,7 @@
 			</p>
 		</header>
 		<nav class="ide-language-links" aria-label="Open IDE by language">
-			<span>Open Tora IDE as:</span>
-			{#each IDE_LANGUAGE_LINKS as language}
-				<a href={`/ide?lang=${language.query}`}>{language.label} online IDE</a>
-			{/each}
+			
 		</nav>
 
 		<div class="ide-stage">

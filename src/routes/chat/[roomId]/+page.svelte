@@ -195,6 +195,44 @@
 		color: string;
 	};
 
+	type ToraAgentEventKind = 'thinking' | 'tool_call' | 'tool_result' | 'text' | 'done';
+
+	type ToraAgentEvent = {
+		kind: ToraAgentEventKind;
+		tool?: string;
+		input?: Record<string, unknown>;
+		result?: unknown;
+		text?: string;
+		turn: number;
+		totalTurns: number;
+		error?: string;
+		originMessageId?: string;
+		workflowKind?: string;
+		timestamp?: number;
+	};
+
+	type ToraAgentEventRecord = ToraAgentEvent & {
+		id: string;
+		receivedAt: number;
+		roomId: string;
+		originMessageId: string;
+	};
+
+	type ToraCanvasActionChange = {
+		kind?: string;
+		file_path?: string;
+		content?: string;
+		description?: string;
+		lines?: number;
+	};
+
+	type CodeCanvasAgentHandle = {
+		applyAgenticChanges?: (payload: {
+			text: string;
+			changes: ToraCanvasActionChange[];
+		}) => Promise<{ applied: number; failed: number }>;
+	};
+
 	type CallStreamSlot = { userId: string; stream: MediaStream };
 	type CallParticipantEntry = { userId: string; name: string; isLocal: boolean };
 	type CallMemberPresenceEntry = {
@@ -504,11 +542,14 @@
 	let typingNamesPreview = '';
 	let typingIndicatorText = '';
 	let hasTypingUsers = false;
-	// Tora panda progress indicator (separate from normal typing)
-	const TORA_BOT_ID = 'Tora-Bot';
-	let toraIsThinking = false;
-	let toraPandaOpen = false;
-	let toraProgressLog: Array<{ text: string; time: number }> = [];
+	const TORA_AGENT_EVENT_KINDS = [
+		'thinking',
+		'tool_call',
+		'tool_result',
+		'text',
+		'done'
+	] as const satisfies readonly ToraAgentEventKind[];
+	let toraLiveAgentEventsByRoom: Record<string, Record<string, ToraAgentEventRecord[]>> = {};
 	let historyLoadingByRoom: Record<string, boolean> = {};
 	let historyHasMoreByRoom: Record<string, boolean> = {};
 	let offlineHydratedByRoom: Record<string, boolean> = {};
@@ -602,6 +643,7 @@
 		capturePrependAnchor?: () => { scrollTop: number; scrollHeight: number } | null;
 		restorePrependAnchor?: (anchor: { scrollTop: number; scrollHeight: number } | null) => void;
 	} | null = null;
+	let codeCanvasRef: CodeCanvasAgentHandle | null = null;
 	let lastHandledPasswordRouteSignature = '';
 	let lastLegacyTimingParamCleanupSignature = '';
 	let skipPasswordResetForPath = '';
@@ -1356,23 +1398,144 @@
 			remoteExpiresAt > now && remoteExpiresAt <= now + REMOTE_TYPING_MAX_FUTURE_MS
 				? remoteExpiresAt
 				: now + TYPING_SAFETY_TIMEOUT_MS;
-		// Route Tora-Bot typing to the panda indicator instead of the normal typing bar
-		if (participantId === TORA_BOT_ID) {
-			toraIsThinking = kind === 'typing_start';
-			if (kind === 'typing_start') {
-				toraProgressLog = [
-					...toraProgressLog.slice(-9),
-					{ text: 'Tora is thinking...', time: Date.now() }
-				];
-			}
-			return true;
-		}
 
 		if (kind === 'typing_start') {
 			setTypingIndicator(targetRoomId, participantId, participantName, expiresAt);
 		} else {
 			clearTypingIndicator(targetRoomId, participantId);
 		}
+		return true;
+	}
+
+	function isRecord(value: unknown): value is Record<string, unknown> {
+		return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+	}
+
+	function resolveToraRoomEventPayload(payload: unknown, expectedType: string) {
+		if (!isRecord(payload)) {
+			return null;
+		}
+		const eventType = toStringValue(payload.type).trim().toLowerCase();
+		if (eventType !== expectedType) {
+			return null;
+		}
+		const directRoomId = normalizeRoomIDValue(toStringValue(payload.roomId ?? payload.room_id));
+		const body =
+			isRecord(payload.payload) && !Array.isArray(payload.payload)
+				? (payload.payload as Record<string, unknown>)
+				: payload;
+		const nestedRoomId = normalizeRoomIDValue(toStringValue(body.roomId ?? body.room_id));
+		return {
+			roomId: directRoomId || nestedRoomId,
+			body
+		};
+	}
+
+	function parseToraAgentEventPayload(payload: unknown) {
+		const resolved = resolveToraRoomEventPayload(payload, 'tora_agent_event');
+		if (!resolved) {
+			return null;
+		}
+
+		const kindValue = toStringValue(resolved.body.kind).trim().toLowerCase();
+		if (!TORA_AGENT_EVENT_KINDS.includes(kindValue as ToraAgentEventKind)) {
+			return {
+				roomId: resolved.roomId,
+				event: null
+			};
+		}
+
+		const receivedAt = Date.now();
+		const turn = Math.max(1, toInt(resolved.body.turn) || 1);
+		const totalTurns = Math.max(
+			turn,
+			toInt(resolved.body.totalTurns ?? resolved.body.total_turns) || turn
+		);
+		const originMessageId = normalizeMessageID(
+			toStringValue(resolved.body.originMessageId ?? resolved.body.origin_message_id)
+		);
+		if (!originMessageId) {
+			return {
+				roomId: resolved.roomId,
+				event: null
+			};
+		}
+		const timestamp = Math.max(
+			0,
+			toInt(resolved.body.timestamp ?? resolved.body.occurredAt ?? resolved.body.occurred_at)
+		);
+
+		return {
+			roomId: resolved.roomId,
+			event: {
+				id: `tora-agent-${receivedAt}-${Math.random().toString(36).slice(2, 8)}`,
+				roomId: resolved.roomId || roomId,
+				receivedAt,
+				originMessageId,
+				kind: kindValue as ToraAgentEventKind,
+				tool: toStringValue(resolved.body.tool).trim(),
+				input: isRecord(resolved.body.input) ? { ...resolved.body.input } : undefined,
+				result: resolved.body.result,
+				text: toStringValue(resolved.body.text).trim(),
+				turn,
+				totalTurns,
+				error: toStringValue(resolved.body.error).trim(),
+				workflowKind: toStringValue(
+					resolved.body.workflowKind ?? resolved.body.workflow_kind
+				).trim(),
+				timestamp: timestamp > 0 ? timestamp : receivedAt
+			} satisfies ToraAgentEventRecord
+		};
+	}
+
+	function appendToraAgentEvent(targetRoomId: string, event: ToraAgentEventRecord) {
+		const normalizedRoomId = normalizeRoomIDValue(targetRoomId || event.roomId);
+		const originMessageId = normalizeMessageID(event.originMessageId);
+		if (!normalizedRoomId || !originMessageId) {
+			return;
+		}
+		const roomEvents = toraLiveAgentEventsByRoom[normalizedRoomId] ?? {};
+		const nextEvents = [...(roomEvents[originMessageId] ?? []).slice(-49), event];
+		toraLiveAgentEventsByRoom = {
+			...toraLiveAgentEventsByRoom,
+			[normalizedRoomId]: {
+				...roomEvents,
+				[originMessageId]: nextEvents
+			}
+		};
+	}
+
+	function clearToraLiveWorkflow(targetRoomId: string, originMessageId: string) {
+		const normalizedRoomId = normalizeRoomIDValue(targetRoomId);
+		const normalizedOriginId = normalizeMessageID(originMessageId);
+		if (!normalizedRoomId || !normalizedOriginId) {
+			return;
+		}
+		const roomEvents = toraLiveAgentEventsByRoom[normalizedRoomId];
+		if (!roomEvents || !roomEvents[normalizedOriginId]) {
+			return;
+		}
+		const nextRoomEvents = { ...roomEvents };
+		delete nextRoomEvents[normalizedOriginId];
+		toraLiveAgentEventsByRoom = {
+			...toraLiveAgentEventsByRoom,
+			[normalizedRoomId]: nextRoomEvents
+		};
+	}
+
+	function handleToraAgentEventPayload(payload: unknown) {
+		const parsed = parseToraAgentEventPayload(payload);
+		if (!parsed) {
+			return false;
+		}
+		if (parsed.roomId && parsed.roomId !== roomId) {
+			return true;
+		}
+		if (!parsed.event) {
+			return true;
+		}
+
+		appendToraAgentEvent(parsed.roomId || parsed.event.roomId, parsed.event);
 		return true;
 	}
 
@@ -2383,6 +2546,44 @@
 		}, 3000);
 	}
 
+	async function applyCanvasAgentChanges(payload: {
+		text: string;
+		changes: Record<string, unknown>[];
+	}) {
+		const normalizedChanges = (payload.changes || [])
+			.map((change) => ({
+				kind: toStringValue(change.kind).trim(),
+				file_path: toStringValue(change.file_path ?? change.path).trim(),
+				content: toStringValue(change.content),
+				description: toStringValue(change.description).trim(),
+				lines: toInt(change.lines)
+			}))
+			.filter((change) => change.file_path && typeof change.content === 'string');
+		if (normalizedChanges.length === 0) {
+			throw new Error('No valid canvas changes were included in this proposal.');
+		}
+
+		isCanvasOpen = true;
+		await tick();
+		if (!codeCanvasRef?.applyAgenticChanges) {
+			throw new Error('Canvas is still loading. Open the canvas and try again.');
+		}
+
+		const result = await codeCanvasRef.applyAgenticChanges({
+			text: payload.text || '',
+			changes: normalizedChanges
+		});
+		if (result.failed > 0) {
+			showErrorToast(`Applied ${result.applied} canvas change(s). ${result.failed} failed.`);
+			return;
+		}
+		showErrorToast(
+			result.applied === 1
+				? 'Applied 1 canvas change.'
+				: `Applied ${result.applied} canvas changes.`
+		);
+	}
+
 	async function openOptionalRoomPasswordDialog(initialValue = '') {
 		const rawValue = await openPromptDialog({
 			title: 'Room Password (E2EE)',
@@ -3118,6 +3319,10 @@
 			return;
 		}
 
+		if (handleToraAgentEventPayload(payload)) {
+			return;
+		}
+
 		if (handleTypingSignalPayload(payload)) {
 			return;
 		}
@@ -3649,27 +3854,28 @@
 		const isOwnMessage =
 			normalizeIdentifier(message.senderId) !== '' &&
 			normalizeIdentifier(message.senderId) === normalizeIdentifier(currentUserId);
-		const shouldCountUnread = !isOwnMessage;
+		const shouldCountUnread = !isOwnMessage && message.type !== 'tora_workflow';
 		upsertMessage(message.roomId, message, shouldCountUnread);
 		addBeaconMessageToDashboard(message);
-
-		// Track Tora-Bot responses in the panda progress log
-		if (normalizeIdentifier(message.senderId) === TORA_BOT_ID) {
-			toraIsThinking = false;
-			let logEntry = '';
-			if (message.type === 'tora_action') {
-				try {
-					const p = JSON.parse(message.content ?? '');
-					const arr = JSON.parse(p.actionsJson ?? '[]');
-					logEntry = `Proposed ${Array.isArray(arr) ? arr.length : '?'} changes`;
-				} catch {
-					logEntry = 'Proposed changes';
-				}
-			} else {
-				const preview = (message.content ?? '').replace(/\n/g, ' ').trim().slice(0, 80);
-				logEntry = preview ? (preview.length === 80 ? preview + '…' : preview) : 'Responded';
+		if (message.type === 'tora_workflow') {
+			const originMessageId = extractToraWorkflowOriginMessageId(message);
+			if (originMessageId) {
+				clearToraLiveWorkflow(message.roomId, originMessageId);
 			}
-			toraProgressLog = [...toraProgressLog.slice(-9), { text: logEntry, time: Date.now() }];
+		}
+	}
+
+	function extractToraWorkflowOriginMessageId(message: ChatMessage) {
+		if (message.type !== 'tora_workflow') {
+			return '';
+		}
+		try {
+			const parsed = JSON.parse(message.content ?? '{}');
+			return normalizeMessageID(
+				toStringValue(parsed.originMessageId ?? parsed.origin_message_id ?? message.replyToMessageId)
+			);
+		} catch {
+			return normalizeMessageID(message.replyToMessageId ?? '');
 		}
 	}
 
@@ -3715,6 +3921,15 @@
 		});
 		messagesByRoom = next.messagesByRoom;
 		roomThreads = next.roomThreads;
+		for (const message of incoming) {
+			if (message.type !== 'tora_workflow') {
+				continue;
+			}
+			const originMessageId = extractToraWorkflowOriginMessageId(message);
+			if (originMessageId) {
+				clearToraLiveWorkflow(targetRoomId, originMessageId);
+			}
+		}
 		if (incoming.length > 0) {
 			queueOfflineCachePersist(targetRoomId);
 		}
@@ -7009,6 +7224,8 @@
 							on:toggleTask={onTaskToggle}
 							on:addTask={onTaskAdd}
 							currentUserName={currentUsername}
+							applyCanvasChanges={applyCanvasAgentChanges}
+							toraLiveAgentEventsByOrigin={toraLiveAgentEventsByRoom[roomId] ?? {}}
 						/>
 					{/if}
 				</div>
@@ -7025,49 +7242,6 @@
 								{/key}
 							{:else}
 								<div class="composer-typing-placeholder" aria-hidden="true"></div>
-							{/if}
-
-							<!-- Panda progress indicator for Tora AI -->
-							{#if toraIsThinking || toraProgressLog.length > 0}
-								<!-- svelte-ignore a11y-click-events-have-key-events -->
-								<!-- svelte-ignore a11y-no-static-element-interactions -->
-								<div
-									class="tora-panda-btn"
-									class:tora-panda-thinking={toraIsThinking}
-									title="Tora AI activity"
-									on:click={() => (toraPandaOpen = !toraPandaOpen)}
-								>
-									<span class="panda-emoji" aria-hidden="true">🐼</span>
-									{#if toraIsThinking}
-										<span class="panda-pulse" aria-hidden="true"></span>
-									{/if}
-								</div>
-
-								{#if toraPandaOpen}
-									<!-- svelte-ignore a11y-click-events-have-key-events -->
-									<!-- svelte-ignore a11y-no-static-element-interactions -->
-									<div class="tora-panda-panel" on:click|stopPropagation>
-										<div class="panda-panel-header">
-											<span>🐼 Tora Activity</span>
-											<button class="panda-panel-close" on:click={() => (toraPandaOpen = false)}>✕</button>
-										</div>
-										<div class="panda-panel-log">
-											{#if toraIsThinking}
-												<div class="panda-log-entry panda-log-thinking">
-													<span class="panda-log-dot thinking-dot"></span>
-													<span>Thinking…</span>
-												</div>
-											{/if}
-											{#each [...toraProgressLog].reverse() as entry (entry.time)}
-												<div class="panda-log-entry">
-													<span class="panda-log-dot"></span>
-													<span class="panda-log-text">{entry.text}</span>
-													<span class="panda-log-time">{new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-												</div>
-											{/each}
-										</div>
-									</div>
-								{/if}
 							{/if}
 						</div>
 					</div>
@@ -7153,6 +7327,7 @@
 				</header>
 				<div class="canvas-pane-body">
 					<CodeCanvas
+						bind:this={codeCanvasRef}
 						{roomId}
 						currentUser={canvasUser}
 						isEphemeralRoom={isActiveRoomEphemeral}

@@ -70,6 +70,7 @@ type TaskCreateRequest struct {
 	Spent           *float64               `json:"spent,omitempty"`
 	SpentCost       *float64               `json:"spent_cost,omitempty"`
 	SpentCostAlt    *float64               `json:"spentCost,omitempty"`
+	AssigneeID      string                 `json:"assignee_id,omitempty"`
 	DueDate         *time.Time             `json:"due_date,omitempty"`
 	StartDate       *time.Time             `json:"start_date,omitempty"`
 	Roles           []TaskRole             `json:"roles,omitempty"`
@@ -747,6 +748,11 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 
 	assigneeID := resolveTaskRequesterAssigneeUUID(r)
+	if trimmedReqAssignee := strings.TrimSpace(req.AssigneeID); trimmedReqAssignee != "" {
+		if parsed, parseErr := gocql.ParseUUID(trimmedReqAssignee); parseErr == nil {
+			assigneeID = &parsed
+		}
+	}
 	statusActorID := strings.TrimSpace(resolveTaskRequesterID(r))
 	statusActorName := resolveTaskRequesterName(r)
 

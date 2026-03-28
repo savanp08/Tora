@@ -16,10 +16,10 @@
 	import { createEventDispatcher, onDestroy, onMount } from 'svelte';
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
-	const AI_TERMS_STORAGE_KEY = 'hasAcceptedAITerms';
+	const AI_TERMS_STORAGE_KEY_PREFIX = 'hasAcceptedAITerms';
 	const AI_PRIVACY_POLICY_URL = 'https://example.com/privacy-policy';
 	const AI_PRIMARY_MENTION = '@ToraAI';
-	const AI_MENTION_TOKENS = ['@ToraAI', '@Tora'];
+	const AI_MENTION_TOKENS = ['@ToraAI', '@Tora', '@Project', '@Canvas'];
 	const AI_DISPLAY_NAME = 'ToraAI';
 	const KLIPY_API_KEY_RAW = import.meta.env.VITE_KLIPY_API_KEY as string | undefined;
 	const KLIPY_API_KEY = KLIPY_API_KEY_RAW?.trim() ?? '';
@@ -168,6 +168,8 @@
 	let mentionActiveIndex = 0;
 	let mentionReplaceStart = 0;
 	let mentionReplaceEnd = 0;
+	let aiTermsSessionStorageKey = '';
+	let loadedAITermsStorageKey = '';
 
 	$: normalizedDraftMessage = draftMessage.trim();
 	$: hasComposerInput = draftMessage.length > 0;
@@ -272,20 +274,33 @@
 		dispatch('typing', { value: nextValue });
 	}
 
-	function loadHasAcceptedAITerms() {
+	function resolveAITermsSessionStorageKey() {
+		const normalizedRoomID = (roomId || '').trim().toLowerCase() || 'global-room';
+		const normalizedUser =
+			(currentUsername || '').trim().toLowerCase().replace(/\s+/g, '_') || 'anonymous-user';
+		return `${AI_TERMS_STORAGE_KEY_PREFIX}:${normalizedRoomID}:${normalizedUser}`;
+	}
+
+	function loadHasAcceptedAITerms(storageKey: string) {
 		if (typeof window === 'undefined') {
 			return false;
 		}
-		const raw = window.localStorage.getItem(AI_TERMS_STORAGE_KEY);
+		if (!storageKey) {
+			return false;
+		}
+		const raw = window.sessionStorage.getItem(storageKey);
 		const normalized = (raw || '').trim().toLowerCase();
 		return normalized === 'true' || normalized === '1' || normalized === 'yes';
 	}
 
-	function persistHasAcceptedAITerms(value: boolean) {
+	function persistHasAcceptedAITerms(storageKey: string, value: boolean) {
 		if (typeof window === 'undefined') {
 			return;
 		}
-		window.localStorage.setItem(AI_TERMS_STORAGE_KEY, value ? 'true' : 'false');
+		if (!storageKey) {
+			return;
+		}
+		window.sessionStorage.setItem(storageKey, value ? 'true' : 'false');
 	}
 
 	function closeMentionPicker() {
@@ -576,7 +591,7 @@
 
 	function onAIDisclaimerAgree() {
 		hasAcceptedAITerms = true;
-		persistHasAcceptedAITerms(true);
+		persistHasAcceptedAITerms(aiTermsSessionStorageKey, true);
 		showAIDisclaimerModal = false;
 		const action = pendingAIAction;
 		pendingAIAction = null;
@@ -601,8 +616,14 @@
 		stopRecordingStream();
 	});
 
+	$: aiTermsSessionStorageKey = resolveAITermsSessionStorageKey();
+
+	$: if (typeof window !== 'undefined' && aiTermsSessionStorageKey !== loadedAITermsStorageKey) {
+		hasAcceptedAITerms = loadHasAcceptedAITerms(aiTermsSessionStorageKey);
+		loadedAITermsStorageKey = aiTermsSessionStorageKey;
+	}
+
 	onMount(() => {
-		hasAcceptedAITerms = loadHasAcceptedAITerms();
 		requestAnimationFrame(() => {
 			resizeComposerTextarea();
 			syncComposerHighlightScroll();

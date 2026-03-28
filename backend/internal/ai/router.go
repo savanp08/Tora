@@ -52,12 +52,12 @@ func (r *AIRouter) RouteRequest(
 ) (any, error) {
 	if request == nil {
 		// println("AIRouter: nil request provided")
-		println("nil req provided");
+		println("nil req provided")
 		return nil, ErrAllAIProvidersExhausted
 	}
 	if r == nil || len(r.providers) == 0 {
 		// println("AIRouter: no providers provided")
-		println("no providers provided");
+		println("no providers provided")
 		return nil, ErrAllAIProvidersExhausted
 	}
 
@@ -147,6 +147,56 @@ func (r *AIRouter) GenerateChatResponseWithHint(ctx context.Context, prompt, mod
 		return "", ErrAllAIProvidersExhausted
 	}
 	return response, nil
+}
+
+func (r *AIRouter) SupportsToolUse() bool {
+	if r == nil {
+		return false
+	}
+	for _, provider := range r.providers {
+		if _, ok := provider.(ToolUseProvider); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *AIRouter) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
+	if r == nil || len(r.providers) == 0 {
+		return AgentProviderResponse{}, ErrAllAIProvidersExhausted
+	}
+
+	var (
+		lastErr        error
+		checkedAnyTool bool
+	)
+	for _, provider := range r.providers {
+		toolProvider, ok := provider.(ToolUseProvider)
+		if !ok {
+			continue
+		}
+		checkedAnyTool = true
+		response, err := toolProvider.GenerateToolResponse(ctx, req)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return AgentProviderResponse{}, err
+		}
+		if isRateLimitError(err) {
+			continue
+		}
+		continue
+	}
+
+	if !checkedAnyTool {
+		return AgentProviderResponse{}, ErrAllAIProvidersExhausted
+	}
+	if lastErr != nil {
+		return AgentProviderResponse{}, lastErr
+	}
+	return AgentProviderResponse{}, ErrAllAIProvidersExhausted
 }
 
 type statusCodeError interface {

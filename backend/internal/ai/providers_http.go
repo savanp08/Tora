@@ -26,9 +26,9 @@ const (
 
 var (
 	defaultVertexModels = []string{
-		defaultVertexModel,   // gemini-3.1-flash-lite  $0.25/1M — default
-		"gemini-3-flash",     // $0.50/1M
-		"gemini-3.1-pro",     // $2.00/1M — fallback for capability
+		defaultVertexModel, // gemini-3.1-flash-lite  $0.25/1M — default
+		"gemini-3-flash",   // $0.50/1M
+		"gemini-3.1-pro",   // $2.00/1M — fallback for capability
 	}
 	defaultGeminiModels = []string{
 		"gemini-3.1-pro",
@@ -53,16 +53,18 @@ var (
 // tier, then the provider's full configured cascade catches anything missed.
 //
 // Vertex Gemini 3 tiers (cost-optimised, staying under 140 K input tokens):
-//   light    → gemini-3.1-flash-lite  $0.25/1M input — conversational replies
-//   standard → gemini-3-flash         $0.50/1M input — data synthesis
-//   heavy    → gemini-3.1-pro         $2.00/1M input — reports / analysis
+//
+//	light    → gemini-3.1-flash-lite  $0.25/1M input — conversational replies
+//	standard → gemini-3-flash         $0.50/1M input — data synthesis
+//	heavy    → gemini-3.1-pro         $2.00/1M input — reports / analysis
 //
 // Gemini Direct tiers — same cost logic, different model name set.
 //
 // Groq tiers (free, Llama):
-//   light    → 8b (instant responses)
-//   standard → 70b versatile
-//   heavy    → 70b versatile (best available on free Groq)
+//
+//	light    → 8b (instant responses)
+//	standard → 70b versatile
+//	heavy    → 70b versatile (best available on free Groq)
 var (
 	vertexTierModels = map[string][]string{
 		AIModelTierLight:    {"gemini-3.1-flash-lite"},
@@ -94,9 +96,9 @@ func buildTieredModelList(configured []string, tier string, tierMaps map[string]
 }
 
 // buildDefaultProvidersFromEnv returns providers in fixed fallback order:
-// Vertex Gemini -> Gemini -> Mistral -> Groq.
+// Vertex Gemini -> Gemini -> OpenAI -> Mistral -> Groq -> XAI.
 func buildDefaultProvidersFromEnv() []Summarizer {
-	providers := make([]Summarizer, 0, 4)
+	providers := make([]Summarizer, 0, 6)
 
 	if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_VERTEX_API_KEY")); apiKey != "" {
 		providers = append(providers, NewVertexGeminiProvider(apiKey, parseModelCascadeFromEnv(
@@ -111,6 +113,12 @@ func buildDefaultProvidersFromEnv() []Summarizer {
 			os.Getenv("GEMINI_MODEL"),
 		)))
 	}
+	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
+		providers = append(providers, NewOpenAIProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("OPENAI_MODELS"),
+			os.Getenv("OPENAI_MODEL"),
+		)))
+	}
 	if apiKey := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")); apiKey != "" {
 		providers = append(providers, NewMistralProvider(apiKey, parseModelCascadeFromEnv(
 			os.Getenv("MISTRAL_MODELS"),
@@ -121,6 +129,12 @@ func buildDefaultProvidersFromEnv() []Summarizer {
 		providers = append(providers, NewGroqProvider(apiKey, parseModelCascadeFromEnv(
 			os.Getenv("GROQ_MODELS"),
 			os.Getenv("GROQ_MODEL"),
+		)))
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("XAI_API_KEY")); apiKey != "" {
+		providers = append(providers, NewXAIProvider(apiKey, parseModelCascadeFromEnv(
+			os.Getenv("XAI_MODELS"),
+			os.Getenv("XAI_MODEL"),
 		)))
 	}
 
@@ -413,16 +427,34 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 	return "", newModelCascadeExhaustedError(providerLabel, p.models)
 }
 
+func (p *MistralProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
+	return generateOpenAICompatibleToolResponse(
+		ctx,
+		p.client,
+		"https://codestral.mistral.ai/v1/chat/completions",
+		map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
+		},
+		p.models,
+		"mistral",
+		req,
+	)
+}
+
 type OpenAIProvider struct {
 	apiKey string
-	model  string
+	models []string
 	client *http.Client
 }
 
-func NewOpenAIProvider(apiKey, model string) *OpenAIProvider {
+func NewOpenAIProvider(apiKey string, models []string) *OpenAIProvider {
+	cascade := models
+	if len(cascade) == 0 {
+		cascade = []string{defaultOpenAIModel}
+	}
 	return &OpenAIProvider{
 		apiKey: strings.TrimSpace(apiKey),
-		model:  trimOrDefault(model, defaultOpenAIModel),
+		models: mergeModelCascade(cascade, []string{defaultOpenAIModel}),
 		client: newProviderHTTPClient(),
 	}
 }
@@ -445,48 +477,69 @@ func (p *OpenAIProvider) GenerateChatResponse(ctx context.Context, prompt string
 		return "", fmt.Errorf("openai prompt is empty")
 	}
 
-	payload := map[string]any{
-		"model": p.model,
-		"messages": []map[string]string{
-			{
-				"role":    "user",
-				"content": prompt,
+	for _, model := range p.models {
+		payload := map[string]any{
+			"model": model,
+			"messages": []map[string]string{
+				{
+					"role":    "user",
+					"content": prompt,
+				},
 			},
+			"temperature": 0.2,
+		}
+
+		statusCode, body, err := postJSON(ctx, p.client, "https://api.openai.com/v1/chat/completions", map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
+		}, payload)
+		if err != nil {
+			return "", err
+		}
+
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(body, &parsed)
+
+		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+				log.Printf("[ai] openai model=%s temporary failure status=%d msg=%s", model, statusCode, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body)))
+				continue
+			}
+			return "", toProviderStatusError("openai", statusCode, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body)))
+		}
+		if len(parsed.Choices) == 0 {
+			return "", fmt.Errorf("openai model=%s returned empty response", model)
+		}
+
+		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
+		if text == "" {
+			return "", fmt.Errorf("openai model=%s returned empty text", model)
+		}
+		return text, nil
+	}
+	return "", newModelCascadeExhaustedError("openai", p.models)
+}
+
+func (p *OpenAIProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
+	return generateOpenAICompatibleToolResponse(
+		ctx,
+		p.client,
+		"https://api.openai.com/v1/chat/completions",
+		map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
 		},
-		"temperature": 0.2,
-	}
-
-	statusCode, body, err := postJSON(ctx, p.client, "https://api.openai.com/v1/chat/completions", map[string]string{
-		"Authorization": "Bearer " + p.apiKey,
-	}, payload)
-	if err != nil {
-		return "", err
-	}
-
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(body, &parsed)
-
-	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return "", toProviderStatusError("openai", statusCode, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body)))
-	}
-	if len(parsed.Choices) == 0 {
-		return "", fmt.Errorf("openai returned empty response")
-	}
-
-	text := strings.TrimSpace(parsed.Choices[0].Message.Content)
-	if text == "" {
-		return "", fmt.Errorf("openai returned empty text")
-	}
-	return text, nil
+		p.models,
+		"openai",
+		req,
+	)
 }
 
 type XAIProvider struct {
@@ -572,6 +625,20 @@ func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (
 		return text, nil
 	}
 	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+}
+
+func (p *XAIProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
+	return generateOpenAICompatibleToolResponse(
+		ctx,
+		p.client,
+		"https://api.x.ai/v1/chat/completions",
+		map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
+		},
+		p.models,
+		"xai",
+		req,
+	)
 }
 
 type GroqProvider struct {
@@ -678,6 +745,20 @@ func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, mo
 	return "", newModelCascadeExhaustedError(providerLabel, models)
 }
 
+func (p *GroqProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
+	return generateOpenAICompatibleToolResponse(
+		ctx,
+		p.client,
+		"https://api.groq.com/openai/v1/chat/completions",
+		map[string]string{
+			"Authorization": "Bearer " + p.apiKey,
+		},
+		p.models,
+		"groq",
+		req,
+	)
+}
+
 type CohereProvider struct {
 	apiKey string
 	model  string
@@ -745,6 +826,282 @@ func (p *CohereProvider) GenerateChatResponse(ctx context.Context, prompt string
 		return "", fmt.Errorf("cohere returned empty text")
 	}
 	return text, nil
+}
+
+func generateOpenAICompatibleToolResponse(
+	ctx context.Context,
+	client *http.Client,
+	endpoint string,
+	headers map[string]string,
+	models []string,
+	providerLabel string,
+	req AgentProviderRequest,
+) (AgentProviderResponse, error) {
+	messages, err := buildOpenAICompatibleMessages(req)
+	if err != nil {
+		return AgentProviderResponse{}, err
+	}
+	tools := buildOpenAICompatibleTools(req.Tools)
+	for _, model := range models {
+		payload := map[string]any{
+			"model":       strings.TrimSpace(model),
+			"messages":    messages,
+			"temperature": 0.2,
+		}
+		if len(tools) > 0 {
+			payload["tools"] = tools
+			payload["tool_choice"] = "auto"
+		}
+
+		statusCode, body, err := postJSON(ctx, client, endpoint, headers, payload)
+		if err != nil {
+			recordAIRequest(providerLabel, "error")
+			return AgentProviderResponse{}, err
+		}
+
+		response, parseErr, statusMessage := parseOpenAICompatibleToolResponse(body)
+		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+				log.Printf("[ai] %s model=%s temporary tool-use failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
+				recordAIRequest(providerLabel, "rate_limit")
+				continue
+			}
+			recordAIRequest(providerLabel, "error")
+			return AgentProviderResponse{}, toProviderStatusError(providerLabel, statusCode, statusMessage)
+		}
+		if parseErr != nil {
+			recordAIRequest(providerLabel, "error")
+			return AgentProviderResponse{}, parseErr
+		}
+		recordAIRequest(providerLabel, "success")
+		return response, nil
+	}
+	return AgentProviderResponse{}, newModelCascadeExhaustedError(providerLabel, models)
+}
+
+func buildOpenAICompatibleMessages(req AgentProviderRequest) ([]map[string]any, error) {
+	messages := make([]map[string]any, 0, len(req.Messages)+1)
+	if systemPrompt := strings.TrimSpace(req.SystemPrompt); systemPrompt != "" {
+		messages = append(messages, map[string]any{
+			"role":    "system",
+			"content": systemPrompt,
+		})
+	}
+
+	for _, message := range req.Messages {
+		role := strings.TrimSpace(message.Role)
+		if role == "" {
+			continue
+		}
+		switch role {
+		case "assistant":
+			textParts := make([]string, 0, len(message.Content))
+			toolCalls := make([]map[string]any, 0, len(message.Content))
+			for _, block := range message.Content {
+				switch strings.TrimSpace(block.Type) {
+				case "thinking", "text":
+					if text := strings.TrimSpace(block.Text); text != "" {
+						textParts = append(textParts, text)
+					}
+				case "tool_use":
+					name := strings.TrimSpace(block.Name)
+					if name == "" {
+						continue
+					}
+					toolCalls = append(toolCalls, map[string]any{
+						"id":   firstNonEmpty(strings.TrimSpace(block.ID), "tool_call"),
+						"type": "function",
+						"function": map[string]any{
+							"name":      name,
+							"arguments": marshalOpenAICompatibleString(block.Input),
+						},
+					})
+				}
+			}
+			if len(toolCalls) == 0 && len(textParts) == 0 {
+				continue
+			}
+			entry := map[string]any{
+				"role": "assistant",
+			}
+			if len(textParts) > 0 {
+				entry["content"] = strings.Join(textParts, "\n\n")
+			} else {
+				entry["content"] = ""
+			}
+			if len(toolCalls) > 0 {
+				entry["tool_calls"] = toolCalls
+			}
+			messages = append(messages, entry)
+		case "user":
+			textParts := make([]string, 0, len(message.Content))
+			for _, block := range message.Content {
+				switch strings.TrimSpace(block.Type) {
+				case "text":
+					if text := strings.TrimSpace(block.Text); text != "" {
+						textParts = append(textParts, text)
+					}
+				case "tool_result":
+					toolCallID := strings.TrimSpace(block.ToolUseID)
+					if toolCallID == "" {
+						continue
+					}
+					messages = append(messages, map[string]any{
+						"role":         "tool",
+						"tool_call_id": toolCallID,
+						"content":      marshalOpenAICompatibleString(block.Content),
+					})
+				}
+			}
+			if len(textParts) > 0 {
+				messages = append(messages, map[string]any{
+					"role":    "user",
+					"content": strings.Join(textParts, "\n\n"),
+				})
+			}
+		default:
+			textParts := make([]string, 0, len(message.Content))
+			for _, block := range message.Content {
+				if text := strings.TrimSpace(block.Text); text != "" {
+					textParts = append(textParts, text)
+				}
+			}
+			if len(textParts) > 0 {
+				messages = append(messages, map[string]any{
+					"role":    role,
+					"content": strings.Join(textParts, "\n\n"),
+				})
+			}
+		}
+	}
+
+	return messages, nil
+}
+
+func buildOpenAICompatibleTools(tools []AnthropicTool) []map[string]any {
+	if len(tools) == 0 {
+		return nil
+	}
+	next := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		next = append(next, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": strings.TrimSpace(tool.Description),
+				"parameters":  tool.InputSchema,
+			},
+		})
+	}
+	return next
+}
+
+func parseOpenAICompatibleToolResponse(body []byte) (AgentProviderResponse, error, string) {
+	var parsed struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   any `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return AgentProviderResponse{}, err, extractMessageFromBody(body)
+	}
+	if len(parsed.Choices) == 0 {
+		return AgentProviderResponse{}, fmt.Errorf("provider returned empty response"), firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+	}
+
+	choice := parsed.Choices[0]
+	blocks := make([]AgentProviderContentBlock, 0, len(choice.Message.ToolCalls)+1)
+	if text := strings.TrimSpace(extractOpenAICompatibleMessageText(choice.Message.Content)); text != "" {
+		blocks = append(blocks, AgentProviderContentBlock{
+			Type: "text",
+			Text: text,
+		})
+	}
+	for _, call := range choice.Message.ToolCalls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			continue
+		}
+		input := make(map[string]any)
+		arguments := strings.TrimSpace(call.Function.Arguments)
+		if arguments != "" && arguments != "{}" {
+			decoder := json.NewDecoder(strings.NewReader(arguments))
+			decoder.UseNumber()
+			if err := decoder.Decode(&input); err != nil {
+				return AgentProviderResponse{}, fmt.Errorf("failed to parse tool arguments for %s: %w", name, err), firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+			}
+		}
+		blocks = append(blocks, AgentProviderContentBlock{
+			Type:  "tool_use",
+			ID:    strings.TrimSpace(call.ID),
+			Name:  name,
+			Input: input,
+		})
+	}
+	if len(blocks) == 0 {
+		return AgentProviderResponse{}, fmt.Errorf("provider returned empty content"), firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+	}
+	return AgentProviderResponse{
+		Content:    blocks,
+		StopReason: strings.TrimSpace(choice.FinishReason),
+	}, nil, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+}
+
+func extractOpenAICompatibleMessageText(content any) string {
+	switch typed := content.(type) {
+	case string:
+		return typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			record, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if strings.TrimSpace(auditStringField(record, "type")) != "text" {
+				continue
+			}
+			if text := strings.TrimSpace(auditStringField(record, "text")); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	default:
+		return ""
+	}
+}
+
+func marshalOpenAICompatibleString(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return "{}"
+		}
+		return string(encoded)
+	}
 }
 
 func buildRollingSummaryPrompt(previousState []byte, newMessages []Message) string {

@@ -6,9 +6,20 @@
 	import { normalizeRoomIDValue, toStringValue } from '$lib/utils/chat/core';
 	import { sendSocketPayload } from '$lib/ws';
 	import { buildTaskSocketPayload } from '$lib/ws/client';
+	import SpreadsheetGrid from './SpreadsheetGrid.svelte';
 
 	export let canEdit = true;
+	export let isAdmin = false;
+	export let sessionUserID = '';
+	export let sessionUserName = '';
 	export let roomId = '';
+	import ChangeRequestModal from './ChangeRequestModal.svelte';
+	import { type ChangeRequestAction } from '$lib/stores/changeRequests';
+
+	let crModalOpen = false;
+	function openImportCR() {
+		crModalOpen = true;
+	}
 
 	type SheetRecord = {
 		task_id: string;
@@ -25,6 +36,9 @@
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = resolveApiBase(API_BASE_RAW);
 	const STATUS_VALUES = ['todo', 'in_progress', 'done'] as const;
+
+	type SheetsTab = 'spreadsheet' | 'import';
+	let activeTab: SheetsTab = 'spreadsheet';
 
 	let importRows: SheetRecord[] = [];
 	let importError = '';
@@ -416,101 +430,198 @@
 </script>
 
 <section class="sheet-tool" aria-label="Spreadsheet tools">
-	<header class="sheet-header">
-		<div>
-			<h3>Sheets</h3>
-			<p>Import/export taskboard data as `.xlsx`.</p>
+	<div class="sheets-tab-bar" role="tablist">
+		<button
+			type="button"
+			role="tab"
+			class="stab-btn"
+			class:is-active={activeTab === 'spreadsheet'}
+			on:click={() => (activeTab = 'spreadsheet')}
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18" />
+			</svg>
+			Spreadsheet
+		</button>
+		<button
+			type="button"
+			role="tab"
+			class="stab-btn"
+			class:is-active={activeTab === 'import'}
+			on:click={() => (activeTab = 'import')}
+		>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1M16 12l-4 4m0 0l-4-4m4 4V4" />
+			</svg>
+			Import / Export
+		</button>
+	</div>
+
+	{#if activeTab === 'spreadsheet'}
+		<div class="spreadsheet-wrap">
+			<SpreadsheetGrid />
 		</div>
-		<div class="sheet-actions">
-			<button type="button" class="sheet-btn" on:click={exportAsXlsx} disabled={exportRows.length === 0}>
-				Export XLSX
-			</button>
-			<label class="sheet-btn sheet-upload-btn" aria-label="Import XLSX">
-				Import XLSX
-				<input
-					type="file"
-					accept=".xlsx,.xls,.csv"
-					on:change={(event) => void onImportFileChange(event)}
-					disabled={importing}
-				/>
+	{:else}
+		<header class="sheet-header">
+			<div>
+				<h3>Import / Export</h3>
+				<p>Import/export taskboard data as `.xlsx`.</p>
+			</div>
+			<div class="sheet-actions">
+				<button type="button" class="sheet-btn" on:click={exportAsXlsx} disabled={exportRows.length === 0}>
+					Export XLSX
+				</button>
+				<label class="sheet-btn sheet-upload-btn" aria-label="Import XLSX">
+					Import XLSX
+					<input
+						type="file"
+						accept=".xlsx,.xls,.csv"
+						on:change={(event) => void onImportFileChange(event)}
+						disabled={importing}
+					/>
+				</label>
+			</div>
+		</header>
+
+		<p class="sheet-note">
+			Use `Task ID` to update existing tasks. Enable create mode below to add rows whose Task ID is
+			missing/not found. `Budget` and `Cost` must be numeric.
+		</p>
+
+		{#if selectedFileName}
+			<p class="sheet-meta">Loaded file: {selectedFileName}</p>
+		{/if}
+		{#if importError}
+			<p class="sheet-error" role="status">{importError}</p>
+		{/if}
+		{#if importSummary}
+			<p class="sheet-summary" role="status">{importSummary}</p>
+		{/if}
+
+		{#if importRows.length > 0}
+			<label class="sheet-checkbox">
+				<input type="checkbox" bind:checked={createMissingTasks} disabled={importing || !canEdit} />
+				<span>Create missing tasks when Task ID is blank/not found</span>
 			</label>
-		</div>
-	</header>
 
-	<p class="sheet-note">
-		Use `Task ID` to update existing tasks. Enable create mode below to add rows whose Task ID is
-		missing/not found. `Budget` and `Cost` must be numeric.
-	</p>
+			<div class="sheet-import-actions">
+				<button
+					type="button"
+					class="sheet-btn sheet-apply-btn"
+					on:click={() => void applyImportUpdates()}
+					disabled={!canEdit || importing}
+				>
+					{importing ? 'Applying…' : 'Apply To Taskboard'}
+				</button>
+				<button type="button" class="sheet-btn" on:click={clearImportPreview} disabled={importing}>
+					Clear File
+				</button>
+				<span>Previewing {previewRows.length} of {importRows.length} row(s)</span>
+			</div>
 
-	{#if selectedFileName}
-		<p class="sheet-meta">Loaded file: {selectedFileName}</p>
-	{/if}
-	{#if importError}
-		<p class="sheet-error" role="status">{importError}</p>
-	{/if}
-	{#if importSummary}
-		<p class="sheet-summary" role="status">{importSummary}</p>
-	{/if}
-
-	{#if importRows.length > 0}
-		<label class="sheet-checkbox">
-			<input type="checkbox" bind:checked={createMissingTasks} disabled={importing || !canEdit} />
-			<span>Create missing tasks when Task ID is blank/not found</span>
-		</label>
-
-		<div class="sheet-import-actions">
-			<button
-				type="button"
-				class="sheet-btn sheet-apply-btn"
-				on:click={() => void applyImportUpdates()}
-				disabled={!canEdit || importing}
-			>
-				{importing ? 'Applying…' : 'Apply To Taskboard'}
-			</button>
-			<button type="button" class="sheet-btn" on:click={clearImportPreview} disabled={importing}>
-				Clear File
-			</button>
-			<span>Previewing {previewRows.length} of {importRows.length} row(s)</span>
-		</div>
-
-		<div class="sheet-preview-wrap">
-			<table>
-				<thead>
-					<tr>
-						<th>Task ID</th>
-						<th>Task</th>
-						<th>Sprint</th>
-						<th>Status</th>
-						<th>Assignee ID</th>
-						<th>Budget</th>
-						<th>Cost</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each previewRows as row, rowIndex (`${row.task_id}-${rowIndex}`)}
+			<div class="sheet-preview-wrap">
+				<table>
+					<thead>
 						<tr>
-							<td>{row.task_id || '—'}</td>
-							<td>{row.task_name || '—'}</td>
-							<td>{row.sprint || '—'}</td>
-							<td>{row.status || 'todo'}</td>
-							<td>{row.assignee_id || '—'}</td>
-							<td>{row.budget}</td>
-							<td>{row.cost}</td>
+							<th>Task ID</th>
+							<th>Task</th>
+							<th>Sprint</th>
+							<th>Status</th>
+							<th>Assignee ID</th>
+							<th>Budget</th>
+							<th>Cost</th>
 						</tr>
-					{/each}
-				</tbody>
-			</table>
-		</div>
+					</thead>
+					<tbody>
+						{#each previewRows as row, rowIndex (`${row.task_id}-${rowIndex}`)}
+							<tr>
+								<td>{row.task_id || '—'}</td>
+								<td>{row.task_name || '—'}</td>
+								<td>{row.sprint || '—'}</td>
+								<td>{row.status || 'todo'}</td>
+								<td>{row.assignee_id || '—'}</td>
+								<td>{row.budget}</td>
+								<td>{row.cost}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
 	{/if}
 </section>
+
+<ChangeRequestModal
+	open={crModalOpen}
+	{roomId}
+	userId={sessionUserID}
+	userName={sessionUserName}
+	action="import_sheet"
+	targetLabel="Import spreadsheet data"
+	payload={{}}
+	on:submitted={() => (crModalOpen = false)}
+	on:cancel={() => (crModalOpen = false)}
+/>
 
 <style>
 	.sheet-tool {
 		height: 100%;
 		min-height: 0;
 		display: grid;
-		grid-template-rows: auto auto auto auto minmax(0, 1fr);
+		grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
 		gap: 0.62rem;
+	}
+
+	.sheets-tab-bar {
+		display: flex;
+		gap: 0.25rem;
+		border-bottom: 1px solid color-mix(in srgb, var(--ws-border) 80%, transparent);
+		padding-bottom: 0.5rem;
+	}
+
+	.stab-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.38rem;
+		padding: 0.32rem 0.7rem;
+		border-radius: 7px;
+		border: 1px solid transparent;
+		background: transparent;
+		color: var(--ws-muted);
+		font-size: 0.72rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 0.13s, color 0.13s, border-color 0.13s;
+	}
+
+	.stab-btn svg {
+		width: 13px;
+		height: 13px;
+		stroke: currentColor;
+		fill: none;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		flex-shrink: 0;
+	}
+
+	.stab-btn:hover {
+		background: color-mix(in srgb, var(--ws-surface) 80%, var(--ws-border) 20%);
+		color: var(--ws-text);
+	}
+
+	.stab-btn.is-active {
+		background: color-mix(in srgb, var(--ws-surface) 60%, var(--ws-border) 40%);
+		color: var(--ws-text);
+		border-color: color-mix(in srgb, var(--ws-border) 90%, transparent);
+	}
+
+	.spreadsheet-wrap {
+		min-height: 0;
+		height: 100%;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
 	}
 
 	.sheet-header {
@@ -626,6 +737,21 @@
 
 	.sheet-apply-btn {
 		background: color-mix(in srgb, var(--ws-surface) 76%, #ffffff 24%);
+	}
+
+	.sheet-request-btn {
+		color: #d97706;
+		border-color: color-mix(in srgb, #f59e0b 45%, transparent);
+		background: color-mix(in srgb, #f59e0b 10%, transparent);
+	}
+	.sheet-request-btn:hover {
+		background: color-mix(in srgb, #f59e0b 20%, transparent);
+	}
+
+	.sheet-no-perm {
+		font-size: 0.68rem;
+		color: var(--ws-muted);
+		font-style: italic;
 	}
 
 	.sheet-preview-wrap {

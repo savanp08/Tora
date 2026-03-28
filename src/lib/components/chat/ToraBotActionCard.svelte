@@ -7,6 +7,7 @@
 
 	type TaskAction = {
 		kind: ActionKind;
+		already_applied?: boolean;
 		task_id?: string; // internal — used for API calls, never shown
 		task_title?: string;
 		task_sprint?: string; // sprint the task belongs to (for update/delete context)
@@ -35,6 +36,15 @@
 		appliedAt: string;
 		counts: { created: number; updated: number; deleted: number };
 	};
+	type AuditTrailEntry = {
+		index: number;
+		kind: string;
+		tool: string;
+		input: Record<string, unknown>;
+		result: unknown;
+		text: string;
+		error: string;
+	};
 	type ChangeEntry = {
 		field: string;
 		label: string;
@@ -45,6 +55,7 @@
 
 	export let text = '';
 	export let actionsJson = '';
+	export let auditTrail: unknown[] = [];
 	export let roomId = '';
 	export let apiBase = '';
 	export let authToken = '';
@@ -61,9 +72,11 @@
 	let appliedMeta: AppliedMeta | null = null;
 	let showModal = false;
 	let showAll = false;
+	let auditEntries: AuditTrailEntry[] = [];
 
 	const PREVIEW_LIMIT = 5;
 	const UPDATE_PREVIEW_LIMIT = 3;
+	const AUDIT_PREVIEW_LIMIT = 4;
 	const currencyFields = new Set(['budget', 'actual_cost', 'actualcost', 'spent']);
 	const dateFormatter = new Intl.DateTimeFormat(undefined, {
 		month: 'short',
@@ -297,6 +310,166 @@
 		return getChangeEntries(action).slice(0, UPDATE_PREVIEW_LIMIT);
 	}
 
+	function normalizeAuditTrailEntry(value: unknown, fallbackIndex: number): AuditTrailEntry | null {
+		const record = toRecord(value);
+		if (!record) {
+			return null;
+		}
+		return {
+			index:
+				typeof record.index === 'number' && Number.isFinite(record.index)
+					? Math.max(1, Math.trunc(record.index))
+					: fallbackIndex + 1,
+			kind: typeof record.kind === 'string' ? record.kind.trim() : '',
+			tool: typeof record.tool === 'string' ? record.tool.trim() : '',
+			input: toRecord(record.input) ?? {},
+			result: record.result,
+			text: typeof record.text === 'string' ? record.text.trim() : '',
+			error: typeof record.error === 'string' ? record.error.trim() : ''
+		};
+	}
+
+	function auditEntryHasError(entry: AuditTrailEntry) {
+		const resultRecord = toRecord(entry.result);
+		return Boolean(entry.error || (resultRecord && typeof resultRecord.error === 'string' && resultRecord.error.trim()));
+	}
+
+	function getAuditEntryIcon(entry: AuditTrailEntry) {
+		if (auditEntryHasError(entry)) {
+			return '✕';
+		}
+		switch (entry.kind) {
+			case 'thinking':
+				return '⏳';
+			case 'tool_call':
+				return entry.tool === 'write_canvas' ? '✍️' : '🔧';
+			case 'tool_result':
+				return '✓';
+			case 'text':
+				return '💬';
+			case 'done':
+				return '✓';
+			default:
+				return '•';
+		}
+	}
+
+	function prettifyToolName(tool: string) {
+		return tool
+			.trim()
+			.replace(/_/g, ' ')
+			.replace(/\b\w/g, (letter) => letter.toUpperCase());
+	}
+
+	function summarizeAuditTarget(input: Record<string, unknown>) {
+		return (
+			(typeof input.title === 'string' && input.title.trim()) ||
+			(typeof input.task_title === 'string' && input.task_title.trim()) ||
+			(typeof input.file_path === 'string' && input.file_path.trim()) ||
+			(typeof input.main_file === 'string' && input.main_file.trim()) ||
+			(typeof input.task_id === 'string' && input.task_id.trim()) ||
+			''
+		);
+	}
+
+	function summarizeAuditResult(result: unknown) {
+		if (Array.isArray(result)) {
+			return `${result.length} item${result.length === 1 ? '' : 's'}`;
+		}
+		const record = toRecord(result);
+		if (!record) {
+			return '';
+		}
+		if (typeof record.error === 'string' && record.error.trim()) {
+			return record.error.trim();
+		}
+		if (record.total_tasks !== undefined && typeof record.total_tasks === 'number') {
+			const supportTickets =
+				typeof record.support_tickets === 'number' ? ` · ${record.support_tickets} support` : '';
+			return `${record.total_tasks} tasks${supportTickets}`;
+		}
+		if (typeof record.task_title === 'string' && record.task_title.trim()) {
+			return record.task_title.trim();
+		}
+		if (typeof record.title === 'string' && record.title.trim()) {
+			return record.title.trim();
+		}
+		if (typeof record.path === 'string' && record.path.trim()) {
+			const lines = typeof record.lines === 'number' ? ` · ${Math.max(0, Math.trunc(record.lines))} lines` : '';
+			return `${record.path.trim()}${lines}`;
+		}
+		if (typeof record.deleted === 'boolean' && record.deleted) {
+			return 'Deleted';
+		}
+		if (typeof record.updated === 'boolean' && record.updated) {
+			return 'Updated';
+		}
+		if (typeof record.created === 'boolean' && record.created) {
+			return 'Created';
+		}
+		if (typeof record.written === 'boolean' && record.written) {
+			return 'Written';
+		}
+		return Object.keys(record)
+			.slice(0, 3)
+			.map((key) => `${humanizeFieldLabel(key)}: ${formatChangeValue(record[key], key)}`)
+			.join(' · ');
+	}
+
+	function formatAuditEntryLabel(entry: AuditTrailEntry) {
+		const toolLabel = prettifyToolName(entry.tool);
+		const target = summarizeAuditTarget(entry.input);
+		if (entry.kind === 'thinking') {
+			return trimPreviewText(entry.text || 'Planning the next step.', 88);
+		}
+		if (entry.kind === 'text') {
+			return `Tora: ${trimPreviewText(entry.text || 'Shared an update.', 88)}`;
+		}
+		if (entry.kind === 'done') {
+			return trimPreviewText(entry.text || 'Completed the agent run.', 96);
+		}
+		if (entry.kind === 'tool_call') {
+			return target ? `${toolLabel}: ${trimPreviewText(target, 68)}` : toolLabel || 'Tool call';
+		}
+		if (entry.kind === 'tool_result') {
+			if (auditEntryHasError(entry)) {
+				return `${toolLabel || 'Tool'} failed`;
+			}
+			const summary = summarizeAuditResult(entry.result);
+			if (summary) {
+				return `${toolLabel || 'Tool'}: ${trimPreviewText(summary, 76)}`;
+			}
+			return `${toolLabel || 'Tool'} succeeded`;
+		}
+		return trimPreviewText(entry.text || toolLabel || 'Agent event', 88);
+	}
+
+	function formatAuditEntryMeta(entry: AuditTrailEntry) {
+		if (entry.kind === 'tool_call') {
+			const params = Object.entries(entry.input)
+				.filter(([key, value]) => {
+					if (key.toLowerCase().endsWith('id') || value == null) {
+						return false;
+					}
+					if (typeof value === 'string') {
+						return value.trim() !== '';
+					}
+					if (Array.isArray(value)) {
+						return value.length > 0;
+					}
+					return true;
+				})
+				.slice(0, 3)
+				.map(([key, value]) => `${humanizeFieldLabel(key)}: ${trimPreviewText(formatChangeValue(value, key), 48)}`);
+			return params.join(' · ');
+		}
+		if (entry.kind === 'tool_result') {
+			const resultSummary = summarizeAuditResult(entry.result);
+			return trimPreviewText(resultSummary, 84);
+		}
+		return '';
+	}
+
 	// Stable hash of the full actionsJson string — used for localStorage persistence.
 	// Uses djb2 so different action lists always produce different keys.
 	function hashActionsJson(s: string): string {
@@ -318,14 +491,44 @@
 			actions = [];
 		}
 	}
+	$: auditEntries = Array.isArray(auditTrail)
+		? auditTrail
+				.map((entry, index) => normalizeAuditTrailEntry(entry, index))
+				.filter((entry): entry is AuditTrailEntry => Boolean(entry))
+		: [];
 
 	$: createCount = actions.filter((a) => a.kind === 'task_create').length;
 	$: updateCount = actions.filter((a) => a.kind === 'task_update').length;
 	$: deleteCount = actions.filter((a) => a.kind === 'task_delete').length;
 	$: visibleActions = showAll ? actions : actions.slice(0, PREVIEW_LIMIT);
 	$: hasMore = !showAll && actions.length > PREVIEW_LIMIT;
+	$: auditToolCallCount = auditEntries.filter((entry) => entry.kind === 'tool_call').length;
+	$: auditErrorCount = auditEntries.filter((entry) => auditEntryHasError(entry)).length;
+	$: auditPreviewEntries = auditEntries.slice(0, AUDIT_PREVIEW_LIMIT);
+	$: auditSummaryText =
+		auditEntries.length === 0
+			? ''
+			: `${auditEntries.length} event${auditEntries.length === 1 ? '' : 's'} · ${auditToolCallCount} tool call${auditToolCallCount === 1 ? '' : 's'}${auditErrorCount > 0 ? ` · ${auditErrorCount} issue${auditErrorCount === 1 ? '' : 's'}` : ''}`;
 
 	onMount(() => {
+		const allAlreadyApplied =
+			actions.length > 0 && actions.every((action) => action.already_applied === true);
+		if (allAlreadyApplied) {
+			appliedCounts = {
+				created: createCount,
+				updated: updateCount,
+				deleted: deleteCount
+			};
+			actionResults = actions.map(() => ({ ok: true }));
+			appliedMeta = {
+				appliedBy: 'Tora-Bot',
+				appliedAt: new Date().toISOString(),
+				counts: { ...appliedCounts }
+			};
+			state = 'applied';
+			return;
+		}
+
 		// Restore persisted applied state from localStorage
 		try {
 			const saved = localStorage.getItem(persistKey());
@@ -561,6 +764,34 @@
 			<button class="details-btn" on:click={() => (showModal = true)}>Full details</button>
 		</div>
 
+		{#if auditEntries.length > 0}
+			<div class="audit-summary-card">
+				<div class="audit-summary-head">
+					<span class="audit-pill">Agent audit</span>
+					<span class="audit-summary-text">{auditSummaryText}</span>
+				</div>
+				<div class="audit-preview-list">
+					{#each auditPreviewEntries as entry (`audit-preview-${entry.index}`)}
+						{@const auditMeta = formatAuditEntryMeta(entry)}
+						<div class="audit-row" class:audit-row-error={auditEntryHasError(entry)}>
+							<span class="audit-row-icon">{getAuditEntryIcon(entry)}</span>
+							<div class="audit-row-main">
+								<div class="audit-row-label">{formatAuditEntryLabel(entry)}</div>
+								{#if auditMeta}
+									<div class="audit-row-meta">{auditMeta}</div>
+								{/if}
+							</div>
+						</div>
+					{/each}
+				</div>
+				{#if auditEntries.length > auditPreviewEntries.length}
+					<button class="expand-btn audit-expand-btn" on:click={() => (showModal = true)}>
+						View full audit trail
+					</button>
+				{/if}
+			</div>
+		{/if}
+
 		<!-- Action buttons -->
 		{#if state === 'pending'}
 			<div class="btn-row">
@@ -737,6 +968,27 @@
 						{/each}
 					</section>
 				{/if}
+
+				{#if auditEntries.length > 0}
+					<section>
+						<h3 class="section-head head-audit">Agent Audit</h3>
+						<div class="audit-detail-list">
+							{#each auditEntries as entry (`audit-detail-${entry.index}`)}
+								{@const auditMeta = formatAuditEntryMeta(entry)}
+								<div class="audit-detail-item" class:audit-detail-error={auditEntryHasError(entry)}>
+									<div class="audit-detail-head">
+										<span class="audit-detail-index">#{entry.index}</span>
+										<span class="audit-row-icon">{getAuditEntryIcon(entry)}</span>
+										<span class="audit-detail-label">{formatAuditEntryLabel(entry)}</span>
+									</div>
+									{#if auditMeta}
+										<div class="audit-detail-meta">{auditMeta}</div>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					</section>
+				{/if}
 			</div>
 
 			<div class="modal-footer">
@@ -825,6 +1077,95 @@
 	.chip-delete {
 		background: #dc262628;
 		color: #dc2626;
+	}
+	.audit-pill {
+		display: inline-flex;
+		align-items: center;
+		padding: 2px 8px;
+		border-radius: 999px;
+		background: rgba(99, 102, 241, 0.12);
+		color: #818cf8;
+		font-size: 0.72em;
+		font-weight: 700;
+	}
+
+	.audit-summary-card {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 10px 12px;
+		border-radius: 10px;
+		background: rgba(99, 102, 241, 0.06);
+		border: 1px solid rgba(99, 102, 241, 0.16);
+	}
+	.audit-summary-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.audit-summary-text {
+		font-size: 0.76em;
+		opacity: 0.78;
+	}
+	.audit-preview-list,
+	.audit-detail-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.audit-row,
+	.audit-detail-item {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 7px 8px;
+		border-radius: 8px;
+		background: rgba(15, 23, 42, 0.2);
+		border: 1px solid rgba(148, 163, 184, 0.12);
+	}
+	.audit-row-error,
+	.audit-detail-error {
+		border-color: rgba(248, 113, 113, 0.3);
+		background: rgba(127, 29, 29, 0.16);
+	}
+	.audit-row-icon {
+		flex-shrink: 0;
+		width: 18px;
+		text-align: center;
+	}
+	.audit-row-main {
+		flex: 1;
+		min-width: 0;
+	}
+	.audit-row-label,
+	.audit-detail-label {
+		font-size: 0.78em;
+		font-weight: 600;
+		line-height: 1.35;
+	}
+	.audit-row-meta,
+	.audit-detail-meta {
+		font-size: 0.72em;
+		margin-top: 2px;
+		opacity: 0.74;
+		line-height: 1.4;
+		word-break: break-word;
+	}
+	.audit-expand-btn {
+		align-self: flex-start;
+	}
+	.audit-detail-head {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.audit-detail-index {
+		font-size: 0.72em;
+		color: #94a3b8;
+		font-weight: 700;
 	}
 
 	/* ── Change list viewport (300px cap) ───────────────────────── */
@@ -1338,6 +1679,9 @@
 	}
 	.result-label-err {
 		color: #f87171;
+	}
+	.head-audit {
+		color: #818cf8;
 	}
 
 	/* ── Modal footer ───────────────────────────────────────────── */

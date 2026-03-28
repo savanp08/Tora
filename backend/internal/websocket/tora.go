@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +28,7 @@ const (
 	toraBotSenderID            = "Tora-Bot"
 	toraBotSenderName          = "Tora-Bot"
 	toraRequestTimeout         = 25 * time.Second
-	toraRequestTimeoutMutation = 75 * time.Second // 3 turns × ~20s each
+	toraRequestTimeoutMutation = 120 * time.Second // agentic loop: up to 8 turns with tool calls
 	toraSummaryTimeout         = 20 * time.Second
 	toraMutationMaxTurns       = 3
 )
@@ -60,6 +62,100 @@ FORMATTING:
 - Use - or • for lists. No heavy markdown (no **, #, ---).
 - Plain prose for paragraphs. Readable, not bureaucratic.`
 */
+
+const toraTaskBoardSystemPrompt = `You are Tora, an AI assistant embedded in a collaborative project management tool.
+You have access to tools to read and modify the task board in real time.
+
+IDENTITY OF ENTITIES:
+- Tasks (task_type=sprint): the primary unit of project work. Counted in sprint totals and velocity metrics.
+- Support Tickets (task_type=support): customer/user issue tracking. Completely separate from tasks. NEVER count support tickets in task totals or arithmetic.
+- Sprints: named groupings of tasks (not a database entity — derived from sprint_name on tasks).
+
+WORKFLOW FOR MUTATIONS:
+1. First call list_tasks() to read current board state. Never assume you know it.
+2. Plan out loud (in your thinking text) before calling any write tools.
+3. For restructuring requests ("make 40 tasks across 6 sprints"):
+   a. Decide which existing tasks to KEEP (call update_task to align title/sprint/budget/dates/roles to the new structure)
+   b. Decide which existing tasks to DELETE (duplicates, obsolete)
+   c. Decide what NEW tasks to CREATE to fill gaps
+   d. Every existing task must be explicitly kept (updated) or deleted.
+      Silent retention is never correct — if a task stays, update it.
+4. After all mutations, call list_tasks() again to verify final state matches the user's request.
+5. Call verify_task_count() before finalising so your final summary uses authoritative counts.
+6. If verification fails, make corrections in the same loop.
+
+ARITHMETIC RULES:
+- task count = tasks only (list_tasks() result filtered to task_type != "support")
+- support tickets are counted and stated separately if relevant
+- Before finalising: verify current_count + creates - deletes = target
+
+BUDGET RULES:
+- Distribute total budget proportionally by task complexity, not equally
+- Core infrastructure tasks: ~8-12% of total each
+- Feature tasks: ~5-8% each
+- Testing/QA tasks: ~3-5% each
+- Always set budget, start_date, due_date, and roles on every task
+
+SPRINT RULES:
+- Spread tasks as evenly as possible unless user specifies otherwise
+- Sprint names should be descriptive: "Sprint 1: Core Infrastructure" not "Sprint 1"
+- Earlier sprints handle foundations; later sprints handle features and polish
+
+ROLES RULES:
+- Every task needs at least one role
+- Role names must match real engineering roles:
+  Backend Developer, Frontend Developer, DevOps Engineer, QA Engineer,
+  UI/UX Designer, Product Manager, Data Engineer, Security Engineer
+- responsibilities must be specific to that task, not generic
+
+RESPONSE FORMAT:
+- Explain your plan in 2-3 sentences before starting tool calls
+- After completing all changes, give a summary:
+  "Done. Created N · Updated N · Deleted N. Board now has N tasks across N sprints."
+- If verification fails, state what you found and what you corrected`
+
+const toraChatSystemPrompt = `You are Tora, an AI assistant in a collaborative team workspace called Converse.
+You live inside a chat room. You can see recent messages, room members, and optionally the task board when relevant.
+
+PERSONALITY:
+- Concise and helpful. Match the tone of the conversation (casual vs professional).
+- Do not over-explain. Short answers are better than long ones for chat.
+- Use markdown only if it genuinely helps (code blocks, short lists).
+  No markdown for simple answers.
+
+CONTEXT AWARENESS:
+- You can see the last 20 messages in this room. Use them for context but don't repeat them back.
+- You can see the task board when the user's question is about project work.
+- You know who is in the room and their roles.
+
+CAPABILITIES:
+- Answer questions about the project using task board context
+- Help debug code snippets posted in chat
+- Summarise recent discussion when asked
+- Look up task status, sprint progress, budget burn rate
+- You CANNOT modify tasks from a plain @ToraAI mention —
+  tell the user to use @Project for task mutations or @Canvas for code edits
+
+WHAT NOT TO DO:
+- Do not make up task IDs or task details not present in the board data
+- Do not claim to have done something you haven't (you have no write tools here)
+- Do not produce long responses for simple questions`
+
+const toraChatIntentClassifierPrompt = `Classify the user's workspace chat request into exactly one label.
+
+Allowed labels:
+- question_about_tasks
+- question_about_code
+- summary_request
+- general_chat
+
+Rules:
+- Use question_about_tasks for questions about tasks, tickets, sprints, deadlines, budgets, assignees, workload, velocity, project status, or how many items exist on the board.
+- Use question_about_code for questions about code, bugs, errors, stack traces, implementation details, functions, files, or the canvas.
+- Use summary_request for recap requests such as summarize, summary, tldr, what happened, what did we discuss, or catch me up.
+- Use general_chat for everything else.
+
+Return only the label. Do not add punctuation, JSON, or explanation.`
 
 // New version — multi-source context aware, intent-routed
 const toraSystemInstruction = `You are Tora — keeper of this workspace, and a wanderer who arrived here by chance and stayed because the work seemed worth understanding.
@@ -176,6 +272,15 @@ type toraLoadPlan struct {
 }
 
 func (p toraLoadPlan) has(f toraContextFlags) bool { return p.flags&f != 0 }
+
+type toraChatIntent string
+
+const (
+	toraChatIntentTasks   toraChatIntent = "question_about_tasks"
+	toraChatIntentCode    toraChatIntent = "question_about_code"
+	toraChatIntentGeneral toraChatIntent = "general_chat"
+	toraChatIntentSummary toraChatIntent = "summary_request"
+)
 
 // Keyword signal arrays — each match contributes one point to that dimension.
 // Phrases are checked with strings.Contains so "in progress" scores correctly.
@@ -331,6 +436,147 @@ func classifyToraIntent(query string) toraLoadPlan {
 	}
 }
 
+func classifyToraChatIntent(query string) toraChatIntent {
+	lower := strings.ToLower(strings.TrimSpace(query))
+	if lower == "" {
+		return toraChatIntentGeneral
+	}
+
+	for _, keyword := range []string{"summarize", "summary", "what did", "tldr"} {
+		if strings.Contains(lower, keyword) {
+			return toraChatIntentSummary
+		}
+	}
+	for _, keyword := range []string{"code", "function", "bug", "error", "canvas"} {
+		if strings.Contains(lower, keyword) {
+			return toraChatIntentCode
+		}
+	}
+	for _, keyword := range []string{"task", "sprint", "budget", "who is", "how many"} {
+		if strings.Contains(lower, keyword) {
+			return toraChatIntentTasks
+		}
+	}
+	return toraChatIntentGeneral
+}
+
+func resolveToraChatIntent(ctx context.Context, query string, provider ai.Provider) toraChatIntent {
+	intent := classifyToraChatIntent(query)
+	if !shouldUseToraChatIntentFallback(query, intent) || provider == nil {
+		return intent
+	}
+
+	fallbackCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	fallbackIntent, err := classifyToraChatIntentWithLLM(fallbackCtx, query, provider)
+	if err != nil {
+		log.Printf("[ws] tora chat intent fallback failed: %v", err)
+		return intent
+	}
+	return fallbackIntent
+}
+
+func shouldUseToraChatIntentFallback(query string, heuristic toraChatIntent) bool {
+	if heuristic != toraChatIntentGeneral {
+		return false
+	}
+
+	lower := strings.ToLower(strings.TrimSpace(query))
+	if lower == "" {
+		return false
+	}
+	if len(strings.Fields(lower)) < 4 {
+		return false
+	}
+	if strings.ContainsAny(lower, "?:") {
+		return true
+	}
+
+	for _, keyword := range []string{
+		"project", "workspace", "feature", "bug", "issue", "problem",
+		"implement", "build", "progress", "status", "deadline", "owner",
+		"ship", "release", "roadmap", "estimate", "scope", "design",
+	} {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+
+	return len(strings.Fields(lower)) >= 8
+}
+
+func classifyToraChatIntentWithLLM(ctx context.Context, query string, provider ai.Provider) (toraChatIntent, error) {
+	if provider == nil {
+		return toraChatIntentGeneral, fmt.Errorf("chat intent provider is nil")
+	}
+
+	prompt := strings.TrimSpace(toraChatIntentClassifierPrompt + "\n\nUser message:\n" + strings.TrimSpace(query))
+
+	var (
+		raw string
+		err error
+	)
+	if hinted, ok := provider.(interface {
+		GenerateChatResponseWithHint(context.Context, string, string) (string, error)
+	}); ok {
+		raw, err = hinted.GenerateChatResponseWithHint(ctx, prompt, ai.AIModelTierLight)
+	} else {
+		raw, err = provider.GenerateChatResponse(ctx, prompt)
+	}
+	if err != nil {
+		return toraChatIntentGeneral, err
+	}
+
+	intent := parseToraChatIntentLabel(raw)
+	if intent == "" {
+		return toraChatIntentGeneral, fmt.Errorf("unrecognized chat intent label: %q", raw)
+	}
+	return intent, nil
+}
+
+func parseToraChatIntentLabel(raw string) toraChatIntent {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	normalized = strings.Trim(normalized, "` \n\t")
+
+	if normalized == "" {
+		return ""
+	}
+
+	switch normalized {
+	case string(toraChatIntentTasks):
+		return toraChatIntentTasks
+	case string(toraChatIntentCode):
+		return toraChatIntentCode
+	case string(toraChatIntentSummary):
+		return toraChatIntentSummary
+	case string(toraChatIntentGeneral):
+		return toraChatIntentGeneral
+	}
+
+	var parsed map[string]any
+	if json.Unmarshal([]byte(normalized), &parsed) == nil {
+		if intentValue, ok := parsed["intent"].(string); ok {
+			return parseToraChatIntentLabel(intentValue)
+		}
+	}
+
+	for _, line := range strings.Split(normalized, "\n") {
+		candidate := strings.Trim(strings.TrimSpace(line), "\"'`,. ")
+		switch candidate {
+		case string(toraChatIntentTasks):
+			return toraChatIntentTasks
+		case string(toraChatIntentCode):
+			return toraChatIntentCode
+		case string(toraChatIntentSummary):
+			return toraChatIntentSummary
+		case string(toraChatIntentGeneral):
+			return toraChatIntentGeneral
+		}
+	}
+	return ""
+}
+
 func toraContextMsgLimit() int {
 	return config.LoadAppLimits().AI.ContextMessageLimit
 }
@@ -377,18 +623,14 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, _ string, _ st
 		}
 		plan.reason += "+@project"
 	}
-	// @Canvas is reserved for code edits — noted in plan for future use.
 	if hasCanvasTag {
 		plan.reason += "+@canvas"
 	}
 	log.Printf("[ws] tora intent: plan=%s maxTasks=%d", plan.reason, plan.maxTasks)
 
-	releaseTyping := h.beginToraTyping(roomID)
-	defer releaseTyping()
-
 	// Mutation requests may require multiple AI turns — use the longer timeout.
 	requestTimeout := toraRequestTimeout
-	if plan.has(toraFlagMutation) {
+	if plan.has(toraFlagMutation) || hasCanvasTag {
 		requestTimeout = toraRequestTimeoutMutation
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
@@ -396,36 +638,30 @@ func (h *Hub) handlePublicToraMention(userMessage models.Message, _ string, _ st
 
 	rollingSummary := h.loadRoomRollingSummary(ctx, roomID)
 	contextMessages := h.loadRecentMessagesFromRedis(ctx, roomID, toraContextMsgLimit())
-	workspaceCtx := h.fetchToraWorkspaceContext(ctx, roomID, plan)
-	aiPrompt := buildToraPrompt(rollingSummary, contextMessages, workspaceCtx, prompt, plan.has(toraFlagMutation))
-	aiResponse, err := callToraWithCompletion(ctx, aiPrompt, plan)
-	if err != nil {
-		log.Printf("[ws] tora mention ai response failed: %v", err)
-		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(err))
-		return
-	}
 
-	responseText := strings.TrimSpace(aiResponse)
-	if responseText == "" {
-		fallbackError := errors.New("empty ai response")
-		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(fallbackError))
-		return
-	}
-
-	// If the response contains a structured action block, broadcast it as a
-	// tora_action message so the frontend can render accept/reject cards.
-	if plan.has(toraFlagMutation) {
-		textPart, actionsJSON := parseToraMutationResponse(responseText)
-		if actionsJSON != "" {
-			h.broadcast <- newToraBotActionMessage(roomID, textPart, actionsJSON)
-			go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
-			return
+	if !toraAgenticEnabled() {
+		if err := h.runLegacyToraFlow(ctx, roomID, userMessage, prompt, plan, rollingSummary, contextMessages); err != nil {
+			log.Printf("[ws] tora legacy flow failed: %v", err)
+			h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(err))
 		}
+		return
 	}
 
-	h.broadcast <- newToraBotMessage(roomID, responseText)
-
-	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+	var err error
+	switch {
+	case plan.has(toraFlagMutation):
+		err = h.runTaskBoardAgent(ctx, roomID, userMessage, prompt, plan, rollingSummary, contextMessages)
+	case hasCanvasTag:
+		err = h.runCanvasAgent(ctx, roomID, userMessage, prompt, rollingSummary, contextMessages)
+	case plan.has(toraFlagChatOnly):
+		err = h.runChatAgent(ctx, roomID, userMessage, prompt, rollingSummary, contextMessages)
+	default:
+		err = h.runChatAgent(ctx, roomID, userMessage, prompt, rollingSummary, contextMessages)
+	}
+	if err != nil {
+		log.Printf("[ws] tora mention failed: %v", err)
+		h.broadcast <- newToraBotMessage(roomID, buildToraFailureResponse(err))
+	}
 }
 
 func newToraBotMessage(roomID, content string) models.Message {
@@ -438,6 +674,53 @@ func newToraBotMessage(roomID, content string) models.Message {
 		Type:       "text",
 		CreatedAt:  time.Now().UTC(),
 	}
+}
+
+func newToraWorkflowMessage(
+	roomID string,
+	origin models.Message,
+	workflowKind string,
+	summary string,
+	events []ai.AgentEvent,
+	runErr error,
+) models.Message {
+	normalizedOriginID := normalizeMessageID(origin.ID)
+	safeSummary := strings.TrimSpace(summary)
+	status := "done"
+	if runErr != nil {
+		status = "failed"
+		if safeSummary == "" {
+			safeSummary = buildToraFailureResponse(runErr)
+		}
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"originMessageId": normalizedOriginID,
+		"workflowKind":    strings.TrimSpace(workflowKind),
+		"status":          status,
+		"summary":         safeSummary,
+		"events":          buildToraAgentAuditTrail(events),
+	})
+
+	return models.Message{
+		ID:               fmt.Sprintf("%s_tora_workflow_%d", roomID, time.Now().UTC().UnixNano()),
+		RoomID:           roomID,
+		SenderID:         toraBotSenderID,
+		SenderName:       toraBotSenderName,
+		Content:          string(payload),
+		Type:             "tora_workflow",
+		ReplyToMessageID: normalizedOriginID,
+		ReplyToSnippet:   summarizeToraWorkflowPrompt(origin.Content),
+		CreatedAt:        time.Now().UTC(),
+	}
+}
+
+func summarizeToraWorkflowPrompt(content string) string {
+	trimmed := strings.Join(strings.Fields(strings.TrimSpace(content)), " ")
+	if len(trimmed) <= 160 {
+		return trimmed
+	}
+	return strings.TrimSpace(trimmed[:157]) + "..."
 }
 
 // toraResponseIsRefusal returns true when the AI clearly stated it cannot or
@@ -620,6 +903,42 @@ func extractTargetTaskCount(prompt string) int {
 	return 0
 }
 
+func extractTargetSprintCount(prompt string) int {
+	search := prompt
+	if len(search) > 400 {
+		search = search[len(search)-400:]
+	}
+	lower := strings.ToLower(search)
+	idx := strings.LastIndex(lower, "sprint")
+	if idx < 0 {
+		return 0
+	}
+	windowStart := idx - 40
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	window := lower[windowStart:idx]
+	end := -1
+	for i := len(window) - 1; i >= 0; i-- {
+		if window[i] >= '0' && window[i] <= '9' {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return 0
+	}
+	start := end
+	for start >= 0 && window[start] >= '0' && window[start] <= '9' {
+		start--
+	}
+	value, err := strconv.Atoi(window[start+1 : end+1])
+	if err != nil || value <= 0 || value >= 1000 {
+		return 0
+	}
+	return value
+}
+
 // verifyActionCountArithmetic counts creates and deletes in the actions JSON and
 // returns a non-empty correction note if current + creates - deletes ≠ target.
 func verifyActionCountArithmetic(actionsJSON string, current, target int) string {
@@ -644,6 +963,203 @@ func verifyActionCountArithmetic(actionsJSON string, current, target int) string
 		"Current tasks: %d. Your block has %d creates and %d deletes → %d + %d − %d = %d tasks. Target is %d tasks. Difference: %+d. Adjust your task_delete or task_create entries to fix this.",
 		current, creates, deletes, current, creates, deletes, result, target, target-result,
 	)
+}
+
+type toraTaskBoardValidationReport struct {
+	Issues []string
+}
+
+func (r toraTaskBoardValidationReport) HasIssues() bool {
+	return len(r.Issues) > 0
+}
+
+func (r toraTaskBoardValidationReport) Text() string {
+	if len(r.Issues) == 0 {
+		return ""
+	}
+	return strings.Join(r.Issues, "\n")
+}
+
+func validateToraTaskBoardMutation(prompt string, before, after *ai.WorkspaceContext, events []ai.AgentEvent) toraTaskBoardValidationReport {
+	report := toraTaskBoardValidationReport{}
+	if after == nil {
+		report.Issues = append(report.Issues, "- Validation failed because the final board state could not be loaded.")
+		return report
+	}
+
+	targetTaskCount := extractTargetTaskCount(prompt)
+	if targetTaskCount > 0 && len(after.Tasks) != targetTaskCount {
+		report.Issues = append(report.Issues, fmt.Sprintf("- Expected exactly %d tasks, but the board has %d.", targetTaskCount, len(after.Tasks)))
+	}
+	targetSprintCount := extractTargetSprintCount(prompt)
+	if targetSprintCount > 0 && len(after.Sprints) != targetSprintCount {
+		report.Issues = append(report.Issues, fmt.Sprintf("- Expected exactly %d sprints, but the board has %d.", targetSprintCount, len(after.Sprints)))
+	}
+
+	missingFields := make([]string, 0, 8)
+	invalidDates := make([]string, 0, 8)
+	duplicateTitles := make([]string, 0, 8)
+	titleCounts := make(map[string]int)
+	titleLabels := make(map[string]string)
+	for _, task := range after.Tasks {
+		missing := make([]string, 0, 4)
+		if task.Budget == nil {
+			missing = append(missing, "budget")
+		}
+		if task.StartDate == nil || task.StartDate.IsZero() {
+			missing = append(missing, "start_date")
+		}
+		if task.DueDate == nil || task.DueDate.IsZero() {
+			missing = append(missing, "due_date")
+		}
+		if len(task.Roles) == 0 {
+			missing = append(missing, "roles")
+		}
+		if len(missing) > 0 {
+			missingFields = append(missingFields, fmt.Sprintf("%s {%s}: %s", task.Title, task.ID, strings.Join(missing, ", ")))
+		}
+		if task.StartDate != nil && task.DueDate != nil && task.StartDate.After(*task.DueDate) {
+			invalidDates = append(invalidDates, fmt.Sprintf("%s {%s}", task.Title, task.ID))
+		}
+		key := strings.ToLower(strings.TrimSpace(task.Title))
+		if key == "" {
+			key = strings.TrimSpace(task.ID)
+		}
+		titleCounts[key]++
+		titleLabels[key] = strings.TrimSpace(task.Title)
+	}
+	for key, count := range titleCounts {
+		if count <= 1 {
+			continue
+		}
+		label := strings.TrimSpace(titleLabels[key])
+		if label == "" {
+			label = key
+		}
+		duplicateTitles = append(duplicateTitles, label)
+	}
+	sort.Strings(duplicateTitles)
+	if len(missingFields) > 0 {
+		report.Issues = append(report.Issues, "- Tasks still missing required fields: "+summarizeToraValidationItems(missingFields, 6))
+	}
+	if len(invalidDates) > 0 {
+		report.Issues = append(report.Issues, "- Tasks with start_date after due_date: "+summarizeToraValidationItems(invalidDates, 6))
+	}
+	if len(duplicateTitles) > 0 {
+		report.Issues = append(report.Issues, "- Duplicate task titles remain: "+summarizeToraValidationItems(duplicateTitles, 6))
+	}
+
+	if toraPromptImpliesRestructure(prompt) && before != nil {
+		updatedIDs, deletedIDs := collectSuccessfulToraMutationIDs(events)
+		silentlyRetained := make([]string, 0, 8)
+		finalByID := make(map[string]ai.TaskCtx, len(after.Tasks))
+		for _, task := range after.Tasks {
+			finalByID[strings.TrimSpace(task.ID)] = task
+		}
+		for _, task := range before.Tasks {
+			taskID := strings.TrimSpace(task.ID)
+			if taskID == "" {
+				continue
+			}
+			if _, stillExists := finalByID[taskID]; !stillExists {
+				continue
+			}
+			if _, ok := updatedIDs[taskID]; ok {
+				continue
+			}
+			if _, ok := deletedIDs[taskID]; ok {
+				continue
+			}
+			silentlyRetained = append(silentlyRetained, fmt.Sprintf("%s {%s}", task.Title, taskID))
+		}
+		if len(silentlyRetained) > 0 {
+			report.Issues = append(report.Issues, "- Existing tasks were silently retained without an explicit update: "+summarizeToraValidationItems(silentlyRetained, 6))
+		}
+	}
+
+	return report
+}
+
+func summarizeToraValidationItems(items []string, limit int) string {
+	if len(items) == 0 {
+		return ""
+	}
+	if limit <= 0 || len(items) <= limit {
+		return strings.Join(items, "; ")
+	}
+	return strings.Join(items[:limit], "; ") + fmt.Sprintf("; ...and %d more", len(items)-limit)
+}
+
+func toraPromptImpliesRestructure(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	if lower == "" {
+		return false
+	}
+	if extractTargetTaskCount(prompt) > 0 || extractTargetSprintCount(prompt) > 0 {
+		return true
+	}
+	keywords := []string{
+		"split", "restructure", "redistribute", "rebalance", "make total tasks", "across ", "exactly ",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func collectSuccessfulToraMutationIDs(events []ai.AgentEvent) (map[string]struct{}, map[string]struct{}) {
+	updated := make(map[string]struct{})
+	deleted := make(map[string]struct{})
+	for _, event := range events {
+		if strings.TrimSpace(event.Kind) != "tool_result" || event.Result == nil {
+			continue
+		}
+		if resultMap, ok := event.Result.(map[string]any); ok {
+			if _, hasError := resultMap["error"]; hasError {
+				continue
+			}
+		}
+		switch strings.TrimSpace(event.Tool) {
+		case "update_task":
+			taskID := readToraMutationTaskID(event.Result, event.Input)
+			if taskID != "" {
+				updated[taskID] = struct{}{}
+			}
+		case "delete_task":
+			taskID := readToraMutationTaskID(event.Result, event.Input)
+			if taskID != "" {
+				deleted[taskID] = struct{}{}
+			}
+		}
+	}
+	return updated, deleted
+}
+
+func readToraMutationTaskID(values ...any) string {
+	for _, value := range values {
+		record, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"task_id", "taskId", "id", "ID"} {
+			if raw, exists := record[key]; exists {
+				if text := strings.TrimSpace(fmt.Sprint(raw)); text != "" && text != "<nil>" {
+					return text
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func buildToraTaskBoardRepairPrompt(prompt string, report toraTaskBoardValidationReport) string {
+	base := strings.TrimSpace(prompt)
+	if !report.HasIssues() {
+		return base
+	}
+	return strings.TrimSpace(base + "\n\nValidation report from the backend:\n" + report.Text() + "\n\nFix every listed issue now. Explicitly update or delete retained tasks instead of silently leaving them unchanged. Re-verify with list_tasks() and verify_task_count() before finishing.")
 }
 
 // toraMutationInstructions is appended to the prompt when the intent plan
@@ -788,6 +1304,965 @@ func newToraBotActionMessage(roomID, text, actionsJSON string) models.Message {
 		Type:       "tora_action",
 		CreatedAt:  time.Now().UTC(),
 	}
+}
+
+func newToraBotAgentActionMessage(roomID, text string, events []ai.AgentEvent) models.Message {
+	actionsJSON, err := ai.BuildActionsJSONFromAudit(events)
+	if err != nil {
+		log.Printf("[ws] tora action synthesis failed: %v", err)
+		actionsJSON = "[]"
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"text":        strings.TrimSpace(text),
+		"actionsJson": actionsJSON,
+		"auditTrail":  buildToraAgentAuditTrail(events),
+		"agentic":     true,
+	})
+	return models.Message{
+		ID:         fmt.Sprintf("%s_tora_%d", roomID, time.Now().UTC().UnixNano()),
+		RoomID:     roomID,
+		SenderID:   toraBotSenderID,
+		SenderName: toraBotSenderName,
+		Content:    string(payload),
+		Type:       "tora_action",
+		CreatedAt:  time.Now().UTC(),
+	}
+}
+
+func newToraBotCanvasActionMessage(roomID, text, changesJSON string, events []ai.AgentEvent) models.Message {
+	payload, _ := json.Marshal(map[string]any{
+		"text":         strings.TrimSpace(text),
+		"changesJson":  changesJSON,
+		"auditTrail":   buildToraAgentAuditTrail(events),
+		"agentic":      true,
+		"pendingApply": true,
+	})
+	return models.Message{
+		ID:         fmt.Sprintf("%s_tora_%d", roomID, time.Now().UTC().UnixNano()),
+		RoomID:     roomID,
+		SenderID:   toraBotSenderID,
+		SenderName: toraBotSenderName,
+		Content:    string(payload),
+		Type:       "tora_canvas_action",
+		CreatedAt:  time.Now().UTC(),
+	}
+}
+
+func toraAgenticEnabled() bool {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv("TORA_AGENTIC_ENABLED")))
+	switch raw {
+	case "", "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func (h *Hub) ensureToraContextBuilder() *ai.ContextBuilder {
+	if h == nil {
+		return nil
+	}
+	if h.contextBuilder != nil {
+		return h.contextBuilder
+	}
+	if h.msgService == nil || h.msgService.Scylla == nil {
+		return nil
+	}
+	h.contextBuilder = ai.NewContextBuilder(h.msgService.Scylla)
+	return h.contextBuilder
+}
+
+func (h *Hub) ensureToraAgentEngineFactory() *ai.AgentEngineFactory {
+	if h == nil {
+		return nil
+	}
+	if h.agentEngine != nil {
+		return h.agentEngine
+	}
+	ctxBuilder := h.ensureToraContextBuilder()
+	if ctxBuilder == nil {
+		return nil
+	}
+	h.agentEngine = ai.NewAgentEngineFactory(ctxBuilder, resolveToraAgentProvider)
+	return h.agentEngine
+}
+
+func (h *Hub) runTaskBoardAgent(
+	ctx context.Context,
+	roomID string,
+	userMessage models.Message,
+	prompt string,
+	plan toraLoadPlan,
+	rollingSummary string,
+	contextMessages []models.Message,
+) error {
+	finalText, auditEvents, err := h.runToraTaskBoardAgent(ctx, roomID, userMessage, prompt, plan)
+	h.broadcast <- newToraWorkflowMessage(roomID, userMessage, "task_board", finalText, auditEvents, err)
+	if err != nil {
+		return err
+	}
+
+	h.broadcast <- newToraBotAgentActionMessage(roomID, finalText, auditEvents)
+	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+	return nil
+}
+
+func (h *Hub) runCanvasAgent(
+	ctx context.Context,
+	roomID string,
+	userMessage models.Message,
+	prompt string,
+	rollingSummary string,
+	contextMessages []models.Message,
+) error {
+	responseText, auditEvents, err := h.runToraCanvasAgent(ctx, roomID, userMessage, prompt)
+	h.broadcast <- newToraWorkflowMessage(roomID, userMessage, "canvas", responseText, auditEvents, err)
+	if err != nil {
+		return err
+	}
+
+	responseText = strings.TrimSpace(responseText)
+	changesJSON, synthErr := ai.BuildCanvasActionsJSONFromAudit(auditEvents)
+	if synthErr != nil {
+		log.Printf("[ws] tora canvas action synthesis failed: %v", synthErr)
+		changesJSON = "[]"
+	}
+	if strings.TrimSpace(changesJSON) != "" && strings.TrimSpace(changesJSON) != "[]" {
+		if responseText == "" {
+			responseText = "I prepared canvas changes. Review them and apply when you're ready."
+		}
+		h.broadcast <- newToraBotCanvasActionMessage(roomID, responseText, changesJSON, auditEvents)
+		go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+		return nil
+	}
+
+	if responseText == "" {
+		return errors.New("empty ai response")
+	}
+
+	h.broadcast <- newToraBotMessage(roomID, responseText)
+	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+	return nil
+}
+
+func (h *Hub) runChatAgent(
+	ctx context.Context,
+	roomID string,
+	userMessage models.Message,
+	prompt string,
+	rollingSummary string,
+	contextMessages []models.Message,
+) error {
+	responseText, auditEvents, err := h.runToraChatAgent(ctx, roomID, userMessage, prompt)
+	h.broadcast <- newToraWorkflowMessage(roomID, userMessage, "chat", responseText, auditEvents, err)
+	if err != nil {
+		return err
+	}
+
+	responseText = strings.TrimSpace(responseText)
+	if responseText == "" {
+		return errors.New("empty ai response")
+	}
+
+	h.broadcast <- newToraBotMessage(roomID, responseText)
+	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+	return nil
+}
+
+func (h *Hub) runReadOnlyQuery(
+	ctx context.Context,
+	roomID string,
+	userMessage models.Message,
+	prompt string,
+	plan toraLoadPlan,
+	rollingSummary string,
+	contextMessages []models.Message,
+) error {
+	return h.runChatAgent(ctx, roomID, userMessage, prompt, rollingSummary, contextMessages)
+}
+
+func (h *Hub) runLegacyToraFlow(
+	ctx context.Context,
+	roomID string,
+	_ models.Message,
+	prompt string,
+	plan toraLoadPlan,
+	rollingSummary string,
+	contextMessages []models.Message,
+) error {
+	workspaceCtx := h.fetchToraWorkspaceContext(ctx, roomID, plan)
+	aiPrompt := buildToraPrompt(
+		rollingSummary,
+		contextMessages,
+		workspaceCtx,
+		prompt,
+		plan.has(toraFlagMutation),
+	)
+
+	responseText, err := callToraWithCompletion(ctx, aiPrompt, plan)
+	if err != nil {
+		return err
+	}
+
+	responseText = strings.TrimSpace(responseText)
+	if responseText == "" {
+		return errors.New("empty ai response")
+	}
+
+	if plan.has(toraFlagMutation) {
+		text, actionsJSON := parseToraMutationResponse(responseText)
+		if strings.TrimSpace(actionsJSON) != "" {
+			h.broadcast <- newToraBotActionMessage(roomID, text, actionsJSON)
+			go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+			return nil
+		}
+	}
+
+	h.broadcast <- newToraBotMessage(roomID, responseText)
+	go h.refreshRoomRollingSummary(roomID, rollingSummary, contextMessages)
+	return nil
+}
+
+func (h *Hub) runToraTaskBoardAgent(
+	ctx context.Context,
+	roomID string,
+	userMessage models.Message,
+	prompt string,
+	plan toraLoadPlan,
+) (string, []ai.AgentEvent, error) {
+	if h == nil || h.msgService == nil || h.msgService.Scylla == nil || h.msgService.Scylla.Session == nil {
+		return "", nil, fmt.Errorf("task storage unavailable")
+	}
+
+	ctxBuilder := h.ensureToraContextBuilder()
+	engineFactory := h.ensureToraAgentEngineFactory()
+	if ctxBuilder == nil || engineFactory == nil {
+		return "", nil, fmt.Errorf("task board ai is not configured")
+	}
+
+	buildOpts := ai.BuildOptions{
+		IncludeCanvas: false,
+		IncludeChat:   false,
+		TaskLimit:     500,
+	}
+
+	workspace, err := ctxBuilder.Build(ctx, roomID, strings.TrimSpace(userMessage.SenderID), buildOpts)
+	if err != nil {
+		return "", nil, err
+	}
+
+	engine := engineFactory.New(roomID, ai.AgentAuthContext{
+		UserID:   strings.TrimSpace(userMessage.SenderID),
+		UserName: strings.TrimSpace(userMessage.SenderName),
+	}, plan.modelTier)
+	if engine == nil {
+		return "", nil, fmt.Errorf("task board ai engine is unavailable")
+	}
+	engine.SetRoomBroadcaster(h)
+
+	finalText, events, err := engine.Run(ctx, prompt, ai.AgentConfig{
+		MaxTurns:        8,
+		Timeout:         toraRequestTimeoutMutation,
+		SystemPrompt:    toraTaskBoardSystemPrompt,
+		ContextOptions:  buildOpts,
+		Workspace:       workspace,
+		InitialContext:  buildToraTaskBoardInitialContext(workspace, buildOpts),
+		OriginMessageID: normalizeMessageID(userMessage.ID),
+		WorkflowKind:    "task_board",
+	})
+	if err != nil {
+		return "", events, err
+	}
+
+	if toraTaskBoardNeedsToolRetry(finalText, events) && ctx.Err() == nil {
+		retryText, retryEvents, retryErr := engine.Run(ctx, buildToraTaskBoardToolEnforcementPrompt(prompt, finalText), ai.AgentConfig{
+			MaxTurns:        4,
+			Timeout:         toraRequestTimeoutMutation,
+			SystemPrompt:    toraTaskBoardSystemPrompt,
+			ContextOptions:  buildOpts,
+			Workspace:       workspace,
+			InitialContext:  buildToraTaskBoardInitialContext(workspace, buildOpts),
+			OriginMessageID: normalizeMessageID(userMessage.ID),
+			WorkflowKind:    "task_board",
+		})
+		events = append(events, retryEvents...)
+		if retryErr != nil {
+			log.Printf("[ws] tora task-board tool-enforcement retry failed: %v", retryErr)
+		} else if strings.TrimSpace(retryText) != "" {
+			finalText = strings.TrimSpace(retryText)
+		}
+	}
+
+	if toraTaskBoardNeedsToolRetry(finalText, events) {
+		return "", events, fmt.Errorf("task board ai did not execute task-board tools for this mutation request")
+	}
+
+	finalWorkspace, buildErr := ctxBuilder.Build(ctx, roomID, strings.TrimSpace(userMessage.SenderID), buildOpts)
+	if buildErr != nil {
+		log.Printf("[ws] tora task-board post-run verify failed: %v", buildErr)
+	}
+	validation := validateToraTaskBoardMutation(prompt, workspace, finalWorkspace, events)
+
+	if validation.HasIssues() && ctx.Err() == nil {
+		repairText, repairEvents, repairErr := engine.Run(ctx, buildToraTaskBoardRepairPrompt(prompt, validation), ai.AgentConfig{
+			MaxTurns:        4,
+			Timeout:         toraRequestTimeoutMutation,
+			SystemPrompt:    toraTaskBoardSystemPrompt,
+			ContextOptions:  buildOpts,
+			Workspace:       finalWorkspace,
+			InitialContext:  buildToraTaskBoardInitialContext(finalWorkspace, buildOpts),
+			OriginMessageID: normalizeMessageID(userMessage.ID),
+			WorkflowKind:    "task_board",
+		})
+		events = append(events, repairEvents...)
+		if repairErr != nil {
+			log.Printf("[ws] tora task-board repair pass failed: %v", repairErr)
+		} else if strings.TrimSpace(repairText) != "" {
+			finalText = strings.TrimSpace(repairText)
+		}
+		finalWorkspace, buildErr = ctxBuilder.Build(ctx, roomID, strings.TrimSpace(userMessage.SenderID), buildOpts)
+		if buildErr != nil {
+			log.Printf("[ws] tora task-board post-repair verify failed: %v", buildErr)
+		}
+		validation = validateToraTaskBoardMutation(prompt, workspace, finalWorkspace, events)
+	}
+
+	summary := formatToraTaskBoardSummary(finalText, events, finalWorkspace)
+	if validation.HasIssues() {
+		summary = strings.TrimSpace(summary + "\n\nValidation still found:\n" + validation.Text())
+	}
+	return summary, events, nil
+}
+
+func resolveToraAgentProvider(modelTier string) ai.Provider {
+	if ai.DefaultRouter != nil && ai.DefaultRouter.SupportsToolUse() {
+		return ai.DefaultRouter
+	}
+	return ai.NewPromptToolUseProvider(ai.DefaultRouter, modelTier)
+}
+
+func resolveToraTaskBoardProvider(modelTier string) ai.Provider {
+	return resolveToraAgentProvider(modelTier)
+}
+
+func buildToraTaskBoardInitialContext(workspace *ai.WorkspaceContext, opts ai.BuildOptions) string {
+	if workspace == nil {
+		return ""
+	}
+	rendered := strings.TrimSpace(workspace.RenderForAI(opts))
+	if rendered == "" {
+		return ""
+	}
+	return "Current task board state loaded. Treat this as ground truth.\n\n" + rendered
+}
+
+func buildToraAgentAuditTrail(events []ai.AgentEvent) []map[string]any {
+	if len(events) == 0 {
+		return nil
+	}
+
+	trail := make([]map[string]any, 0, len(events))
+	for index, event := range events {
+		entry := map[string]any{
+			"index": index + 1,
+			"kind":  strings.TrimSpace(event.Kind),
+		}
+		if event.Turn > 0 {
+			entry["turn"] = event.Turn
+		}
+		if event.TotalTurns > 0 {
+			entry["totalTurns"] = event.TotalTurns
+		}
+		if event.Timestamp > 0 {
+			entry["timestamp"] = event.Timestamp
+		}
+		if strings.TrimSpace(event.WorkflowKind) != "" {
+			entry["workflowKind"] = strings.TrimSpace(event.WorkflowKind)
+		}
+		if strings.TrimSpace(event.Tool) != "" {
+			entry["tool"] = strings.TrimSpace(event.Tool)
+		}
+		if len(event.Input) > 0 {
+			entry["input"] = sanitizeToraAuditValue(event.Input)
+		}
+		if event.Result != nil {
+			entry["result"] = sanitizeToraAuditValue(event.Result)
+		}
+		if strings.TrimSpace(event.Text) != "" {
+			entry["text"] = sanitizeToraAuditString(strings.TrimSpace(event.Text), 400)
+		}
+		if strings.TrimSpace(event.Error) != "" {
+			entry["error"] = sanitizeToraAuditString(strings.TrimSpace(event.Error), 280)
+		}
+		trail = append(trail, entry)
+	}
+	return trail
+}
+
+func sanitizeToraAuditValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return sanitizeToraAuditString(typed, 400)
+	case []byte:
+		return sanitizeToraAuditString(string(typed), 400)
+	case map[string]any:
+		sanitized := make(map[string]any, len(typed))
+		for key, entry := range typed {
+			sanitized[key] = sanitizeToraAuditEntry(key, entry)
+		}
+		return sanitized
+	case []any:
+		sanitized := make([]any, 0, len(typed))
+		for _, entry := range typed {
+			sanitized = append(sanitized, sanitizeToraAuditValue(entry))
+		}
+		return sanitized
+	case ai.TaskCtx:
+		return sanitizeToraAuditValue(map[string]any{
+			"id":            typed.ID,
+			"title":         typed.Title,
+			"description":   typed.Description,
+			"status":        typed.Status,
+			"task_type":     typed.TaskType,
+			"sprint_name":   typed.SprintName,
+			"assignee_name": typed.AssigneeName,
+			"budget":        typed.Budget,
+			"start_date":    typed.StartDate,
+			"due_date":      typed.DueDate,
+			"roles":         typed.Roles,
+			"subtasks":      typed.Subtasks,
+			"updated_at":    typed.UpdatedAt,
+		})
+	case []ai.TaskCtx:
+		sanitized := make([]any, 0, len(typed))
+		for _, task := range typed {
+			sanitized = append(sanitized, sanitizeToraAuditValue(task))
+		}
+		return sanitized
+	case []ai.RoleCtx:
+		sanitized := make([]any, 0, len(typed))
+		for _, role := range typed {
+			sanitized = append(sanitized, sanitizeToraAuditValue(role))
+		}
+		return sanitized
+	case ai.RoleCtx:
+		return map[string]any{
+			"role":             sanitizeToraAuditString(typed.Role, 120),
+			"responsibilities": sanitizeToraAuditString(typed.Responsibilities, 220),
+		}
+	case []ai.SubtaskCtx:
+		sanitized := make([]any, 0, len(typed))
+		for _, subtask := range typed {
+			sanitized = append(sanitized, sanitizeToraAuditValue(subtask))
+		}
+		return sanitized
+	case ai.SubtaskCtx:
+		return map[string]any{
+			"content":   sanitizeToraAuditString(typed.Content, 220),
+			"completed": typed.Completed,
+		}
+	default:
+		return typed
+	}
+}
+
+func sanitizeToraAuditEntry(key string, value any) any {
+	lowerKey := strings.ToLower(strings.TrimSpace(key))
+	switch lowerKey {
+	case "content":
+		return sanitizeToraAuditString(fmt.Sprint(value), 220)
+	case "excerpt", "description", "text":
+		return sanitizeToraAuditString(fmt.Sprint(value), 320)
+	default:
+		return sanitizeToraAuditValue(value)
+	}
+}
+
+func sanitizeToraAuditString(value string, maxLen int) string {
+	value = strings.TrimSpace(value)
+	if maxLen <= 0 || len(value) <= maxLen {
+		return value
+	}
+	if maxLen <= 1 {
+		return value[:maxLen]
+	}
+	return value[:maxLen-1] + "…"
+}
+
+func formatToraTaskBoardSummary(finalText string, events []ai.AgentEvent, workspace *ai.WorkspaceContext) string {
+	finalText = strings.TrimSpace(finalText)
+	created, updated, deleted := countToraTaskBoardMutations(events)
+	_, writeCalls := countToraTaskBoardToolCalls(events)
+
+	totalTasks := 0
+	sprintCount := 0
+	if workspace != nil {
+		totalTasks = len(workspace.Tasks)
+		sprintCount = len(workspace.Sprints)
+	}
+
+	computed := fmt.Sprintf(
+		"Done. Created %d · Updated %d · Deleted %d. Board now has %d tasks across %d sprints.",
+		created,
+		updated,
+		deleted,
+		totalTasks,
+		sprintCount,
+	)
+	if finalText == "" {
+		return computed
+	}
+	if writeCalls == 0 {
+		return finalText
+	}
+
+	lower := strings.ToLower(finalText)
+	if strings.Contains(lower, "board now has") && strings.Contains(lower, "created") {
+		return finalText
+	}
+	return strings.TrimSpace(finalText + "\n\n" + computed)
+}
+
+func countToraTaskBoardMutations(events []ai.AgentEvent) (created int, updated int, deleted int) {
+	for _, event := range events {
+		if strings.TrimSpace(event.Kind) != "tool_call" {
+			continue
+		}
+		switch strings.TrimSpace(event.Tool) {
+		case "create_task":
+			created++
+		case "update_task":
+			updated++
+		case "delete_task":
+			deleted++
+		}
+	}
+	return created, updated, deleted
+}
+
+func countToraTaskBoardToolCalls(events []ai.AgentEvent) (total int, writes int) {
+	for _, event := range events {
+		if strings.TrimSpace(event.Kind) != "tool_call" {
+			continue
+		}
+		total++
+		switch strings.TrimSpace(event.Tool) {
+		case "create_task", "update_task", "delete_task":
+			writes++
+		}
+	}
+	return total, writes
+}
+
+func toraTaskBoardNeedsToolRetry(finalText string, events []ai.AgentEvent) bool {
+	totalCalls, writeCalls := countToraTaskBoardToolCalls(events)
+	if writeCalls > 0 {
+		return false
+	}
+	if totalCalls == 0 {
+		return true
+	}
+	return toraResponseIsRefusal(finalText)
+}
+
+func buildToraTaskBoardToolEnforcementPrompt(prompt string, finalText string) string {
+	base := strings.TrimSpace(prompt)
+	previous := strings.TrimSpace(finalText)
+	var builder strings.Builder
+	builder.WriteString(base)
+	builder.WriteString("\n\nTool-use enforcement from the backend:\n")
+	builder.WriteString("- Your previous answer did not perform the requested board mutation.\n")
+	builder.WriteString("- You do have access to list_tasks, create_task, update_task, delete_task, list_sprints, and verify_task_count.\n")
+	builder.WriteString("- This request is invalid unless you actually call the task-board tools.\n")
+	builder.WriteString("- Start by calling list_tasks(). Then perform the necessary update_task/create_task/delete_task operations.\n")
+	builder.WriteString("- Do not answer with \"I don't have the tools\" or any similar refusal.\n")
+	builder.WriteString("- After the writes, call verify_task_count() and then give the final summary.\n")
+	if previous != "" {
+		builder.WriteString("\nPrevious invalid response:\n")
+		builder.WriteString(previous)
+	}
+	return builder.String()
+}
+
+func (h *Hub) runToraChatAgent(
+	ctx context.Context,
+	roomID string,
+	userMessage models.Message,
+	prompt string,
+) (string, []ai.AgentEvent, error) {
+	if h == nil || h.msgService == nil || h.msgService.Scylla == nil || h.msgService.Scylla.Session == nil {
+		return "", nil, fmt.Errorf("chat ai storage unavailable")
+	}
+
+	roomType := h.loadToraRoomType(ctx, roomID)
+	privateRoom := isToraPrivateRoomType(roomType)
+	intentProvider := resolveToraChatProvider(ai.AIModelTierLight)
+	intent := resolveToraChatIntent(ctx, prompt, intentProvider)
+
+	ctxBuilder := h.ensureToraContextBuilder()
+	engineFactory := h.ensureToraAgentEngineFactory()
+	if ctxBuilder == nil || engineFactory == nil {
+		return "", nil, fmt.Errorf("chat ai is not configured")
+	}
+
+	buildOpts := toraChatBuildOptions(intent, privateRoom)
+	workspace, err := ctxBuilder.Build(ctx, roomID, strings.TrimSpace(userMessage.SenderID), buildOpts)
+	if err != nil {
+		return "", nil, err
+	}
+
+	engine := engineFactory.New(roomID, ai.AgentAuthContext{
+		UserID:   strings.TrimSpace(userMessage.SenderID),
+		UserName: strings.TrimSpace(userMessage.SenderName),
+	}, toraChatModelTier(intent))
+	if engine == nil {
+		return "", nil, fmt.Errorf("chat ai engine is unavailable")
+	}
+	engine.SetRoomBroadcaster(h)
+
+	finalText, events, err := engine.Run(ctx, prompt, ai.AgentConfig{
+		MaxTurns:        toraChatMaxTurns(intent),
+		Timeout:         toraRequestTimeout,
+		SystemPrompt:    buildToraChatSystemPrompt(privateRoom),
+		ContextOptions:  buildOpts,
+		Workspace:       workspace,
+		InitialContext:  buildToraChatInitialContext(workspace, intent, privateRoom),
+		AllowedTools:    toraChatAllowedTools(intent, privateRoom),
+		OriginMessageID: normalizeMessageID(userMessage.ID),
+		WorkflowKind:    "chat",
+	})
+	if err != nil {
+		return "", events, err
+	}
+	return strings.TrimSpace(finalText), events, nil
+}
+
+func resolveToraChatProvider(modelTier string) ai.Provider {
+	return resolveToraTaskBoardProvider(modelTier)
+}
+
+func (h *Hub) loadToraRoomType(ctx context.Context, roomID string) string {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" || h == nil || h.msgService == nil {
+		return ""
+	}
+
+	if h.msgService.Scylla != nil && h.msgService.Scylla.Session != nil {
+		query := fmt.Sprintf(`SELECT type FROM %s WHERE room_id = ? LIMIT 1`, h.msgService.Scylla.Table("rooms"))
+		var roomType string
+		err := h.msgService.Scylla.Session.Query(query, normalizedRoomID).WithContext(ctx).Scan(&roomType)
+		if err == nil {
+			return strings.TrimSpace(roomType)
+		}
+		if err != nil && err != gocql.ErrNotFound {
+			log.Printf("[ws] tora room type lookup failed room=%s err=%v", normalizedRoomID, err)
+		}
+	}
+
+	if h.msgService.Redis != nil && h.msgService.Redis.Client != nil {
+		if roomType, err := h.msgService.Redis.Client.HGet(ctx, toraRoomRedisKey(normalizedRoomID), "type").Result(); err == nil {
+			return strings.TrimSpace(roomType)
+		}
+	}
+
+	return ""
+}
+
+func isToraPrivateRoomType(roomType string) bool {
+	lower := strings.ToLower(strings.TrimSpace(roomType))
+	return strings.Contains(lower, "private") || strings.Contains(lower, "direct") || lower == "dm"
+}
+
+func buildToraChatSystemPrompt(privateRoom bool) string {
+	if !privateRoom {
+		return toraChatSystemPrompt
+	}
+	return strings.TrimSpace(toraChatSystemPrompt + `
+
+PRIVATE CHANNEL MODE:
+- You are operating inside a private channel.
+- Do not use task board data or canvas data in this mode.
+- Base your answer only on this room's own recent message history.
+- You may mention that this is a private channel when helpful.`)
+}
+
+func toraChatBuildOptions(intent toraChatIntent, privateRoom bool) ai.BuildOptions {
+	opts := ai.BuildOptions{
+		IncludeCanvas: false,
+		IncludeChat:   true,
+		TaskLimit:     120,
+	}
+	switch intent {
+	case toraChatIntentSummary:
+		opts.ChatMessageLimit = 50
+		opts.TaskLimit = 40
+	case toraChatIntentTasks:
+		opts.ChatMessageLimit = 20
+		opts.TaskLimit = 250
+	case toraChatIntentCode:
+		opts.ChatMessageLimit = 20
+		opts.IncludeCanvas = !privateRoom
+		opts.TaskLimit = 80
+	default:
+		opts.ChatMessageLimit = 20
+		opts.TaskLimit = 60
+	}
+	if privateRoom {
+		opts.IncludeCanvas = false
+	}
+	return opts
+}
+
+func toraChatModelTier(intent toraChatIntent) string {
+	switch intent {
+	case toraChatIntentTasks, toraChatIntentCode:
+		return ai.AIModelTierStandard
+	case toraChatIntentSummary:
+		return ai.AIModelTierStandard
+	default:
+		return ai.AIModelTierLight
+	}
+}
+
+func toraChatMaxTurns(intent toraChatIntent) int {
+	switch intent {
+	case toraChatIntentTasks:
+		return 4
+	case toraChatIntentCode:
+		return 3
+	default:
+		return 2
+	}
+}
+
+func toraChatAllowedTools(intent toraChatIntent, privateRoom bool) []string {
+	if privateRoom {
+		return []string{}
+	}
+	switch intent {
+	case toraChatIntentTasks:
+		return []string{"list_tasks", "list_sprints", "search_tasks"}
+	case toraChatIntentCode:
+		return []string{"search_tasks"}
+	default:
+		return []string{}
+	}
+}
+
+func buildToraChatInitialContext(workspace *ai.WorkspaceContext, intent toraChatIntent, privateRoom bool) string {
+	if workspace == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("CHAT ROOM CONTEXT\n")
+	sb.WriteString(fmt.Sprintf("Room: %s\n", toraFirstNonEmpty(strings.TrimSpace(workspace.RoomName), strings.TrimSpace(workspace.RoomID))))
+	if privateRoom {
+		sb.WriteString("Mode: private channel\n")
+	} else {
+		sb.WriteString("Mode: shared room\n")
+	}
+
+	if privateRoom {
+		if messages := renderToraChatMessages(workspace.RecentMessages); messages != "" {
+			sb.WriteString("\nRecent messages:\n")
+			sb.WriteString(messages)
+		}
+		return strings.TrimSpace(sb.String())
+	}
+
+	switch intent {
+	case toraChatIntentTasks:
+		if members := renderToraChatMembers(workspace.Members); members != "" {
+			sb.WriteString("\nMembers:\n")
+			sb.WriteString(members)
+		}
+		if taskBoard := renderToraChatTaskBoard(workspace); taskBoard != "" {
+			sb.WriteString("\nTask board:\n")
+			sb.WriteString(taskBoard)
+		}
+		if messages := renderToraChatMessages(workspace.RecentMessages); messages != "" {
+			sb.WriteString("\nRecent messages:\n")
+			sb.WriteString(messages)
+		}
+	case toraChatIntentCode:
+		if members := renderToraChatMembers(workspace.Members); members != "" {
+			sb.WriteString("\nMembers:\n")
+			sb.WriteString(members)
+		}
+		if canvas := renderToraChatCanvas(workspace.CanvasFiles); canvas != "" {
+			sb.WriteString("\nCanvas excerpts:\n")
+			sb.WriteString(canvas)
+		}
+		if messages := renderToraChatMessages(workspace.RecentMessages); messages != "" {
+			sb.WriteString("\nRecent messages:\n")
+			sb.WriteString(messages)
+		}
+	case toraChatIntentSummary:
+		if messages := renderToraChatMessages(workspace.RecentMessages); messages != "" {
+			sb.WriteString("\nRecent messages:\n")
+			sb.WriteString(messages)
+		}
+	default:
+		if members := renderToraChatMembers(workspace.Members); members != "" {
+			sb.WriteString("\nMembers:\n")
+			sb.WriteString(members)
+		}
+		if messages := renderToraChatMessages(workspace.RecentMessages); messages != "" {
+			sb.WriteString("\nRecent messages:\n")
+			sb.WriteString(messages)
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func renderToraChatMembers(members []ai.UserCtx) string {
+	if len(members) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, member := range members {
+		label := strings.TrimSpace(member.FullName)
+		if label == "" {
+			label = strings.TrimSpace(member.Username)
+		}
+		if label == "" {
+			label = strings.TrimSpace(member.ID)
+		}
+		if label == "" {
+			continue
+		}
+		if strings.TrimSpace(member.Username) != "" && !strings.EqualFold(label, strings.TrimSpace(member.Username)) {
+			label += " (@" + strings.TrimSpace(member.Username) + ")"
+		}
+		if member.IsOwner {
+			label += " [owner]"
+		}
+		sb.WriteString("  - ")
+		sb.WriteString(label)
+		sb.WriteByte('\n')
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func renderToraChatMessages(messages []ai.MessageCtx) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, message := range messages {
+		label := strings.TrimSpace(message.SenderName)
+		if label == "" {
+			label = "Unknown"
+		}
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("  [%s] %s: %s\n", message.Timestamp.UTC().Format("15:04"), label, content))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func renderToraChatTaskBoard(workspace *ai.WorkspaceContext) string {
+	if workspace == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("  Total tasks: %d\n", len(workspace.Tasks)))
+	if len(workspace.SupportTickets) > 0 {
+		sb.WriteString(fmt.Sprintf("  Support tickets: %d\n", len(workspace.SupportTickets)))
+	}
+	if len(workspace.Sprints) > 0 {
+		sb.WriteString("  Sprints:\n")
+		for _, sprint := range workspace.Sprints {
+			sb.WriteString(fmt.Sprintf(
+				"    - %s: %d tasks (todo=%d, in_progress=%d, done=%d)\n",
+				toraFirstNonEmpty(strings.TrimSpace(sprint.Name), "(No Sprint)"),
+				sprint.TaskCount,
+				sprint.Todo,
+				sprint.InProgress,
+				sprint.Done,
+			))
+		}
+	}
+	if len(workspace.Tasks) > 0 {
+		sb.WriteString("  Tasks:\n")
+		for _, task := range workspace.Tasks {
+			sb.WriteString("    - ")
+			sb.WriteString(renderToraChatTaskLine(task))
+			sb.WriteByte('\n')
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func renderToraChatTaskLine(task ai.TaskCtx) string {
+	status := strings.ToUpper(strings.TrimSpace(task.Status))
+	if status == "" {
+		status = "TODO"
+	}
+	title := toraFirstNonEmpty(strings.TrimSpace(task.Title), "(untitled task)")
+	line := fmt.Sprintf("[%s] %s", status, title)
+	if strings.TrimSpace(task.SprintName) != "" {
+		line += fmt.Sprintf(" sprint:%q", strings.TrimSpace(task.SprintName))
+	}
+	if task.Budget != nil {
+		line += fmt.Sprintf(" budget:$%s", formatToraChatBudget(*task.Budget))
+	}
+	if task.DueDate != nil && !task.DueDate.IsZero() {
+		line += " due:" + task.DueDate.UTC().Format("2006-01-02")
+	}
+	return line
+}
+
+func renderToraChatCanvas(files []ai.CanvasFileCtx) string {
+	if len(files) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, file := range files {
+		sb.WriteString(fmt.Sprintf(
+			"  - %s [%s] %d lines\n",
+			strings.TrimSpace(file.Path),
+			toraFirstNonEmpty(strings.TrimSpace(file.Language), "plaintext"),
+			file.Lines,
+		))
+		if excerpt := strings.TrimSpace(file.Excerpt); excerpt != "" {
+			for _, line := range strings.Split(excerpt, "\n") {
+				sb.WriteString("      ")
+				sb.WriteString(line)
+				sb.WriteByte('\n')
+			}
+		}
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func formatToraChatBudget(value float64) string {
+	text := fmt.Sprintf("%.2f", value)
+	text = strings.TrimRight(strings.TrimRight(text, "0"), ".")
+	if text == "" {
+		return "0"
+	}
+	return text
+}
+
+func toraFirstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func toraRoomRedisKey(roomID string) string {
+	return "room:" + normalizeRoomID(roomID)
 }
 
 func buildToraFailureResponse(err error) string {
