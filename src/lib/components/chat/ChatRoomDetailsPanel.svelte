@@ -3,6 +3,7 @@
 	import type { OnlineMember } from '$lib/types/chat';
 	import { normalizeIdentifier } from '$lib/utils/chat/core';
 	import { createEventDispatcher, onDestroy } from 'svelte';
+	import { canvasPermissionStore } from '$lib/stores/canvasPermissions';
 
 	export let show = false;
 	export let isMobileView = false;
@@ -36,7 +37,6 @@
 	let promotionError = '';
 	let promotionSuccess = '';
 	$: visibleAdminCode = (roomAdminCode || '').trim().toUpperCase().slice(0, 4);
-
 	onDestroy(() => {
 		if (copiedTimer) {
 			clearTimeout(copiedTimer);
@@ -201,6 +201,21 @@
 			normalizeIdentifier(member.id) === normalizeIdentifier(currentUserId)
 		);
 	}
+
+	function memberHasCanvasEdit(member: OnlineMember): boolean {
+		return canvasPermissionStore.hasEdit(roomId, normalizeIdentifier(member.id));
+	}
+
+	function toggleCanvasEdit(member: OnlineMember) {
+		if (!isActiveRoomAdmin || !roomId) return;
+		canvasPermissionStore.toggle(roomId, normalizeIdentifier(member.id));
+		// Force reactivity
+		canvasEditorIds = canvasPermissionStore.getEditors(roomId);
+	}
+
+	let canvasEditorIds: string[] = [];
+	$: if (roomId) canvasEditorIds = canvasPermissionStore.getEditors(roomId);
+
 </script>
 
 {#if show}
@@ -308,13 +323,26 @@
 							<div class="member-meta">Joined {formatDateTime(member.joinedAt)}</div>
 						</div>
 						{#if isActiveRoomAdmin && normalizeIdentifier(member.id) !== normalizeIdentifier(currentUserId)}
-							<button
-								type="button"
-								class="member-remove-button"
-								on:click={() => dispatch('removeMember', { memberId: member.id })}
-							>
-								Remove
-							</button>
+							<div class="member-admin-actions">
+								<button
+									type="button"
+									class="member-canvas-btn {memberHasCanvasEdit(member) ? 'canvas-granted' : ''}"
+									title={memberHasCanvasEdit(member) ? 'Revoke canvas edit access' : 'Grant canvas edit access'}
+									on:click={() => { toggleCanvasEdit(member); canvasEditorIds = canvasPermissionStore.getEditors(roomId); }}
+								>
+									<svg viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z"/>
+									</svg>
+									{memberHasCanvasEdit(member) ? 'Canvas ✓' : 'Canvas'}
+								</button>
+								<button
+									type="button"
+									class="member-remove-button"
+									on:click={() => dispatch('removeMember', { memberId: member.id })}
+								>
+									Remove
+								</button>
+							</div>
 						{/if}
 					</div>
 				{/each}

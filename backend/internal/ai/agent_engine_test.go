@@ -38,6 +38,58 @@ func (m *mockToolUseProvider) GenerateToolResponse(ctx context.Context, req Agen
 	return m.generateToolResponse(ctx, req)
 }
 
+func TestBuildPromptToolUseRequestIncludesRequiredFieldRules(t *testing.T) {
+	prompt := buildPromptToolUseRequest(AgentProviderRequest{
+		SystemPrompt: "Use tools carefully.",
+		Tools:        BuiltInAnthropicTools(),
+		Messages: []AgentProviderMessage{
+			{
+				Role: "user",
+				Content: []AgentProviderContentBlock{
+					{Type: "text", Text: "Create a task"},
+				},
+			},
+		},
+	})
+
+	for _, needle := range []string{
+		"Return valid JSON only. No markdown fences, no extra text.",
+		"Every tool call input MUST include ALL required fields",
+		"Zero-input tools must still be emitted with \"input\": {}.",
+		"When creating tasks: always include title, sprint_name, budget, start_date, due_date, and roles in the input.",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Fatalf("expected prompt to include %q, got %q", needle, prompt)
+		}
+	}
+}
+
+func TestParsePromptToolUseResponsePreservesZeroInputToolCalls(t *testing.T) {
+	resp, err := parsePromptToolUseResponse(`{
+		"tool_calls": [
+			{"name": "verify_task_count", "input": {}}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("parsePromptToolUseResponse returned error: %v", err)
+	}
+	if len(resp.Content) != 1 {
+		t.Fatalf("expected exactly one content block, got %#v", resp.Content)
+	}
+	if resp.Content[0].Type != "tool_use" {
+		t.Fatalf("expected zero-input tool call to be preserved, got %#v", resp.Content)
+	}
+	if resp.Content[0].Name != "verify_task_count" {
+		t.Fatalf("unexpected tool name: %#v", resp.Content[0])
+	}
+	if resp.Content[0].Input == nil {
+		t.Fatalf("expected zero-input tool call to use an empty input object, got %#v", resp.Content[0])
+	}
+	if len(resp.Content[0].Input) != 0 {
+		t.Fatalf("expected empty input object, got %#v", resp.Content[0].Input)
+	}
+}
+
 func TestAgentEngineToolDispatch(t *testing.T) {
 	var (
 		callCount    int

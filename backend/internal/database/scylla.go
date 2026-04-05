@@ -191,6 +191,7 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 			room_id text PRIMARY KEY,
 			name text,
 			type text,
+			project_type text,
 			parent_room_id text,
 			origin_message_id text,
 			admin_code text,
@@ -209,6 +210,7 @@ func ensureBaseSchema(session *gocql.Session, keyspace string) error {
 	roomAlterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD parent_room_id text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD project_type text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD canvas_has_data boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD rolling_summary text`, roomsTable),
 	}
@@ -292,6 +294,7 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 	timeEntriesTable := normalizedKeyspace + ".time_entries"
 	intakeFormsTable := normalizedKeyspace + ".intake_forms"
 	formSubmissionsTable := normalizedKeyspace + ".form_submissions"
+	groupsTable := normalizedKeyspace + ".groups"
 	roomsTable := normalizedKeyspace + ".rooms"
 
 	persistenceQueries := []string{
@@ -358,16 +361,35 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 					description text,
 					status text,
 					sprint_name text,
+					group_id uuid,
 					assignee_id uuid,
 					custom_fields text,
 					status_actor_id text,
 					status_actor_name text,
 					status_changed_at timestamp,
+					task_type text,
+					due_date timestamp,
+					start_date timestamp,
+					roles text,
 					created_at timestamp,
 					updated_at timestamp,
 					PRIMARY KEY ((room_id), id)
 				) WITH CLUSTERING ORDER BY (id ASC)`,
 			tasksTable,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				workspace_id uuid,
+				group_id uuid,
+				name text,
+				display_order int,
+				start_date text,
+				end_date text,
+				description text,
+				created_at timestamp,
+				PRIMARY KEY (workspace_id, group_id)
+			) WITH CLUSTERING ORDER BY (group_id ASC)`,
+			groupsTable,
 		),
 		fmt.Sprintf(
 			`CREATE TABLE IF NOT EXISTS %s (
@@ -441,6 +463,7 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 			formSubmissionsTable,
 		),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (assignee_id)`, tasksTable),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (name)`, groupsTable),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (to_task_id)`, taskRelationsTable),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (user_id)`, timeEntriesTable),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS ON %s (form_id)`, intakeFormsTable),
@@ -458,6 +481,7 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 		fmt.Sprintf(`ALTER TABLE %s ADD is_ephemeral boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD is_direct boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD expires_at timestamp`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD project_type text`, roomsTable),
 	}
 	for _, alterQuery := range alterRoomsQueries {
 		err := session.Query(alterQuery).Exec()
@@ -491,10 +515,15 @@ func ensurePersistenceSchema(session *gocql.Session, keyspace string) error {
 
 	alterTasksQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD sprint_name text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD group_id uuid`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_id text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_name text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_changed_at timestamp`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD custom_fields text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD task_type text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD due_date timestamp`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD start_date timestamp`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD roles text`, tasksTable),
 	}
 	for _, alterQuery := range alterTasksQueries {
 		err := session.Query(alterQuery).Exec()

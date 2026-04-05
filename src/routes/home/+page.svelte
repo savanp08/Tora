@@ -295,7 +295,7 @@
 		let tsToken = '';
 		try {
 			if (mode === 'create') tsToken = await requestTurnstileToken();
-			const res = await fetch(`${API_BASE}/api/rooms/join`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomName: reqName, roomCode: reqCode, username: userIdentity.username, userId: userIdentity.id, type: 'ephemeral', mode, roomDurationHours, turnstileToken: tsToken, aiEnabled: prefs.aiEnabled, e2eEnabled: prefs.e2eEnabled }) });
+			const res = await fetch(`${API_BASE}/api/rooms/join`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roomName: reqName, roomCode: reqCode, username: userIdentity.username, userId: userIdentity.id, type: 'persistent', mode, roomDurationHours, turnstileToken: tsToken, aiEnabled: prefs.aiEnabled, e2eEnabled: prefs.e2eEnabled }) });
 			const data = await res.json();
 			if (!res.ok) throw new Error(data.error || 'Failed to join room');
 			currentUser.set({ id: data.userId || userIdentity.id, username: userIdentity.username });
@@ -448,7 +448,7 @@
 							<input
 								id="room-name-input"
 								type="text"
-								placeholder="e.g. Product Sprint"
+								placeholder="e.g. Product Launch"
 								bind:value={roomName}
 								bind:this={roomNameInputElement}
 								maxlength={ROOM_NAME_MAX_LENGTH}

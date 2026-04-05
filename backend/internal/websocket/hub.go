@@ -53,6 +53,8 @@ type Hub struct {
 
 	toraTypingMu     sync.Mutex
 	toraTypingByRoom map[string]int
+	toraRunMu        sync.Mutex
+	toraRuns         map[string]toraRunHandle
 }
 
 type ClientTypingEvent struct {
@@ -189,6 +191,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 		msgService:           service,
 		tracker:              tracker,
 		toraTypingByRoom:     make(map[string]int),
+		toraRuns:             make(map[string]toraRunHandle),
 	}
 
 	if service != nil && service.Scylla != nil {

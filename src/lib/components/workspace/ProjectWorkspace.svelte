@@ -13,9 +13,15 @@
 	import WorkloadView from '$lib/components/workspace/WorkloadView.svelte';
 	import ActivityFeedPanel from './ActivityFeedPanel.svelte';
 	import ChangeRequestPanel from './ChangeRequestPanel.svelte';
-	import { changeRequestStore, pendingCount, handleIncomingChangeRequest } from '$lib/stores/changeRequests';
+	import ProjectTypePicker from './ProjectTypePicker.svelte';
+	import {
+		changeRequestStore,
+		pendingCount,
+		handleIncomingChangeRequest
+	} from '$lib/stores/changeRequests';
 	import { resolveApiBase } from '$lib/config/apiBase';
 	import { currentUser } from '$lib/store';
+	import { currentWorkspace, projectTypeConfig, type ProjectType } from '$lib/stores/projectType';
 	import type { OnlineMember } from '$lib/types/chat';
 
 	const dispatch = createEventDispatcher<{ close: void }>();
@@ -83,20 +89,17 @@
 		}
 	];
 
-	const COST_ICON =
-		'M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6';
+	const COST_ICON = 'M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6';
 	const TEAM_ICON =
 		'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75';
-	const SHEETS_ICON =
-		'M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18';
+	const SHEETS_ICON = 'M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18';
 	const AI_ICON =
 		'M12 4.2 13.7 8l3.8 1.5-3.8 1.5L12 14.8 10.3 11 6.5 9.5 10.3 8 12 4.2Z M18.5 13.5l.9 2.2 2.1.8-2.1.9-.9 2.1-.8-2.1-2.2-.9 2.2-.8z';
 	const TEMPLATE_ICON =
 		'M12 2.9a2 2 0 0 1 2 2V6h1.1a2 2 0 0 1 1.5.7l.8.9 1.5-.3a2 2 0 0 1 2.3 2.3l-.3 1.5.9.8a2 2 0 0 1 .7 1.5V15a2 2 0 0 1-.7 1.5l-.9.8.3 1.5a2 2 0 0 1-2.3 2.3l-1.5-.3-.8.9a2 2 0 0 1-1.5.7H14v1.1a2 2 0 0 1-4 0V22h-1.1a2 2 0 0 1-1.5-.7l-.8-.9-1.5.3a2 2 0 0 1-2.3-2.3l.3-1.5-.9-.8A2 2 0 0 1 2 15v-1.1a2 2 0 0 1 .7-1.5l.9-.8-.3-1.5a2 2 0 0 1 2.3-2.3l1.5.3.8-.9A2 2 0 0 1 8.9 6H10V4.9a2 2 0 0 1 2-2Z M9 12h6M9 16h6M9 8h6';
 	const SETTINGS_ICON =
 		'M9.8 8.2 8.4 5.9l1.4-1.4 2.3 1.4a5.7 5.7 0 0 1 1.8 0l2.3-1.4 1.4 1.4-1.4 2.3c.2.6.3 1.2.3 1.8s-.1 1.2-.3 1.8l1.4 2.3-1.4 1.4-2.3-1.4a5.7 5.7 0 0 1-1.8 0l-2.3 1.4-1.4-1.4 1.4-2.3a5.7 5.7 0 0 1 0-3.6ZM12 14.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4Z';
-	const BELL_ICON =
-		'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0';
+	const BELL_ICON = 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0';
 
 	let lastWorkspaceRoomID = '';
 	let lastTemplateSocketSignature = '';
@@ -111,12 +114,17 @@
 	let progressSubView: ProgressSubView = 'gantt';
 	let teamSubView: TeamSubView = 'people';
 	let pendingTaskEditID = '';
+	let pendingTaskOpenID = '';
 	let isCompactWorkspaceLayout = false;
 	let mobileWorkspacePane: MobileWorkspacePane = 'board';
 	let sidebarCollapsed = false;
 	let notificationOpen = false;
 	let settingsOpen = false;
 	let changeRequestPanelOpen = false;
+	let workspaceProjectType: ProjectType = 'software';
+	let pendingProjectType: ProjectType = 'software';
+	let projectTypeSaving = false;
+	let workspaceSettingsError = '';
 
 	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: sessionUserName = ($currentUser?.username || '').trim();
@@ -133,7 +141,7 @@
 	$: if (!aiEnabled && $activeProjectTab === 'tora_ai') {
 		activeProjectTab.set('overview');
 	}
-$: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
+	$: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 	$: {
 		if (toolsSidebarPinned) {
 			rightPanelMode = 'tools';
@@ -166,9 +174,15 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 		void refreshWorkspaceAfterTemplateApply(latestTemplateSocketEvent.templateId === 'blank');
 	}
 
-	$: { const _gm = $globalMessages as Record<string, unknown> | null; if (_gm?.['type'] === 'change_request' && _gm?.['payload']) { handleIncomingChangeRequest(_gm['payload']); } }
+	$: {
+		const _gm = $globalMessages as Record<string, unknown> | null;
+		if (_gm?.['type'] === 'change_request' && _gm?.['payload']) {
+			handleIncomingChangeRequest(_gm['payload']);
+		}
+	}
 
 	$: timeline = $projectTimeline;
+	$: workspaceProjectType = ($projectTypeConfig.type as ProjectType) || 'software';
 	$: sprints = timeline?.sprints ?? [];
 	$: allTasks = sprints.flatMap((sprint) => sprint.tasks);
 	$: totalTasks = allTasks.length;
@@ -248,7 +262,6 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 		showMobileBoardPane();
 	}
 
-
 	function createBlankWorkspaceTimeline() {
 		const today = new Date();
 		const dateText = today.toISOString().slice(0, 10);
@@ -287,9 +300,27 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 		showMobileBoardPane();
 	}
 
+	function requestTaskOpen(taskID: string) {
+		const normalizedTaskID = taskID.trim();
+		if (!normalizedTaskID) {
+			return;
+		}
+		toolsSidebarPinned = false;
+		taskBoardViewMode = 'table';
+		pendingTaskOpenID = normalizedTaskID;
+		activeProjectTab.set('tasks');
+		showMobileBoardPane();
+	}
+
 	function handleTaskEditBridgeClear(taskID: string) {
 		if (pendingTaskEditID === taskID) {
 			pendingTaskEditID = '';
+		}
+	}
+
+	function handleTaskOpenBridgeClear(taskID: string) {
+		if (pendingTaskOpenID === taskID) {
+			pendingTaskOpenID = '';
 		}
 	}
 
@@ -340,6 +371,7 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 
 		if (blank) {
 			await Promise.all([
+				loadWorkspaceDetails(normalizedWorkspaceRoomID),
 				initializeTaskStoreForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
 				initializeFieldSchemasForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE })
 			]);
@@ -349,6 +381,7 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 		}
 
 		await Promise.all([
+			loadWorkspaceDetails(normalizedWorkspaceRoomID),
 			initializeProjectTimelineForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
 			initializeTaskStoreForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE }),
 			initializeFieldSchemasForRoom(normalizedWorkspaceRoomID, { apiBase: API_BASE })
@@ -386,12 +419,14 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 		if (!normalizedRoomID) {
 			setBoardActivityRoom('');
 			setProjectTimeline(null);
+			currentWorkspace.set(null);
 			isProjectNew.set(true);
 			timelineError.set('');
 			return;
 		}
 
 		await Promise.all([
+			loadWorkspaceDetails(normalizedRoomID),
 			initializeProjectTimelineForRoom(normalizedRoomID, { apiBase: API_BASE }),
 			initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE }),
 			initializeFieldSchemasForRoom(normalizedRoomID, { apiBase: API_BASE })
@@ -400,7 +435,69 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 		if (loadToken !== workspaceLoadToken) return;
 	}
 
-	function buildTimelineDateMap(timeline: ProjectTimeline | null): Map<string, { startDate: number; endDate: number }> {
+	async function loadWorkspaceDetails(normalizedRoomID: string) {
+		try {
+			const response = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}`, {
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				throw new Error(await parseWorkspaceError(response));
+			}
+			const payload = (await response.json().catch(() => ({}))) as {
+				roomName?: string;
+				project_type?: string;
+			};
+			currentWorkspace.set({
+				id: normalizedRoomID,
+				name: payload.roomName || normalizedRoomID,
+				project_type: payload.project_type || 'software'
+			});
+			pendingProjectType = (payload.project_type as ProjectType) || 'software';
+		} catch (error) {
+			currentWorkspace.set({
+				id: normalizedRoomID,
+				name: normalizedRoomID,
+				project_type: 'software'
+			});
+			workspaceSettingsError =
+				error instanceof Error ? error.message : 'Failed to load workspace details.';
+		}
+	}
+
+	async function saveProjectType() {
+		if (!normalizedWorkspaceRoomID || projectTypeSaving) return;
+		projectTypeSaving = true;
+		workspaceSettingsError = '';
+		try {
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(normalizedWorkspaceRoomID)}`,
+				{
+					method: 'PATCH',
+					credentials: 'include',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ project_type: pendingProjectType })
+				}
+			);
+			if (!response.ok) {
+				throw new Error(await parseWorkspaceError(response));
+			}
+			currentWorkspace.update((workspace) =>
+				workspace && workspace.id === normalizedWorkspaceRoomID
+					? { ...workspace, project_type: pendingProjectType }
+					: workspace
+			);
+			settingsOpen = false;
+		} catch (error) {
+			workspaceSettingsError =
+				error instanceof Error ? error.message : 'Failed to update project type.';
+		} finally {
+			projectTypeSaving = false;
+		}
+	}
+
+	function buildTimelineDateMap(
+		timeline: ProjectTimeline | null
+	): Map<string, { startDate: number; endDate: number }> {
 		const map = new Map<string, { startDate: number; endDate: number }>();
 		if (!timeline) return map;
 		for (const sprint of timeline.sprints) {
@@ -604,7 +701,11 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 					type="button"
 					class="snav-btn"
 					class:is-active={settingsOpen}
-					on:click={() => (settingsOpen = !settingsOpen)}
+					on:click={() => {
+						pendingProjectType = workspaceProjectType;
+						workspaceSettingsError = '';
+						settingsOpen = !settingsOpen;
+					}}
 					title="Settings"
 					aria-label="Settings"
 				>
@@ -656,8 +757,12 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 						</button>
 					{/if}
 					<div class="workspace-header-copy">
-						<h2>Project</h2>
-						<p>{totalTasks} total · {inProgressTasks} in progress · {completionRate}% done</p>
+						<h2>{$projectTypeConfig.displayName}</h2>
+						<p>
+							{totalTasks}
+							{$projectTypeConfig.taskTermPlural.toLowerCase()} total · {inProgressTasks}
+							in progress · {completionRate}% done
+						</p>
 					</div>
 				</div>
 				<div class="workspace-header-actions">
@@ -701,10 +806,14 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 							aria-expanded={changeRequestPanelOpen}
 						>
 							<svg viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9l2 2 4-4" />
+								<path
+									d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9l2 2 4-4"
+								/>
 							</svg>
 							{#if crPendingCount > 0}
-								<span class="cr-header-badge" aria-label="{crPendingCount} pending requests">{crPendingCount}</span>
+								<span class="cr-header-badge" aria-label="{crPendingCount} pending requests"
+									>{crPendingCount}</span
+								>
 							{/if}
 						</button>
 					{/if}
@@ -859,11 +968,17 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 								</div>
 							</div>
 						{:else}
-							<SheetsTool {canEdit} {roomId} isAdmin={currentUserIsAdmin} {sessionUserID} {sessionUserName} />
+							<SheetsTool
+								{canEdit}
+								{roomId}
+								isAdmin={currentUserIsAdmin}
+								{sessionUserID}
+								{sessionUserName}
+							/>
 						{/if}
 					</div>
 				{:else if $activeProjectTab === 'overview'}
-					<TimelineBoard />
+					<TimelineBoard on:requestTaskOpen={(event) => requestTaskOpen(event.detail?.taskId ?? '')} />
 				{:else if $activeProjectTab === 'tasks'}
 					<TaskBoard
 						{roomId}
@@ -875,10 +990,18 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 						boardView={taskBoardCanvasView}
 						externalEditTaskId={pendingTaskEditID}
 						onExternalEditHandled={handleTaskEditBridgeClear}
+						externalOpenTaskId={pendingTaskOpenID}
+						onExternalOpenHandled={handleTaskOpenBridgeClear}
 					/>
 				{:else if $activeProjectTab === 'progress'}
 					{#if progressSubView === 'gantt'}
-						<ProgressGanttTab {onlineMembers} isAdmin={currentUserIsAdmin} {sessionUserID} {sessionUserName} {roomId} />
+						<ProgressGanttTab
+							{onlineMembers}
+							isAdmin={currentUserIsAdmin}
+							{sessionUserID}
+							{sessionUserName}
+							{roomId}
+						/>
 					{:else}
 						<CalendarView
 							tasks={calendarWorkloadTasks}
@@ -888,9 +1011,9 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 					{/if}
 				{:else if aiEnabled && $activeProjectTab === 'tora_ai'}
 					<ToraAIPanel {roomId} contextKey="taskboard" {onlineMembers} />
-				{:else}
-					<TimelineBoard />
-				{/if}
+					{:else}
+						<TimelineBoard on:requestTaskOpen={(event) => requestTaskOpen(event.detail?.taskId ?? '')} />
+					{/if}
 			</main>
 		</div>
 	</div>
@@ -941,10 +1064,89 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 			open={changeRequestPanelOpen}
 			roomId={normalizedWorkspaceRoomID}
 			isAdmin={currentUserIsAdmin}
-			sessionUserID={sessionUserID}
-			sessionUserName={sessionUserName}
+			{sessionUserID}
+			{sessionUserName}
 			on:close={() => (changeRequestPanelOpen = false)}
 		/>
+	{/if}
+
+	{#if settingsOpen}
+		<div
+			class="template-modal-backdrop"
+			role="presentation"
+			tabindex="-1"
+			on:click={() => (settingsOpen = false)}
+			on:keydown={(event) => {
+				if (event.key === 'Escape') {
+					event.preventDefault();
+					settingsOpen = false;
+				}
+			}}
+		>
+			<div
+				class="template-modal-card workspace-settings-card"
+				role="dialog"
+				aria-modal="true"
+				aria-label="Workspace settings"
+				tabindex="0"
+				on:click|stopPropagation
+				on:keydown|stopPropagation
+			>
+				<header class="workspace-settings-header">
+					<div>
+						<h3>Workspace Settings</h3>
+						<p>
+							Changing the project type updates terminology labels only. Your tasks and groups are
+							not affected.
+						</p>
+					</div>
+					<button
+						type="button"
+						class="notif-close-btn"
+						on:click={() => (settingsOpen = false)}
+						aria-label="Close settings"
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							<path d="M18 6 6 18M6 6l12 12"></path>
+						</svg>
+					</button>
+				</header>
+
+				<section class="workspace-settings-section">
+					<div class="workspace-settings-row">
+						<div>
+							<strong>Project type</strong>
+							<p>Current: {$projectTypeConfig.displayName}</p>
+						</div>
+					</div>
+					<ProjectTypePicker
+						value={pendingProjectType}
+						on:select={(event) => (pendingProjectType = event.detail.projectType)}
+					/>
+					{#if workspaceSettingsError}
+						<p class="workspace-settings-error">{workspaceSettingsError}</p>
+					{/if}
+				</section>
+
+				<div class="workspace-settings-actions">
+					<button
+						type="button"
+						class="sprint-composer-cancel"
+						on:click={() => (settingsOpen = false)}
+					>
+						Cancel
+					</button>
+					<button
+						type="button"
+						class="sprint-composer-submit"
+						on:click={() => void saveProjectType()}
+						disabled={projectTypeSaving}
+					>
+						{projectTypeSaving ? 'Saving…' : 'Save'}
+					</button>
+				</div>
+			</div>
+		</div>
 	{/if}
 
 	<!-- ── Template picker modal ──────────────────────────────── -->
@@ -1250,6 +1452,7 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 	}
 
 	.workspace-header {
+		grid-row: 1;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -1435,6 +1638,7 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 
 	/* ── Task view bar ────────────────────────────────────────── */
 	.task-view-bar {
+		grid-row: 2;
 		display: flex;
 		align-items: center;
 		gap: 0.22rem;
@@ -1487,10 +1691,17 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 
 	/* ── Canvas ──────────────────────────────────────────────── */
 	.workspace-canvas {
+		grid-row: 3;
 		min-width: 0;
 		min-height: 0;
+		display: grid;
 		overflow: hidden;
 		background: var(--ws-bg);
+	}
+
+	.workspace-canvas > * {
+		min-width: 0;
+		min-height: 0;
 	}
 
 	@media (max-width: 640px) {
@@ -1533,6 +1744,59 @@ $: taskBoardCanvasView = taskBoardViewMode as TaskBoardCanvasView;
 		min-height: 0;
 		padding: 0.72rem;
 		overflow: hidden;
+	}
+
+	.workspace-settings-card {
+		display: grid;
+		gap: 1rem;
+		max-width: min(760px, calc(100vw - 2rem));
+	}
+
+	.workspace-settings-header {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 1rem;
+	}
+
+	.workspace-settings-header h3 {
+		margin: 0;
+		font-size: 1.1rem;
+	}
+
+	.workspace-settings-header p {
+		margin: 0.35rem 0 0;
+		color: var(--ws-muted);
+		font-size: 0.92rem;
+		line-height: 1.5;
+	}
+
+	.workspace-settings-section {
+		display: grid;
+		gap: 0.9rem;
+	}
+
+	.workspace-settings-row strong {
+		display: block;
+		margin-bottom: 0.25rem;
+	}
+
+	.workspace-settings-row p {
+		margin: 0;
+		color: var(--ws-muted);
+		font-size: 0.92rem;
+	}
+
+	.workspace-settings-error {
+		margin: 0;
+		color: var(--ws-danger);
+		font-size: 0.9rem;
+	}
+
+	.workspace-settings-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.75rem;
 	}
 
 	.tool-sub-view-wrap {

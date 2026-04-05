@@ -1,17 +1,22 @@
 <script lang="ts">
 	import { createEventDispatcher, tick } from 'svelte';
+	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
 	import { resolveApiBase } from '$lib/config/apiBase';
 	import {
 		activeProjectTab,
 		type AITimelineConversationMessage,
 		type AITimelineIntent,
-		generateAITimeline,
+		type StreamAIStatusMeta,
+		isTimelineRequestStoppedError,
 		isProjectNew,
 		projectTimeline,
 		setProjectTimeline,
+		stopActiveTimelineRequest,
+		streamAITimeline,
 		timelineError,
 		timelineLoading
 	} from '$lib/stores/timeline';
+	import { sessionTier } from '$lib/stores/auth';
 	import { fieldSchemaStore } from '$lib/stores/fieldSchema';
 	import { initializeTaskStoreForRoom, taskStore } from '$lib/stores/tasks';
 	import { normalizeRoomIDValue } from '$lib/utils/chat/core';
@@ -37,6 +42,14 @@
 	const API_BASE = resolveApiBase(import.meta.env.VITE_API_BASE as string | undefined);
 	const BLANK_TEMPLATE_ID = 'blank';
 
+	function formatNumberedSprintName(name: string, sprintIndex: number) {
+		const trimmed = name.trim() || `Sprint ${sprintIndex + 1}`;
+		if (trimmed.toLowerCase() === 'backlog') {
+			return 'Backlog';
+		}
+		return `${sprintIndex + 1}. ${trimmed.replace(/^\d+\.\s*/, '')}`;
+	}
+
 	type OnboardingMode = 'selection' | 'manual' | 'ai';
 	type ManualStep = 'picker' | 'confirm';
 	type PromptStarter = {
@@ -49,6 +62,22 @@
 		text: string;
 		timestamp: number;
 		intent?: AITimelineIntent;
+	};
+	type OnboardingWorkflowEntry = {
+		id: string;
+		title: string;
+		detail?: string;
+		progress?: string;
+		tone: 'status' | 'success' | 'warning';
+		taskTitles?: string[];
+		stepKey?: string;
+		timing?: {
+			startedAt: number;
+			endedAt?: number;
+			stepBudgetMs?: number;
+			promptBudgetMs?: number;
+			strategy?: string;
+		};
 	};
 	type PersistedOnboardingConversation = {
 		version: 1;
@@ -129,11 +158,35 @@
 	let mode: OnboardingMode = templatePickerOnly ? 'manual' : 'selection';
 	let manualStep: ManualStep = 'picker';
 	let aiPrompt = '';
+	let fitToTier = false;
+
+	function autoResize(node: HTMLTextAreaElement, _value?: string) {
+		function resize() {
+			node.style.height = 'auto';
+			node.style.height = node.scrollHeight + 'px';
+		}
+		node.addEventListener('input', resize);
+		resize();
+		return {
+			update() { resize(); },
+			destroy() { node.removeEventListener('input', resize); }
+		};
+	}
 	let localError = '';
 	let applyingTemplate = false;
 	let aiPartialWarning = '';
 	let aiMissingSprints: string[] = [];
 	let aiConversation: OnboardingAIMessage[] = [];
+	let aiWorkflowEntries: OnboardingWorkflowEntry[] = [];
+	let streamingStep = '';
+	let lastWorkflowStatusKey = '';
+	let activeWorkflowEntryId = '';
+	let activeWorkflowStepKey = '';
+	let aiWorkflowRunStartedAt = 0;
+	let aiWorkflowRunFinishedAt = 0;
+	let aiWorkflowPromptBudgetMs = 15 * 60 * 1000;
+	let aiWorkflowClockNow = Date.now();
+	let aiWorkflowTimer: number | null = null;
 	let loadedConversationKey = '';
 	let aiThreadElement: HTMLDivElement | null = null;
 	let aiComposerTextarea: HTMLTextAreaElement | null = null;
@@ -172,9 +225,9 @@
 		(schema) => normalizeRoomIDValue(schema.roomId) === normalizedOnboardingRoomID
 	).length;
 	$: roomHasExistingContent = roomTaskCount > 0 || roomFieldCount > 0;
-	$: availableTemplates = [BLANK_TEMPLATE_CARD, ...templates];
-	$: selectedTemplate =
-		availableTemplates.find((template) => template.id === selectedTemplateId) ?? null;
+	$: allTemplates = [BLANK_TEMPLATE_CARD, ...templates];
+	$: availableTemplates = allTemplates;
+	$: selectedTemplate = allTemplates.find((template) => template.id === selectedTemplateId) ?? null;
 	$: templatePreviewFields = selectedTemplate?.fieldSchemas ?? [];
 	$: templatePreviewTasks = selectedTemplate?.sampleTasks ?? [];
 
@@ -460,6 +513,222 @@
 		});
 	}
 
+	function formatWorkflowDuration(ms: number) {
+		if (!Number.isFinite(ms) || ms <= 0) {
+			return '00:00';
+		}
+		const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const seconds = totalSeconds % 60;
+		if (hours > 0) {
+			return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+		}
+		return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+	}
+
+	function startOnboardingWorkflowClock(startedAt = Date.now()) {
+		stopOnboardingWorkflowClock(startedAt);
+		aiWorkflowClockNow = startedAt;
+		if (typeof window === 'undefined') {
+			return;
+		}
+		aiWorkflowTimer = window.setInterval(() => {
+			aiWorkflowClockNow = Date.now();
+		}, 1000);
+	}
+
+	function stopOnboardingWorkflowClock(finishedAt = Date.now()) {
+		aiWorkflowClockNow = finishedAt;
+		if (aiWorkflowTimer && typeof window !== 'undefined') {
+			window.clearInterval(aiWorkflowTimer);
+		}
+		aiWorkflowTimer = null;
+	}
+
+	function getOnboardingWorkflowReferenceNow() {
+		if ($timelineLoading && aiWorkflowRunStartedAt > 0) {
+			return aiWorkflowClockNow || Date.now();
+		}
+		return aiWorkflowRunFinishedAt || aiWorkflowClockNow || Date.now();
+	}
+
+	function getOnboardingWorkflowEntry(entryId: string) {
+		return aiWorkflowEntries.find((entry) => entry.id === entryId) ?? null;
+	}
+
+	function getOnboardingWorkflowEntryElapsedMs(entry: OnboardingWorkflowEntry) {
+		if (!entry.timing) {
+			return 0;
+		}
+		const end = entry.timing.endedAt ?? getOnboardingWorkflowReferenceNow();
+		return Math.max(0, end - entry.timing.startedAt);
+	}
+
+	function getOnboardingWorkflowEntryTimingChips(entry: OnboardingWorkflowEntry) {
+		if (!entry.timing) {
+			return [] as string[];
+		}
+		const chips: string[] = [];
+		const elapsedMs = getOnboardingWorkflowEntryElapsedMs(entry);
+		if (elapsedMs > 0) {
+			chips.push(`Step ${formatWorkflowDuration(elapsedMs)}`);
+		}
+		if (entry.timing.stepBudgetMs && entry.timing.stepBudgetMs > 0) {
+			chips.push(`Budget ${formatWorkflowDuration(entry.timing.stepBudgetMs)}`);
+		}
+		if (entry.timing.strategy) {
+			chips.push(entry.timing.strategy.replace(/_/g, ' '));
+		}
+		return chips;
+	}
+
+	function getOnboardingTotalElapsedMs() {
+		if (!aiWorkflowRunStartedAt) {
+			return 0;
+		}
+		return Math.max(0, getOnboardingWorkflowReferenceNow() - aiWorkflowRunStartedAt);
+	}
+
+	function getOnboardingCurrentStepElapsedMs() {
+		const entry = activeWorkflowEntryId ? getOnboardingWorkflowEntry(activeWorkflowEntryId) : null;
+		return entry ? getOnboardingWorkflowEntryElapsedMs(entry) : 0;
+	}
+
+	function getOnboardingWorkflowSummary() {
+		if (!aiWorkflowRunStartedAt) {
+			return '';
+		}
+		const parts = [`Elapsed ${formatWorkflowDuration(getOnboardingTotalElapsedMs())}`];
+		const currentStepElapsedMs = getOnboardingCurrentStepElapsedMs();
+		if (currentStepElapsedMs > 0) {
+			parts.push(`Current step ${formatWorkflowDuration(currentStepElapsedMs)}`);
+		}
+		if (aiWorkflowPromptBudgetMs > 0) {
+			parts.push(`Prompt budget ${formatWorkflowDuration(aiWorkflowPromptBudgetMs)}`);
+		}
+		return parts.join(' • ');
+	}
+
+	function startOnboardingWorkflowRun(promptBudgetMs = 15 * 60 * 1000) {
+		const startedAt = Date.now();
+		aiWorkflowRunStartedAt = startedAt;
+		aiWorkflowRunFinishedAt = 0;
+		aiWorkflowPromptBudgetMs = promptBudgetMs;
+		startOnboardingWorkflowClock(startedAt);
+	}
+
+	function finalizeActiveWorkflowEntry(finishedAt = Date.now()) {
+		if (!activeWorkflowEntryId) {
+			return;
+		}
+		aiWorkflowEntries = aiWorkflowEntries.map((entry) =>
+			entry.id === activeWorkflowEntryId && entry.timing
+				? {
+						...entry,
+						timing: {
+							...entry.timing,
+							endedAt: entry.timing.endedAt ?? finishedAt
+						}
+					}
+				: entry
+		);
+		activeWorkflowEntryId = '';
+		activeWorkflowStepKey = '';
+	}
+
+	function finishOnboardingWorkflowRun(finishedAt = Date.now()) {
+		finalizeActiveWorkflowEntry(finishedAt);
+		aiWorkflowRunFinishedAt = finishedAt;
+		stopOnboardingWorkflowClock(finishedAt);
+	}
+
+	function resetOnboardingWorkflow() {
+		stopOnboardingWorkflowClock();
+		aiWorkflowEntries = [];
+		lastWorkflowStatusKey = '';
+		activeWorkflowEntryId = '';
+		activeWorkflowStepKey = '';
+		aiWorkflowRunStartedAt = 0;
+		aiWorkflowRunFinishedAt = 0;
+		aiWorkflowPromptBudgetMs = 15 * 60 * 1000;
+	}
+
+	function appendWorkflowEntry(entry: Omit<OnboardingWorkflowEntry, 'id'>) {
+		const nextEntry = { id: createMessageID(), ...entry };
+		aiWorkflowEntries = [...aiWorkflowEntries, nextEntry].slice(-18);
+		scrollOnboardingThreadToBottom();
+		return nextEntry.id;
+	}
+
+	function addWorkflowStatus(
+		stepKey: string,
+		label: string,
+		progress?: string,
+		meta?: StreamAIStatusMeta
+	) {
+		const normalizedLabel = String(label || '').trim();
+		if (!normalizedLabel) {
+			return;
+		}
+		const normalizedStepKey = String(stepKey || normalizedLabel).trim() || normalizedLabel;
+		if (meta?.promptTimeoutMs && meta.promptTimeoutMs > 0) {
+			aiWorkflowPromptBudgetMs = meta.promptTimeoutMs;
+		}
+		const statusKey = `${normalizedStepKey}::${normalizedLabel}::${progress ?? ''}`;
+		if (activeWorkflowEntryId && normalizedStepKey === activeWorkflowStepKey) {
+			aiWorkflowEntries = aiWorkflowEntries.map((entry) =>
+				entry.id === activeWorkflowEntryId
+					? {
+							...entry,
+							title: normalizedLabel,
+							progress,
+							timing: entry.timing
+								? {
+										...entry.timing,
+										stepBudgetMs: meta?.timeoutMs ?? entry.timing.stepBudgetMs,
+										promptBudgetMs: meta?.promptTimeoutMs ?? entry.timing.promptBudgetMs,
+										strategy: meta?.strategy ?? entry.timing.strategy
+									}
+								: entry.timing
+						}
+					: entry
+			);
+			lastWorkflowStatusKey = statusKey;
+			return;
+		}
+		if (statusKey === lastWorkflowStatusKey) {
+			return;
+		}
+		finalizeActiveWorkflowEntry();
+		lastWorkflowStatusKey = statusKey;
+		const entryId = appendWorkflowEntry({
+			title: normalizedLabel,
+			progress,
+			tone: 'status',
+			stepKey: normalizedStepKey,
+			timing: {
+				startedAt: Date.now(),
+				stepBudgetMs: meta?.timeoutMs,
+				promptBudgetMs: meta?.promptTimeoutMs,
+				strategy: meta?.strategy
+			}
+		});
+		activeWorkflowEntryId = entryId;
+		activeWorkflowStepKey = normalizedStepKey;
+	}
+
+	function summarizeTaskTitles(taskTitles: string[]) {
+		if (taskTitles.length <= 4) {
+			return taskTitles;
+		}
+		return [...taskTitles.slice(0, 4), `+${taskTitles.length - 4} more`];
+	}
+
+	function stopWorkspaceGeneration() {
+		stopActiveTimelineRequest();
+	}
+
 	function buildConversationPayload(
 		messages: OnboardingAIMessage[]
 	): AITimelineConversationMessage[] {
@@ -511,6 +780,31 @@
 		resetTemplateFlow();
 		aiPartialWarning = '';
 		aiMissingSprints = [];
+	}
+
+	function openTemplateFlow() {
+		mode = 'manual';
+		manualStep = 'picker';
+		selectedTemplateId = '';
+		confirmReplaceExisting = false;
+		localError = '';
+	}
+
+	function openBlankFlow() {
+		mode = 'manual';
+		manualStep = 'picker';
+		selectedTemplateId = BLANK_TEMPLATE_ID;
+		confirmReplaceExisting = false;
+		localError = '';
+	}
+
+	function openAIFlow() {
+		if (!aiEnabled) {
+			localError = 'Tora AI is unavailable in this room.';
+			return;
+		}
+		localError = '';
+		mode = 'ai';
 	}
 
 	function openPartialWorkspace() {
@@ -578,7 +872,7 @@
 
 	function reviewSelectedTemplate() {
 		if (!selectedTemplate) {
-			localError = 'Choose a starter template or blank workspace first.';
+			localError = 'Choose a template first.';
 			return;
 		}
 		manualStep = 'confirm';
@@ -609,27 +903,115 @@
 			localError = 'Describe your project before generating.';
 			return;
 		}
+		if ([...normalizedPrompt].length > 3000) {
+			localError = 'Your prompt is too long (max 3,000 characters). Please shorten it.';
+			return;
+		}
 
 		appendOnboardingMessage('user', normalizedPrompt);
 		const conversationPayload = buildConversationPayload(aiConversation);
 		aiPrompt = '';
+		streamingStep = '';
+		resetOnboardingWorkflow();
+		startOnboardingWorkflowRun();
+		appendWorkflowEntry({
+			title: 'Starting workspace generation',
+			detail: 'Tora is preparing the request and opening the live workflow.',
+			tone: 'status'
+		});
 
 		try {
-			const generationResult = await generateAITimeline(
+			const generationResult = await streamAITimeline(
 				normalizedRoomID,
 				normalizedPrompt,
-				conversationPayload
+				conversationPayload,
+				{
+					onStatus: (step, label, sprintIndex, sprintTotal, meta) => {
+						if (meta?.promptTimeoutMs && meta.promptTimeoutMs > 0) {
+							aiWorkflowPromptBudgetMs = meta.promptTimeoutMs;
+						}
+						if (
+							typeof sprintIndex === 'number' &&
+							typeof sprintTotal === 'number' &&
+							sprintTotal > 0
+						) {
+							streamingStep = `${label} (${Math.min(sprintIndex + 1, sprintTotal)}/${sprintTotal})`;
+							addWorkflowStatus(
+								step || label,
+								label,
+								`${Math.min(sprintIndex + 1, sprintTotal)}/${sprintTotal}`,
+								meta
+							);
+							return;
+						}
+						streamingStep = label;
+						addWorkflowStatus(step || label, label, undefined, meta);
+					},
+					onBlueprint: ({ projectName, assistantReply, sprintNames }) => {
+						const numberedSprintNames = sprintNames.map((name, index) =>
+							formatNumberedSprintName(name, index)
+						);
+						appendWorkflowEntry({
+							title: `Blueprint ready for ${projectName || 'your workspace'}`,
+							detail:
+								assistantReply ||
+								(numberedSprintNames.length > 0
+									? `Planned ${numberedSprintNames.length} sprints: ${numberedSprintNames.join(', ')}.`
+									: 'The workspace shell is ready and task creation has started.'),
+							tone: 'success',
+							taskTitles: summarizeTaskTitles(numberedSprintNames)
+						});
+					},
+					onSprint: ({ sprintName, taskCount, taskTitles, sprintIndex, sprintTotal }) => {
+						appendWorkflowEntry({
+							title: `Built ${formatNumberedSprintName(sprintName || `Sprint ${sprintIndex + 1}`, sprintIndex)}`,
+							detail: `${taskCount} tasks added to the board.`,
+							progress:
+								sprintTotal > 0
+									? `${Math.min(sprintIndex + 1, sprintTotal)}/${sprintTotal}`
+									: undefined,
+							tone: 'success',
+							taskTitles: summarizeTaskTitles(taskTitles)
+						});
+					},
+					onDone: ({ assistantReply, isPartial, missingSprints }) => {
+						finishOnboardingWorkflowRun();
+						appendWorkflowEntry({
+							title: isPartial ? 'Workspace generation paused with partial output' : 'Workspace generation complete',
+							detail: isPartial
+								? missingSprints.length > 0
+									? `Missing sprints: ${missingSprints.join(', ')}.`
+									: assistantReply || 'Partial work was kept on the board.'
+								: assistantReply || 'The workspace is ready.',
+							tone: isPartial ? 'warning' : 'success'
+						});
+					},
+					onError: ({ message, isStopped }) => {
+						finishOnboardingWorkflowRun();
+						appendWorkflowEntry({
+							title: isStopped ? 'Generation stopped' : 'Generation interrupted',
+							detail: message,
+							tone: 'warning'
+						});
+					},
+					onChat: (intent, assistantReply) => {
+						appendOnboardingMessage('assistant', assistantReply || 'Understood.', intent as AITimelineIntent);
+					}
+				},
+				fitToTier
 			);
+			streamingStep = '';
 			const generatedTimeline = generationResult.timeline;
-			appendOnboardingMessage(
-				'assistant',
-				generationResult.assistantReply || 'Understood.',
-				generationResult.intent
-			);
 			if (generationResult.intent === 'chat' || generationResult.intent === 'clarify') {
+				finishOnboardingWorkflowRun();
 				isProjectNew.set(true);
 				return;
 			}
+			appendOnboardingMessage(
+				'assistant',
+				generationResult.assistantReply || 'Your workspace has been generated.',
+				generationResult.intent
+			);
 			if (!generatedTimeline) {
 				throw new Error('AI did not return a timeline. Please provide more detail and try again.');
 			}
@@ -649,8 +1031,31 @@
 			isProjectNew.set(false);
 			activeProjectTab.set('overview');
 		} catch (error) {
+			finishOnboardingWorkflowRun();
+			streamingStep = '';
+			if (isTimelineRequestStoppedError(error)) {
+				localError = '';
+				const stoppedTimeline = error.timeline;
+				if (stoppedTimeline?.is_partial) {
+					aiMissingSprints = stoppedTimeline.missing_sprints ?? [];
+					aiPartialWarning =
+						aiMissingSprints.length > 0
+							? 'Generation stopped. Partial workspace kept.'
+							: 'Generation stopped after creating part of the workspace.';
+					isProjectNew.set(true);
+				}
+				return;
+			}
 			localError = error instanceof Error ? error.message : 'Failed to generate workspace.';
-			appendOnboardingMessage('assistant', `Error: ${localError}`, 'chat');
+			const latestWorkflowTitle =
+				aiWorkflowEntries[aiWorkflowEntries.length - 1]?.title || 'the current AI step';
+			appendOnboardingMessage(
+				'assistant',
+				`The run stopped during ${latestWorkflowTitle.toLowerCase()}. ${localError}`,
+				'chat'
+			);
+		} finally {
+			finishOnboardingWorkflowRun();
 		}
 	}
 
@@ -721,11 +1126,24 @@
 		<div class="selection-shell">
 			<header class="selection-header">
 				<h2>Create Project Workspace</h2>
-				<p>Choose your setup path for this room.</p>
+				<p>Choose Blank, Template, or Tora AI to set up this workspace.</p>
 			</header>
 
-			<div class="selection-actions" class:single-option={!aiEnabled}>
-				<button type="button" class="selection-btn manual" on:click={() => (mode = 'manual')}>
+			<div class="selection-actions">
+				<button type="button" class="selection-btn blank" on:click={openBlankFlow}>
+					<span class="selection-icon" aria-hidden="true">
+						<svg viewBox="0 0 24 24">
+							<path d="M6 6h12v12H6z"></path>
+							<path d="M9 9h6M9 12h6M9 15h3"></path>
+						</svg>
+					</span>
+					<span class="selection-copy">
+						<strong>Blank</strong>
+						<small>Start with an empty board and shape the structure yourself.</small>
+					</span>
+				</button>
+
+				<button type="button" class="selection-btn manual" on:click={openTemplateFlow}>
 					<span class="selection-icon" aria-hidden="true">
 						<svg viewBox="0 0 24 24">
 							<rect x="4.5" y="4.5" width="6.5" height="6.5" rx="1.5"></rect>
@@ -735,30 +1153,39 @@
 						</svg>
 					</span>
 					<span class="selection-copy">
-						<strong>Choose a starter template</strong>
-						<small>Pick an industry setup or start blank, then review before applying.</small>
+						<strong>Template</strong>
+						<small>Browse starter templates, preview the setup, then apply one when ready.</small>
 					</span>
 				</button>
 
-				{#if aiEnabled}
-					<button type="button" class="selection-btn ai" on:click={() => (mode = 'ai')}>
-						<span class="selection-icon" aria-hidden="true">
-							<svg viewBox="0 0 24 24">
-								<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"
-								></path>
-								<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"
-								></path>
-							</svg>
-						</span>
-						<span class="selection-copy">
-							<strong>Let Tora AI do it</strong>
-							<small>Describe your project and auto-generate structure.</small>
-						</span>
-					</button>
-				{/if}
+				<button
+					type="button"
+					class="selection-btn ai"
+					class:is-disabled={!aiEnabled}
+					on:click={openAIFlow}
+					aria-disabled={!aiEnabled}
+					title={aiEnabled
+						? 'Generate a workspace with Tora AI'
+						: 'Tora AI is unavailable in this room'}
+				>
+					<span class="selection-icon" aria-hidden="true">
+						<svg viewBox="0 0 24 24">
+							<path d="M12 3.5 13.8 8l4.7 1.8-4.7 1.8L12 16l-1.8-4.4L5.5 9.8 10.2 8 12 3.5Z"></path>
+							<path d="M18.5 13.5 19.4 15.7l2.1.9-2.1.8-.9 2.2-.8-2.2-2.2-.8 2.2-.9.8-2.2Z"></path>
+						</svg>
+					</span>
+					<span class="selection-copy">
+						<strong>Tora AI</strong>
+						<small>
+							{aiEnabled
+								? 'Describe your project and auto-generate structure.'
+								: 'Unavailable in this room. Blank and Template are still available.'}
+						</small>
+					</span>
+				</button>
 			</div>
 			{#if !aiEnabled}
-				<p class="ai-disabled-note">AI assistant is disabled for this room.</p>
+				<p class="ai-disabled-note">Tora AI is unavailable in this room.</p>
 			{/if}
 		</div>
 	{:else if mode === 'ai' && aiEnabled}
@@ -815,32 +1242,81 @@
 										<span class="ai-time-chip">{formatConversationTime(message.timestamp)}</span>
 									</div>
 								</div>
-								<div class="ai-response-body">{message.text}</div>
+								<div class="ai-response-body">
+									<RichTextContent text={message.text} />
+								</div>
 							</article>
 						{/if}
 					{/each}
 				{/if}
-				{#if $timelineLoading}
-					<div class="ai-loading-row">
-						<span class="ai-spinner" aria-hidden="true"></span>
-						Generating workspace...
+				{#if $timelineLoading || aiWorkflowEntries.length > 0}
+					<div class="ai-loading-panel">
+						{#if $timelineLoading}
+							<div class="ai-loading-row">
+								<span class="ai-spinner" aria-hidden="true"></span>
+								<div class="ai-loading-copy">
+									<strong>{streamingStep || 'Generating workspace...'}</strong>
+									<p>Live workflow updates and partial task drops appear here as Tora builds the board.</p>
+									{#if getOnboardingWorkflowSummary()}
+										<span class="ai-loading-progress">{getOnboardingWorkflowSummary()}</span>
+									{/if}
+								</div>
+							</div>
+						{:else}
+							<div class="ai-loading-copy">
+								<strong>Latest AI workflow</strong>
+								<p>The last run has finished. Its step history stays here so interruptions do not erase what Tora already showed you.</p>
+								{#if getOnboardingWorkflowSummary()}
+									<span class="ai-loading-progress">{getOnboardingWorkflowSummary()}</span>
+								{/if}
+							</div>
+						{/if}
+						{#if aiWorkflowEntries.length > 0}
+							<div class="ai-workflow-list" role="status" aria-live="polite">
+								{#each aiWorkflowEntries as entry (entry.id)}
+									<section class={`ai-workflow-entry tone-${entry.tone}`}>
+										<div class="ai-workflow-entry-head">
+											<strong>{entry.title}</strong>
+											{#if entry.progress}
+												<span class="ai-workflow-progress">{entry.progress}</span>
+											{/if}
+										</div>
+										{#if entry.detail}
+											<p>{entry.detail}</p>
+										{/if}
+										{#if getOnboardingWorkflowEntryTimingChips(entry).length > 0 || (entry.taskTitles && entry.taskTitles.length > 0)}
+											<div class="ai-workflow-tags">
+												{#each getOnboardingWorkflowEntryTimingChips(entry) as chip}
+													<span>{chip}</span>
+												{/each}
+												{#each entry.taskTitles ?? [] as item}
+													<span>{item}</span>
+												{/each}
+											</div>
+										{/if}
+									</section>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>
 
-			<div class="suggestions-panel">
-				{#each AI_PROMPT_STARTERS as starter (starter.label)}
-					<button
-						type="button"
-						class="suggestion-item"
-						on:click={() => applyPromptStarter(starter.prompt)}
-						disabled={$timelineLoading}
-					>
-						<span class="suggestion-arrow" aria-hidden="true">→</span>
-						<span class="suggestion-text">{starter.label}</span>
-					</button>
-				{/each}
-			</div>
+			{#if aiConversation.length === 0}
+				<div class="suggestions-panel">
+					{#each AI_PROMPT_STARTERS as starter (starter.label)}
+						<button
+							type="button"
+							class="suggestion-item"
+							on:click={() => applyPromptStarter(starter.prompt)}
+							disabled={$timelineLoading}
+						>
+							<span class="suggestion-arrow" aria-hidden="true">→</span>
+							<span class="suggestion-text">{starter.label}</span>
+						</button>
+					{/each}
+				</div>
+			{/if}
 
 			{#if aiPartialWarning}
 				<div class="partial-warning-banner">
@@ -866,34 +1342,61 @@
 						class="tora-textarea"
 						bind:this={aiComposerTextarea}
 						bind:value={aiPrompt}
+						use:autoResize={aiPrompt}
 						rows="1"
 						placeholder="Describe the workspace you want Tora to generate..."
 						on:keydown={handleAIPromptKeydown}
 						disabled={$timelineLoading}
 					></textarea>
 					<div class="tora-toolbar">
-						<span class="tora-hint">
+						<span class="tora-hint" class:tora-hint-warn={[...aiPrompt].length > 2700}>
 							{#if aiPrompt.trim().length === 0}
 								Include sprint count, budget, owners, and deadline
+							{:else if [...aiPrompt].length > 2700}
+								{[...aiPrompt].length}/3000
 							{:else}
 								Enter to send
 							{/if}
 						</span>
-						<div class="toolbar-spacer"></div>
 						<button
-							type="submit"
-							class="send-btn"
-							disabled={$timelineLoading || !aiPrompt.trim()}
-							aria-label="Generate workspace"
+							type="button"
+							class="fit-tier-toggle"
+							class:active={fitToTier}
+							on:click={() => { fitToTier = !fitToTier; }}
+							title={fitToTier
+								? `Fit to ${$sessionTier} plan: ON — AI will stay within your tier limits`
+								: 'Fit to plan: OFF — AI generates at full quality (may hit limits)'}
 						>
-							{#if $timelineLoading}
-								<span class="ai-spinner" aria-hidden="true"></span>
-							{:else}
+							<svg viewBox="0 0 14 14" aria-hidden="true">
+								<path d="M1 3h12M3 7h8M5 11h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+							</svg>
+							<span>Fit to {$sessionTier}</span>
+						</button>
+						<div class="toolbar-spacer"></div>
+						{#if $timelineLoading}
+							<button
+								type="button"
+								class="send-btn is-stop"
+								on:click={stopWorkspaceGeneration}
+								aria-label="Stop workspace generation"
+								title="Stop"
+							>
+								<svg viewBox="0 0 14 14" aria-hidden="true">
+									<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="1.2"></rect>
+								</svg>
+							</button>
+						{:else}
+							<button
+								type="submit"
+								class="send-btn"
+								disabled={!aiPrompt.trim()}
+								aria-label="Generate workspace"
+							>
 								<svg viewBox="0 0 14 14" aria-hidden="true">
 									<path d="M2 7h10M8 3l4 4-4 4"></path>
 								</svg>
-							{/if}
-						</button>
+							</button>
+						{/if}
 					</div>
 				</div>
 			</form>
@@ -902,9 +1405,9 @@
 		<div class="wizard-shell">
 			<header class="wizard-head">
 				<div class="wizard-title-block">
-					<h3>{templatePickerOnly ? 'Change Template' : 'Starter Templates'}</h3>
+					<h3>{templatePickerOnly ? 'Change Template' : 'Workspace Setup'}</h3>
 					<p>
-						Choose an industry setup, preview what it creates, then apply it when you are ready.
+						Choose a starter template, preview the board setup, then apply it when ready.
 					</p>
 				</div>
 				<div class="wizard-head-actions">
@@ -918,59 +1421,72 @@
 			</header>
 
 			{#if manualStep === 'picker'}
-				<div class="template-intro-card">
-					<div>
-						<strong>Template library</strong>
-						<p>
-							Start with a structured board instead of an empty canvas. Every template includes
-							starter fields and sample tasks so the workspace feels usable immediately.
-						</p>
-					</div>
-					<div class="template-intro-meta">
-						<span>{availableTemplates.length} options</span>
-						<span>{templatesLoading ? 'Loading...' : 'Ready to review'}</span>
-					</div>
-				</div>
-
-				{#if templateLoadError}
-					<div class="error-banner">
-						<span>{templateLoadError}</span>
-						<button type="button" class="inline-link-btn" on:click={retryTemplateLoad}>Retry</button
-						>
-					</div>
-				{/if}
-
-				<div class="template-grid">
-					{#each availableTemplates as template (template.id)}
-						<button
-							type="button"
-							class="template-card"
-							class:is-selected={selectedTemplateId === template.id}
-							on:click={() => selectTemplateCard(template.id)}
-							disabled={applyingTemplate}
-						>
-							<div class="template-card-top">
-								<span class="template-pill">{template.industries[0] || 'Starter'}</span>
-								<span class="template-counts">
-									{template.fieldSchemas.length} fields · {template.sampleTasks.length} tasks
+				<div class="picker-stack">
+					<section class="picker-section">
+						<div class="template-intro-card">
+							<div>
+								<strong>Starter template</strong>
+								<p>
+									Choose the board style you want to start from. Each template already defines its
+									own structure, starter fields, and sample work.
+								</p>
+							</div>
+							<div class="template-intro-meta">
+								<span>{availableTemplates.length} options</span>
+								<span>
+									{#if templatesLoading && selectedTemplate?.id !== BLANK_TEMPLATE_ID}
+										Loading...
+									{:else if selectedTemplate}
+										{selectedTemplate.name}
+									{:else}
+										Select one
+									{/if}
 								</span>
 							</div>
-							<strong>{template.name}</strong>
-							<p>{template.description}</p>
-							<div class="template-card-meta">
-								{#if template.fieldSchemas.length > 0}
-									<span
-										>{template.fieldSchemas
-											.slice(0, 3)
-											.map((field) => field.name)
-											.join(' · ')}</span
-									>
-								{:else}
-									<span>No starter data</span>
-								{/if}
+						</div>
+
+						{#if templateLoadError}
+							<div class="error-banner">
+								<span>{templateLoadError}</span>
+								<button type="button" class="inline-link-btn" on:click={retryTemplateLoad}
+									>Retry</button
+								>
 							</div>
-						</button>
-					{/each}
+						{/if}
+
+						<div class="template-grid">
+							{#each availableTemplates as template (template.id)}
+								<button
+									type="button"
+									class="template-card"
+									class:is-selected={selectedTemplateId === template.id}
+									on:click={() => selectTemplateCard(template.id)}
+									disabled={applyingTemplate}
+								>
+									<div class="template-card-top">
+										<span class="template-pill">{template.industries[0] || 'Starter'}</span>
+										<span class="template-counts">
+											{template.fieldSchemas.length} fields · {template.sampleTasks.length} tasks
+										</span>
+									</div>
+									<strong>{template.name}</strong>
+									<p>{template.description}</p>
+									<div class="template-card-meta">
+										{#if template.fieldSchemas.length > 0}
+											<span
+												>{template.fieldSchemas
+													.slice(0, 3)
+													.map((field) => field.name)
+													.join(' · ')}</span
+											>
+										{:else}
+											<span>No starter data</span>
+										{/if}
+									</div>
+								</button>
+							{/each}
+						</div>
+					</section>
 				</div>
 
 				<div class="wizard-actions">
@@ -985,7 +1501,7 @@
 							applyingTemplate ||
 							(templatesLoading && selectedTemplate?.id !== BLANK_TEMPLATE_ID)}
 					>
-						Review selection
+						{selectedTemplate?.id === BLANK_TEMPLATE_ID ? 'Review blank setup' : 'Review selection'}
 					</button>
 				</div>
 			{:else}
@@ -995,9 +1511,11 @@
 							<h4>{selectedTemplate?.name}</h4>
 							<p>{selectedTemplate?.description}</p>
 						</div>
-						<span class="template-pill subtle"
-							>{selectedTemplate?.industries.join(' · ') || 'Blank'}</span
-						>
+						<div class="template-preview-badges">
+							<span class="template-pill subtle"
+								>{selectedTemplate?.industries.join(' · ') || 'Blank'}</span
+							>
+						</div>
 					</div>
 
 					<div class="template-preview-summary">
@@ -1146,8 +1664,10 @@
 	.project-onboarding {
 		height: 100%;
 		min-height: 0;
-		display: grid;
-		grid-template-rows: 1fr auto;
+		min-width: 0;
+		box-sizing: border-box;
+		display: flex;
+		flex-direction: column;
 		gap: 0.9rem;
 		padding: 1rem;
 		background: var(--po-bg);
@@ -1162,6 +1682,8 @@
 
 	.selection-shell,
 	.wizard-shell {
+		flex: 1 1 0;
+		min-height: 0;
 		border: 1px solid var(--po-border);
 		border-radius: 18px;
 		background: var(--po-surface);
@@ -1170,10 +1692,14 @@
 
 	.selection-shell {
 		display: grid;
-		align-content: start;
+		align-content: center;
 		justify-items: center;
 		gap: 1.25rem;
 		padding: 1.7rem;
+		overflow-y: auto;
+	}
+
+	.wizard-shell {
 		overflow-y: auto;
 	}
 
@@ -1195,13 +1721,8 @@
 	.selection-actions {
 		width: min(920px, 100%);
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 		gap: 0.95rem;
-	}
-
-	.selection-actions.single-option {
-		grid-template-columns: minmax(0, 1fr);
-		max-width: 460px;
 	}
 
 	.ai-disabled-note {
@@ -1234,6 +1755,19 @@
 		background: color-mix(in srgb, var(--po-accent-soft) 55%, var(--po-surface));
 	}
 
+	.selection-btn:disabled,
+	.selection-btn.is-disabled {
+		cursor: not-allowed;
+		opacity: 0.72;
+	}
+
+	.selection-btn:disabled:hover,
+	.selection-btn.is-disabled:hover {
+		transform: none;
+		border-color: var(--po-border);
+		background: var(--po-surface);
+	}
+
 	.selection-icon {
 		width: 2.6rem;
 		height: 2.6rem;
@@ -1258,6 +1792,17 @@
 		stroke: var(--po-accent);
 	}
 
+	.selection-btn.is-disabled .selection-icon,
+	.selection-btn:disabled .selection-icon {
+		background: color-mix(in srgb, var(--po-surface-soft) 85%, var(--po-surface));
+		border-color: color-mix(in srgb, var(--po-border) 90%, transparent);
+	}
+
+	.selection-btn.is-disabled .selection-icon svg,
+	.selection-btn:disabled .selection-icon svg {
+		stroke: var(--po-muted);
+	}
+
 	.selection-copy strong {
 		display: block;
 		font-size: 1rem;
@@ -1276,6 +1821,16 @@
 		gap: 1rem;
 		align-content: start;
 		padding: 1rem;
+	}
+
+	.picker-stack {
+		display: grid;
+		gap: 1rem;
+	}
+
+	.picker-section {
+		display: grid;
+		gap: 0.78rem;
 	}
 
 	.wizard-head {
@@ -1494,6 +2049,14 @@
 		gap: 1rem;
 	}
 
+	.template-preview-badges {
+		display: inline-flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.45rem;
+		flex-wrap: wrap;
+	}
+
 	.template-preview-head h4 {
 		margin: 0;
 		font-size: 1rem;
@@ -1508,7 +2071,7 @@
 
 	.template-preview-summary {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
 		gap: 0.72rem;
 	}
 
@@ -1627,7 +2190,7 @@
 	}
 
 	.tora-chat {
-		height: 100%;
+		flex: 1 1 0;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
@@ -1863,13 +2426,40 @@
 		word-break: break-word;
 	}
 
+	.ai-loading-panel {
+		display: grid;
+		gap: 0.7rem;
+		padding: 0.8rem 0.88rem;
+		border-radius: 16px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03)),
+			rgba(17, 18, 22, 0.92);
+	}
+
 	.ai-loading-row {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.5rem;
+		display: flex;
+		align-items: flex-start;
+		gap: 0.62rem;
 		font-size: 0.78rem;
 		color: #9aa0a6;
-		font-style: italic;
+	}
+
+	.ai-loading-copy {
+		display: grid;
+		gap: 0.18rem;
+	}
+
+	.ai-loading-copy strong {
+		font-size: 0.82rem;
+		color: #f3f6fb;
+	}
+
+	.ai-loading-copy p {
+		margin: 0;
+		font-size: 0.72rem;
+		line-height: 1.5;
+		color: #9aa0a6;
 	}
 
 	.ai-spinner {
@@ -1879,6 +2469,73 @@
 		border-top-color: #1a73e8;
 		border-radius: 999px;
 		animation: tora-spin 0.8s linear infinite;
+	}
+
+	.ai-workflow-list {
+		display: grid;
+		gap: 0.46rem;
+	}
+
+	.ai-workflow-entry {
+		display: grid;
+		gap: 0.28rem;
+		padding: 0.56rem 0.62rem;
+		border-radius: 12px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.03);
+	}
+
+	.ai-workflow-entry-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.ai-workflow-entry-head strong {
+		font-size: 0.77rem;
+		color: #eef2f7;
+	}
+
+	.ai-workflow-entry p {
+		margin: 0;
+		font-size: 0.72rem;
+		line-height: 1.5;
+		color: #b7bec8;
+	}
+
+	.ai-workflow-progress {
+		border-radius: 999px;
+		padding: 0.12rem 0.4rem;
+		font-size: 0.62rem;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+		background: rgba(26, 115, 232, 0.14);
+		color: #8ab4f8;
+	}
+
+	.ai-workflow-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.36rem;
+	}
+
+	.ai-workflow-tags span {
+		border-radius: 999px;
+		padding: 0.16rem 0.44rem;
+		font-size: 0.64rem;
+		background: rgba(255, 255, 255, 0.06);
+		color: #d3d9e2;
+	}
+
+	.ai-workflow-entry.tone-success {
+		border-color: rgba(86, 179, 127, 0.26);
+		background: rgba(86, 179, 127, 0.08);
+	}
+
+	.ai-workflow-entry.tone-warning {
+		border-color: rgba(245, 158, 11, 0.28);
+		background: rgba(245, 158, 11, 0.08);
 	}
 
 	.suggestions-panel {
@@ -1954,7 +2611,8 @@
 
 	.tora-textarea {
 		min-height: 22px;
-		max-height: 120px;
+		max-height: calc(0.84rem * 1.46 * 3);
+		overflow-y: auto;
 		border: none;
 		background: transparent;
 		color: #e8eaed;
@@ -1994,6 +2652,12 @@
 	.tora-hint {
 		font-size: 0.68rem;
 		color: #9aa0a6;
+		transition: color 0.15s;
+	}
+
+	.tora-hint.tora-hint-warn {
+		color: #f59e0b;
+		font-weight: 600;
 	}
 
 	.toolbar-spacer {
@@ -2034,6 +2698,16 @@
 		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.48);
 	}
 
+	.send-btn.is-stop {
+		background: #b3261e;
+		box-shadow: 0 2px 10px rgba(179, 38, 30, 0.34);
+	}
+
+	.send-btn.is-stop:hover:not(:disabled) {
+		background: #8f1f19;
+		box-shadow: 0 4px 16px rgba(179, 38, 30, 0.4);
+	}
+
 	.send-btn:disabled {
 		background: rgba(255, 255, 255, 0.08);
 		cursor: not-allowed;
@@ -2041,12 +2715,37 @@
 		transform: none;
 	}
 
-	.send-btn .ai-spinner {
-		width: 13px;
-		height: 13px;
-		border-width: 1.8px;
-		border-color: rgba(255, 255, 255, 0.42);
-		border-top-color: #fff;
+	.fit-tier-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.28rem;
+		padding: 0.2rem 0.55rem;
+		border-radius: 999px;
+		border: 1px solid rgba(255, 255, 255, 0.14);
+		background: transparent;
+		color: var(--po-text-muted, rgba(200, 210, 230, 0.6));
+		font-size: 0.62rem;
+		font-weight: 600;
+		font-family: 'JetBrains Mono', monospace;
+		letter-spacing: 0.04em;
+		cursor: pointer;
+		transition: color 0.15s, border-color 0.15s, background 0.15s;
+		white-space: nowrap;
+	}
+	.fit-tier-toggle svg {
+		width: 12px;
+		height: 12px;
+		flex-shrink: 0;
+		fill: none;
+	}
+	.fit-tier-toggle:hover {
+		color: var(--po-accent, #7eb3f7);
+		border-color: rgba(126, 179, 247, 0.3);
+	}
+	.fit-tier-toggle.active {
+		color: #7eb3f7;
+		border-color: rgba(126, 179, 247, 0.45);
+		background: rgba(126, 179, 247, 0.1);
 	}
 
 	.error-banner {

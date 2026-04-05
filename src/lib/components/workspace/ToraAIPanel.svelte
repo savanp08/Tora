@@ -1,10 +1,14 @@
 <script lang="ts">
 	import { tick } from 'svelte';
+	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
 	import {
 		type AITimelineConversationMessage,
 		type AITimelineIntent,
+		type StreamAIStatusMeta,
 		editAITimeline,
+		isTimelineRequestStoppedError,
 		projectTimeline,
+		stopActiveTimelineRequest,
 		timelineLoading
 	} from '$lib/stores/timeline';
 	import { initializeTaskStoreForRoom } from '$lib/stores/tasks';
@@ -27,12 +31,53 @@
 		version: 1;
 		messages: ToraMessage[];
 	};
+	type LiveWorkflowEntry = {
+		id: string;
+		title: string;
+		detail?: string;
+		progress?: string;
+		tone: 'status' | 'success' | 'warning';
+		stepKey?: string;
+		timing?: {
+			startedAt: number;
+			endedAt?: number;
+			stepBudgetMs?: number;
+			promptBudgetMs?: number;
+			strategy?: string;
+		};
+	};
 
 	let draft = '';
 	let messages: ToraMessage[] = [];
 	let submitError = '';
+	let liveStatus = '';
+	let liveAssistantPreview = '';
+	let liveAppliedCount = 0;
+	let liveOperationTotal = 0;
+	let liveWorkflowEntries: LiveWorkflowEntry[] = [];
+	let lastWorkflowStatusKey = '';
+	let activeWorkflowEntryId = '';
+	let activeWorkflowStepKey = '';
+	let liveWorkflowRunStartedAt = 0;
+	let liveWorkflowRunFinishedAt = 0;
+	let liveWorkflowPromptBudgetMs = 15 * 60 * 1000;
+	let liveWorkflowClockNow = Date.now();
+	let liveWorkflowTimer: number | null = null;
 	let threadElement: HTMLDivElement | null = null;
 	let composerTextarea: HTMLTextAreaElement | null = null;
+
+	function autoResize(node: HTMLTextAreaElement, _value?: string) {
+		function resize() {
+			node.style.height = 'auto';
+			node.style.height = node.scrollHeight + 'px';
+		}
+		node.addEventListener('input', resize);
+		resize();
+		return {
+			update() { resize(); },
+			destroy() { node.removeEventListener('input', resize); }
+		};
+	}
 	let loadedConversationKey = '';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
@@ -71,6 +116,8 @@
 	$: boardStatusText = currentState
 		? `${sprints.length} sprints \u00B7 ${totalTasks} tasks`
 		: 'No project loaded';
+	$: liveProgressLabel =
+		liveOperationTotal > 0 ? `${Math.min(liveAppliedCount, liveOperationTotal)}/${liveOperationTotal} changes applied` : '';
 	$: if (conversationStorageKey !== loadedConversationKey) {
 		loadedConversationKey = conversationStorageKey;
 		loadConversationForKey(conversationStorageKey);
@@ -232,16 +279,239 @@
 		return `${userPrompt}\n\n[SYSTEM CONTEXT: Valid Assignee IDs for tasks: ${validAssigneeContext}. Use only these IDs for assigneeId/assignee_id updates. If none are listed, do not modify task assignees.]`;
 	}
 
+	function formatWorkflowDuration(ms: number) {
+		if (!Number.isFinite(ms) || ms <= 0) {
+			return '00:00';
+		}
+		const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const seconds = totalSeconds % 60;
+		if (hours > 0) {
+			return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+		}
+		return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+	}
+
+	function startLiveWorkflowClock(startedAt = Date.now()) {
+		stopLiveWorkflowClock(startedAt);
+		liveWorkflowClockNow = startedAt;
+		if (typeof window === 'undefined') {
+			return;
+		}
+		liveWorkflowTimer = window.setInterval(() => {
+			liveWorkflowClockNow = Date.now();
+		}, 1000);
+	}
+
+	function stopLiveWorkflowClock(finishedAt = Date.now()) {
+		liveWorkflowClockNow = finishedAt;
+		if (liveWorkflowTimer && typeof window !== 'undefined') {
+			window.clearInterval(liveWorkflowTimer);
+		}
+		liveWorkflowTimer = null;
+	}
+
+	function getLiveWorkflowReferenceNow() {
+		if ($timelineLoading && liveWorkflowRunStartedAt > 0) {
+			return liveWorkflowClockNow || Date.now();
+		}
+		return liveWorkflowRunFinishedAt || liveWorkflowClockNow || Date.now();
+	}
+
+	function getLiveWorkflowEntry(entryId: string) {
+		return liveWorkflowEntries.find((entry) => entry.id === entryId) ?? null;
+	}
+
+	function getLiveWorkflowEntryElapsedMs(entry: LiveWorkflowEntry) {
+		if (!entry.timing) {
+			return 0;
+		}
+		const end = entry.timing.endedAt ?? getLiveWorkflowReferenceNow();
+		return Math.max(0, end - entry.timing.startedAt);
+	}
+
+	function getLiveWorkflowEntryTimingChips(entry: LiveWorkflowEntry) {
+		if (!entry.timing) {
+			return [] as string[];
+		}
+		const chips: string[] = [];
+		const elapsedMs = getLiveWorkflowEntryElapsedMs(entry);
+		if (elapsedMs > 0) {
+			chips.push(`Step ${formatWorkflowDuration(elapsedMs)}`);
+		}
+		if (entry.timing.stepBudgetMs && entry.timing.stepBudgetMs > 0) {
+			chips.push(`Budget ${formatWorkflowDuration(entry.timing.stepBudgetMs)}`);
+		}
+		if (entry.timing.strategy) {
+			chips.push(entry.timing.strategy.replace(/_/g, ' '));
+		}
+		return chips;
+	}
+
+	function getLiveWorkflowTotalElapsedMs() {
+		if (!liveWorkflowRunStartedAt) {
+			return 0;
+		}
+		return Math.max(0, getLiveWorkflowReferenceNow() - liveWorkflowRunStartedAt);
+	}
+
+	function getLiveWorkflowCurrentStepElapsedMs() {
+		const entry = activeWorkflowEntryId ? getLiveWorkflowEntry(activeWorkflowEntryId) : null;
+		return entry ? getLiveWorkflowEntryElapsedMs(entry) : 0;
+	}
+
+	function getLiveWorkflowSummary() {
+		if (!liveWorkflowRunStartedAt) {
+			return '';
+		}
+		const parts = [`Elapsed ${formatWorkflowDuration(getLiveWorkflowTotalElapsedMs())}`];
+		const currentStepElapsedMs = getLiveWorkflowCurrentStepElapsedMs();
+		if (currentStepElapsedMs > 0) {
+			parts.push(`Current step ${formatWorkflowDuration(currentStepElapsedMs)}`);
+		}
+		if (liveWorkflowPromptBudgetMs > 0) {
+			parts.push(`Prompt budget ${formatWorkflowDuration(liveWorkflowPromptBudgetMs)}`);
+		}
+		return parts.join(' • ');
+	}
+
+	function startLiveWorkflowRun(promptBudgetMs = 15 * 60 * 1000) {
+		const startedAt = Date.now();
+		liveWorkflowRunStartedAt = startedAt;
+		liveWorkflowRunFinishedAt = 0;
+		liveWorkflowPromptBudgetMs = promptBudgetMs;
+		startLiveWorkflowClock(startedAt);
+	}
+
+	function finalizeActiveWorkflowEntry(finishedAt = Date.now()) {
+		if (!activeWorkflowEntryId) {
+			return;
+		}
+		liveWorkflowEntries = liveWorkflowEntries.map((entry) =>
+			entry.id === activeWorkflowEntryId && entry.timing
+				? {
+						...entry,
+						timing: {
+							...entry.timing,
+							endedAt: entry.timing.endedAt ?? finishedAt
+						}
+					}
+				: entry
+		);
+		activeWorkflowEntryId = '';
+		activeWorkflowStepKey = '';
+	}
+
+	function finishLiveWorkflowRun(finishedAt = Date.now()) {
+		finalizeActiveWorkflowEntry(finishedAt);
+		liveWorkflowRunFinishedAt = finishedAt;
+		stopLiveWorkflowClock(finishedAt);
+	}
+
+	function resetLiveState() {
+		stopLiveWorkflowClock();
+		liveStatus = '';
+		liveAssistantPreview = '';
+		liveAppliedCount = 0;
+		liveOperationTotal = 0;
+		liveWorkflowEntries = [];
+		lastWorkflowStatusKey = '';
+		activeWorkflowEntryId = '';
+		activeWorkflowStepKey = '';
+		liveWorkflowRunStartedAt = 0;
+		liveWorkflowRunFinishedAt = 0;
+		liveWorkflowPromptBudgetMs = 15 * 60 * 1000;
+	}
+
+	function appendWorkflowEntry(entry: Omit<LiveWorkflowEntry, 'id'>) {
+		const nextEntry = { id: createMessageID(), ...entry };
+		liveWorkflowEntries = [...liveWorkflowEntries, nextEntry].slice(-20);
+		scrollThreadToBottom();
+		return nextEntry.id;
+	}
+
+	function addWorkflowStatus(
+		stepKey: string,
+		label: string,
+		progress?: string,
+		meta?: StreamAIStatusMeta
+	) {
+		const normalizedLabel = String(label || '').trim();
+		if (!normalizedLabel) {
+			return;
+		}
+		const normalizedStepKey = String(stepKey || normalizedLabel).trim() || normalizedLabel;
+		if (meta?.promptTimeoutMs && meta.promptTimeoutMs > 0) {
+			liveWorkflowPromptBudgetMs = meta.promptTimeoutMs;
+		}
+		const statusKey = `${normalizedStepKey}::${normalizedLabel}::${progress ?? ''}`;
+		if (activeWorkflowEntryId && normalizedStepKey === activeWorkflowStepKey) {
+			liveWorkflowEntries = liveWorkflowEntries.map((entry) =>
+				entry.id === activeWorkflowEntryId
+					? {
+							...entry,
+							title: normalizedLabel,
+							progress,
+							timing: entry.timing
+								? {
+										...entry.timing,
+										stepBudgetMs: meta?.timeoutMs ?? entry.timing.stepBudgetMs,
+										promptBudgetMs: meta?.promptTimeoutMs ?? entry.timing.promptBudgetMs,
+										strategy: meta?.strategy ?? entry.timing.strategy
+									}
+								: entry.timing
+						}
+					: entry
+			);
+			lastWorkflowStatusKey = statusKey;
+			return;
+		}
+		if (statusKey === lastWorkflowStatusKey) {
+			return;
+		}
+		finalizeActiveWorkflowEntry();
+		lastWorkflowStatusKey = statusKey;
+		const entryId = appendWorkflowEntry({
+			title: normalizedLabel,
+			progress,
+			tone: 'status',
+			stepKey: normalizedStepKey,
+			timing: {
+				startedAt: Date.now(),
+				stepBudgetMs: meta?.timeoutMs,
+				promptBudgetMs: meta?.promptTimeoutMs,
+				strategy: meta?.strategy
+			}
+		});
+		activeWorkflowEntryId = entryId;
+		activeWorkflowStepKey = normalizedStepKey;
+	}
+
+	function stopBoardAIRequest() {
+		stopActiveTimelineRequest();
+	}
+
 	async function submitEditPrompt() {
 		submitError = '';
+		resetLiveState();
 		const prompt = draft.trim();
 		if (!prompt) {
+			return;
+		}
+		if ([...prompt].length > 3000) {
+			submitError = 'Prompt is too long (max 3,000 characters). Please shorten it.';
 			return;
 		}
 
 		appendMessage('user', prompt);
 		const conversationPayload = buildConversationPayload(messages);
 		draft = '';
+		appendWorkflowEntry({
+			title: 'Starting board update',
+			detail: 'Tora is reading the board and preparing the first operations.',
+			tone: 'status'
+		});
 
 		if (!normalizedRoomID) {
 			appendMessage('assistant', 'Room id is missing. AI edits cannot run right now.');
@@ -252,19 +522,105 @@
 			return;
 		}
 
+		startLiveWorkflowRun();
 		try {
 			const agenticPrompt = buildAgenticEditPrompt(prompt);
 			const result = await editAITimeline(
 				normalizedRoomID,
 				agenticPrompt,
 				currentState,
-				conversationPayload
+				conversationPayload,
+				{
+					onStatus: (step, label, appliedCount, operationTotal, meta) => {
+						liveStatus = label || 'Applying board updates...';
+						if (meta?.promptTimeoutMs && meta.promptTimeoutMs > 0) {
+							liveWorkflowPromptBudgetMs = meta.promptTimeoutMs;
+						}
+						if (typeof appliedCount === 'number') {
+							liveAppliedCount = appliedCount;
+						}
+						if (typeof operationTotal === 'number') {
+							liveOperationTotal = operationTotal;
+						}
+						const progressLabel =
+							typeof operationTotal === 'number' && operationTotal > 0
+								? `${Math.min(appliedCount ?? 0, operationTotal)}/${operationTotal}`
+								: undefined;
+						addWorkflowStatus(
+							step || liveStatus,
+							liveStatus,
+							progressLabel,
+							meta
+						);
+					},
+					onPlan: (assistantReply, operationTotal) => {
+						liveAssistantPreview = assistantReply || 'Preparing board changes...';
+						if (typeof operationTotal === 'number') {
+							liveOperationTotal = operationTotal;
+						}
+						appendWorkflowEntry({
+							title: 'Plan ready',
+							detail: assistantReply || 'Board change plan prepared.',
+							progress: operationTotal > 0 ? `${operationTotal} ops` : undefined,
+							tone: 'success'
+						});
+					},
+					onOperation: (summary, appliedCount, operationTotal) => {
+						liveStatus = summary || 'Applied a board change.';
+						liveAppliedCount = appliedCount;
+						liveOperationTotal = operationTotal;
+						appendWorkflowEntry({
+							title: summary || 'Applied a board change.',
+							detail:
+								operationTotal > 0
+									? `${Math.min(appliedCount, operationTotal)} of ${operationTotal} changes applied.`
+									: 'Board state updated.',
+							progress: operationTotal > 0 ? `${Math.min(appliedCount, operationTotal)}/${operationTotal}` : undefined,
+							tone: 'success'
+						});
+					},
+					onChat: (_intent, assistantReply) => {
+						liveAssistantPreview = assistantReply || '';
+					},
+					onError: (message, meta) => {
+						finishLiveWorkflowRun();
+						if (meta?.isStopped) {
+							appendWorkflowEntry({
+								title: 'Board update stopped',
+								detail: message,
+								tone: 'warning'
+							});
+							return;
+						}
+						submitError = message;
+						if (!liveStatus) {
+							liveStatus = message;
+						}
+						appendWorkflowEntry({
+							title: 'Board update interrupted',
+							detail: message,
+							tone: 'warning'
+						});
+					}
+				}
 			);
+			finishLiveWorkflowRun();
 			if (result.intent !== 'chat' && result.intent !== 'clarify') {
 				await initializeTaskStoreForRoom(normalizedRoomID, { apiBase: API_BASE });
 			}
 			appendMessage('assistant', result.assistantReply || formatSuccessMessage(), result.intent);
 		} catch (error) {
+			finishLiveWorkflowRun();
+			if (isTimelineRequestStoppedError(error)) {
+				submitError = '';
+				appendMessage(
+					'assistant',
+					error.timeline
+						? 'Stopped. Any changes already applied are still on the board.'
+						: 'Stopped before any board changes were applied.'
+				);
+				return;
+			}
 			submitError = error instanceof Error ? error.message : 'Failed to apply Tora AI edit.';
 			appendMessage('assistant', `Error: ${submitError}`);
 		}
@@ -344,15 +700,64 @@
 								<span class="ai-time-chip">{formatMessageTime(message.timestamp)}</span>
 							</div>
 						</div>
-						<div class="ai-response-body">{message.text}</div>
+						<div class="ai-response-body">
+							<RichTextContent text={message.text} />
+						</div>
 					</article>
 				{/if}
 			{/each}
 		{/if}
-		{#if $timelineLoading && currentState}
-			<div class="ai-loading-row">
-				<span class="ai-spinner" aria-hidden="true"></span>
-				Applying board updates...
+		{#if ($timelineLoading || liveWorkflowEntries.length > 0) && currentState}
+			<div class="ai-loading-panel">
+				{#if $timelineLoading}
+					<div class="ai-loading-row">
+						<span class="ai-spinner" aria-hidden="true"></span>
+						<div class="ai-loading-copy">
+							<strong>{liveStatus || 'Applying board updates...'}</strong>
+							{#if liveAssistantPreview}
+								<p>{liveAssistantPreview}</p>
+							{/if}
+							{#if getLiveWorkflowSummary()}
+								<span class="ai-loading-progress">{getLiveWorkflowSummary()}</span>
+							{/if}
+							{#if liveProgressLabel}
+								<span class="ai-loading-progress">{liveProgressLabel}</span>
+							{/if}
+						</div>
+					</div>
+				{:else}
+					<div class="ai-loading-copy">
+						<strong>Latest board AI workflow</strong>
+						<p>The last run has finished. Its step history stays visible here for debugging and review.</p>
+						{#if getLiveWorkflowSummary()}
+							<span class="ai-loading-progress">{getLiveWorkflowSummary()}</span>
+						{/if}
+					</div>
+				{/if}
+				{#if liveWorkflowEntries.length > 0}
+					<div class="ai-workflow-list" role="status" aria-live="polite">
+						{#each liveWorkflowEntries as entry (entry.id)}
+							<section class={`ai-workflow-entry tone-${entry.tone}`}>
+								<div class="ai-workflow-entry-head">
+									<strong>{entry.title}</strong>
+									{#if entry.progress}
+										<span class="ai-workflow-progress">{entry.progress}</span>
+									{/if}
+								</div>
+								{#if entry.detail}
+									<p>{entry.detail}</p>
+								{/if}
+								{#if getLiveWorkflowEntryTimingChips(entry).length > 0}
+									<div class="ai-workflow-tags">
+										{#each getLiveWorkflowEntryTimingChips(entry) as chip}
+											<span>{chip}</span>
+										{/each}
+									</div>
+								{/if}
+							</section>
+						{/each}
+					</div>
+				{/if}
 			</div>
 		{/if}
 	</div>
@@ -383,15 +788,18 @@
 				class="tora-textarea"
 				bind:this={composerTextarea}
 				bind:value={draft}
+				use:autoResize={draft}
 				rows="1"
 				placeholder="Ask Tora to update this sprint plan..."
 				on:keydown={handleComposerKeydown}
 				disabled={$timelineLoading || !currentState}
 			></textarea>
 			<div class="tora-toolbar">
-				<span class="tora-hint">
+				<span class="tora-hint" class:tora-hint-warn={[...draft].length > 2700}>
 					{#if !currentState}
 						Create a project to start chatting
+					{:else if [...draft].length > 2700}
+						{[...draft].length}/3000
 					{:else if isLargeProject}
 						Large board mode enabled
 					{:else}
@@ -399,20 +807,30 @@
 					{/if}
 				</span>
 				<div class="toolbar-spacer"></div>
-				<button
-					type="submit"
-					class="send-btn"
-					disabled={$timelineLoading || !draft.trim() || !currentState}
-					aria-label="Send message"
-				>
-					{#if $timelineLoading}
-						<span class="ai-spinner" aria-hidden="true"></span>
-					{:else}
+				{#if $timelineLoading}
+					<button
+						type="button"
+						class="send-btn is-stop"
+						on:click={stopBoardAIRequest}
+						aria-label="Stop board AI request"
+						title="Stop"
+					>
+						<svg viewBox="0 0 14 14" aria-hidden="true">
+							<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="1.2"></rect>
+						</svg>
+					</button>
+				{:else}
+					<button
+						type="submit"
+						class="send-btn"
+						disabled={!draft.trim() || !currentState}
+						aria-label="Send message"
+					>
 						<svg viewBox="0 0 14 14" aria-hidden="true">
 							<path d="M2 7h10M8 3l4 4-4 4"></path>
 						</svg>
-					{/if}
-				</button>
+					</button>
+				{/if}
 			</div>
 		</div>
 	</form>
@@ -653,16 +1071,116 @@
 		word-break: break-word;
 	}
 
+	.ai-loading-panel {
+		display: grid;
+		gap: 0.7rem;
+		padding: 0.78rem 0.82rem;
+		border-radius: 0.96rem;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03)),
+			rgba(16, 18, 22, 0.9);
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		color: #c9d1d9;
+	}
+
 	.ai-loading-row {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.5rem;
-		font-size: 0.78rem;
+		display: flex;
+		align-items: flex-start;
+		gap: 0.65rem;
+	}
+
+	.ai-loading-copy {
+		display: grid;
+		gap: 0.2rem;
+		min-width: 0;
+	}
+
+	.ai-loading-copy strong {
+		font-size: 0.8rem;
+		font-weight: 600;
+		color: #e8eaed;
+	}
+
+	.ai-loading-copy p {
+		margin: 0;
+		font-size: 0.74rem;
+		line-height: 1.45;
 		color: #9aa0a6;
-		font-style: italic;
+	}
+
+	.ai-loading-progress {
+		font-size: 0.7rem;
+		color: #8ab4f8;
+	}
+
+	.ai-workflow-list {
+		display: grid;
+		gap: 0.46rem;
+	}
+
+	.ai-workflow-entry {
+		display: grid;
+		gap: 0.24rem;
+		padding: 0.52rem 0.58rem;
+		border-radius: 12px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(255, 255, 255, 0.03);
+	}
+
+	.ai-workflow-entry-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.ai-workflow-entry-head strong {
+		font-size: 0.76rem;
+		color: #eef2f7;
+	}
+
+	.ai-workflow-entry p {
+		margin: 0;
+		font-size: 0.72rem;
+		line-height: 1.45;
+		color: #b8c0ca;
+	}
+
+	.ai-workflow-progress {
+		border-radius: 999px;
+		padding: 0.12rem 0.4rem;
+		font-size: 0.62rem;
+		font-weight: 700;
+		background: rgba(26, 115, 232, 0.14);
+		color: #8ab4f8;
+	}
+
+	.ai-workflow-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+	}
+
+	.ai-workflow-tags span {
+		border-radius: 999px;
+		padding: 0.14rem 0.42rem;
+		font-size: 0.62rem;
+		background: rgba(255, 255, 255, 0.08);
+		color: #bdc1c6;
+	}
+
+	.ai-workflow-entry.tone-success {
+		border-color: rgba(86, 179, 127, 0.26);
+		background: rgba(86, 179, 127, 0.08);
+	}
+
+	.ai-workflow-entry.tone-warning {
+		border-color: rgba(245, 158, 11, 0.28);
+		background: rgba(245, 158, 11, 0.08);
 	}
 
 	.ai-spinner {
+		flex: 0 0 auto;
 		width: 14px;
 		height: 14px;
 		border: 2px solid rgba(255, 255, 255, 0.12);
@@ -744,7 +1262,8 @@
 
 	.tora-textarea {
 		min-height: 22px;
-		max-height: 120px;
+		max-height: calc(0.84rem * 1.46 * 3);
+		overflow-y: auto;
 		border: none;
 		background: transparent;
 		color: #e8eaed;
@@ -784,6 +1303,12 @@
 	.tora-hint {
 		font-size: 0.68rem;
 		color: #9aa0a6;
+		transition: color 0.15s;
+	}
+
+	.tora-hint.tora-hint-warn {
+		color: #f59e0b;
+		font-weight: 600;
 	}
 
 	.toolbar-spacer {
@@ -824,19 +1349,21 @@
 		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.48);
 	}
 
+	.send-btn.is-stop {
+		background: #b3261e;
+		box-shadow: 0 2px 10px rgba(179, 38, 30, 0.34);
+	}
+
+	.send-btn.is-stop:hover:not(:disabled) {
+		background: #8f1f19;
+		box-shadow: 0 4px 16px rgba(179, 38, 30, 0.4);
+	}
+
 	.send-btn:disabled {
 		background: rgba(255, 255, 255, 0.08);
 		cursor: not-allowed;
 		box-shadow: none;
 		transform: none;
-	}
-
-	.send-btn .ai-spinner {
-		width: 13px;
-		height: 13px;
-		border-width: 1.8px;
-		border-color: rgba(255, 255, 255, 0.42);
-		border-top-color: #fff;
 	}
 
 	@keyframes tora-spin {

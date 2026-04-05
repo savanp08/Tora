@@ -28,6 +28,21 @@ type AppLimits struct {
 	WS     WebSocketLimits
 }
 
+type AITimelineTierLimits struct {
+	MaxPromptChars    int
+	MaxSprints        int
+	MaxTasksPerSprint int
+	MaxOutputTokens   int
+	RequestTimeout    time.Duration
+}
+
+type AITimelineTiers struct {
+	Free AITimelineTierLimits
+	Plus AITimelineTierLimits
+	Pro  AITimelineTierLimits
+	Team AITimelineTierLimits
+}
+
 type AILimits struct {
 	ContextMessageLimit     int
 	OrganizeMaxRequestBytes int64
@@ -40,6 +55,7 @@ type AILimits struct {
 	RoomRequestLimits       TimeWindowLimit
 	IPRequestLimits         TimeWindowLimit
 	DeviceRequestLimits     TimeWindowLimit
+	TimelineTiers           AITimelineTiers
 }
 
 type BoardLimits struct {
@@ -99,7 +115,7 @@ var (
 			OrganizeNoteMaxLength:   1200,
 			OrganizeTopicMaxLength:  180,
 			OrganizeTextMaxLength:   3000,
-			OrganizeRequestTimeout:  30 * time.Second,
+			OrganizeRequestTimeout:  300 * time.Second,
 			UserRequestLimits: TimeWindowLimit{
 				PerHour:  30,
 				PerDay:   180,
@@ -123,6 +139,12 @@ var (
 				PerDay:   220,
 				PerWeek:  1100,
 				PerMonth: 3200,
+			},
+			TimelineTiers: AITimelineTiers{
+				Free: AITimelineTierLimits{MaxPromptChars: 4000, MaxSprints: 5, MaxTasksPerSprint: 6, MaxOutputTokens: 4096, RequestTimeout: 300 * time.Second},
+				Plus: AITimelineTierLimits{MaxPromptChars: 7000, MaxSprints: 8, MaxTasksPerSprint: 8, MaxOutputTokens: 6144, RequestTimeout: 300 * time.Second},
+				Pro:  AITimelineTierLimits{MaxPromptChars: 12000, MaxSprints: 12, MaxTasksPerSprint: 10, MaxOutputTokens: 8192, RequestTimeout: 300 * time.Second},
+				Team: AITimelineTierLimits{MaxPromptChars: 25000, MaxSprints: 20, MaxTasksPerSprint: 12, MaxOutputTokens: 16384, RequestTimeout: 300 * time.Second},
 			},
 		},
 		Board: BoardLimits{

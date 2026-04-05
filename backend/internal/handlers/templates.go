@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
+	"github.com/savanp08/converse/internal/models"
 	industrytemplates "github.com/savanp08/converse/internal/templates"
 )
 
@@ -104,6 +105,14 @@ func (h *RoomHandler) ApplyRoomTemplate(w http.ResponseWriter, r *http.Request) 
 		template = resolvedTemplate
 		templateName = resolvedTemplate.Name
 	}
+	previousProjectType := h.getRoomProjectTypeOrDefault(r.Context(), normalizedRoomID)
+	targetProjectType := previousProjectType
+	if isBlankTemplate {
+		targetProjectType = "general"
+	} else if strings.TrimSpace(template.ProjectType) != "" {
+		targetProjectType = template.ProjectType
+	}
+	targetProjectType = models.NormalizeProjectType(targetProjectType)
 
 	roomHasContent, err := h.roomHasTemplateContent(r.Context(), roomUUID, normalizedRoomID)
 	if err != nil {
@@ -137,6 +146,9 @@ func (h *RoomHandler) ApplyRoomTemplate(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		_ = h.clearTemplateManagedRoomState(r.Context(), normalizedRoomID)
+		if targetProjectType != previousProjectType {
+			_ = h.updateRoomProjectType(r.Context(), normalizedRoomID, previousProjectType)
+		}
 	}()
 
 	fieldNameToID := make(map[string]string)
@@ -184,10 +196,20 @@ func (h *RoomHandler) ApplyRoomTemplate(w http.ResponseWriter, r *http.Request) 
 		automationRulesCreated += 1
 	}
 
+	if targetProjectType != previousProjectType {
+		if err := h.updateRoomProjectType(r.Context(), normalizedRoomID, targetProjectType); err != nil {
+			rollbackRequired = true
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update workspace setup"})
+			return
+		}
+	}
+
 	rollbackRequired = false
 	h.broadcastRoomEvent(normalizedRoomID, "template_applied", map[string]interface{}{
 		"template_id":              strings.TrimSpace(templateID),
 		"template_name":            templateName,
+		"project_type":             targetProjectType,
 		"fields_created":           fieldsCreated,
 		"tasks_created":            tasksCreated,
 		"automation_rules_created": automationRulesCreated,

@@ -16,6 +16,7 @@ import (
 	"github.com/gocql/gocql"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/execution"
+	"github.com/savanp08/converse/internal/projectboard"
 )
 
 const (
@@ -250,6 +251,10 @@ func (e *AgentEngine) ExecuteBuiltInTool(ctx context.Context, name string, input
 		return e.agentDeleteTask(ctx, input)
 	case "list_sprints":
 		return e.agentListSprints(ctx)
+	case "list_groups":
+		return e.agentListGroups(ctx)
+	case "delete_group":
+		return e.agentDeleteGroup(ctx, input)
 	case "read_canvas":
 		return e.agentReadCanvas(ctx, input)
 	case "write_canvas":
@@ -383,7 +388,7 @@ func BuiltInAnthropicTools() []AnthropicTool {
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": taskMutationProperties,
-				"required":   []string{"title", "sprint_name"},
+				"required":   []string{"title", "sprint_name", "budget", "start_date", "due_date", "roles"},
 			},
 		},
 		{
@@ -427,6 +432,42 @@ func BuiltInAnthropicTools() []AnthropicTool {
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
+			},
+		},
+		{
+			Name:        "list_groups",
+			Description: "List all named groups (sprints/phases/campaigns) in the workspace. Returns group IDs, names, dates, and task counts.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+				"required":   []string{},
+			},
+		},
+		{
+			Name:        "delete_group",
+			Description: "Delete a group (sprint/phase/campaign). You must specify what to do with its tasks: reassign them to another group or delete them.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"group_id": map[string]any{
+						"type":        "string",
+						"description": "UUID of the group to delete",
+					},
+					"group_name": map[string]any{
+						"type":        "string",
+						"description": "Name of the group (for confirmation display)",
+					},
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"reassign", "delete_tasks"},
+						"description": "What to do with tasks in this group",
+					},
+					"reassign_to_group_id": map[string]any{
+						"type":        "string",
+						"description": "Required when action=reassign. UUID of the group to move tasks into.",
+					},
+				},
+				"required": []string{"group_id", "group_name", "action"},
 			},
 		},
 		{
@@ -592,6 +633,13 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 			return finalText, events, nil
 		}
 
+		// Emit a pre-call event so the frontend knows the agent is active and
+		// the workflow button appears immediately on turn 1.
+		events = e.recordEvent(events, cfg, cfg.MaxTurns, turn, AgentEvent{
+			Kind: "thinking",
+			Text: "",
+		})
+
 		response, responseErr := toolProvider.GenerateToolResponse(runCtx, AgentProviderRequest{
 			Model:        cfg.Model,
 			SystemPrompt: cfg.SystemPrompt,
@@ -708,6 +756,14 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 			finalText = strings.Join(turnTextParts, "\n\n")
 		} else if strings.TrimSpace(lastResponseText) != "" {
 			finalText = strings.TrimSpace(lastResponseText)
+		} else if turn < cfg.MaxTurns {
+			// Model returned an empty turn (no text, no tools) after finishing tool work.
+			// Nudge it to produce a summary rather than returning a cryptic error.
+			messages = append(messages, AgentProviderMessage{
+				Role:    "user",
+				Content: []AgentProviderContentBlock{{Type: "text", Text: "Please summarize what you've done."}},
+			})
+			continue
 		} else {
 			finalText = "I finished the tool loop but did not receive a final text response."
 		}
@@ -1195,6 +1251,75 @@ func (e *AgentEngine) agentListSprints(ctx context.Context) (any, error) {
 	return sprints, nil
 }
 
+func (e *AgentEngine) agentListGroups(ctx context.Context) (any, error) {
+	service := projectboard.NewService(e.scyllaStore())
+	return service.ListGroupSummaries(ctx, e.roomID)
+}
+
+func (e *AgentEngine) agentDeleteGroup(ctx context.Context, input map[string]any) (any, error) {
+	groupID, err := requiredStringField(input, "group_id")
+	if err != nil {
+		return nil, err
+	}
+	groupName, err := requiredStringField(input, "group_name")
+	if err != nil {
+		return nil, err
+	}
+	action, err := requiredStringField(input, "action")
+	if err != nil {
+		return nil, err
+	}
+	reassignToGroupID, _, err := optionalStringField(input, "reassign_to_group_id")
+	if err != nil {
+		return nil, err
+	}
+
+	service := projectboard.NewService(e.scyllaStore())
+	summaries, err := service.ListGroupSummaries(ctx, e.roomID)
+	if err != nil {
+		return nil, err
+	}
+
+	taskCount := 0
+	for _, summary := range summaries {
+		if strings.EqualFold(strings.TrimSpace(summary.GroupID), strings.TrimSpace(groupID)) {
+			taskCount = summary.TaskCount
+			break
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(action), "delete_tasks") && taskCount > 20 {
+		return map[string]any{
+			"error": fmt.Sprintf("Deleting this group would remove %d tasks. Break this into smaller steps or use action=reassign to move tasks first.", taskCount),
+		}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(action), "reassign") && strings.TrimSpace(reassignToGroupID) == "" {
+		return nil, &agentToolInputError{
+			Field:   "reassign_to_group_id",
+			Message: "reassign_to_group_id is required when action=reassign",
+		}
+	}
+
+	result, err := service.DeleteGroup(ctx, e.roomID, groupID, projectboard.GroupDeleteRequest{
+		Action:            action,
+		ReassignToGroupID: reassignToGroupID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"deleted":               true,
+		"group_id":              strings.TrimSpace(groupID),
+		"group_name":            strings.TrimSpace(groupName),
+		"action":                strings.TrimSpace(action),
+		"task_count":            result.TaskCount,
+		"deleted_task_count":    result.DeletedTaskCount,
+		"reassigned_task_count": result.ReassignedCount,
+		"reassign_to_group_id":  strings.TrimSpace(reassignToGroupID),
+	}, nil
+}
+
 func (e *AgentEngine) agentReadCanvas(ctx context.Context, input map[string]any) (any, error) {
 	filePath, present, err := optionalStringField(input, "file_path")
 	if err != nil {
@@ -1366,6 +1491,8 @@ func (e *AgentEngine) agentVerifyTaskCount(ctx context.Context) (any, error) {
 	return map[string]any{
 		"total_tasks":     len(workspace.Tasks),
 		"support_tickets": len(workspace.SupportTickets),
+		"sprint_count":    len(bySprint),
+		"group_count":     len(bySprint),
 		"by_sprint":       bySprint,
 		"by_status":       byStatus,
 	}, nil
@@ -2185,10 +2312,13 @@ func buildPromptToolUseRequest(req AgentProviderRequest) string {
   "final_text": "only when you are completely done"
 }` + "\n")
 	builder.WriteString("Rules:\n")
-	builder.WriteString("- Return valid JSON only.\n")
+	builder.WriteString("- Return valid JSON only. No markdown fences, no extra text.\n")
 	builder.WriteString("- Use exact tool names from AVAILABLE TOOLS.\n")
-	builder.WriteString("- If tool_calls is non-empty, final_text should be empty.\n")
+	builder.WriteString("- Every tool call input MUST include ALL required fields from the tool's input_schema. Do not skip any required field.\n")
+	builder.WriteString("- Zero-input tools must still be emitted with \"input\": {}.\n")
+	builder.WriteString("- If tool_calls is non-empty, final_text must be empty.\n")
 	builder.WriteString("- If you are done, tool_calls must be empty and final_text must be set.\n")
+	builder.WriteString("- When creating tasks: always include title, sprint_name, budget, start_date, due_date, and roles in the input.\n")
 	return builder.String()
 }
 
@@ -2234,15 +2364,31 @@ func parsePromptToolUseResponse(raw string) (AgentProviderResponse, error) {
 		if callID == "" {
 			callID = fmt.Sprintf("prompt_call_%d", index+1)
 		}
+		toolInput := cloneStringAnyMap(call.Input)
+		if toolInput == nil {
+			toolInput = map[string]any{}
+		}
 		blocks = append(blocks, AgentProviderContentBlock{
 			Type:  "tool_use",
 			ID:    callID,
 			Name:  toolName,
-			Input: cloneStringAnyMap(call.Input),
+			Input: toolInput,
 		})
 	}
 
 	if len(envelope.ToolCalls) == 0 {
+		finalText := strings.TrimSpace(envelope.FinalText)
+		if finalText == "" {
+			finalText = strings.TrimSpace(envelope.Text)
+		}
+		if finalText == "" {
+			finalText = trimmed
+		}
+		blocks = append(blocks, AgentProviderContentBlock{
+			Type: "text",
+			Text: finalText,
+		})
+	} else if len(blocks) == 0 {
 		finalText := strings.TrimSpace(envelope.FinalText)
 		if finalText == "" {
 			finalText = strings.TrimSpace(envelope.Text)
@@ -2392,13 +2538,13 @@ func isAgentContextTimeout(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 	if ctx == nil {
 		return false
 	}
-	return errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
 
 func serializeToolError(err error) any {

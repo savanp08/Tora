@@ -213,6 +213,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setAuthCookie(w, r, token)
+	user.Tier = resolveUserTierLabel()
 	writeAuthJSON(w, http.StatusCreated, AuthResponse{User: user, Token: token})
 }
 
@@ -270,6 +271,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setAuthCookie(w, r, token)
+	user.Tier = resolveUserTierLabel()
 	writeAuthJSON(w, http.StatusOK, AuthResponse{User: user, Token: token})
 }
 
@@ -460,12 +462,19 @@ func (h *AuthHandler) Anonymous(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setAuthCookie(w, r, token)
+	user.Tier = resolveUserTierLabel()
 	writeAuthJSON(w, http.StatusOK, AuthResponse{User: user, Token: token})
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	clearAuthCookie(w, r)
 	writeAuthJSON(w, http.StatusOK, map[string]string{"message": "Logged out"})
+}
+
+// Me returns the resolved tier for the currently authenticated user.
+// No DB lookup needed — tier is derived purely from server configuration.
+func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
+	writeAuthJSON(w, http.StatusOK, map[string]string{"tier": resolveUserTierLabel()})
 }
 
 func (h *AuthHandler) ensureUserSchema() {
@@ -723,6 +732,15 @@ func clearAuthCookie(w http.ResponseWriter, r *http.Request) {
 			MaxAge:   -1,
 		})
 	}
+}
+
+// resolveUserTierLabel returns the user's plan tier as a displayable string.
+// Mirrors the logic in resolveAITimelineTier — both must stay in sync.
+func resolveUserTierLabel() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TEST_USER")), "true") {
+		return "pro"
+	}
+	return "free"
 }
 
 func writeAuthJSON(w http.ResponseWriter, code int, payload any) {

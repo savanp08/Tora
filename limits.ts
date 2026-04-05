@@ -1,5 +1,19 @@
 // Centralized app limits.
 // Update values here to tune both frontend and backend behavior.
+
+export type AiTimelineTierLimits = {
+	// Max user prompt characters accepted (prevents token-exhaustion abuse)
+	maxPromptChars: number;
+	// Max sprints the AI may generate per board (each sprint = 1 extra AI call)
+	maxSprints: number;
+	// Max tasks per sprint the AI should generate
+	maxTasksPerSprint: number;
+	// Max output tokens per individual AI call
+	maxOutputTokens: number;
+	// Per-call backend timeout in milliseconds
+	requestTimeoutMs: number;
+};
+
 export type AppLimits = {
 	ai: {
 		// Sliding window size (seconds) for private AI request throttling.
@@ -58,6 +72,12 @@ export type AppLimits = {
 		organizeTextMaxLength: number;
 		// Backend timeout (ms) for one AI organize request.
 		organizeRequestTimeoutMs: number;
+	};
+	aiTimeline: {
+		free:  AiTimelineTierLimits;
+		plus:  AiTimelineTierLimits;
+		pro:   AiTimelineTierLimits;
+		team:  AiTimelineTierLimits;
 	};
 	chat: {
 		// Max text payload size (bytes) for a chat message body.
@@ -333,8 +353,38 @@ export const LIMITS: AppLimits = {
 		organizeTopicMaxLength: 180,
 		// AI organize max text/content length.
 		organizeTextMaxLength: 3000,
-		// AI organize backend timeout = 30s.
-		organizeRequestTimeoutMs: 30000
+		// AI organize backend timeout = 5m.
+		organizeRequestTimeoutMs: 300000
+	},
+	aiTimeline: {
+		free: {
+			maxPromptChars:    4000,
+			maxSprints:        5,
+			maxTasksPerSprint: 6,
+			maxOutputTokens:   4096,
+			requestTimeoutMs:  300000,
+		},
+		plus: {
+			maxPromptChars:    7000,
+			maxSprints:        8,
+			maxTasksPerSprint: 8,
+			maxOutputTokens:   6144,
+			requestTimeoutMs:  300000,
+		},
+		pro: {
+			maxPromptChars:    12000,
+			maxSprints:        12,
+			maxTasksPerSprint: 10,
+			maxOutputTokens:   8192,
+			requestTimeoutMs:  300000,
+		},
+		team: {
+			maxPromptChars:    25000,
+			maxSprints:        20,
+			maxTasksPerSprint: 12,
+			maxOutputTokens:   16384,
+			requestTimeoutMs:  300000,
+		},
 	},
 	chat: {
 		// Max text payload size per message.

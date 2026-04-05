@@ -44,6 +44,9 @@
 	export let themePreference: ThemePreference = 'system';
 	export let canCollapse = false;
 	export let isCollapsed = false;
+	export let showCreateRoomAction = true;
+	export let showRelationsMapAction = true;
+	export let showBranchBadges = true;
 
 	const dispatch = createEventDispatcher<{
 		select: { id: string; isMember: boolean; status: ThreadStatus; focusMessageId?: string };
@@ -710,11 +713,15 @@
 			</button>
 			{#if showLeftMenu}
 				<div class="room-menu left-menu">
-					<button type="button" on:click={() => dispatch('createRoom')}>New room</button>
+					{#if showCreateRoomAction}
+						<button type="button" on:click={() => dispatch('createRoom')}>New room</button>
+					{/if}
 					<button type="button" on:click={requestRenameRoom} disabled={!activeRoomId}
 						>Rename room</button
 					>
-					<button type="button" on:click={openRelationsMap}>Relations map</button>
+					{#if showRelationsMapAction}
+						<button type="button" on:click={openRelationsMap}>Relations map</button>
+					{/if}
 					<button type="button" on:click={toggleFullView}>
 						{isFullView ? 'Streamlined view' : 'Full view'}
 					</button>
@@ -864,7 +871,7 @@
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
 									<span class="badges">
-										{#if hasChildren(thread.id)}
+										{#if showBranchBadges && hasChildren(thread.id)}
 											<span
 												class="branch-badge"
 												title={`${getChildCount(thread.id)} breakaway room(s)`}
@@ -935,7 +942,7 @@
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
 									<span class="badges">
-										{#if hasChildren(thread.id)}
+										{#if showBranchBadges && hasChildren(thread.id)}
 											<span
 												class="branch-badge"
 												title={`${getChildCount(thread.id)} breakaway room(s)`}
@@ -1006,7 +1013,7 @@
 								<span class="item-bottom">
 									<span class="room-preview">{getThreadPreview(thread)}</span>
 									<span class="badges">
-										{#if hasChildren(thread.id)}
+										{#if showBranchBadges && hasChildren(thread.id)}
 											<span
 												class="branch-badge"
 												title={`${getChildCount(thread.id)} breakaway room(s)`}
@@ -1098,7 +1105,7 @@
 							<span class="item-bottom">
 								<span class="room-preview">{getThreadPreview(thread)}</span>
 								<span class="badges">
-									{#if hasChildren(thread.id)}
+									{#if showBranchBadges && hasChildren(thread.id)}
 										<span class="branch-badge" title={`${getChildCount(thread.id)} breakaway room(s)`}>
 											<svg
 												width="12"

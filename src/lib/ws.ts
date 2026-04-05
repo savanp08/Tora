@@ -1,6 +1,8 @@
 import { browser } from '$app/environment';
 import { resolveApiBase } from '$lib/config/apiBase';
 import { APP_LIMITS } from '$lib/config/limits';
+import { recordProjectServerDataDEBUG_DELETE_LATER } from '$lib/debug/projectServerDataDEBUG_DELETE_LATER';
+import { applyServerTier } from '$lib/stores/auth';
 import {
 	syncBoardActivityFromSocketPayload,
 	syncFieldSchemaStoreFromSocketPayload,
@@ -31,6 +33,34 @@ let lastSubscriptionSignature = '';
 
 const subscribedRoomIDs = new Set<string>();
 const outboundQueue: string[] = [];
+
+function toSocketRecordDEBUG_DELETE_LATER(value: unknown): Record<string, unknown> | null {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return null;
+	}
+	return value as Record<string, unknown>;
+}
+
+function toSocketStringDEBUG_DELETE_LATER(value: unknown) {
+	return typeof value === 'string' ? value.trim() : '';
+}
+
+function extractSocketEventTypeDEBUG_DELETE_LATER(payload: unknown) {
+	const source = toSocketRecordDEBUG_DELETE_LATER(payload);
+	return toSocketStringDEBUG_DELETE_LATER(source?.type) || undefined;
+}
+
+function extractSocketRoomIdDEBUG_DELETE_LATER(payload: unknown) {
+	const source = toSocketRecordDEBUG_DELETE_LATER(payload);
+	const nestedPayload = toSocketRecordDEBUG_DELETE_LATER(source?.payload);
+	return (
+		toSocketStringDEBUG_DELETE_LATER(source?.roomId) ||
+		toSocketStringDEBUG_DELETE_LATER(source?.room_id) ||
+		toSocketStringDEBUG_DELETE_LATER(nestedPayload?.roomId) ||
+		toSocketStringDEBUG_DELETE_LATER(nestedPayload?.room_id) ||
+		undefined
+	);
+}
 
 export function initGlobalSocket(userId: string, username: string) {
 	if (!browser) {
@@ -134,9 +164,33 @@ function connectSocket() {
 			return;
 		}
 		const payload = parseMessagePayload(event.data);
+		recordProjectServerDataDEBUG_DELETE_LATER({
+			source: `socket:${extractSocketEventTypeDEBUG_DELETE_LATER(payload) || 'message'}`,
+			direction: 'response',
+			roomId: extractSocketRoomIdDEBUG_DELETE_LATER(payload),
+			endpoint: 'websocket:/ws',
+			event: extractSocketEventTypeDEBUG_DELETE_LATER(payload),
+			payload
+		});
 		syncTaskStoreFromSocketPayload(payload);
 		syncBoardActivityFromSocketPayload(payload);
 		syncFieldSchemaStoreFromSocketPayload(payload);
+
+		// Handle server-resolved tier on connect
+		if (
+			payload &&
+			typeof payload === 'object' &&
+			(payload as Record<string, unknown>).type === 'session_info'
+		) {
+			const raw = ((payload as Record<string, unknown>).tier as string | undefined)?.trim().toLowerCase();
+			const validTiers = ['free', 'plus', 'pro', 'team'] as const;
+			const tier = validTiers.includes(raw as (typeof validTiers)[number])
+				? (raw as (typeof validTiers)[number])
+				: 'free';
+			console.log(`[session] tier from server: ${tier}`);
+			applyServerTier(tier);
+		}
+
 		globalMessages.set({
 			payload,
 			receivedAt: Date.now()

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gocql/gocql"
 	"github.com/savanp08/converse/internal/database"
+	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/security"
 )
 
@@ -31,6 +32,7 @@ const (
 type WorkspaceContext struct {
 	RoomID         string
 	RoomName       string
+	ProjectType    string
 	RequestedBy    UserCtx
 	Members        []UserCtx
 	Tasks          []TaskCtx
@@ -132,9 +134,10 @@ func (cb *ContextBuilder) Build(ctx context.Context, roomID string, requestedByI
 
 	opts = normalizeBuildOptions(opts)
 	workspace := &WorkspaceContext{
-		RoomID:    normalizedRoomID,
-		RoomName:  normalizedRoomID,
-		Timestamp: time.Now().UTC(),
+		RoomID:      normalizedRoomID,
+		RoomName:    normalizedRoomID,
+		ProjectType: models.DefaultProjectType,
+		Timestamp:   time.Now().UTC(),
 	}
 
 	roomUUID, _, roomUUIDErr := resolveContextTaskRoomUUID(roomID)
@@ -158,13 +161,16 @@ func (cb *ContextBuilder) Build(ctx context.Context, roomID string, requestedByI
 	}
 
 	run("room_meta", func() error {
-		roomName, roomSummary, err := cb.loadRoomMeta(ctx, normalizedRoomID)
+		roomName, roomSummary, projectType, err := cb.loadRoomMeta(ctx, normalizedRoomID)
 		if err != nil {
 			return err
 		}
 		mu.Lock()
 		if roomName != "" {
 			workspace.RoomName = roomName
+		}
+		if strings.TrimSpace(projectType) != "" {
+			workspace.ProjectType = models.NormalizeProjectType(projectType)
 		}
 		workspace.RoomSummary = roomSummary
 		mu.Unlock()
@@ -182,21 +188,23 @@ func (cb *ContextBuilder) Build(ctx context.Context, roomID string, requestedByI
 		return nil
 	})
 
-	run("tasks", func() error {
-		if roomUUIDErr != nil {
-			return roomUUIDErr
-		}
-		tasks, supportTickets, sprints, err := cb.loadTasks(ctx, roomUUID, opts.TaskLimit)
-		if err != nil {
-			return err
-		}
-		mu.Lock()
-		workspace.Tasks = tasks
-		workspace.SupportTickets = supportTickets
-		workspace.Sprints = sprints
-		mu.Unlock()
-		return nil
-	})
+	if opts.TaskLimit != 0 {
+		run("tasks", func() error {
+			if roomUUIDErr != nil {
+				return roomUUIDErr
+			}
+			tasks, supportTickets, sprints, err := cb.loadTasks(ctx, roomUUID, opts.TaskLimit)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			workspace.Tasks = tasks
+			workspace.SupportTickets = supportTickets
+			workspace.Sprints = sprints
+			mu.Unlock()
+			return nil
+		})
+	}
 
 	if opts.IncludeCanvas {
 		run("canvas_files", func() error {
@@ -361,18 +369,19 @@ func (wc *WorkspaceContext) RenderForAI(opts BuildOptions) string {
 	return sb.String()
 }
 
-func (cb *ContextBuilder) loadRoomMeta(ctx context.Context, roomID string) (string, string, error) {
-	query := fmt.Sprintf(`SELECT name FROM %s WHERE room_id = ? LIMIT 1`, cb.scylla.Table("rooms"))
+func (cb *ContextBuilder) loadRoomMeta(ctx context.Context, roomID string) (string, string, string, error) {
+	query := fmt.Sprintf(`SELECT name, project_type FROM %s WHERE room_id = ? LIMIT 1`, cb.scylla.Table("rooms"))
 	var roomName string
-	if err := cb.scylla.Session.Query(query, roomID).WithContext(ctx).Scan(&roomName); err != nil && !errors.Is(err, gocql.ErrNotFound) {
-		return "", "", err
+	var projectType string
+	if err := cb.scylla.Session.Query(query, roomID).WithContext(ctx).Scan(&roomName, &projectType); err != nil && !errors.Is(err, gocql.ErrNotFound) {
+		return "", "", "", err
 	}
 
 	summary, err := cb.scylla.GetRoomSummary(ctx, roomID)
 	if err != nil {
-		return strings.TrimSpace(roomName), "", err
+		return strings.TrimSpace(roomName), "", models.NormalizeProjectType(projectType), err
 	}
-	return strings.TrimSpace(roomName), strings.TrimSpace(summary), nil
+	return strings.TrimSpace(roomName), strings.TrimSpace(summary), models.NormalizeProjectType(projectType), nil
 }
 
 func (cb *ContextBuilder) loadMembers(ctx context.Context, rawRoomID, normalizedRoomID string) ([]UserCtx, error) {
@@ -916,7 +925,7 @@ func normalizeBuildOptions(opts BuildOptions) BuildOptions {
 	if opts.ChatMessageLimit <= 0 {
 		opts.ChatMessageLimit = defaultChatMessageLimit
 	}
-	if opts.TaskLimit <= 0 {
+	if opts.TaskLimit < 0 {
 		opts.TaskLimit = defaultTaskLimit
 	}
 	if opts.CanvasExcerptLines <= 0 {

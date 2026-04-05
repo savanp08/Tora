@@ -15,11 +15,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
+	"github.com/savanp08/converse/internal/projectboard"
 )
 
 // TaskRole describes which team role is responsible for a portion of a task.
 type TaskRole struct {
-	Role            string `json:"role"`
+	Role             string `json:"role"`
 	Responsibilities string `json:"responsibilities"`
 }
 
@@ -37,6 +38,7 @@ type TaskRecordResponse struct {
 	Budget          *float64               `json:"budget,omitempty"`
 	ActualCost      *float64               `json:"actual_cost,omitempty"`
 	SprintName      string                 `json:"sprint_name,omitempty"`
+	GroupID         string                 `json:"group_id,omitempty"`
 	AssigneeID      string                 `json:"assignee_id,omitempty"`
 	DueDate         *time.Time             `json:"due_date,omitempty"`
 	StartDate       *time.Time             `json:"start_date,omitempty"`
@@ -62,6 +64,7 @@ type TaskCreateRequest struct {
 	Status          string                 `json:"status"`
 	TaskType        string                 `json:"task_type,omitempty"`
 	SprintName      string                 `json:"sprint_name"`
+	GroupID         string                 `json:"group_id,omitempty"`
 	CustomFields    map[string]interface{} `json:"custom_fields,omitempty"`
 	CustomFieldsAlt map[string]interface{} `json:"customFields,omitempty"`
 	Budget          *float64               `json:"budget,omitempty"`
@@ -94,6 +97,7 @@ type TaskUpdateRequest struct {
 	SpentCostAlt    *float64                `json:"spentCost,omitempty"`
 	SprintName      *string                 `json:"sprint_name"`
 	SprintNameAlt   *string                 `json:"sprintName"`
+	GroupID         *string                 `json:"group_id,omitempty"`
 	AssigneeID      *string                 `json:"assignee_id"`
 	AssigneeIDAlt   *string                 `json:"assigneeId"`
 	DueDate         *time.Time              `json:"due_date,omitempty"`
@@ -508,6 +512,7 @@ func (h *RoomHandler) ensureTaskSchema() {
 		description text,
 		status text,
 		sprint_name text,
+		group_id uuid,
 		assignee_id uuid,
 		custom_fields text,
 		status_actor_id text,
@@ -529,6 +534,7 @@ func (h *RoomHandler) ensureTaskSchema() {
 
 	alterQueries := []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD sprint_name text`, tasksTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD group_id uuid`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_id text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_name text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_changed_at timestamp`, tasksTable),
@@ -561,7 +567,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ?`,
+		`SELECT id, title, description, status, custom_fields, sprint_name, group_id, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	iter := h.scylla.Session.Query(query, roomUUID).WithContext(r.Context()).Iter()
@@ -574,6 +580,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 		status          string
 		customFieldsRaw *string
 		sprintName      string
+		groupID         *gocql.UUID
 		assigneeID      *gocql.UUID
 		statusActorID   string
 		statusActorName string
@@ -592,6 +599,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 		&status,
 		&customFieldsRaw,
 		&sprintName,
+		&groupID,
 		&assigneeID,
 		&statusActorID,
 		&statusActorName,
@@ -617,6 +625,9 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:       createdAt.UTC(),
 			UpdatedAt:       updatedAt.UTC(),
 			Roles:           parseTaskRoles(rolesRaw),
+		}
+		if groupID != nil {
+			task.GroupID = strings.TrimSpace(groupID.String())
 		}
 		task.Budget = extractTaskBudget(task.Description)
 		task.ActualCost = extractTaskActualCost(task.Description)
@@ -756,8 +767,15 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	statusActorID := strings.TrimSpace(resolveTaskRequesterID(r))
 	statusActorName := resolveTaskRequesterName(r)
 
+	groupUUID, groupErr := h.resolveTaskGroupUUID(r.Context(), normalizedRoomID, sprintName, req.GroupID)
+	if groupErr != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": groupErr.Error()})
+		return
+	}
+
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, group_id, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		h.scylla.Table("tasks"),
 	)
 	if err := h.scylla.Session.Query(
@@ -768,6 +786,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		description,
 		status,
 		sprintName,
+		groupUUID,
 		assigneeID,
 		nullableTaskCustomFieldsJSON(customFieldsJSON),
 		nullableTrimmedText(statusActorID),
@@ -802,6 +821,9 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		DueDate:         req.DueDate,
 		StartDate:       req.StartDate,
 		Roles:           req.Roles,
+	}
+	if groupUUID != nil {
+		response.GroupID = strings.TrimSpace(groupUUID.String())
 	}
 	response.Budget = extractTaskBudget(response.Description)
 	response.ActualCost = extractTaskActualCost(response.Description)
@@ -974,6 +996,28 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		}
 		setClauses = append(setClauses, "sprint_name = ?")
 		args = append(args, nullableTrimmedText(sprintName))
+		groupUUID, groupErr := h.resolveTaskGroupUUID(r.Context(), normalizedRoomID, sprintName, "")
+		if groupErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": groupErr.Error()})
+			return
+		}
+		setClauses = append(setClauses, "group_id = ?")
+		args = append(args, groupUUID)
+	}
+	if req.GroupID != nil {
+		sprintNameForGroup := ""
+		if sprintNameValue != nil {
+			sprintNameForGroup = strings.TrimSpace(*sprintNameValue)
+		}
+		groupUUID, groupErr := h.resolveTaskGroupUUID(r.Context(), normalizedRoomID, sprintNameForGroup, strings.TrimSpace(*req.GroupID))
+		if groupErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": groupErr.Error()})
+			return
+		}
+		setClauses = append(setClauses, "group_id = ?")
+		args = append(args, groupUUID)
 	}
 
 	assigneeIDValue := req.AssigneeID
@@ -1050,7 +1094,7 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	selectQuery := fmt.Sprintf(
-		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ? AND id = ?`,
+		`SELECT id, title, description, status, custom_fields, sprint_name, group_id, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ? AND id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	var (
@@ -1060,6 +1104,7 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		status          string
 		customFieldsRaw *string
 		sprintName      string
+		groupID         *gocql.UUID
 		assigneeID      *gocql.UUID
 		statusActorID   string
 		statusActorName string
@@ -1078,6 +1123,7 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		&status,
 		&customFieldsRaw,
 		&sprintName,
+		&groupID,
 		&assigneeID,
 		&statusActorID,
 		&statusActorName,
@@ -1113,6 +1159,9 @@ func (h *RoomHandler) UpdateRoomTask(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:       createdAt.UTC(),
 		UpdatedAt:       updatedAt.UTC(),
 		Roles:           parseTaskRoles(rolesRaw),
+	}
+	if groupID != nil {
+		response.GroupID = strings.TrimSpace(groupID.String())
 	}
 	response.Budget = extractTaskBudget(response.Description)
 	response.ActualCost = extractTaskActualCost(response.Description)
@@ -1326,6 +1375,17 @@ func (h *RoomHandler) DeleteRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deleteQuery := fmt.Sprintf(`DELETE FROM %s WHERE room_id = ? AND id = ?`, h.scylla.Table("tasks"))
+	allowed, limitErr := h.allowTaskDeletion(r.Context(), normalizedRoomID)
+	if limitErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to verify deletion rate"})
+		return
+	}
+	if !allowed {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Too many deletions — confirm bulk operation in workspace settings."})
+		return
+	}
 	if err := h.deleteTaskRelationsForTask(r.Context(), normalizedRoomID, strings.TrimSpace(taskID.String())); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete task relations"})
@@ -1366,6 +1426,60 @@ func parseFlexibleTaskUUID(raw string) (gocql.UUID, error) {
 		compact[20:32],
 	)
 	return gocql.ParseUUID(formatted)
+}
+
+func (h *RoomHandler) resolveTaskGroupUUID(ctx context.Context, roomID string, sprintName string, explicitGroupID string) (*gocql.UUID, error) {
+	trimmedGroupID := strings.TrimSpace(explicitGroupID)
+	if trimmedGroupID != "" {
+		parsed, err := parseFlexibleTaskUUID(trimmedGroupID)
+		if err != nil {
+			return nil, fmt.Errorf("group_id must be a valid UUID")
+		}
+		return &parsed, nil
+	}
+
+	trimmedSprintName := strings.TrimSpace(sprintName)
+	if trimmedSprintName == "" {
+		return nil, nil
+	}
+
+	group, err := projectboard.NewService(h.scylla).EnsureGroupByName(ctx, roomID, trimmedSprintName)
+	if err != nil {
+		return nil, err
+	}
+	if group == nil || strings.TrimSpace(group.GroupID) == "" {
+		return nil, nil
+	}
+	parsed, err := parseFlexibleTaskUUID(group.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func (h *RoomHandler) allowTaskDeletion(ctx context.Context, roomID string) (bool, error) {
+	if h == nil || h.redis == nil || h.redis.Client == nil {
+		return true, nil
+	}
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return false, fmt.Errorf("room id is required")
+	}
+	key := "room:" + normalizedRoomID + ":task_delete_rate"
+	count, err := h.redis.Client.Incr(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	if count == 1 {
+		if expireErr := h.redis.Client.Expire(ctx, key, 60*time.Second).Err(); expireErr != nil {
+			return false, expireErr
+		}
+	}
+	if count > 30 {
+		_, _ = h.redis.Client.Decr(ctx, key).Result()
+		return false, nil
+	}
+	return true, nil
 }
 
 func resolveTaskRoomUUID(raw string) (gocql.UUID, string, error) {

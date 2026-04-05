@@ -24,11 +24,13 @@ CAPABILITIES:
 WORKFLOW FOR CODE CHANGES:
 1. Always read_canvas() first to see what files exist
 2. Read the specific file(s) you plan to edit before writing
-3. When writing, produce the COMPLETE file content — never partial diffs,
+3. If the canvas is empty, or the user explicitly asks you to create something new, you MAY create a sensible new file path with write_canvas(...).
+   Prefer conventional names that match the request (for example, README.md, technical_implementation.md, main.go, App.tsx).
+4. When writing, produce the COMPLETE file content — never partial diffs,
    never "..." placeholders. The write_canvas tool replaces the entire file.
-4. After writing, call read_canvas(file_path) to verify the staged write succeeded
-5. When the change is risky or touches executable code, call execute_canvas(...) to verify it before finishing
-6. Explain what you changed and why in plain text after the tool calls
+5. After writing, call read_canvas(file_path) to verify the staged write succeeded
+6. When the change is risky or touches executable code, call execute_canvas(...) to verify it before finishing
+7. Explain what you changed and why in plain text after the tool calls
 
 CODE QUALITY RULES:
 - Match the existing code style (indentation, naming, patterns)
@@ -46,7 +48,7 @@ TASK CONTEXT:
 - Never modify the task board from @Canvas. Task data is reference-only here.
 
 WHAT NOT TO DO:
-- Do not invent file paths that don't exist in the canvas
+- Do not pretend an existing file/path already exists when it does not. For new work, create a sensible new file path and then verify it.
 - Do not write partial content with "rest unchanged" — always full content
 - Do not modify files outside the canvas (task board, database schema, etc.)`
 
@@ -54,6 +56,7 @@ type toraCanvasDraftChange struct {
 	Path        string
 	Content     string
 	Description string
+	Operation   string
 }
 
 func (h *Hub) runToraCanvasAgent(
@@ -61,6 +64,7 @@ func (h *Hub) runToraCanvasAgent(
 	roomID string,
 	userMessage models.Message,
 	prompt string,
+	forceTaskReference bool,
 ) (string, []ai.AgentEvent, error) {
 	if h == nil || h.msgService == nil || h.msgService.Scylla == nil || h.msgService.Scylla.Session == nil {
 		return "", nil, fmt.Errorf("canvas ai storage unavailable")
@@ -72,7 +76,7 @@ func (h *Hub) runToraCanvasAgent(
 		return "", nil, fmt.Errorf("canvas ai is not configured")
 	}
 
-	taskReferenceRequested := toraCanvasPromptReferencesTasks(prompt)
+	taskReferenceRequested := toraCanvasNeedsTaskReference(prompt, forceTaskReference)
 	buildOpts := toraCanvasBuildOptions(taskReferenceRequested)
 	workspace, err := ctxBuilder.Build(ctx, roomID, strings.TrimSpace(userMessage.SenderID), buildOpts)
 	if err != nil {
@@ -94,7 +98,7 @@ func (h *Hub) runToraCanvasAgent(
 		case "read_canvas":
 			return executeToraCanvasDraftRead(toolCtx, engine, draftWrites, input)
 		case "write_canvas":
-			return executeToraCanvasDraftWrite(toolCtx, draftWrites, input)
+			return executeToraCanvasDraftWrite(toolCtx, engine, draftWrites, input)
 		case "execute_canvas":
 			return executeToraCanvasDraftExecute(toolCtx, engine, draftWrites, input)
 		default:
@@ -179,6 +183,10 @@ func toraCanvasPromptReferencesTasks(prompt string) bool {
 		}
 	}
 	return false
+}
+
+func toraCanvasNeedsTaskReference(prompt string, forceTaskReference bool) bool {
+	return forceTaskReference || toraCanvasPromptReferencesTasks(prompt)
 }
 
 func toraCanvasWorkspaceHasTaskBoard(workspace *ai.WorkspaceContext) bool {
@@ -413,7 +421,8 @@ func executeToraCanvasDraftRead(
 }
 
 func executeToraCanvasDraftWrite(
-	_ context.Context,
+	ctx context.Context,
+	engine *ai.AgentEngine,
 	drafts map[string]toraCanvasDraftChange,
 	input map[string]any,
 ) (any, error) {
@@ -426,10 +435,23 @@ func executeToraCanvasDraftWrite(
 		return nil, fmt.Errorf("missing required field: content")
 	}
 	description := strings.TrimSpace(toraCanvasDraftInputString(input, "description"))
+	operation := "update"
+	if existingDraft, ok := drafts[filePath]; ok {
+		if strings.TrimSpace(existingDraft.Operation) != "" {
+			operation = strings.TrimSpace(existingDraft.Operation)
+		}
+	} else if engine != nil {
+		if _, err := engine.ExecuteBuiltInTool(ctx, "read_canvas", map[string]any{"file_path": filePath}); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				operation = "create"
+			}
+		}
+	}
 	drafts[filePath] = toraCanvasDraftChange{
 		Path:        filePath,
 		Content:     content,
 		Description: description,
+		Operation:   operation,
 	}
 	return map[string]any{
 		"written":     true,
@@ -437,6 +459,7 @@ func executeToraCanvasDraftWrite(
 		"path":        filePath,
 		"lines":       toraCanvasDraftLineCount(content),
 		"description": description,
+		"operation":   operation,
 	}, nil
 }
 

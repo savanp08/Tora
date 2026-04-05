@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createEventDispatcher, onDestroy, tick } from 'svelte';
+	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
 	import type { ChatMessage } from '$lib/types/chat';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
@@ -25,10 +26,24 @@
 	let messages: ChatMessage[] = [];
 	let draft = '';
 	let isSending = false;
+
+	function autoResize(node: HTMLTextAreaElement, _value?: string) {
+		function resize() {
+			node.style.height = 'auto';
+			node.style.height = node.scrollHeight + 'px';
+		}
+		node.addEventListener('input', resize);
+		resize();
+		return {
+			update() { resize(); },
+			destroy() { node.removeEventListener('input', resize); }
+		};
+	}
 	let errorText = '';
 	let viewportEl: HTMLDivElement | null = null;
 	let composerTextarea: HTMLTextAreaElement | null = null;
 	let requestAbortController: AbortController | null = null;
+	let activePendingMessageId = '';
 
 	$: canSend = !isSending && draft.trim().length > 0;
 
@@ -158,6 +173,7 @@
 			createdAt: Date.now(),
 			pending: true
 		});
+		activePendingMessageId = pendingId;
 
 		requestAbortController?.abort();
 		requestAbortController = new AbortController();
@@ -175,6 +191,15 @@
 				};
 			});
 		} catch (error) {
+			const isAbortError =
+				typeof error === 'object' &&
+				error !== null &&
+				'name' in error &&
+				(error as { name?: string }).name === 'AbortError';
+			if (isAbortError) {
+				messages = messages.filter((entry) => entry.id !== pendingId);
+				return;
+			}
 			const message = error instanceof Error ? error.message : 'Failed to fetch AI response';
 			errorText = message;
 			messages = messages.map((entry) => {
@@ -188,9 +213,27 @@
 				};
 			});
 		} finally {
+			if (activePendingMessageId === pendingId) {
+				activePendingMessageId = '';
+			}
 			isSending = false;
 			void scrollToBottom();
 		}
+	}
+
+	function stopPrompt() {
+		if (!isSending) {
+			return;
+		}
+		requestAbortController?.abort();
+		requestAbortController = null;
+		errorText = '';
+		if (activePendingMessageId) {
+			messages = messages.filter((entry) => entry.id !== activePendingMessageId);
+			activePendingMessageId = '';
+		}
+		isSending = false;
+		void scrollToBottom();
 	}
 
 	function onInputKeyDown(event: KeyboardEvent) {
@@ -215,6 +258,7 @@
 	function clearPrivateChatContext() {
 		requestAbortController?.abort();
 		requestAbortController = null;
+		activePendingMessageId = '';
 		isSending = false;
 		errorText = '';
 		draft = '';
@@ -302,7 +346,9 @@
 										<span class="ai-time-chip">{formatMessageTime(message.createdAt)}</span>
 									</div>
 								</div>
-								<div class="ai-response-body">{message.content}</div>
+								<div class="ai-response-body">
+									<RichTextContent text={message.content} />
+								</div>
 							</article>
 						{/if}
 					{/each}
@@ -335,6 +381,7 @@
 						rows="1"
 						bind:this={composerTextarea}
 						bind:value={draft}
+						use:autoResize={draft}
 						class="private-ai-textarea"
 						placeholder="Ask Tora anything..."
 						on:keydown={onInputKeyDown}
@@ -343,17 +390,31 @@
 					<div class="private-ai-toolbar">
 						<span class="private-ai-hint">Enter to send</span>
 						<div class="toolbar-spacer"></div>
-						<button
-							type="button"
-							class="send-btn"
-							on:click={() => void sendPrompt()}
-							disabled={!canSend}
-							aria-label="Send prompt"
-						>
-							<svg viewBox="0 0 14 14" aria-hidden="true">
-								<path d="M2 7h10M8 3l4 4-4 4"></path>
-							</svg>
-						</button>
+						{#if isSending}
+							<button
+								type="button"
+								class="send-btn is-stop"
+								on:click={stopPrompt}
+								aria-label="Stop AI response"
+								title="Stop"
+							>
+								<svg viewBox="0 0 14 14" aria-hidden="true">
+									<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="1.2"></rect>
+								</svg>
+							</button>
+						{:else}
+							<button
+								type="button"
+								class="send-btn"
+								on:click={() => void sendPrompt()}
+								disabled={!canSend}
+								aria-label="Send prompt"
+							>
+								<svg viewBox="0 0 14 14" aria-hidden="true">
+									<path d="M2 7h10M8 3l4 4-4 4"></path>
+								</svg>
+							</button>
+						{/if}
 					</div>
 				</div>
 			</footer>
@@ -701,7 +762,8 @@
 	.private-ai-textarea {
 		resize: none;
 		min-height: 20px;
-		max-height: 120px;
+		max-height: calc(0.86rem * 1.48 * 3);
+		overflow-y: auto;
 		border: none;
 		outline: none;
 		background: transparent;
@@ -771,6 +833,16 @@
 		background: #1967d2;
 		transform: scale(1.05);
 		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.5);
+	}
+
+	.send-btn.is-stop {
+		background: #b3261e;
+		box-shadow: 0 2px 10px rgba(179, 38, 30, 0.34);
+	}
+
+	.send-btn.is-stop:hover:not(:disabled) {
+		background: #8f1f19;
+		box-shadow: 0 4px 16px rgba(179, 38, 30, 0.4);
 	}
 
 	.send-btn:disabled {

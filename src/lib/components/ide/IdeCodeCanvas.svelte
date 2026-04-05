@@ -10,6 +10,7 @@
 	import { applyUpdate, encodeStateAsUpdate } from 'yjs';
 	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
+	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
 	import 'xterm/css/xterm.css';
 
 	export let roomId: string;
@@ -270,7 +271,7 @@ Return ONLY valid JSON with this exact shape:
   ]
 }
 Rules:
-- assistant_reply: concise, plain text, no markdown.
+- assistant_reply: concise and user-friendly; markdown like headings, bullets, bold, and inline code is allowed when it improves readability.
 - changes: include every file modification needed.
 - file_path must match workspace relative paths exactly.
 - action:
@@ -6314,6 +6315,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				'name' in error &&
 				(error as { name?: string }).name === 'AbortError';
 			if (isAbortError) {
+				writeTerminalLine('\x1b[35m> AI generation stopped.\x1b[0m');
 				return;
 			}
 			const message = error instanceof Error ? error.message : 'Failed to generate code with AI.';
@@ -6323,6 +6325,18 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			isCanvasAIGenerating = false;
 			canvasAIAbortController = null;
 		}
+	}
+
+	function stopCanvasAIMessage() {
+		if (!isCanvasAIGenerating) {
+			return;
+		}
+		canvasAIAbortController?.abort();
+		canvasAIAbortController = null;
+		isCanvasAIGenerating = false;
+		canvasAIError = '';
+		fileExplorerError = '';
+		writeTerminalLine('\x1b[35m> AI generation stopped.\x1b[0m');
 	}
 
 	function parseCanvasAIPromptPixel(value: string) {
@@ -8469,7 +8483,13 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 												})}
 											</time>
 										</header>
-										<p class="canvas-ai-message-text">{message.text}</p>
+										<div class="canvas-ai-message-text">
+											{#if message.role === 'assistant'}
+												<RichTextContent text={message.text} />
+											{:else}
+												{message.text}
+											{/if}
+										</div>
 										{#if message.changes && message.changes.length > 0}
 											<div class="canvas-ai-change-list">
 												<div class="canvas-ai-change-list-header">
@@ -8541,19 +8561,25 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 							<button
 								type="button"
 								class="canvas-ai-send-button"
-								on:click={() => void sendCanvasAIMessage()}
-								disabled={!canSendCanvasAIPrompt()}
-								aria-label={isCanvasAIGenerating ? 'AI is thinking' : 'Send AI prompt'}
-								title={isCanvasAIGenerating ? 'AI is thinking' : 'Send'}
+								class:is-stop={isCanvasAIGenerating}
+								on:click={() =>
+									isCanvasAIGenerating
+										? stopCanvasAIMessage()
+										: void sendCanvasAIMessage()}
+								disabled={isCanvasAIGenerating ? false : !canSendCanvasAIPrompt()}
+								aria-label={isCanvasAIGenerating ? 'Stop AI generation' : 'Send AI prompt'}
+								title={isCanvasAIGenerating ? 'Stop' : 'Send'}
 							>
 								{#if isCanvasAIGenerating}
-									<span class="canvas-ai-send-spinner" aria-hidden="true"></span>
+									<svg viewBox="0 0 14 14" aria-hidden="true">
+										<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="1.2"></rect>
+									</svg>
 								{:else}
 									<svg viewBox="0 0 14 14" aria-hidden="true">
 										<path d="M2 7h10M8 3l4 4-4 4"></path>
 									</svg>
 								{/if}
-								<span class="canvas-ai-sr-only">Send</span>
+								<span class="canvas-ai-sr-only">{isCanvasAIGenerating ? 'Stop' : 'Send'}</span>
 							</button>
 						</div>
 						<div class="canvas-ai-composer-footer">
@@ -8801,7 +8827,13 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 															})}
 														</time>
 													</header>
-													<p class="canvas-ai-message-text">{message.text}</p>
+													<div class="canvas-ai-message-text">
+														{#if message.role === 'assistant'}
+															<RichTextContent text={message.text} />
+														{:else}
+															{message.text}
+														{/if}
+													</div>
 													{#if message.changes && message.changes.length > 0}
 														<div class="canvas-ai-change-list">
 															<div class="canvas-ai-change-list-header">
@@ -8871,19 +8903,25 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 										<button
 											type="button"
 											class="canvas-ai-send-button"
-											on:click={() => void sendCanvasAIMessage()}
-											disabled={!canSendCanvasAIPrompt()}
-											aria-label={isCanvasAIGenerating ? 'AI is thinking' : 'Send AI prompt'}
-											title={isCanvasAIGenerating ? 'AI is thinking' : 'Send'}
+											class:is-stop={isCanvasAIGenerating}
+											on:click={() =>
+												isCanvasAIGenerating
+													? stopCanvasAIMessage()
+													: void sendCanvasAIMessage()}
+											disabled={isCanvasAIGenerating ? false : !canSendCanvasAIPrompt()}
+											aria-label={isCanvasAIGenerating ? 'Stop AI generation' : 'Send AI prompt'}
+											title={isCanvasAIGenerating ? 'Stop' : 'Send'}
 										>
 											{#if isCanvasAIGenerating}
-												<span class="canvas-ai-send-spinner" aria-hidden="true"></span>
+												<svg viewBox="0 0 14 14" aria-hidden="true">
+													<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="1.2"></rect>
+												</svg>
 											{:else}
 												<svg viewBox="0 0 14 14" aria-hidden="true">
 													<path d="M2 7h10M8 3l4 4-4 4"></path>
 												</svg>
 											{/if}
-											<span class="canvas-ai-sr-only">Send</span>
+											<span class="canvas-ai-sr-only">{isCanvasAIGenerating ? 'Stop' : 'Send'}</span>
 										</button>
 									</div>
 									<div class="canvas-ai-composer-footer">
@@ -11230,6 +11268,16 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		background: #1967d2;
 		transform: scale(1.05);
 		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.48);
+	}
+
+	.canvas-ai-send-button.is-stop {
+		background: #b3261e;
+		box-shadow: 0 2px 10px rgba(179, 38, 30, 0.34);
+	}
+
+	.canvas-ai-send-button.is-stop:hover:not(:disabled) {
+		background: #8f1f19;
+		box-shadow: 0 4px 16px rgba(179, 38, 30, 0.4);
 	}
 
 	.canvas-ai-send-button:disabled {

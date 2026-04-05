@@ -6,6 +6,7 @@
 	import type { LayoutData } from './$types';
 	import { DEFAULT_SITE_DESCRIPTION, DEFAULT_SITE_NAME } from '$lib/utils/seo';
 	import { initializeAuth } from '$lib/stores/auth';
+	import { installProjectServerFetchDebugDEBUG_DELETE_LATER } from '$lib/debug/projectServerDataDEBUG_DELETE_LATER';
 	import { isDarkMode } from '$lib/store';
 	import './layout.css';
 
@@ -26,6 +27,7 @@
 	let tooltipY = 0;
 	let tooltipPlacement: TooltipPlacement = 'top';
 	let activeTooltipElement: HTMLElement | null = null;
+	let removeProjectServerFetchDebugDEBUG_DELETE_LATER: (() => void) | null = null;
 
 	if (browser) {
 		initializeAuth();
@@ -35,6 +37,8 @@
 		if (!browser) {
 			return;
 		}
+		removeProjectServerFetchDebugDEBUG_DELETE_LATER =
+			installProjectServerFetchDebugDEBUG_DELETE_LATER();
 		initializeThemePreference();
 		registerTooltipListeners();
 		return () => {
@@ -43,6 +47,10 @@
 			if (removeSystemThemeListener) {
 				removeSystemThemeListener();
 				removeSystemThemeListener = null;
+			}
+			if (removeProjectServerFetchDebugDEBUG_DELETE_LATER) {
+				removeProjectServerFetchDebugDEBUG_DELETE_LATER();
+				removeProjectServerFetchDebugDEBUG_DELETE_LATER = null;
 			}
 		};
 	});
@@ -53,6 +61,10 @@
 		if (removeSystemThemeListener) {
 			removeSystemThemeListener();
 			removeSystemThemeListener = null;
+		}
+		if (removeProjectServerFetchDebugDEBUG_DELETE_LATER) {
+			removeProjectServerFetchDebugDEBUG_DELETE_LATER();
+			removeProjectServerFetchDebugDEBUG_DELETE_LATER = null;
 		}
 		systemThemeMediaQuery = null;
 	});

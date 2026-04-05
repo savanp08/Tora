@@ -11,7 +11,8 @@ export type ChangeRequestAction =
 	| 'edit_cost'
 	| 'import_sheet'
 	| 'edit_field_schema'
-	| 'remove_member';
+	| 'remove_member'
+	| 'edit_canvas';
 
 export type ChangeRequestStatus = 'pending' | 'approved' | 'rejected';
 

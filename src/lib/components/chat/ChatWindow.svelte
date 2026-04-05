@@ -4,19 +4,27 @@
 	import TaskCard from '$lib/components/chat/TaskCard.svelte';
 	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
-	import type { ChatMessage, MessageActionMode, ToraWorkflowEvent } from '$lib/types/chat';
-	import { normalizeIdentifier, normalizeMessageID } from '$lib/utils/chat/core';
+	import type { ChatMessage, MessageActionMode, ReplyTarget, ToraWorkflowEvent } from '$lib/types/chat';
+	import type {
+		CanvasAgenticApplyResult,
+		CanvasAgenticChange
+	} from '$lib/utils/canvasAgentApply';
+	import { normalizeIdentifier, normalizeMessageID, normalizeUsernameValue } from '$lib/utils/chat/core';
 	import { formatBeaconTimestamp, parseBeaconMessagePayload } from '$lib/utils/chat/beacon';
 	import { resolveSenderNameColor } from '$lib/utils/chat/senderNameColors';
 	import { parseTaskMessagePayload } from '$lib/utils/chat/task';
 	import ToraBotActionCard from '$lib/components/chat/ToraBotActionCard.svelte';
 	import ToraBotCanvasActionCard from '$lib/components/chat/ToraBotCanvasActionCard.svelte';
 	import ToraWorkflowTrace from '$lib/components/chat/ToraWorkflowTrace.svelte';
+	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
 
 	type ReplyPreview = {
 		messageId: string;
 		author: string;
 		content: string;
+		kind: 'text' | 'image' | 'video' | 'audio' | 'file';
+		mediaUrl?: string;
+		fileName?: string;
 	};
 
 	type SnippetPayload = {
@@ -29,6 +37,15 @@
 		value: string;
 		isEmoji: boolean;
 		isMention: boolean;
+	};
+
+	type WorkflowViewportBounds = {
+		top: number;
+		right: number;
+		bottom: number;
+		left: number;
+		width: number;
+		height: number;
 	};
 
 	type ReactionEntry = {
@@ -62,9 +79,10 @@
 	export let chatAuthToken = '';
 	export let toraAutoApply = false;
 	export let currentUserName = '';
+	export let canResolveToraChanges = false;
 	export let hiddenContextActions: MessageContextAction[] = [];
 	export let applyCanvasChanges:
-		| ((payload: { text: string; changes: Record<string, unknown>[] }) => Promise<void>)
+		| ((payload: { text: string; changes: CanvasAgenticChange[] }) => Promise<CanvasAgenticApplyResult>)
 		| null = null;
 	export let toraLiveAgentEventsByOrigin: Record<string, ToraWorkflowEvent[]> = {};
 
@@ -84,7 +102,7 @@
 		messageSelect: { messageId: string };
 		openDiscussion: { messageId: string };
 		focusHandled: { messageId: string };
-		reply: { messageId: string; senderName: string; content: string };
+		reply: ReplyTarget;
 		editSelected: { messageId: string };
 		deleteSelected: { messageId: string };
 		requestOlder: void;
@@ -130,6 +148,7 @@
 		/(\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?)*)/gu;
 	const MENTION_TOKEN_PATTERN = /(^|[^A-Za-z0-9_])(@[A-Za-z0-9_.-]{1,32})/g;
 	let viewport: HTMLDivElement | null = null;
+	let messagesShell: HTMLDivElement | null = null;
 	let previousVisibleCount = 0;
 	let copiedMessageId = '';
 	let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -152,7 +171,11 @@
 	let expandedSnippetCodeByMessageID: Record<string, boolean> = {};
 	let expandedSnippetMessageByMessageID: Record<string, boolean> = {};
 	let gutterMeasureFrame: number | null = null;
+	let workflowBoundsFrame: number | null = null;
 	let resizeMeasureHandler: (() => void) | null = null;
+	let workflowBoundsScrollHandler: (() => void) | null = null;
+	let workflowBoundsObserver: ResizeObserver | null = null;
+	let workflowViewportBounds: WorkflowViewportBounds | null = null;
 	let messageContextMenu = {
 		open: false,
 		x: 0,
@@ -220,6 +243,7 @@
 	$: firstUnreadId = unreadDividerAnchorId;
 
 	afterUpdate(() => {
+		scheduleWorkflowViewportBoundsMeasure();
 		if (!viewport) {
 			return;
 		}
@@ -297,21 +321,45 @@
 			window.removeEventListener('resize', resizeMeasureHandler);
 			resizeMeasureHandler = null;
 		}
+		if (typeof window !== 'undefined' && workflowBoundsScrollHandler) {
+			window.removeEventListener('scroll', workflowBoundsScrollHandler, true);
+			workflowBoundsScrollHandler = null;
+		}
+		if (workflowBoundsObserver) {
+			workflowBoundsObserver.disconnect();
+			workflowBoundsObserver = null;
+		}
 		if (typeof window !== 'undefined' && gutterMeasureFrame !== null) {
 			window.cancelAnimationFrame(gutterMeasureFrame);
 			gutterMeasureFrame = null;
+		}
+		if (typeof window !== 'undefined' && workflowBoundsFrame !== null) {
+			window.cancelAnimationFrame(workflowBoundsFrame);
+			workflowBoundsFrame = null;
 		}
 	});
 
 	onMount(() => {
 		setupTopObserver();
 		if (typeof window !== 'undefined') {
-			resizeMeasureHandler = () => scheduleCompactMineActionMeasure();
+			resizeMeasureHandler = () => {
+				scheduleCompactMineActionMeasure();
+				scheduleWorkflowViewportBoundsMeasure();
+			};
 			window.addEventListener('resize', resizeMeasureHandler);
 			window.addEventListener('keydown', onWindowKeyDown, true);
 			window.addEventListener('contextmenu', onWindowContextMenuCapture, true);
 			window.addEventListener('pointerdown', onWindowPointerDown, true);
+			workflowBoundsScrollHandler = () => scheduleWorkflowViewportBoundsMeasure();
+			window.addEventListener('scroll', workflowBoundsScrollHandler, true);
+			if (typeof ResizeObserver !== 'undefined' && messagesShell) {
+				workflowBoundsObserver = new ResizeObserver(() => {
+					scheduleWorkflowViewportBoundsMeasure();
+				});
+				workflowBoundsObserver.observe(messagesShell);
+			}
 			scheduleCompactMineActionMeasure();
+			scheduleWorkflowViewportBoundsMeasure();
 		}
 		return () => {
 			if (topObserver) {
@@ -322,6 +370,14 @@
 				window.removeEventListener('resize', resizeMeasureHandler);
 				resizeMeasureHandler = null;
 			}
+			if (typeof window !== 'undefined' && workflowBoundsScrollHandler) {
+				window.removeEventListener('scroll', workflowBoundsScrollHandler, true);
+				workflowBoundsScrollHandler = null;
+			}
+			if (workflowBoundsObserver) {
+				workflowBoundsObserver.disconnect();
+				workflowBoundsObserver = null;
+			}
 			if (typeof window !== 'undefined') {
 				window.removeEventListener('keydown', onWindowKeyDown, true);
 				window.removeEventListener('contextmenu', onWindowContextMenuCapture, true);
@@ -330,6 +386,10 @@
 			if (typeof window !== 'undefined' && gutterMeasureFrame !== null) {
 				window.cancelAnimationFrame(gutterMeasureFrame);
 				gutterMeasureFrame = null;
+			}
+			if (typeof window !== 'undefined' && workflowBoundsFrame !== null) {
+				window.cancelAnimationFrame(workflowBoundsFrame);
+				workflowBoundsFrame = null;
 			}
 		};
 	});
@@ -340,6 +400,48 @@
 
 	$: if (!isLoadingOlder) {
 		olderRequestPending = false;
+	}
+
+	function scheduleWorkflowViewportBoundsMeasure() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		if (workflowBoundsFrame !== null) {
+			return;
+		}
+		workflowBoundsFrame = window.requestAnimationFrame(() => {
+			workflowBoundsFrame = null;
+			measureWorkflowViewportBounds();
+		});
+	}
+
+	function measureWorkflowViewportBounds() {
+		if (typeof window === 'undefined' || !messagesShell || !isVisible) {
+			workflowViewportBounds = null;
+			return;
+		}
+
+		const rect = messagesShell.getBoundingClientRect();
+		const left = clampViewportEdge(rect.left, window.innerWidth);
+		const top = clampViewportEdge(rect.top, window.innerHeight);
+		const rightEdge = clampViewportEdge(rect.right, window.innerWidth);
+		const bottomEdge = clampViewportEdge(rect.bottom, window.innerHeight);
+
+		workflowViewportBounds = {
+			top,
+			left,
+			right: Math.max(0, Math.round(window.innerWidth - rightEdge)),
+			bottom: Math.max(0, Math.round(window.innerHeight - bottomEdge)),
+			width: Math.max(0, Math.round(rightEdge - left)),
+			height: Math.max(0, Math.round(bottomEdge - top))
+		};
+	}
+
+	function clampViewportEdge(value: number, limit: number) {
+		if (!Number.isFinite(value)) {
+			return 0;
+		}
+		return Math.round(Math.min(Math.max(0, value), limit));
 	}
 
 	function tryFocusMessage() {
@@ -858,29 +960,65 @@
 	}
 
 	function getToraWorkflowForMessage(message: ChatMessage) {
-		const originMessageId = normalizeMessageID(message.id);
-		if (!originMessageId) {
+		const candidateOriginIds = getToraWorkflowCandidateOriginIds(message);
+		if (candidateOriginIds.length === 0) {
 			return null;
 		}
-		const persisted = persistedToraWorkflowsByOrigin[originMessageId];
-		if (persisted) {
+		for (const originMessageId of candidateOriginIds) {
+			const persisted = persistedToraWorkflowsByOrigin[originMessageId];
+			if (persisted) {
+				return {
+					summary: persisted.summary,
+					workflowKind: persisted.workflowKind,
+					events: persisted.events,
+					isLive: false
+				};
+			}
+		}
+		for (const originMessageId of candidateOriginIds) {
+			const liveEvents = toraLiveAgentEventsByOrigin[originMessageId] ?? [];
+			if (liveEvents.length === 0) {
+				continue;
+			}
 			return {
-				summary: persisted.summary,
-				workflowKind: persisted.workflowKind,
-				events: persisted.events,
-				isLive: false
+				summary: '',
+				workflowKind: liveEvents[liveEvents.length - 1]?.workflowKind || '',
+				events: liveEvents,
+				isLive: true
 			};
 		}
-		const liveEvents = toraLiveAgentEventsByOrigin[originMessageId] ?? [];
-		if (liveEvents.length === 0) {
-			return null;
-		}
-		return {
-			summary: '',
-			workflowKind: liveEvents[liveEvents.length - 1]?.workflowKind || '',
-			events: liveEvents,
-			isLive: true
+		return null;
+	}
+
+	function getToraWorkflowCandidateOriginIds(message: ChatMessage) {
+		const candidates: string[] = [];
+		const pushCandidate = (value: string) => {
+			const normalized = normalizeMessageID(value);
+			if (!normalized || candidates.includes(normalized)) {
+				return;
+			}
+			candidates.push(normalized);
 		};
+
+		pushCandidate(message.id);
+		pushCandidate(message.replyToMessageId ?? '');
+
+		const messageType = (message.type || '').trim().toLowerCase();
+		if (messageType === 'tora_action' || messageType === 'tora_canvas_action') {
+			try {
+				const parsed = JSON.parse(message.content || '{}');
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					const payload = parsed as Record<string, unknown>;
+					pushCandidate(
+						String(payload.originMessageId ?? payload.origin_message_id ?? '').trim()
+					);
+				}
+			} catch {
+				/* ignore */
+			}
+		}
+
+		return candidates;
 	}
 
 	function buildReplyCountByMessageID(input: ChatMessage[]) {
@@ -1033,6 +1171,10 @@
 		return message.content || '';
 	}
 
+	function shouldRenderRichText(message: ChatMessage) {
+		return (message.senderId || '').trim() === 'Tora-Bot';
+	}
+
 	function getBeaconLabel(message: ChatMessage) {
 		const beaconPayload = getBeaconPayload(message);
 		if (!beaconPayload) {
@@ -1056,17 +1198,56 @@
 		return `${snippetBlock}\n\n${payload.message}`;
 	}
 
+	function getReplyPreviewKindFromMessage(message: ChatMessage) {
+		const normalizedType = (message.type || '').trim().toLowerCase();
+		if (normalizedType === 'image' || (normalizedType === 'file' && isImageFileMessage(message))) {
+			return 'image' as const;
+		}
+		if (normalizedType === 'video' || (normalizedType === 'file' && isVideoFileMessage(message))) {
+			return 'video' as const;
+		}
+		if (normalizedType === 'audio') {
+			return 'audio' as const;
+		}
+		if (normalizedType === 'file') {
+			return 'file' as const;
+		}
+		return 'text' as const;
+	}
+
+	function buildReplyPreviewFromMessage(message: ChatMessage): ReplyPreview {
+		const kind = getReplyPreviewKindFromMessage(message);
+		const fileName =
+			kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'file'
+				? getFileName(message)
+				: '';
+		return {
+			messageId: message.id,
+			author: normalizeUsernameValue(message.senderName) || 'Original',
+			content: truncateInlineText(getReplyDispatchContent(message), 260),
+			kind,
+			mediaUrl: getMediaURL(message),
+			fileName
+		};
+	}
+
 	function getReplyPreview(message: ChatMessage): ReplyPreview | null {
 		const messageID = (message.replyToMessageId || '').trim();
 		const rawSnippet = (message.replyToSnippet || '').trim();
 		if (!messageID) {
 			return null;
 		}
+		const originalMessage =
+			messages.find((entry) => normalizeMessageID(entry.id) === normalizeMessageID(messageID)) ?? null;
+		if (originalMessage) {
+			return buildReplyPreviewFromMessage(originalMessage);
+		}
 		if (!rawSnippet) {
 			return {
 				messageId: messageID,
 				author: 'Original',
-				content: 'Preview unavailable'
+				content: 'Preview unavailable',
+				kind: 'text'
 			};
 		}
 
@@ -1075,7 +1256,8 @@
 			return {
 				messageId: messageID,
 				author: 'Original',
-				content: truncateInlineText(rawSnippet, 260)
+				content: truncateInlineText(rawSnippet, 260),
+				kind: 'text'
 			};
 		}
 
@@ -1084,7 +1266,8 @@
 		return {
 			messageId: messageID,
 			author,
-			content: truncateInlineText(content || 'Message', 260)
+			content: truncateInlineText(content || 'Message', 260),
+			kind: 'text'
 		};
 	}
 
@@ -1141,6 +1324,24 @@
 			return 'Call log';
 		}
 		return 'Message';
+	}
+
+	function getReplyDispatchTarget(message: ChatMessage): ReplyTarget {
+		const normalizedType = (message.type || '').trim();
+		const hasMedia =
+			normalizedType === 'image' ||
+			normalizedType === 'video' ||
+			normalizedType === 'audio' ||
+			normalizedType === 'file';
+		return {
+			messageId: message.id,
+			senderName: normalizeUsernameValue(message.senderName) || 'User',
+			content: getReplyDispatchContent(message),
+			type: normalizedType,
+			mediaUrl: hasMedia ? getMediaURL(message) : '',
+			mediaType: (message.mediaType || '').trim(),
+			fileName: hasMedia ? getFileName(message) : ''
+		};
 	}
 
 	function isCallLogMessage(message: ChatMessage) {
@@ -1308,19 +1509,6 @@
 			return '';
 		}
 		return content;
-	}
-
-	function cleanAiText(value: string) {
-		if (!value) {
-			return '';
-		}
-		let cleaned = value.replace(/\r\n/g, '\n');
-		cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
-		cleaned = cleaned.replace(/^\s*---+\s*$/gm, '');
-		cleaned = cleaned.replace(/\*\*([^*]+)\*\*/g, '$1');
-		cleaned = cleaned.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, '$1$2');
-		cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-		return cleaned.trim();
 	}
 
 	function splitMessageTextByEmoji(value: string): MessageTextSegment[] {
@@ -1814,6 +2002,7 @@
 	class="messages-shell {isSelectionMode ? 'selection-mode' : ''} {isDarkMode
 		? 'theme-dark'
 		: ''} {isMember ? '' : 'readonly-mode'}"
+	bind:this={messagesShell}
 >
 	<MonochromeRoomBackground seed={roomId || 'chat-room'} />
 	<div class="messages" bind:this={viewport} on:scroll={onMessagesScroll}>
@@ -1885,6 +2074,7 @@
 										workflowKind={toraWorkflow.workflowKind}
 										events={toraWorkflow.events}
 										isLive={toraWorkflow.isLive}
+										viewportBounds={workflowViewportBounds}
 									/>
 								</div>
 							{/if}
@@ -1929,12 +2119,7 @@
 											class="gutter-action-btn"
 											title="Reply"
 											aria-label="Reply"
-											on:click|stopPropagation={() =>
-												dispatch('reply', {
-													messageId: message.id,
-													senderName: message.senderName,
-													content: getReplyDispatchContent(message)
-												})}
+											on:click|stopPropagation={() => dispatch('reply', getReplyDispatchTarget(message))}
 										>
 											<IconSet name="reply" size={12} className="gutter-action-icon" />
 										</button>
@@ -2024,7 +2209,50 @@
 									on:click|stopPropagation={() => jumpToReplyTarget(message)}
 								>
 									<span class="reply-snippet-author">{replyPreview.author}</span>
-									<span class="reply-snippet-content">{replyPreview.content}</span>
+									<span
+										class="reply-snippet-body"
+										class:has-visual={(replyPreview.kind === 'image' ||
+											replyPreview.kind === 'video') &&
+											Boolean(replyPreview.mediaUrl) &&
+											!mediaLoadFailedById[replyPreview.messageId]}
+									>
+										{#if (replyPreview.kind === 'image' || replyPreview.kind === 'video') &&
+											replyPreview.mediaUrl &&
+											!mediaLoadFailedById[replyPreview.messageId]}
+											<span class="reply-snippet-thumb" aria-hidden="true">
+												{#if replyPreview.kind === 'image'}
+													<img
+														src={replyPreview.mediaUrl}
+														alt={replyPreview.fileName || 'Reply preview'}
+														class="reply-snippet-thumb-media"
+														on:error={() => onMediaError(replyPreview.messageId)}
+													/>
+												{:else}
+													<!-- svelte-ignore a11y_media_has_caption -->
+													<video
+														src={replyPreview.mediaUrl}
+														class="reply-snippet-thumb-media"
+														muted
+														playsinline
+														preload="metadata"
+														on:error={() => onMediaError(replyPreview.messageId)}
+													></video>
+												{/if}
+											</span>
+										{:else if replyPreview.kind === 'audio' || replyPreview.kind === 'file'}
+											<span class="reply-snippet-icon" aria-hidden="true">
+												<IconSet name="file" size={13} />
+											</span>
+										{/if}
+										{#if replyPreview.kind !== 'image' && replyPreview.kind !== 'video'}
+											<span class="reply-snippet-text">
+												<span class="reply-snippet-content">{replyPreview.content}</span>
+												{#if replyPreview.fileName && replyPreview.fileName !== replyPreview.content}
+													<span class="reply-snippet-file">{replyPreview.fileName}</span>
+												{/if}
+											</span>
+										{/if}
+									</span>
 								</button>
 							{/if}
 							<div
@@ -2256,6 +2484,7 @@
 											authToken={chatAuthToken}
 											autoApply={toraAutoApply}
 											{currentUserName}
+											canResolve={canResolveToraChanges}
 										/>
 									{:else}
 										{message.content}
@@ -2270,11 +2499,15 @@
 									})()}
 									{#if toraCanvasPayload}
 										<ToraBotCanvasActionCard
+											{roomId}
+											{apiBase}
 											text={toraCanvasPayload.text ?? ''}
 											changesJson={toraCanvasPayload.changesJson ?? '[]'}
 											auditTrail={Array.isArray(toraCanvasPayload.auditTrail)
 												? toraCanvasPayload.auditTrail
 												: []}
+											{currentUserName}
+											canResolve={canResolveToraChanges}
 											applyChanges={applyCanvasChanges}
 										/>
 									{:else}
@@ -2290,15 +2523,10 @@
 											<span class="beacon-card-time">{getBeaconLabel(message)}</span>
 										</div>
 										<div class="beacon-card-text">
-											{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
-												{#if segment.isEmoji}
-													<span class="emoji-boost">{segment.value}</span>
-												{:else if segment.isMention}
-													<span class="mention-tag">{segment.value}</span>
-												{:else}
-													{segment.value}
-												{/if}
-											{/each}
+											<RichTextContent
+												text={getMessageDisplayText(message)}
+												className="beacon-rich-text"
+											/>
 										</div>
 									</div>
 								{:else if isCallLogMessage(message)}
@@ -2321,12 +2549,17 @@
 											</div>
 										</div>
 									</div>
+								{:else if shouldRenderRichText(message)}
+									<RichTextContent
+										text={getMessageDisplayText(message)}
+										className="chat-message-rich-text"
+									/>
 								{:else if isCodeBlock(getMessageDisplayText(message))}
 									<pre class="code-block"><code
 											>{getCodeContent(getMessageDisplayText(message))}</code
 										></pre>
 								{:else}
-									{#each splitMessageTextByEmoji(cleanAiText(getMessageDisplayText(message))) as segment}
+									{#each splitMessageTextByEmoji(getMessageDisplayText(message)) as segment}
 										{#if segment.isEmoji}
 											<span class="emoji-boost">{segment.value}</span>
 										{:else if segment.isMention}
@@ -2865,8 +3098,8 @@
 		max-width: 100%;
 	}
 
-	.message-workflow-slot :global(.workflow-panel) {
-		width: min(26rem, calc(100vw - 9rem));
+	.message-workflow-slot :global(.workflow-floating-panel) {
+		width: min(34rem, 100%);
 		max-width: 100%;
 	}
 
@@ -3434,6 +3667,54 @@
 		margin-bottom: 0.1rem;
 	}
 
+	.reply-snippet-body {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		gap: 0.46rem;
+		min-width: 0;
+	}
+
+	.reply-snippet-body.has-visual {
+		align-items: flex-start;
+	}
+
+	.reply-snippet-thumb {
+		width: 44px;
+		height: 44px;
+		flex: 0 0 44px;
+		border-radius: 8px;
+		overflow: hidden;
+		background: rgba(120, 136, 158, 0.18);
+		border: 1px solid rgba(120, 136, 158, 0.24);
+	}
+
+	.reply-snippet-thumb-media {
+		width: 100%;
+		height: 100%;
+		display: block;
+		object-fit: cover;
+	}
+
+	.reply-snippet-icon {
+		width: 34px;
+		height: 34px;
+		flex: 0 0 34px;
+		border-radius: 8px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(120, 136, 158, 0.16);
+		border: 1px solid rgba(120, 136, 158, 0.22);
+	}
+
+	.reply-snippet-text {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+	}
+
 	.reply-snippet-content {
 		display: -webkit-box;
 		line-clamp: 3;
@@ -3443,6 +3724,14 @@
 		font-size: 0.74rem;
 		line-height: 1.3;
 		opacity: 0.95;
+	}
+
+	.reply-snippet-file {
+		font-size: 0.68rem;
+		opacity: 0.72;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.break-indicator {

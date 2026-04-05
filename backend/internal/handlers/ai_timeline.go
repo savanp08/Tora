@@ -8,13 +8,22 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gocql/gocql"
 	"github.com/savanp08/converse/internal/ai"
+	"github.com/savanp08/converse/internal/config"
+	"github.com/savanp08/converse/internal/models"
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	aiTimelinePerCallTimeout = 5 * time.Minute
+	aiTimelinePromptTimeout  = 15 * time.Minute
+	aiHTTPStatusClientClosed = 499
 )
 
 const aiBlueprintSystemPrompt = `You are an Expert Project Architect.
@@ -33,16 +42,160 @@ Important behavior:
 - Do not ask follow-up questions in this step (clarification is handled by a separate intent gate).
 - Do NOT generate sprint tasks in this step.`
 
-const aiTaskFillSystemPrompt = `You are an Expert Agile Manager.
+const aiBlueprintFoundationSystemPrompt = `You are an Expert Project Architect.
+Return ONLY valid JSON with keys:
+- "assistant_reply"
+- "project_name"
+- "tech_stack" (array)
+- "target_audience"
+- "estimated_cost"
+- "roles_needed" (array)
+
+Rules:
+- Infer practical assumptions when the user leaves gaps.
+- Optimize for a thorough, high-quality project foundation, not a cut-down outline.
+- Do not ask follow-up questions in this step.
+- Do NOT include sprints or tasks.`
+
+func buildAIBlueprintSprintPlanSystemPrompt(maxSprints int) string {
+	if maxSprints < 1 {
+		maxSprints = 1
+	}
+	return fmt.Sprintf(`You are an Expert Delivery Planner.
+Return ONLY valid JSON with key "sprints".
+Each sprint object must include:
+- "name"
+- "duration_days"
+
+Rules:
+- Generate a complete end-to-end project sequence that covers all major phases needed for delivery.
+- Use concrete, meaningful sprint names that reflect the actual phase of work.
+- Prefer thorough execution sequencing over a thin outline.
+- Return between 1 and %d sprints total.
+- Do NOT include tasks or prose outside the JSON.`, maxSprints)
+}
+
+const aiTimelineExecutionSystemPrompt = `You are Tora's onboarding workspace execution agent.
+You receive the current workspace state and a structured project blueprint.
+Your job is to build the board by using tools directly.
+
+Execution rules:
+- You MUST use create_task to build the board. Do not stop at prose.
+- This is a high-quality project build, not a token-saving outline. Prefer complete, executable work over skeletal placeholder tasks.
+- During onboarding, do not delete or update existing tasks. Only add missing work.
+- Respect the exact group names from the blueprint unless the workspace already has the same names in a different case.
+- Keep each task inside the date window of its target group.
+- Keep each initial task description concise: 1-2 short sentences max. Do not generate full walkthroughs or long how-to instructions during onboarding because detailed task steps are generated later on demand.
+- Every create_task call MUST include title, sprint_name, budget, start_date, due_date, and roles.
+- Use assignee_id only when you have a valid member UUID from the current workspace. If unsure, omit assignee_id.
+- If the workspace already has tasks from a previous partial run, avoid duplicate titles in the same group and continue filling the missing work.
+- When time is limited, keep using tools on the highest-value remaining work before you summarize.
+- Before finishing, call verify_task_count and then provide a concise summary of what you created and what may still be missing.`
+
+func buildAITaskFillSystemPrompt(maxTasks int) string {
+	return fmt.Sprintf(`You are an Expert Agile Manager.
 Given a project blueprint and a sprint name, return strict JSON with key "tasks" (array).
 Each task must include:
 - "title"
+- "description" (optional)
 - "duration_unit" ("hours" or "days")
 - "duration_value" (number)
 - "status"
 - "type"
 - "budget" (numeric)
-Keep outputs realistic and implementation-oriented.`
+Keep outputs realistic and implementation-oriented.
+If you include "description", keep it brief: 1-2 short sentences with no step-by-step instructions.
+IMPORTANT: Return at most %d tasks per sprint. Prioritise the most impactful tasks only.`, maxTasks)
+}
+
+// resolveAITimelineTier returns the AITimelineTierLimits for the current request.
+// If TEST_USER env var is "true", the user is treated as Pro (useful for local dev).
+// Expand this to read a real subscription field once billing is wired up.
+func resolveAITimelineTier() config.AITimelineTierLimits {
+	tiers := config.LoadAppLimits().AI.TimelineTiers
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TEST_USER")), "true") {
+		return tiers.Pro
+	}
+	return tiers.Free
+}
+
+// buildTierHint returns a compact instruction injected into every AI call when
+// the user has chosen "fit to tier". It tells the model to scope the output so
+// the full generation completes within the plan's sprint and task limits without
+// hitting a timeout or cost overrun.
+func buildTierHint(tier config.AITimelineTierLimits, tierLabel string) string {
+	return fmt.Sprintf(
+		"[TIER CONSTRAINT — fit to plan]\n"+
+			"The user is on the %q plan. Generate output that fits completely within these hard limits:\n"+
+			"- Max sprints: %d\n"+
+			"- Max tasks per sprint: %d\n"+
+			"- Max output tokens per call: %d\n"+
+			"Prioritise the highest-value work. Prefer fewer, well-scoped items over an exhaustive list that will be cut off.\n"+
+			"Do not exceed these limits under any circumstances.\n"+
+			"[END TIER CONSTRAINT]",
+		tierLabel,
+		tier.MaxSprints,
+		tier.MaxTasksPerSprint,
+		tier.MaxOutputTokens,
+	)
+}
+
+// tierLabelFromLimits returns a human-readable plan name matching the tier limits.
+func tierLabelFromLimits(tier config.AITimelineTierLimits) string {
+	tiers := config.LoadAppLimits().AI.TimelineTiers
+	switch tier.MaxSprints {
+	case tiers.Team.MaxSprints:
+		return "team"
+	case tiers.Pro.MaxSprints:
+		return "pro"
+	case tiers.Plus.MaxSprints:
+		return "plus"
+	default:
+		return "free"
+	}
+}
+
+func resolveAITimelineAgentProvider(modelTier string) ai.Provider {
+	if ai.DefaultRouter != nil && ai.DefaultRouter.SupportsToolUse() {
+		return ai.DefaultRouter
+	}
+	return ai.NewPromptToolUseProvider(ai.DefaultRouter, modelTier)
+}
+
+func normalizeAITimelineCallTimeout(_ time.Duration) time.Duration {
+	return aiTimelinePerCallTimeout
+}
+
+func calculateAITimelineExecutionTimeout(base time.Duration, sprintCount int) time.Duration {
+	base = normalizeAITimelineCallTimeout(base)
+	if sprintCount < 1 {
+		sprintCount = 1
+	}
+	timeout := base + time.Duration(sprintCount-1)*(base/2)
+	if timeout < aiTimelinePerCallTimeout {
+		timeout = aiTimelinePerCallTimeout
+	}
+	if timeout > aiTimelinePromptTimeout {
+		timeout = aiTimelinePromptTimeout
+	}
+	return timeout
+}
+
+func calculateAITimelineLLMTimeout(base time.Duration, max time.Duration, fragments ...string) time.Duration {
+	return normalizeAITimelineCallTimeout(base)
+}
+
+func calculateAITimelineBlueprintTimeout(base time.Duration, prompt string) time.Duration {
+	timeout := 2 * normalizeAITimelineCallTimeout(base)
+	if timeout > aiTimelinePromptTimeout {
+		timeout = aiTimelinePromptTimeout
+	}
+	return timeout
+}
+
+func calculateAITimelineEditTimeout(base time.Duration, prompt string, projectSummaryJSON string) time.Duration {
+	return calculateAITimelineLLMTimeout(base, aiTimelinePerCallTimeout, prompt, projectSummaryJSON)
+}
 
 const aiTimelineEditSystemPrompt = `You are an autonomous Project and Resource Manager acting as a JSON patcher.
 You receive the current project state (each task has a database task_id) and a user request.
@@ -105,6 +258,7 @@ type aiTimelineGenerateRequest struct {
 	UserID              string                        `json:"userId,omitempty"`
 	DeviceID            string                        `json:"deviceId,omitempty"`
 	ConversationHistory []aiTimelineConversationEntry `json:"conversation_history,omitempty"`
+	FitToTier           bool                          `json:"fit_to_tier,omitempty"`
 }
 
 type AIIntentResponse struct {
@@ -118,6 +272,7 @@ type aiTimelineEditRequest struct {
 	UserID              string                        `json:"userId,omitempty"`
 	DeviceID            string                        `json:"deviceId,omitempty"`
 	ConversationHistory []aiTimelineConversationEntry `json:"conversation_history,omitempty"`
+	FitToTier           bool                          `json:"fit_to_tier,omitempty"`
 }
 
 type aiTimelineConversationEntry struct {
@@ -262,6 +417,43 @@ type aiTimelineEditSummary struct {
 	Sprints        []aiTimelineEditSprintSummary `json:"sprints"`
 }
 
+type aiTimelineBlueprintProgressFunc func(step string, label string)
+
+type aiTimelineStageError struct {
+	Stage   string
+	Timeout time.Duration
+	Err     error
+}
+
+func (e *aiTimelineStageError) Error() string {
+	if e == nil || e.Err == nil {
+		return strings.TrimSpace(e.Stage)
+	}
+	if strings.TrimSpace(e.Stage) == "" {
+		return e.Err.Error()
+	}
+	return strings.TrimSpace(e.Stage) + ": " + e.Err.Error()
+}
+
+func (e *aiTimelineStageError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+type aiTimelineErrorPayload struct {
+	Error           string `json:"error"`
+	Message         string `json:"message,omitempty"`
+	Code            string `json:"code,omitempty"`
+	Stage           string `json:"stage,omitempty"`
+	Detail          string `json:"detail,omitempty"`
+	Retryable       bool   `json:"retryable,omitempty"`
+	ProviderStatus  int    `json:"provider_status,omitempty"`
+	TimeoutMs       int64  `json:"timeout_ms,omitempty"`
+	PromptTimeoutMs int64  `json:"prompt_timeout_ms,omitempty"`
+}
+
 type aiTimelineFlatTask struct {
 	SprintIndex int
 	TaskIndex   int
@@ -324,7 +516,16 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		writeAITimelineError(w, http.StatusBadRequest, "prompt is required")
 		return
 	}
+	tier := resolveAITimelineTier()
+	if len([]rune(prompt)) > tier.MaxPromptChars {
+		writeAITimelineError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("Prompt exceeds the %d-character limit for your plan. Please shorten your request.", tier.MaxPromptChars))
+		return
+	}
 	conversationHistory := normalizeAITimelineConversationHistory(req.ConversationHistory)
+	tierHint := ""
+	if req.FitToTier {
+		tierHint = buildTierHint(tier, tierLabelFromLimits(tier))
+	}
 
 	userID := normalizeIdentifier(
 		firstNonEmpty(
@@ -359,8 +560,13 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	promptCtx, cancelPrompt := context.WithTimeout(r.Context(), aiTimelinePromptTimeout)
+	defer cancelPrompt()
+
 	limits := getAIOrganizeLimits()
-	intentCtx, cancelIntent := context.WithTimeout(r.Context(), limits.RequestTimeout)
+	limits.RequestTimeout = normalizeAITimelineCallTimeout(tier.RequestTimeout)
+	limits.MaxOutputTokens = tier.MaxOutputTokens
+	intentCtx, cancelIntent := context.WithTimeout(promptCtx, limits.RequestTimeout)
 	generateIntent, intentErr := classifyAITimelineGenerateIntent(
 		intentCtx,
 		roomID,
@@ -389,7 +595,10 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	blueprintCtx, cancelBlueprint := context.WithTimeout(r.Context(), limits.RequestTimeout)
+	blueprintTimeout := calculateAITimelineBlueprintTimeout(tier.RequestTimeout, prompt)
+	blueprintLimits := limits
+	blueprintLimits.RequestTimeout = blueprintTimeout
+	blueprintCtx, cancelBlueprint := context.WithTimeout(promptCtx, blueprintLimits.RequestTimeout)
 	defer cancelBlueprint()
 
 	generated, generateErr := generateAIProjectBlueprint(
@@ -397,19 +606,23 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		roomID,
 		prompt,
 		conversationHistory,
-		limits,
+		blueprintLimits,
+		tier.MaxSprints,
+		nil,
+		tierHint,
 	)
 	if generateErr != nil {
-		switch {
-		case errors.Is(generateErr, context.Canceled), errors.Is(generateErr, context.DeadlineExceeded):
-			writeAITimelineError(w, http.StatusGatewayTimeout, "AI timeline request timed out")
-		case errors.Is(generateErr, ai.ErrAllAIProvidersExhausted):
-			writeAITimelineError(w, http.StatusServiceUnavailable, "AI providers are currently unavailable")
-		default:
-			writeAITimelineError(w, http.StatusBadGateway, "Failed to generate timeline from AI")
-		}
+		status, payload := buildAITimelineErrorPayload("blueprint", generateErr, blueprintTimeout, aiTimelinePromptTimeout)
+		writeAITimelineErrorPayload(w, status, payload)
 		return
 	}
+	// Cap sprints based on user tier to prevent runaway serial AI calls
+	if len(generated.Sprints) > tier.MaxSprints {
+		generated.MissingSprints = append(generated.MissingSprints, remainingSprintNames(generated.Sprints, tier.MaxSprints)...)
+		generated.Sprints = generated.Sprints[:tier.MaxSprints]
+		generated.IsPartial = true
+	}
+
 	blueprintRaw, marshalErr := json.Marshal(generated)
 	if marshalErr != nil {
 		writeAITimelineError(w, http.StatusInternalServerError, "Failed to prepare project blueprint")
@@ -431,19 +644,24 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		}
 
 		sprintName := strings.TrimSpace(generated.Sprints[sprintIndex].Name)
-		sprintCtx, cancelSprint := context.WithTimeout(r.Context(), limits.RequestTimeout)
-		tasks, taskErr := generateTasksForSprint(sprintCtx, blueprintJSON, sprintName, limits)
+		sprintCtx, cancelSprint := context.WithTimeout(promptCtx, limits.RequestTimeout)
+		tasks, taskErr := generateTasksForSprint(sprintCtx, blueprintJSON, sprintName, limits, tier.MaxTasksPerSprint, tierHint)
 		cancelSprint()
 		if taskErr != nil {
 			switch {
 			case errors.Is(taskErr, context.Canceled), errors.Is(taskErr, context.DeadlineExceeded):
-				writeAITimelineError(w, http.StatusGatewayTimeout, "AI timeline task generation timed out")
+				// Degrade gracefully: return what we have as a partial board
+				log.Printf("[ai-timeline] sprint task gen timed out, degrading to partial sprint_index=%d sprint=%q room_id=%q", sprintIndex, sprintName, roomID)
+				generated.IsPartial = true
+				generated.MissingSprints = append(generated.MissingSprints, remainingSprintNames(generated.Sprints, sprintIndex)...)
 			case errors.Is(taskErr, ai.ErrAllAIProvidersExhausted):
-				writeAITimelineError(w, http.StatusServiceUnavailable, "AI providers are currently unavailable")
+				generated.IsPartial = true
+				generated.MissingSprints = append(generated.MissingSprints, remainingSprintNames(generated.Sprints, sprintIndex)...)
 			default:
-				writeAITimelineError(w, http.StatusBadGateway, "Failed to generate sprint tasks from AI")
+				generated.IsPartial = true
+				generated.MissingSprints = append(generated.MissingSprints, remainingSprintNames(generated.Sprints, sprintIndex)...)
 			}
-			return
+			break
 		}
 		generated.Sprints[sprintIndex].Tasks = tasks
 		generated.Sprints[sprintIndex].TasksGenerated = true
@@ -455,7 +673,7 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		return
 	}
 	assigneeID := resolveAuthAssigneeUUID(r.Context())
-	persistedCount, persistErr := h.persistAITimelineTasks(r.Context(), roomUUID, assigneeID, &generated)
+	persistedCount, persistErr := h.persistAITimelineTasks(promptCtx, roomUUID, assigneeID, &generated)
 	if persistErr != nil {
 		writeAITimelineError(w, http.StatusInternalServerError, "Failed to persist generated timeline tasks")
 		return
@@ -475,6 +693,287 @@ func (h *RoomHandler) HandleAIGenerateTimeline(w http.ResponseWriter, r *http.Re
 		IsPartial:      generated.IsPartial,
 		MissingSprints: generated.MissingSprints,
 		PersistedTask:  persistedCount,
+	})
+}
+
+// writeSSEEvent writes a single Server-Sent Events frame and flushes the response.
+func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, data any) {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(jsonBytes))
+	flusher.Flush()
+}
+
+// HandleAIGenerateTimelineStream streams project generation progress as Server-Sent Events.
+// Clients receive status, blueprint, sprint_tasks, chat, done, and error events incrementally
+// so they can populate the board as each sprint is generated rather than waiting for completion.
+func (h *RoomHandler) HandleAIGenerateTimelineStream(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		writeAITimelineError(w, http.StatusServiceUnavailable, "Task storage unavailable")
+		return
+	}
+	if h.redis == nil || h.redis.Client == nil {
+		writeAITimelineError(w, http.StatusServiceUnavailable, "Room storage unavailable")
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	if roomID == "" {
+		writeAITimelineError(w, http.StatusBadRequest, "Invalid room id")
+		return
+	}
+
+	var req aiTimelineGenerateRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1*1024*1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeAITimelineError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		writeAITimelineError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	tier := resolveAITimelineTier()
+	if len([]rune(prompt)) > tier.MaxPromptChars {
+		writeAITimelineError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("Prompt exceeds the %d-character limit for your plan. Please shorten your request.", tier.MaxPromptChars))
+		return
+	}
+	conversationHistory := normalizeAITimelineConversationHistory(req.ConversationHistory)
+	tierHint := ""
+	if req.FitToTier {
+		tierHint = buildTierHint(tier, tierLabelFromLimits(tier))
+	}
+
+	userID := normalizeIdentifier(firstNonEmpty(
+		AuthUserIDFromContext(r.Context()),
+		req.UserID,
+		r.URL.Query().Get("userId"),
+		r.URL.Query().Get("user_id"),
+		r.Header.Get("X-User-Id"),
+	))
+	if userID == "" {
+		writeAITimelineError(w, http.StatusUnauthorized, "User context is required")
+		return
+	}
+	deviceID := strings.TrimSpace(firstNonEmpty(
+		req.DeviceID,
+		r.URL.Query().Get("deviceId"),
+		r.URL.Query().Get("device_id"),
+		r.Header.Get("X-Device-Id"),
+	))
+	clientIP := strings.TrimSpace(extractClientIP(r))
+
+	isMember, memberErr := h.isRoomMember(r.Context(), roomID, userID)
+	if memberErr != nil {
+		writeAITimelineError(w, http.StatusInternalServerError, "Failed to verify room membership")
+		return
+	}
+	if !isMember {
+		writeAITimelineError(w, http.StatusForbidden, "Join the room to generate a timeline")
+		return
+	}
+	if limitErr := enforcePrivateAIRequestLimits(r.Context(), userID, roomID, clientIP, deviceID); limitErr != nil {
+		var exceeded *privateAILimitExceededError
+		if errors.As(limitErr, &exceeded) {
+			logPrivateAILimitExceeded("ai_timeline_generate_stream", exceeded, userID, roomID, clientIP, deviceID)
+			writeAITimelineError(w, http.StatusTooManyRequests, exceeded.PublicMessage())
+			return
+		}
+		writeAITimelineError(w, http.StatusServiceUnavailable, "AI limiter unavailable")
+		return
+	}
+
+	promptCtx, cancelPrompt := context.WithTimeout(r.Context(), aiTimelinePromptTimeout)
+	defer cancelPrompt()
+
+	// All validation passed – switch to SSE mode. Errors from here go as SSE error events.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return
+	}
+
+	limits := getAIOrganizeLimits()
+	limits.RequestTimeout = normalizeAITimelineCallTimeout(tier.RequestTimeout)
+	limits.MaxOutputTokens = tier.MaxOutputTokens
+
+	// Step 1: classify intent
+	writeSSEEvent(w, flusher, "status", map[string]any{
+		"step":              "intent",
+		"label":             "Classifying your request...",
+		"timeout_ms":        limits.RequestTimeout.Milliseconds(),
+		"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
+		"strategy":          "single_llm_call",
+	})
+	intentCtx, cancelIntent := context.WithTimeout(promptCtx, limits.RequestTimeout)
+	generateIntent, intentErr := classifyAITimelineGenerateIntent(intentCtx, roomID, prompt, conversationHistory, limits)
+	cancelIntent()
+	if intentErr != nil {
+		log.Printf("[ai_timeline/stream] intent classification failed room_id=%q user_id=%q err=%v", roomID, userID, intentErr)
+	} else if generateIntent.Intent == aiIntentChat || generateIntent.Intent == aiIntentClarify {
+		assistantReply := strings.TrimSpace(generateIntent.AssistantReply)
+		if assistantReply == "" {
+			if generateIntent.Intent == aiIntentClarify {
+				assistantReply = "Before I generate the board, share one key constraint (deadline, sprint count, or budget cap)."
+			} else {
+				assistantReply = "I can answer questions about planning approach without generating the board yet."
+			}
+		}
+		writeSSEEvent(w, flusher, "chat", map[string]any{"intent": generateIntent.Intent, "assistant_reply": assistantReply})
+		return
+	}
+
+	// Step 2: generate blueprint
+	blueprintTimeout := calculateAITimelineBlueprintTimeout(tier.RequestTimeout, prompt)
+	writeSSEEvent(w, flusher, "status", map[string]any{
+		"step":              "blueprint",
+		"label":             "Designing project blueprint...",
+		"timeout_ms":        blueprintTimeout.Milliseconds(),
+		"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
+		"strategy":          "multi_call",
+	})
+	blueprintLimits := limits
+	blueprintLimits.RequestTimeout = blueprintTimeout
+	blueprintCtx, cancelBlueprint := context.WithTimeout(promptCtx, blueprintLimits.RequestTimeout)
+	generated, generateErr := generateAIProjectBlueprint(
+		blueprintCtx,
+		roomID,
+		prompt,
+		conversationHistory,
+		blueprintLimits,
+		tier.MaxSprints,
+		func(step string, label string) {
+			writeSSEEvent(w, flusher, "status", map[string]any{
+				"step":              strings.TrimSpace(step),
+				"label":             strings.TrimSpace(label),
+				"timeout_ms":        normalizeAITimelineCallTimeout(limits.RequestTimeout).Milliseconds(),
+				"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
+				"strategy":          "multi_call",
+			})
+		},
+		tierHint,
+	)
+	cancelBlueprint()
+	if generateErr != nil {
+		_, payload := buildAITimelineErrorPayload("blueprint", generateErr, blueprintTimeout, aiTimelinePromptTimeout)
+		writeSSEEvent(w, flusher, "error", payload)
+		return
+	}
+
+	// Cap sprints by tier
+	if len(generated.Sprints) > tier.MaxSprints {
+		generated.MissingSprints = append(generated.MissingSprints, remainingSprintNames(generated.Sprints, tier.MaxSprints)...)
+		generated.Sprints = generated.Sprints[:tier.MaxSprints]
+		generated.IsPartial = true
+	}
+
+	// Emit blueprint structure (sprint shells without tasks so client can show sprint names)
+	blueprintShell := generated
+	blueprintShell.Sprints = make([]aiTimelineSprint, len(generated.Sprints))
+	for i, s := range generated.Sprints {
+		blueprintShell.Sprints[i] = aiTimelineSprint{
+			ID:           s.ID,
+			Name:         s.Name,
+			StartDate:    s.StartDate,
+			EndDate:      s.EndDate,
+			DurationDays: s.DurationDays,
+		}
+	}
+	writeSSEEvent(w, flusher, "blueprint", blueprintShell)
+
+	blueprintRaw, _ := json.Marshal(generated)
+	blueprintJSON := string(blueprintRaw)
+
+	executionTimeout := calculateAITimelineExecutionTimeout(limits.RequestTimeout, len(generated.Sprints))
+	writeSSEEvent(w, flusher, "status", map[string]any{
+		"step":              "execute",
+		"label":             "Building tasks directly in the workspace...",
+		"timeout_ms":        executionTimeout.Milliseconds(),
+		"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
+		"strategy":          "tool_loop",
+	})
+
+	executionCtx, cancelExecution := context.WithTimeout(
+		promptCtx,
+		executionTimeout,
+	)
+	createdTaskCount, executionReply, executionTimedOut, executionErr := h.executeAITimelineBlueprintWithAgent(
+		executionCtx,
+		roomID,
+		userID,
+		blueprintJSON,
+		prompt,
+		tier,
+		limits,
+		&generated,
+		func(step string, label string, sprintIndex int) {
+			payload := map[string]any{
+				"step":  strings.TrimSpace(step),
+				"label": strings.TrimSpace(label),
+			}
+			if sprintIndex >= 0 {
+				payload["sprint_index"] = sprintIndex
+				payload["sprint_total"] = len(generated.Sprints)
+			}
+			writeSSEEvent(w, flusher, "status", payload)
+		},
+		func(sprintIndex int) {
+			if sprintIndex < 0 || sprintIndex >= len(generated.Sprints) {
+				return
+			}
+			sprint := generated.Sprints[sprintIndex]
+			writeSSEEvent(w, flusher, "sprint_tasks", map[string]any{
+				"sprint_index": sprintIndex,
+				"sprint_name":  sprint.Name,
+				"sprint_id":    sprint.ID,
+				"start_date":   sprint.StartDate,
+				"end_date":     sprint.EndDate,
+				"tasks":        sprint.Tasks,
+			})
+		},
+	)
+	cancelExecution()
+
+	if strings.TrimSpace(executionReply) != "" {
+		generated.AssistantReply = strings.TrimSpace(executionReply)
+	}
+	generated.MissingSprints = collectAITimelineMissingSprints(generated)
+	generated.IsPartial = executionTimedOut || executionErr != nil || len(generated.MissingSprints) > 0
+
+	if executionErr != nil {
+		if executionTimedOut && !errors.Is(executionErr, context.DeadlineExceeded) {
+			executionErr = context.DeadlineExceeded
+		}
+		_, payload := buildAITimelineErrorPayload("execute", executionErr, executionTimeout, aiTimelinePromptTimeout)
+		writeSSEEvent(w, flusher, "error", payload)
+		writeSSEEvent(w, flusher, "done", map[string]any{
+			"persisted_task_count": createdTaskCount,
+			"is_partial":           true,
+			"missing_sprints":      generated.MissingSprints,
+			"assistant_reply":      generated.AssistantReply,
+		})
+		return
+	}
+	if executionTimedOut {
+		_, payload := buildAITimelineErrorPayload("execute", context.DeadlineExceeded, executionTimeout, aiTimelinePromptTimeout)
+		writeSSEEvent(w, flusher, "error", payload)
+	}
+
+	writeSSEEvent(w, flusher, "done", map[string]any{
+		"persisted_task_count": createdTaskCount,
+		"is_partial":           generated.IsPartial,
+		"missing_sprints":      generated.MissingSprints,
+		"assistant_reply":      generated.AssistantReply,
 	})
 }
 
@@ -506,6 +1005,11 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
 		writeAITimelineError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	editTier := resolveAITimelineTier()
+	if len([]rune(prompt)) > editTier.MaxPromptChars {
+		writeAITimelineError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("Prompt exceeds the %d-character limit for your plan. Please shorten your request.", editTier.MaxPromptChars))
 		return
 	}
 	conversationHistory := normalizeAITimelineConversationHistory(req.ConversationHistory)
@@ -565,14 +1069,19 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 	}
 	normalizedCurrent := normalizeAITimelineProject(currentState)
 
+	promptCtx, cancelPrompt := context.WithTimeout(r.Context(), aiTimelinePromptTimeout)
+	defer cancelPrompt()
+
 	limits := getAIOrganizeLimits()
+	limits.RequestTimeout = normalizeAITimelineCallTimeout(editTier.RequestTimeout)
+	limits.MaxOutputTokens = editTier.MaxOutputTokens
 
 	intentSummaryJSON, summaryErr := buildAITimelineIntentSummaryJSON(normalizedCurrent)
 	if summaryErr != nil {
 		writeAITimelineError(w, http.StatusBadRequest, "Failed to summarize current_state")
 		return
 	}
-	intentCtx, cancelIntent := context.WithTimeout(r.Context(), limits.RequestTimeout)
+	intentCtx, cancelIntent := context.WithTimeout(promptCtx, limits.RequestTimeout)
 	intentResult, intentErr := classifyAITimelineEditIntent(
 		intentCtx,
 		roomID,
@@ -607,25 +1116,22 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 		writeAITimelineError(w, http.StatusBadRequest, "Failed to summarize current_state for edits")
 		return
 	}
-	editCtx, cancelEdit := context.WithTimeout(r.Context(), limits.RequestTimeout)
+	editPlanTimeout := calculateAITimelineEditTimeout(editTier.RequestTimeout, prompt, editSummaryJSON)
+	editLimits := limits
+	editLimits.RequestTimeout = editPlanTimeout
+	editCtx, cancelEdit := context.WithTimeout(promptCtx, editLimits.RequestTimeout)
 	editOps, editErr := generateAITimelineEditOperations(
 		editCtx,
 		roomID,
 		prompt,
 		editSummaryJSON,
 		conversationHistory,
-		limits,
+		editLimits,
 	)
 	cancelEdit()
 	if editErr != nil {
-		switch {
-		case errors.Is(editErr, context.Canceled), errors.Is(editErr, context.DeadlineExceeded):
-			writeAITimelineError(w, http.StatusGatewayTimeout, "AI timeline edit request timed out")
-		case errors.Is(editErr, ai.ErrAllAIProvidersExhausted):
-			writeAITimelineError(w, http.StatusServiceUnavailable, "AI providers are currently unavailable")
-		default:
-			writeAITimelineError(w, http.StatusBadGateway, "Failed to generate timeline edit operations from AI")
-		}
+		status, payload := buildAITimelineErrorPayload("plan", editErr, editPlanTimeout, aiTimelinePromptTimeout)
+		writeAITimelineErrorPayload(w, status, payload)
 		return
 	}
 	if editOps.Mode == aiIntentChat || editOps.Mode == aiIntentClarify {
@@ -645,7 +1151,7 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	persistedCount, persistErr := h.applyAIOperations(r.Context(), roomID, editOps.Operations)
+	persistedCount, persistErr := h.applyAIOperations(promptCtx, roomID, editOps.Operations)
 	if persistErr != nil {
 		writeAITimelineError(w, http.StatusInternalServerError, "Failed to apply AI timeline operations")
 		return
@@ -673,6 +1179,271 @@ func (h *RoomHandler) HandleAIEditTimeline(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		writeAITimelineError(w, http.StatusServiceUnavailable, "Task storage unavailable")
+		return
+	}
+	if h.redis == nil || h.redis.Client == nil {
+		writeAITimelineError(w, http.StatusServiceUnavailable, "Room storage unavailable")
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	if roomID == "" {
+		writeAITimelineError(w, http.StatusBadRequest, "Invalid room id")
+		return
+	}
+
+	var req aiTimelineEditRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeAITimelineError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		writeAITimelineError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	editTier := resolveAITimelineTier()
+	if len([]rune(prompt)) > editTier.MaxPromptChars {
+		writeAITimelineError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("Prompt exceeds the %d-character limit for your plan. Please shorten your request.", editTier.MaxPromptChars))
+		return
+	}
+	conversationHistory := normalizeAITimelineConversationHistory(req.ConversationHistory)
+	if len(req.CurrentState) == 0 || strings.TrimSpace(string(req.CurrentState)) == "" || strings.TrimSpace(string(req.CurrentState)) == "null" {
+		writeAITimelineError(w, http.StatusBadRequest, "current_state is required")
+		return
+	}
+
+	userID := normalizeIdentifier(
+		firstNonEmpty(
+			AuthUserIDFromContext(r.Context()),
+			req.UserID,
+			r.URL.Query().Get("userId"),
+			r.URL.Query().Get("user_id"),
+			r.Header.Get("X-User-Id"),
+		),
+	)
+	if userID == "" {
+		writeAITimelineError(w, http.StatusUnauthorized, "User context is required")
+		return
+	}
+	deviceID := strings.TrimSpace(
+		firstNonEmpty(
+			req.DeviceID,
+			r.URL.Query().Get("deviceId"),
+			r.URL.Query().Get("device_id"),
+			r.Header.Get("X-Device-Id"),
+		),
+	)
+	clientIP := strings.TrimSpace(extractClientIP(r))
+
+	isMember, memberErr := h.isRoomMember(r.Context(), roomID, userID)
+	if memberErr != nil {
+		writeAITimelineError(w, http.StatusInternalServerError, "Failed to verify room membership")
+		return
+	}
+	if !isMember {
+		writeAITimelineError(w, http.StatusForbidden, "Join the room to edit the timeline")
+		return
+	}
+
+	if limitErr := enforcePrivateAIRequestLimits(r.Context(), userID, roomID, clientIP, deviceID); limitErr != nil {
+		var exceeded *privateAILimitExceededError
+		if errors.As(limitErr, &exceeded) {
+			logPrivateAILimitExceeded("ai_timeline_edit_stream", exceeded, userID, roomID, clientIP, deviceID)
+			writeAITimelineError(w, http.StatusTooManyRequests, exceeded.PublicMessage())
+			return
+		}
+		writeAITimelineError(w, http.StatusServiceUnavailable, "AI limiter unavailable")
+		return
+	}
+
+	var currentState aiTimelineProject
+	if err := json.Unmarshal(req.CurrentState, &currentState); err != nil {
+		writeAITimelineError(w, http.StatusBadRequest, "current_state must be valid project JSON")
+		return
+	}
+	normalizedCurrent := normalizeAITimelineProject(currentState)
+
+	promptCtx, cancelPrompt := context.WithTimeout(r.Context(), aiTimelinePromptTimeout)
+	defer cancelPrompt()
+
+	limits := getAIOrganizeLimits()
+	limits.RequestTimeout = normalizeAITimelineCallTimeout(editTier.RequestTimeout)
+	limits.MaxOutputTokens = editTier.MaxOutputTokens
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return
+	}
+
+	writeSSEEvent(w, flusher, "status", map[string]any{
+		"step":              "intent",
+		"label":             "Understanding your board request...",
+		"timeout_ms":        limits.RequestTimeout.Milliseconds(),
+		"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
+		"strategy":          "single_llm_call",
+	})
+
+	intentSummaryJSON, summaryErr := buildAITimelineIntentSummaryJSON(normalizedCurrent)
+	if summaryErr != nil {
+		writeSSEEvent(w, flusher, "error", map[string]any{"message": "Failed to summarize current_state"})
+		return
+	}
+	intentCtx, cancelIntent := context.WithTimeout(promptCtx, limits.RequestTimeout)
+	intentResult, intentErr := classifyAITimelineEditIntent(
+		intentCtx,
+		roomID,
+		prompt,
+		intentSummaryJSON,
+		conversationHistory,
+		limits,
+	)
+	cancelIntent()
+	if intentErr != nil {
+		log.Printf("[ai_timeline/edit_stream] intent classification failed room_id=%q user_id=%q err=%v", roomID, userID, intentErr)
+	} else if intentResult.Intent == aiIntentChat || intentResult.Intent == aiIntentClarify {
+		assistantReply := strings.TrimSpace(intentResult.AssistantReply)
+		if assistantReply == "" {
+			if intentResult.Intent == aiIntentClarify {
+				assistantReply = "I can make the change once you confirm one key detail."
+			} else {
+				assistantReply = "I can explain the current board and answer questions without editing it."
+			}
+		}
+		writeSSEEvent(w, flusher, "chat", map[string]any{
+			"intent":          intentResult.Intent,
+			"assistant_reply": assistantReply,
+		})
+		return
+	}
+
+	editSummaryJSON, editSummaryErr := buildAITimelineEditSummaryJSON(normalizedCurrent)
+	if editSummaryErr != nil {
+		writeSSEEvent(w, flusher, "error", map[string]any{"message": "Failed to summarize current_state for edits"})
+		return
+	}
+	editPlanTimeout := calculateAITimelineEditTimeout(editTier.RequestTimeout, prompt, editSummaryJSON)
+	writeSSEEvent(w, flusher, "status", map[string]any{
+		"step":              "plan",
+		"label":             "Planning board changes...",
+		"timeout_ms":        editPlanTimeout.Milliseconds(),
+		"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
+		"strategy":          "single_llm_call",
+	})
+	editLimits := limits
+	editLimits.RequestTimeout = editPlanTimeout
+	editCtx, cancelEdit := context.WithTimeout(promptCtx, editLimits.RequestTimeout)
+	editOps, editErr := generateAITimelineEditOperations(
+		editCtx,
+		roomID,
+		prompt,
+		editSummaryJSON,
+		conversationHistory,
+		editLimits,
+	)
+	cancelEdit()
+	if editErr != nil {
+		_, payload := buildAITimelineErrorPayload("plan", editErr, editPlanTimeout, aiTimelinePromptTimeout)
+		writeSSEEvent(w, flusher, "error", payload)
+		return
+	}
+	if editOps.Mode == aiIntentChat || editOps.Mode == aiIntentClarify {
+		assistantReply := strings.TrimSpace(editOps.AssistantReply)
+		if assistantReply == "" {
+			if editOps.Mode == aiIntentClarify {
+				assistantReply = "I can apply the change once you confirm one key detail."
+			} else {
+				assistantReply = "I can discuss the board without changing it."
+			}
+		}
+		writeSSEEvent(w, flusher, "chat", map[string]any{
+			"intent":          editOps.Mode,
+			"assistant_reply": assistantReply,
+		})
+		return
+	}
+
+	workingState := applyAITimelineEditOperations(normalizedCurrent, aiTimelineEditOperationsResponse{
+		ProjectPatch: editOps.ProjectPatch,
+	})
+	totalOperations := len(editOps.Operations)
+	writeSSEEvent(w, flusher, "plan", map[string]any{
+		"assistant_reply": editOps.AssistantReply,
+		"project_patch":   editOps.ProjectPatch,
+		"operation_total": totalOperations,
+	})
+
+	if totalOperations == 0 && !hasAITimelineProjectPatch(editOps.ProjectPatch) {
+		writeSSEEvent(w, flusher, "error", map[string]any{"message": "AI returned no valid board changes"})
+		return
+	}
+
+	writeSSEEvent(w, flusher, "status", map[string]any{
+		"step":            "apply",
+		"label":           "Applying board changes...",
+		"applied_count":   0,
+		"operation_total": totalOperations,
+	})
+
+	appliedCount, persistErr := h.applyAIOperationsWithCallback(promptCtx, roomID, editOps.Operations, func(operation aiTimelineEditOperation, appliedCount int, operationTotal int) {
+		workingState = applyAITimelineEditOperations(workingState, aiTimelineEditOperationsResponse{
+			Operations: []aiTimelineEditOperation{operation},
+		})
+		writeSSEEvent(w, flusher, "operation_applied", map[string]any{
+			"operation":       operation,
+			"applied_count":   appliedCount,
+			"operation_total": operationTotal,
+		})
+		writeSSEEvent(w, flusher, "status", map[string]any{
+			"step":            "apply",
+			"label":           "Applying board changes...",
+			"applied_count":   appliedCount,
+			"operation_total": operationTotal,
+		})
+	})
+	if persistErr != nil {
+		workingState.IsPartial = true
+		if strings.TrimSpace(workingState.AssistantReply) == "" {
+			workingState.AssistantReply = "I applied part of the board update before the request stopped."
+		}
+		writeSSEEvent(w, flusher, "error", map[string]any{"message": "Failed to apply AI timeline operations"})
+		writeSSEEvent(w, flusher, "done", map[string]any{
+			"intent":          aiIntentModifyProject,
+			"assistant_reply": workingState.AssistantReply,
+			"timeline":        workingState,
+			"is_partial":      true,
+			"applied_count":   appliedCount,
+			"operation_total": totalOperations,
+		})
+		return
+	}
+
+	if strings.TrimSpace(workingState.AssistantReply) == "" {
+		workingState.AssistantReply = strings.TrimSpace(editOps.AssistantReply)
+	}
+	writeSSEEvent(w, flusher, "done", map[string]any{
+		"intent":          aiIntentModifyProject,
+		"assistant_reply": workingState.AssistantReply,
+		"timeline":        workingState,
+		"is_partial":      false,
+		"applied_count":   appliedCount,
+		"operation_total": totalOperations,
+	})
+}
+
 func resolveAuthAssigneeUUID(ctx context.Context) *gocql.UUID {
 	raw := strings.TrimSpace(AuthUserIDFromContext(ctx))
 	if raw == "" {
@@ -691,20 +1462,860 @@ func generateAIProjectBlueprint(
 	prompt string,
 	conversationHistory []aiTimelineConversationEntry,
 	limits aiOrganizeLimits,
+	maxSprints int,
+	onProgress aiTimelineBlueprintProgressFunc,
+	tierHint string,
 ) (aiTimelineProject, error) {
-	conversationJSON, _ := json.Marshal(conversationHistory)
-	userPrompt := fmt.Sprintf(
-		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nUser request:\n%s\n\nGenerate a detailed project blueprint now.",
+	sourcePrompt := extractAITimelineUserInstruction(prompt)
+	if strings.TrimSpace(sourcePrompt) == "" {
+		sourcePrompt = strings.TrimSpace(prompt)
+	}
+	conversationJSON := buildAITimelineConversationContext(conversationHistory, 8, 500)
+	if onProgress != nil {
+		onProgress("blueprint_foundation", "Drafting project foundation...")
+	}
+	foundationCtx, cancelFoundation := context.WithTimeout(ctx, normalizeAITimelineCallTimeout(limits.RequestTimeout))
+	foundation, foundationErr := generateAIProjectBlueprintFoundation(
+		foundationCtx,
 		roomID,
+		sourcePrompt,
+		conversationJSON,
 		hasAssistantClarificationRequest(conversationHistory),
-		string(conversationJSON),
-		strings.TrimSpace(prompt),
+		limits,
+		tierHint,
 	)
-	raw, err := generateAIOrganizeStructuredJSON(ctx, aiBlueprintSystemPrompt, userPrompt, limits)
+	cancelFoundation()
+	if foundationErr != nil {
+		return aiTimelineProject{}, &aiTimelineStageError{
+			Stage:   "blueprint_foundation",
+			Timeout: normalizeAITimelineCallTimeout(limits.RequestTimeout),
+			Err:     foundationErr,
+		}
+	}
+
+	normalizedFoundation := normalizeAITimelineProject(aiTimelineProject{
+		AssistantReply: foundation.AssistantReply,
+		ProjectName:    foundation.ProjectName,
+		TechStack:      foundation.TechStack,
+		TargetAudience: foundation.TargetAudience,
+		EstimatedCost:  foundation.EstimatedCost,
+		RolesNeeded:    foundation.RolesNeeded,
+	})
+	if onProgress != nil {
+		onProgress("blueprint_sprints", "Planning project phases...")
+	}
+	sprintPlanCtx, cancelSprintPlan := context.WithTimeout(ctx, normalizeAITimelineCallTimeout(limits.RequestTimeout))
+	sprints, sprintErr := generateAIProjectBlueprintSprintPlan(
+		sprintPlanCtx,
+		roomID,
+		sourcePrompt,
+		conversationJSON,
+		normalizedFoundation,
+		hasAssistantClarificationRequest(conversationHistory),
+		limits,
+		maxSprints,
+		tierHint,
+	)
+	cancelSprintPlan()
+	if sprintErr != nil {
+		return aiTimelineProject{}, &aiTimelineStageError{
+			Stage:   "blueprint_sprints",
+			Timeout: normalizeAITimelineCallTimeout(limits.RequestTimeout),
+			Err:     sprintErr,
+		}
+	}
+
+	return normalizeAITimelineProject(aiTimelineProject{
+		AssistantReply: normalizedFoundation.AssistantReply,
+		ProjectName:    normalizedFoundation.ProjectName,
+		TechStack:      normalizedFoundation.TechStack,
+		TargetAudience: normalizedFoundation.TargetAudience,
+		EstimatedCost:  normalizedFoundation.EstimatedCost,
+		RolesNeeded:    normalizedFoundation.RolesNeeded,
+		Sprints:        sprints,
+	}), nil
+}
+
+func generateAIProjectBlueprintFoundation(
+	ctx context.Context,
+	roomID string,
+	sourcePrompt string,
+	conversationJSON string,
+	clarificationAsked bool,
+	limits aiOrganizeLimits,
+	tierHint string,
+) (aiTimelineProject, error) {
+	tierSection := ""
+	if strings.TrimSpace(tierHint) != "" {
+		tierSection = "\n\n" + strings.TrimSpace(tierHint)
+	}
+	userPrompt := fmt.Sprintf(
+		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nUser request:\n%s%s\n\nGenerate the project foundation now.",
+		roomID,
+		clarificationAsked,
+		conversationJSON,
+		strings.TrimSpace(sourcePrompt),
+		tierSection,
+	)
+	raw, err := generateAIOrganizeStructuredJSONWithTier(
+		ctx,
+		aiBlueprintFoundationSystemPrompt,
+		userPrompt,
+		limits,
+		ai.AIModelTierHeavy,
+	)
 	if err != nil {
 		return aiTimelineProject{}, err
 	}
-	return parseAITimelineProject(raw)
+	return parseAITimelineBlueprintFoundation(raw)
+}
+
+func generateAIProjectBlueprintSprintPlan(
+	ctx context.Context,
+	roomID string,
+	sourcePrompt string,
+	conversationJSON string,
+	foundation aiTimelineProject,
+	clarificationAsked bool,
+	limits aiOrganizeLimits,
+	maxSprints int,
+	tierHint string,
+) ([]aiTimelineSprint, error) {
+	foundationJSONBytes, _ := json.Marshal(map[string]any{
+		"project_name":    foundation.ProjectName,
+		"tech_stack":      foundation.TechStack,
+		"target_audience": foundation.TargetAudience,
+		"estimated_cost":  foundation.EstimatedCost,
+		"roles_needed":    foundation.RolesNeeded,
+	})
+	tierSection := ""
+	if strings.TrimSpace(tierHint) != "" {
+		tierSection = "\n\n" + strings.TrimSpace(tierHint)
+	}
+	userPrompt := fmt.Sprintf(
+		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nProject foundation JSON:\n%s\n\nUser request:\n%s%s\n\nGenerate the sprint plan now.",
+		roomID,
+		clarificationAsked,
+		conversationJSON,
+		string(foundationJSONBytes),
+		strings.TrimSpace(sourcePrompt),
+		tierSection,
+	)
+	raw, err := generateAIOrganizeStructuredJSONWithTier(
+		ctx,
+		buildAIBlueprintSprintPlanSystemPrompt(maxSprints),
+		userPrompt,
+		limits,
+		ai.AIModelTierHeavy,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return parseAITimelineBlueprintSprintPlan(raw)
+}
+
+func extractAITimelineUserInstruction(prompt string) string {
+	trimmed := strings.TrimSpace(prompt)
+	if trimmed == "" {
+		return ""
+	}
+	upper := strings.ToUpper(trimmed)
+	for _, marker := range []string{"USER REQUEST:", "EDIT REQUEST:"} {
+		index := strings.LastIndex(upper, marker)
+		if index >= 0 {
+			extracted := strings.TrimSpace(trimmed[index+len(marker):])
+			if extracted != "" {
+				return extracted
+			}
+		}
+	}
+	if endFormatIndex := strings.LastIndex(upper, "[END FORMAT]"); endFormatIndex >= 0 {
+		extracted := strings.TrimSpace(trimmed[endFormatIndex+len("[END FORMAT]"):])
+		if extracted != "" {
+			return extracted
+		}
+	}
+	return trimmed
+}
+
+func buildAITimelineConversationContext(
+	history []aiTimelineConversationEntry,
+	maxEntries int,
+	maxChars int,
+) string {
+	if maxEntries <= 0 {
+		maxEntries = 8
+	}
+	if maxChars <= 0 {
+		maxChars = 500
+	}
+	if len(history) == 0 {
+		return "[]"
+	}
+	start := len(history) - maxEntries
+	if start < 0 {
+		start = 0
+	}
+	trimmedHistory := make([]aiTimelineConversationEntry, 0, len(history)-start)
+	for _, entry := range history[start:] {
+		role := strings.TrimSpace(entry.Role)
+		if role != "assistant" {
+			role = "user"
+		}
+		text := truncateRunes(strings.TrimSpace(entry.Text), maxChars)
+		if text == "" {
+			continue
+		}
+		trimmedHistory = append(trimmedHistory, aiTimelineConversationEntry{
+			Role:   role,
+			Text:   text,
+			Intent: normalizeAIIntent(entry.Intent),
+		})
+	}
+	if len(trimmedHistory) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(trimmedHistory)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
+func parseAITimelineBlueprintFoundation(raw string) (aiTimelineProject, error) {
+	candidates := extractJSONObjectsCandidates(raw)
+	if len(candidates) == 0 {
+		return aiTimelineProject{}, fmt.Errorf("ai blueprint foundation response did not contain JSON")
+	}
+
+	var lastErr error
+	for _, content := range candidates {
+		var direct aiTimelineProject
+		if err := json.Unmarshal([]byte(content), &direct); err == nil && hasAITimelineFoundationFields(direct) {
+			return direct, nil
+		} else if err != nil {
+			lastErr = err
+		}
+
+		var envelope struct {
+			AssistantReply string          `json:"assistant_reply"`
+			Timeline       json.RawMessage `json:"timeline"`
+			Foundation     json.RawMessage `json:"foundation"`
+			Project        json.RawMessage `json:"project"`
+		}
+		if err := json.Unmarshal([]byte(content), &envelope); err != nil {
+			lastErr = err
+			continue
+		}
+		nestedPayload := pickFirstNonEmptyJSONRaw(envelope.Foundation, envelope.Timeline, envelope.Project)
+		if len(nestedPayload) == 0 {
+			lastErr = fmt.Errorf("ai blueprint foundation response missing project foundation object")
+			continue
+		}
+		var nested aiTimelineProject
+		if err := json.Unmarshal(nestedPayload, &nested); err != nil {
+			lastErr = err
+			continue
+		}
+		if strings.TrimSpace(envelope.AssistantReply) != "" {
+			nested.AssistantReply = strings.TrimSpace(envelope.AssistantReply)
+		}
+		if hasAITimelineFoundationFields(nested) {
+			return nested, nil
+		}
+	}
+	if lastErr != nil {
+		return aiTimelineProject{}, lastErr
+	}
+	return aiTimelineProject{}, fmt.Errorf("ai blueprint foundation response was not parseable")
+}
+
+func parseAITimelineBlueprintSprintPlan(raw string) ([]aiTimelineSprint, error) {
+	candidates := extractJSONObjectsCandidates(raw)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("ai sprint plan response did not contain JSON")
+	}
+
+	var lastErr error
+	for _, content := range candidates {
+		var direct struct {
+			Sprints []aiTimelineSprint `json:"sprints"`
+		}
+		if err := json.Unmarshal([]byte(content), &direct); err == nil && len(direct.Sprints) > 0 {
+			return direct.Sprints, nil
+		} else if err != nil {
+			lastErr = err
+		}
+
+		project, err := parseAITimelineProjectCandidate(content)
+		if err == nil && len(project.Sprints) > 0 {
+			return project.Sprints, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("ai sprint plan response returned no valid sprints")
+}
+
+func hasAITimelineFoundationFields(project aiTimelineProject) bool {
+	return strings.TrimSpace(project.ProjectName) != "" ||
+		len(project.TechStack) > 0 ||
+		strings.TrimSpace(project.TargetAudience) != "" ||
+		strings.TrimSpace(project.EstimatedCost) != "" ||
+		len(project.RolesNeeded) > 0 ||
+		strings.TrimSpace(project.AssistantReply) != ""
+}
+
+func buildAITimelineExecutionInitialContext(
+	workspace *ai.WorkspaceContext,
+	opts ai.BuildOptions,
+	cfg models.ProjectTypeConfig,
+) string {
+	if workspace == nil {
+		return ""
+	}
+	rendered := strings.TrimSpace(workspace.RenderForAI(opts))
+	if rendered == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"CURRENT WORKSPACE STATE — existing %s are pre-loaded. Do NOT call list_tasks() unless you need to avoid duplicates or continue a previous partial onboarding run:\n\n%s",
+		strings.ToLower(strings.TrimSpace(cfg.TaskTermPlural)),
+		rendered,
+	)
+}
+
+func buildAITimelineExecutionPrompt(
+	originalPrompt string,
+	blueprintJSON string,
+	cfg models.ProjectTypeConfig,
+	maxTasksPerSprint int,
+) string {
+	groupPlural := strings.ToLower(strings.TrimSpace(cfg.GroupTermPlural))
+	if groupPlural == "" {
+		groupPlural = "groups"
+	}
+	groupSingular := strings.ToLower(strings.TrimSpace(cfg.GroupTerm))
+	if groupSingular == "" {
+		groupSingular = "group"
+	}
+	taskPlural := strings.ToLower(strings.TrimSpace(cfg.TaskTermPlural))
+	if taskPlural == "" {
+		taskPlural = "tasks"
+	}
+	return fmt.Sprintf(
+		"Original user request:\n%s\n\nProject blueprint JSON:\n%s\n\nBuild this workspace now by using tools directly.\nCritical execution rules:\n- Use the exact %s from the blueprint.\n- Create at most %d %s per %s.\n- Prefer full project quality over a minimal token-saving outline.\n- If the board already contains partial work from an earlier run, continue from there without duplicating titles in the same %s.\n- End with verify_task_count and then give a concise summary of what you created.",
+		strings.TrimSpace(originalPrompt),
+		strings.TrimSpace(blueprintJSON),
+		groupPlural,
+		maxTasksPerSprint,
+		taskPlural,
+		groupSingular,
+		groupSingular,
+	)
+}
+
+func buildAITimelineExecutionRetryPrompt(
+	originalPrompt string,
+	blueprintJSON string,
+	cfg models.ProjectTypeConfig,
+	maxTasksPerSprint int,
+) string {
+	return buildAITimelineExecutionPrompt(originalPrompt, blueprintJSON, cfg, maxTasksPerSprint) +
+		"\n\nYou have not created any tasks yet. Stop explaining and start calling create_task immediately."
+}
+
+func summarizeAITimelineAgentText(text string) string {
+	trimmed := collapseWhitespace(text)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > 180 {
+		trimmed = strings.TrimSpace(trimmed[:180]) + "..."
+	}
+	return trimmed
+}
+
+func collapseWhitespace(text string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+}
+
+func asFloatValue(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err == nil {
+			return parsed
+		}
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func aiTimelineSprintNameKey(raw string) string {
+	return strings.ToLower(collapseWhitespace(raw))
+}
+
+func aiTimelineTaskTitleKey(raw string) string {
+	return strings.ToLower(collapseWhitespace(raw))
+}
+
+func findAITimelineSprintIndexByName(project *aiTimelineProject, sprintName string) int {
+	if project == nil {
+		return -1
+	}
+	targetKey := aiTimelineSprintNameKey(sprintName)
+	if targetKey == "" {
+		return -1
+	}
+	for index, sprint := range project.Sprints {
+		if aiTimelineSprintNameKey(sprint.Name) == targetKey {
+			return index
+		}
+	}
+	return -1
+}
+
+func upsertAITimelineAgentTask(
+	project *aiTimelineProject,
+	sprintName string,
+	startDate string,
+	endDate string,
+	task aiTimelineTask,
+) int {
+	if project == nil {
+		return -1
+	}
+	sprintIndex := findAITimelineSprintIndexByName(project, sprintName)
+	if sprintIndex < 0 {
+		sprintIndex = len(project.Sprints)
+		project.Sprints = append(project.Sprints, aiTimelineSprint{
+			ID:             fmt.Sprintf("sprint-%d", sprintIndex+1),
+			Name:           truncateRunes(strings.TrimSpace(firstNonEmpty(sprintName, fmt.Sprintf("Sprint %d", sprintIndex+1))), 160),
+			StartDate:      normalizeAITimelineAgentDate(startDate),
+			EndDate:        normalizeAITimelineAgentDate(endDate),
+			DurationDays:   7,
+			TasksGenerated: false,
+			Tasks:          nil,
+		})
+	}
+
+	sprint := &project.Sprints[sprintIndex]
+	if sprint.StartDate == "" {
+		sprint.StartDate = normalizeAITimelineAgentDate(startDate)
+	}
+	if sprint.EndDate == "" {
+		sprint.EndDate = normalizeAITimelineAgentDate(endDate)
+	}
+	if sprint.DurationDays <= 0 {
+		sprint.DurationDays = 7
+	}
+	for index, existing := range sprint.Tasks {
+		if normalizeAITimelineTaskIdentifier(firstNonEmpty(existing.TaskID, existing.ID)) ==
+			normalizeAITimelineTaskIdentifier(firstNonEmpty(task.TaskID, task.ID)) {
+			sprint.Tasks[index] = task
+			sprint.TasksGenerated = true
+			return sprintIndex
+		}
+	}
+	sprint.Tasks = append(sprint.Tasks, task)
+	sprint.TasksGenerated = true
+	return sprintIndex
+}
+
+func collectAITimelineMissingSprints(project aiTimelineProject) []string {
+	missing := make([]string, 0, len(project.Sprints))
+	for index, sprint := range project.Sprints {
+		if len(sprint.Tasks) > 0 {
+			continue
+		}
+		name := strings.TrimSpace(sprint.Name)
+		if name == "" {
+			name = fmt.Sprintf("Sprint %d", index+1)
+		}
+		missing = append(missing, name)
+	}
+	return missing
+}
+
+func normalizeAITimelineAgentDate(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		parsed, err := time.Parse(layout, trimmed)
+		if err == nil {
+			return parsed.UTC().Format("2006-01-02")
+		}
+	}
+	return ""
+}
+
+func normalizeAITimelineAgentDuration(start *time.Time, end *time.Time) (string, float64) {
+	if start == nil || end == nil {
+		return "days", 1
+	}
+	startUTC := start.UTC()
+	endUTC := end.UTC()
+	if endUTC.Before(startUTC) {
+		return "days", 1
+	}
+	durationDays := int(endUTC.Sub(startUTC).Hours()/24) + 1
+	if durationDays < 1 {
+		durationDays = 1
+	}
+	return "days", float64(durationDays)
+}
+
+func convertAITimelineAgentTask(result any, input map[string]any) (aiTimelineTask, string, string, string, bool) {
+	taskResult, ok := result.(ai.TaskCtx)
+	if !ok {
+		return aiTimelineTask{}, "", "", "", false
+	}
+
+	description := truncateRunes(strings.TrimSpace(taskResult.Description), 4000)
+	taskType := truncateRunes(strings.ToLower(strings.TrimSpace(taskResult.TaskType)), 48)
+	if taskType == "" {
+		taskType = truncateRunes(strings.ToLower(strings.TrimSpace(extractTaskMetadataValue(description, "type"))), 48)
+	}
+	if taskType == "" {
+		taskType = "general"
+	}
+
+	budget := 0.0
+	if taskResult.Budget != nil {
+		budget = normalizeTimelineBudgetValue(*taskResult.Budget)
+	} else if extractedBudget := extractTaskBudget(description); extractedBudget != nil {
+		budget = normalizeTimelineBudgetValue(*extractedBudget)
+	}
+
+	actualCost := 0.0
+	if taskResult.ActualCost != nil {
+		actualCost = normalizeTimelineBudgetValue(*taskResult.ActualCost)
+	} else if extractedCost := extractTaskActualCost(description); extractedCost != nil {
+		actualCost = normalizeTimelineBudgetValue(*extractedCost)
+	}
+
+	durationUnit, durationValue := normalizeAITimelineAgentDuration(taskResult.StartDate, taskResult.DueDate)
+	if extractedUnit, extractedValue, ok := extractTaskDurationMetadata(description); ok {
+		durationUnit = extractedUnit
+		durationValue = extractedValue
+	}
+	effortScore := estimateEffortScoreFromDuration(durationUnit, durationValue)
+	if extractedEffort, ok := extractTaskEffortMetadata(description); ok {
+		effortScore = extractedEffort
+	}
+
+	assigneeID := normalizeTimelineAssigneeID(taskResult.AssigneeID)
+	assigneeDisplay := strings.TrimSpace(firstNonEmpty(taskResult.AssigneeName, assigneeID))
+	sprintName := truncateRunes(strings.TrimSpace(firstNonEmpty(taskResult.SprintName, asStringValue(input["sprint_name"]))), 160)
+	startDate := ""
+	if taskResult.StartDate != nil {
+		startDate = taskResult.StartDate.UTC().Format("2006-01-02")
+	}
+	endDate := ""
+	if taskResult.DueDate != nil {
+		endDate = taskResult.DueDate.UTC().Format("2006-01-02")
+	}
+	if startDate == "" {
+		startDate = normalizeAITimelineAgentDate(asStringValue(input["start_date"]))
+	}
+	if endDate == "" {
+		endDate = normalizeAITimelineAgentDate(asStringValue(input["due_date"]))
+	}
+
+	return aiTimelineTask{
+		TaskID:        normalizeAITimelineTaskIdentifier(taskResult.ID),
+		ID:            normalizeAITimelineTaskIdentifier(taskResult.ID),
+		Title:         truncateRunes(strings.TrimSpace(taskResult.Title), 240),
+		Status:        normalizeTaskStatusValue(taskResult.Status),
+		Type:          taskType,
+		AssigneeID:    assigneeID,
+		Assignee:      assigneeDisplay,
+		Budget:        budget,
+		ActualCost:    actualCost,
+		DurationUnit:  durationUnit,
+		DurationValue: durationValue,
+		EffortScore:   effortScore,
+		Description:   description,
+	}, sprintName, startDate, endDate, true
+}
+
+func (h *RoomHandler) executeAITimelineBlueprintWithAgent(
+	ctx context.Context,
+	roomID string,
+	userID string,
+	blueprintJSON string,
+	originalPrompt string,
+	tier config.AITimelineTierLimits,
+	limits aiOrganizeLimits,
+	project *aiTimelineProject,
+	onStatus func(step string, label string, sprintIndex int),
+	onSprintUpdate func(sprintIndex int),
+) (int, string, bool, error) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return 0, "", false, fmt.Errorf("task storage unavailable")
+	}
+	ctxBuilder := ai.NewContextBuilder(h.scylla)
+	if ctxBuilder == nil {
+		return 0, "", false, fmt.Errorf("context builder unavailable")
+	}
+
+	buildOpts := ai.BuildOptions{
+		IncludeCanvas: false,
+		IncludeChat:   false,
+		TaskLimit:     500,
+	}
+	workspace, workspaceErr := ctxBuilder.Build(ctx, roomID, userID, buildOpts)
+	if workspaceErr != nil {
+		return 0, "", false, workspaceErr
+	}
+	projectTypeCfg := models.GetProjectTypeConfig(workspace.ProjectType)
+
+	provider := resolveAITimelineAgentProvider(ai.AIModelTierHeavy)
+	if provider == nil {
+		return 0, "", false, fmt.Errorf("timeline onboarding ai provider is unavailable")
+	}
+
+	engine := ai.NewAgentEngine(
+		provider,
+		ctxBuilder,
+		roomID,
+		ai.AgentAuthContext{
+			UserID:   strings.TrimSpace(userID),
+			UserName: "User",
+		},
+	)
+	if engine == nil {
+		return 0, "", false, fmt.Errorf("timeline onboarding ai engine is unavailable")
+	}
+
+	sprintTaskCounts := make(map[string]int, len(project.Sprints))
+	existingTitlesBySprint := make(map[string]map[string]struct{}, len(project.Sprints))
+	existingSprintUpdates := make(map[int]struct{}, len(project.Sprints))
+	for _, task := range workspace.Tasks {
+		sprintKey := aiTimelineSprintNameKey(task.SprintName)
+		if sprintKey == "" {
+			continue
+		}
+		sprintTaskCounts[sprintKey]++
+		if existingTitlesBySprint[sprintKey] == nil {
+			existingTitlesBySprint[sprintKey] = make(map[string]struct{})
+		}
+		titleKey := aiTimelineTaskTitleKey(task.Title)
+		if titleKey != "" {
+			existingTitlesBySprint[sprintKey][titleKey] = struct{}{}
+		}
+		timelineTask, sprintName, startDate, endDate, ok := convertAITimelineAgentTask(task, nil)
+		if ok {
+			sprintIndex := upsertAITimelineAgentTask(project, sprintName, startDate, endDate, timelineTask)
+			if sprintIndex >= 0 {
+				existingSprintUpdates[sprintIndex] = struct{}{}
+			}
+		}
+	}
+	if onSprintUpdate != nil {
+		for sprintIndex := range project.Sprints {
+			if _, exists := existingSprintUpdates[sprintIndex]; !exists {
+				continue
+			}
+			onSprintUpdate(sprintIndex)
+		}
+	}
+
+	createdTaskCount := 0
+	engine.SetToolExecutor(func(callCtx context.Context, name string, input map[string]any) (any, error) {
+		toolName := strings.TrimSpace(name)
+		switch toolName {
+		case "list_tasks":
+			if onStatus != nil {
+				onStatus("review", "Reviewing current board state...", -1)
+			}
+		case "verify_task_count":
+			if onStatus != nil {
+				onStatus("verify", "Verifying generated workspace...", -1)
+			}
+		case "create_task":
+			sprintName := truncateRunes(strings.TrimSpace(asStringValue(input["sprint_name"])), 160)
+			title := truncateRunes(strings.TrimSpace(asStringValue(input["title"])), 240)
+			sprintIndex := findAITimelineSprintIndexByName(project, sprintName)
+			if onStatus != nil {
+				label := "Creating task..."
+				if title != "" {
+					label = fmt.Sprintf("Creating %s...", title)
+				}
+				onStatus("apply", label, sprintIndex)
+			}
+
+			sprintKey := aiTimelineSprintNameKey(sprintName)
+			if sprintKey != "" && tier.MaxTasksPerSprint > 0 && sprintTaskCounts[sprintKey] >= tier.MaxTasksPerSprint {
+				return nil, fmt.Errorf("group %q already has the maximum %d tasks for this plan", sprintName, tier.MaxTasksPerSprint)
+			}
+			titleKey := aiTimelineTaskTitleKey(title)
+			if sprintKey != "" && titleKey != "" {
+				if _, exists := existingTitlesBySprint[sprintKey][titleKey]; exists {
+					return nil, fmt.Errorf("a task titled %q already exists in %q", title, sprintName)
+				}
+			}
+		}
+
+		result, err := engine.ExecuteBuiltInTool(callCtx, toolName, input)
+		if err != nil {
+			return nil, err
+		}
+
+		switch toolName {
+		case "create_task":
+			task, sprintName, startDate, endDate, ok := convertAITimelineAgentTask(result, input)
+			if !ok {
+				return result, nil
+			}
+			sprintIndex := upsertAITimelineAgentTask(project, sprintName, startDate, endDate, task)
+			createdTaskCount++
+
+			sprintKey := aiTimelineSprintNameKey(sprintName)
+			if sprintKey != "" {
+				sprintTaskCounts[sprintKey]++
+				if existingTitlesBySprint[sprintKey] == nil {
+					existingTitlesBySprint[sprintKey] = make(map[string]struct{})
+				}
+				titleKey := aiTimelineTaskTitleKey(task.Title)
+				if titleKey != "" {
+					existingTitlesBySprint[sprintKey][titleKey] = struct{}{}
+				}
+			}
+
+			if onSprintUpdate != nil {
+				onSprintUpdate(sprintIndex)
+			}
+			if onStatus != nil {
+				onStatus("apply", fmt.Sprintf("Created %d task%s so far...", createdTaskCount, ternaryPlural(createdTaskCount)), sprintIndex)
+			}
+		case "verify_task_count":
+			if onStatus == nil {
+				break
+			}
+			counts, ok := result.(map[string]any)
+			if !ok {
+				onStatus("verify", "Verification completed.", -1)
+				break
+			}
+			totalTasks := int(asFloatValue(counts["total_tasks"]))
+			sprintCount := int(asFloatValue(counts["sprint_count"]))
+			if totalTasks > 0 && sprintCount > 0 {
+				onStatus("verify", fmt.Sprintf("Verified %d tasks across %d groups.", totalTasks, sprintCount), -1)
+			} else {
+				onStatus("verify", "Verification completed.", -1)
+			}
+		}
+
+		return result, nil
+	})
+
+	allowedTools := []string{"create_task", "list_tasks", "verify_task_count"}
+	runConfig := ai.AgentConfig{
+		MaxTurns:       40,
+		Timeout:        calculateAITimelineExecutionTimeout(limits.RequestTimeout, len(project.Sprints)),
+		SystemPrompt:   aiTimelineExecutionSystemPrompt,
+		ContextOptions: buildOpts,
+		Workspace:      workspace,
+		InitialContext: buildAITimelineExecutionInitialContext(workspace, buildOpts, projectTypeCfg),
+		AllowedTools:   allowedTools,
+		WorkflowKind:   "timeline_onboarding",
+		StreamCallback: func(event ai.AgentEvent) {
+			if onStatus == nil {
+				return
+			}
+			switch strings.TrimSpace(event.Kind) {
+			case "thinking", "text":
+				label := summarizeAITimelineAgentText(event.Text)
+				if label != "" {
+					onStatus("reasoning", label, -1)
+				}
+			}
+		},
+	}
+
+	finalText, events, runErr := engine.Run(
+		ctx,
+		buildAITimelineExecutionPrompt(originalPrompt, blueprintJSON, projectTypeCfg, tier.MaxTasksPerSprint),
+		runConfig,
+	)
+	if runErr != nil {
+		return createdTaskCount, strings.TrimSpace(finalText), isAITimelineAgentTimedOut(ctx, finalText, events), runErr
+	}
+
+	if createdTaskCount == 0 && ctx.Err() == nil && len(collectAITimelineMissingSprints(*project)) > 0 {
+		if onStatus != nil {
+			onStatus("retry", "Retrying with direct task execution...", -1)
+		}
+		retryWorkspace, retryWorkspaceErr := ctxBuilder.Build(ctx, roomID, userID, buildOpts)
+		if retryWorkspaceErr == nil && retryWorkspace != nil {
+			runConfig.Workspace = retryWorkspace
+			runConfig.InitialContext = buildAITimelineExecutionInitialContext(retryWorkspace, buildOpts, projectTypeCfg)
+		}
+		retryText, retryEvents, retryErr := engine.Run(
+			ctx,
+			buildAITimelineExecutionRetryPrompt(originalPrompt, blueprintJSON, projectTypeCfg, tier.MaxTasksPerSprint),
+			runConfig,
+		)
+		if retryErr == nil && strings.TrimSpace(retryText) != "" {
+			finalText = retryText
+		}
+		events = append(events, retryEvents...)
+		if retryErr != nil {
+			return createdTaskCount, strings.TrimSpace(finalText), isAITimelineAgentTimedOut(ctx, finalText, events), retryErr
+		}
+	}
+
+	return createdTaskCount, strings.TrimSpace(finalText), isAITimelineAgentTimedOut(ctx, finalText, events), nil
+}
+
+func ternaryPlural(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func isAITimelineAgentTimedOut(ctx context.Context, finalText string, events []ai.AgentEvent) bool {
+	if ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	loweredText := strings.ToLower(strings.TrimSpace(finalText))
+	if strings.Contains(loweredText, "ran out of time") {
+		return true
+	}
+	for _, event := range events {
+		if strings.TrimSpace(event.Kind) != "done" {
+			continue
+		}
+		loweredError := strings.ToLower(strings.TrimSpace(event.Error))
+		if strings.Contains(loweredError, "deadline") ||
+			strings.Contains(loweredError, "timed out") {
+			return true
+		}
+	}
+	return false
 }
 
 func generateAITimelineEditOperations(
@@ -724,7 +2335,13 @@ func generateAITimelineEditOperations(
 		strings.TrimSpace(currentSummaryJSON),
 		strings.TrimSpace(prompt),
 	)
-	raw, err := generateAIOrganizeStructuredJSON(ctx, aiTimelineEditSystemPrompt, userPrompt, limits)
+	raw, err := generateAIOrganizeStructuredJSONWithTier(
+		ctx,
+		aiTimelineEditSystemPrompt,
+		userPrompt,
+		limits,
+		ai.AIModelTierHeavy,
+	)
 	if err != nil {
 		return aiTimelineEditOperationsResponse{}, err
 	}
@@ -1220,15 +2837,25 @@ func classifyAITimelineGenerateIntent(
 	conversationHistory []aiTimelineConversationEntry,
 	limits aiOrganizeLimits,
 ) (AIIntentResponse, error) {
-	conversationJSON, _ := json.Marshal(conversationHistory)
+	sourcePrompt := extractAITimelineUserInstruction(prompt)
+	if strings.TrimSpace(sourcePrompt) == "" {
+		sourcePrompt = strings.TrimSpace(prompt)
+	}
+	conversationJSON := buildAITimelineConversationContext(conversationHistory, 6, 400)
 	userPrompt := fmt.Sprintf(
 		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nUser request:\n%s\n\nReturn only the intent classification JSON.",
 		roomID,
 		hasAssistantClarificationRequest(conversationHistory),
-		string(conversationJSON),
-		strings.TrimSpace(prompt),
+		conversationJSON,
+		sourcePrompt,
 	)
-	raw, err := generateAIOrganizeStructuredJSON(ctx, aiTimelineGenerateIntentSystemPrompt, userPrompt, limits)
+	raw, err := generateAIOrganizeStructuredJSONWithTier(
+		ctx,
+		aiTimelineGenerateIntentSystemPrompt,
+		userPrompt,
+		limits,
+		ai.AIModelTierLight,
+	)
 	if err != nil {
 		return AIIntentResponse{}, err
 	}
@@ -1243,16 +2870,26 @@ func classifyAITimelineEditIntent(
 	conversationHistory []aiTimelineConversationEntry,
 	limits aiOrganizeLimits,
 ) (AIIntentResponse, error) {
-	conversationJSON, _ := json.Marshal(conversationHistory)
+	sourcePrompt := extractAITimelineUserInstruction(prompt)
+	if strings.TrimSpace(sourcePrompt) == "" {
+		sourcePrompt = strings.TrimSpace(prompt)
+	}
+	conversationJSON := buildAITimelineConversationContext(conversationHistory, 6, 400)
 	userPrompt := fmt.Sprintf(
 		"Room ID: %s\nClarification already asked earlier: %t\nConversation history JSON:\n%s\n\nCurrent project summary JSON:\n%s\n\nUser request:\n%s\n\nReturn only the intent classification JSON.",
 		roomID,
 		hasAssistantClarificationRequest(conversationHistory),
-		string(conversationJSON),
+		conversationJSON,
 		strings.TrimSpace(projectSummaryJSON),
-		strings.TrimSpace(prompt),
+		sourcePrompt,
 	)
-	raw, err := generateAIOrganizeStructuredJSON(ctx, aiTimelineIntentSystemPrompt, userPrompt, limits)
+	raw, err := generateAIOrganizeStructuredJSONWithTier(
+		ctx,
+		aiTimelineIntentSystemPrompt,
+		userPrompt,
+		limits,
+		ai.AIModelTierLight,
+	)
 	if err != nil {
 		return AIIntentResponse{}, err
 	}
@@ -1683,18 +3320,25 @@ func generateTasksForSprint(
 	blueprintJSON string,
 	sprintName string,
 	limits aiOrganizeLimits,
+	maxTasksPerSprint int,
+	tierHint string,
 ) ([]aiTimelineTask, error) {
 	normalizedSprintName := strings.TrimSpace(sprintName)
 	if normalizedSprintName == "" {
 		return nil, fmt.Errorf("sprint name is required")
 	}
 
+	tierSection := ""
+	if strings.TrimSpace(tierHint) != "" {
+		tierSection = "\n\n" + strings.TrimSpace(tierHint)
+	}
 	userPrompt := fmt.Sprintf(
-		"Project blueprint JSON:\n%s\n\nSprint name: %s\nGenerate tasks only for this sprint.",
+		"Project blueprint JSON:\n%s\n\nSprint name: %s\nGenerate tasks only for this sprint.%s",
 		strings.TrimSpace(blueprintJSON),
 		normalizedSprintName,
+		tierSection,
 	)
-	raw, err := generateAIOrganizeStructuredJSON(ctx, aiTaskFillSystemPrompt, userPrompt, limits)
+	raw, err := generateAIOrganizeStructuredJSON(ctx, buildAITaskFillSystemPrompt(maxTasksPerSprint), userPrompt, limits)
 	if err != nil {
 		return nil, err
 	}
@@ -2525,6 +4169,15 @@ func (h *RoomHandler) applyAIOperations(
 	roomID string,
 	operations []aiTimelineEditOperation,
 ) (int, error) {
+	return h.applyAIOperationsWithCallback(ctx, roomID, operations, nil)
+}
+
+func (h *RoomHandler) applyAIOperationsWithCallback(
+	ctx context.Context,
+	roomID string,
+	operations []aiTimelineEditOperation,
+	onApplied func(operation aiTimelineEditOperation, appliedCount int, operationTotal int),
+) (int, error) {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return 0, fmt.Errorf("task storage unavailable")
 	}
@@ -2548,9 +4201,11 @@ func (h *RoomHandler) applyAIOperations(
 
 	now := time.Now().UTC()
 	changedRows := 0
+	operationTotal := len(operations)
 
 	for index := range operations {
 		operation := &operations[index]
+		applied := false
 		switch operation.Op {
 		case "update_task":
 			taskUUID, ok := parseAITimelineTaskUUID(operation.TaskID)
@@ -2623,6 +4278,7 @@ func (h *RoomHandler) applyAIOperations(
 				return changedRows, err
 			}
 			changedRows++
+			applied = true
 		case "add_task":
 			title := truncateRunes(strings.TrimSpace(operation.Title), 240)
 			if title == "" {
@@ -2696,6 +4352,7 @@ func (h *RoomHandler) applyAIOperations(
 				return changedRows, err
 			}
 			changedRows++
+			applied = true
 		case "delete_task":
 			taskUUID, ok := parseAITimelineTaskUUID(operation.TaskID)
 			if !ok {
@@ -2705,6 +4362,10 @@ func (h *RoomHandler) applyAIOperations(
 				return changedRows, err
 			}
 			changedRows++
+			applied = true
+		}
+		if applied && onApplied != nil {
+			onApplied(*operation, changedRows, operationTotal)
 		}
 	}
 
@@ -2972,4 +4633,161 @@ func writeAITimelineError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error": strings.TrimSpace(message),
 	})
+}
+
+func writeAITimelineErrorPayload(w http.ResponseWriter, status int, payload aiTimelineErrorPayload) {
+	if w == nil {
+		return
+	}
+	if strings.TrimSpace(payload.Error) == "" {
+		payload.Error = "AI timeline request failed"
+	}
+	if strings.TrimSpace(payload.Message) == "" {
+		payload.Message = payload.Error
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func buildAITimelineErrorPayload(
+	stage string,
+	err error,
+	timeout time.Duration,
+	promptTimeout time.Duration,
+) (int, aiTimelineErrorPayload) {
+	var stageErr *aiTimelineStageError
+	if errors.As(err, &stageErr) && stageErr != nil {
+		if strings.TrimSpace(stageErr.Stage) != "" {
+			stage = stageErr.Stage
+		}
+		if stageErr.Timeout > 0 {
+			timeout = stageErr.Timeout
+		}
+		if stageErr.Err != nil {
+			err = stageErr.Err
+		}
+	}
+	stageLabel := humanizeAITimelineStage(stage)
+	payload := aiTimelineErrorPayload{
+		Stage:           strings.TrimSpace(stage),
+		TimeoutMs:       timeout.Milliseconds(),
+		PromptTimeoutMs: promptTimeout.Milliseconds(),
+	}
+	detail := sanitizeAITimelineErrorDetail(err)
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		payload.Code = "deadline_exceeded"
+		payload.Error = fmt.Sprintf("%s exceeded its time budget.", stageLabel)
+		payload.Message = payload.Error
+		payload.Detail = firstNonEmpty(
+			detail,
+			fmt.Sprintf("The %s step hit a context deadline. Per-call budget=%s, overall prompt budget=%s.", stageLabel, timeout, promptTimeout),
+		)
+		payload.Retryable = true
+		return http.StatusGatewayTimeout, payload
+	case errors.Is(err, context.Canceled):
+		payload.Code = "request_canceled"
+		payload.Error = fmt.Sprintf("%s was canceled before completion.", stageLabel)
+		payload.Message = payload.Error
+		payload.Detail = firstNonEmpty(
+			detail,
+			fmt.Sprintf("The %s step ended with context cancellation before finishing.", stageLabel),
+		)
+		payload.Retryable = true
+		return aiHTTPStatusClientClosed, payload
+	}
+
+	var exhaustedErr *ai.ProvidersExhaustedError
+	if errors.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.LastErr != nil {
+		return buildAITimelineErrorPayload(stage, exhaustedErr.LastErr, timeout, promptTimeout)
+	}
+
+	var statusErr *ai.HTTPStatusError
+	if errors.As(err, &statusErr) && statusErr != nil {
+		payload.ProviderStatus = statusErr.StatusCode()
+		payload.Detail = firstNonEmpty(detail, statusErr.Error())
+		switch statusErr.StatusCode() {
+		case http.StatusTooManyRequests:
+			payload.Code = "provider_rate_limited"
+			payload.Error = fmt.Sprintf("An AI provider rate-limited the %s step.", stageLabel)
+			payload.Message = payload.Error
+			payload.Retryable = true
+			return http.StatusTooManyRequests, payload
+		case http.StatusUnauthorized, http.StatusForbidden:
+			payload.Code = "provider_auth_failed"
+			payload.Error = fmt.Sprintf("An AI provider rejected the %s step.", stageLabel)
+			payload.Message = payload.Error
+			payload.Retryable = false
+			return http.StatusServiceUnavailable, payload
+		case http.StatusBadRequest, http.StatusUnprocessableEntity:
+			payload.Code = "provider_rejected_request"
+			payload.Error = fmt.Sprintf("The %s step was rejected by the AI provider.", stageLabel)
+			payload.Message = payload.Error
+			payload.Retryable = false
+			return http.StatusBadGateway, payload
+		default:
+			payload.Code = "provider_http_error"
+			payload.Error = fmt.Sprintf("The %s step failed with an upstream AI provider error.", stageLabel)
+			payload.Message = payload.Error
+			payload.Retryable = statusErr.StatusCode() >= http.StatusInternalServerError
+			return http.StatusBadGateway, payload
+		}
+	}
+
+	if errors.Is(err, ai.ErrAllAIProvidersExhausted) {
+		payload.Code = "providers_exhausted"
+		payload.Error = fmt.Sprintf("All configured AI providers failed during %s.", stageLabel)
+		payload.Message = payload.Error
+		payload.Detail = firstNonEmpty(detail, "All configured AI providers exhausted without returning a usable response.")
+		payload.Retryable = true
+		return http.StatusServiceUnavailable, payload
+	}
+
+	payload.Code = "stage_failed"
+	payload.Error = fmt.Sprintf("%s failed before completion.", stageLabel)
+	payload.Message = payload.Error
+	payload.Detail = firstNonEmpty(detail, "The stage returned an unexpected internal failure.")
+	payload.Retryable = false
+	return http.StatusBadGateway, payload
+}
+
+func humanizeAITimelineStage(stage string) string {
+	switch strings.TrimSpace(strings.ToLower(stage)) {
+	case "intent":
+		return "Request classification"
+	case "blueprint":
+		return "Project blueprint generation"
+	case "blueprint_foundation":
+		return "Project foundation generation"
+	case "blueprint_sprints":
+		return "Project phase planning"
+	case "execute":
+		return "Workspace execution"
+	case "plan":
+		return "Board change planning"
+	case "apply":
+		return "Board change application"
+	default:
+		if strings.TrimSpace(stage) == "" {
+			return "The AI request"
+		}
+		return strings.TrimSpace(stage)
+	}
+}
+
+func sanitizeAITimelineErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := strings.TrimSpace(err.Error())
+	if detail == "" {
+		return ""
+	}
+	detail = strings.Join(strings.Fields(detail), " ")
+	if len(detail) > 600 {
+		detail = detail[:597] + "..."
+	}
+	return detail
 }

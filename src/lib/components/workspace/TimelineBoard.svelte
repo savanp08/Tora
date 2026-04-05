@@ -1,6 +1,9 @@
 <script lang="ts">
+	import { createEventDispatcher } from 'svelte';
 	import { projectTimeline } from '$lib/stores/timeline';
 	import type { TimelineTaskPriority } from '$lib/types/timeline';
+
+	const dispatch = createEventDispatcher<{ requestTaskOpen: { taskId: string } }>();
 
 	type StatTone = 'blue' | 'green' | 'orange' | 'purple' | 'neutral';
 	type StatCard = {
@@ -32,6 +35,7 @@
 	type SprintSnapshot = {
 		id: string;
 		name: string;
+		displayName: string;
 		startLabel: string;
 		endLabel: string;
 		total: number;
@@ -86,6 +90,14 @@
 		'var(--tb-orange)',
 		'var(--tb-green)'
 	];
+
+	function formatSprintLabel(name: string, sprintIndex: number) {
+		const trimmed = name.trim() || `Sprint ${sprintIndex + 1}`;
+		if (trimmed.toLowerCase() === 'backlog') {
+			return 'Backlog';
+		}
+		return `${sprintIndex + 1}. ${trimmed.replace(/^\d+\.\s*/, '')}`;
+	}
 
 	$: timeline = $projectTimeline;
 	$: sprints = timeline?.sprints ?? [];
@@ -227,6 +239,7 @@
 	$: sprintSnapshots = (() => {
 		const scopedTotal = Math.max(1, totalTasks);
 		return scopedSprints.map<SprintSnapshot>((sprint, index) => {
+			const absoluteIndex = activeSprintIndex >= 0 ? activeSprintIndex + index : index;
 			const done = sprint.tasks.filter((task) => task.status === 'done').length;
 			const inProgress = sprint.tasks.filter((task) => task.status === 'in_progress').length;
 			const todo = sprint.tasks.filter((task) => task.status === 'todo').length;
@@ -234,6 +247,7 @@
 			return {
 				id: sprint.id,
 				name: sprint.name,
+				displayName: formatSprintLabel(sprint.name, absoluteIndex),
 				startLabel: sprint.start_date ? fmtDate(sprint.start_date) : '--',
 				endLabel: sprint.end_date ? fmtDate(sprint.end_date) : '--',
 				total,
@@ -250,7 +264,7 @@
 
 	$: sprintShareSegments = buildDonutSegments(
 		sprintSnapshots.map((snapshot) => ({
-			label: snapshot.name,
+			label: snapshot.displayName,
 			value: snapshot.total,
 			color: snapshot.color
 		}))
@@ -467,7 +481,7 @@
 			return {
 				x,
 				y,
-				label: shortSprintName(entry.name),
+				label: shortSprintName(entry.displayName),
 				remaining: entry.remaining,
 				done: entry.done,
 				total: entry.total
@@ -552,6 +566,14 @@
 			.slice(0, 2)
 			.map((part) => part[0]?.toUpperCase() ?? '')
 			.join('');
+	}
+
+	function handleLaneRowClick(taskId: string) {
+		const normalizedTaskId = taskId.trim();
+		if (!normalizedTaskId) {
+			return;
+		}
+		dispatch('requestTaskOpen', { taskId: normalizedTaskId });
 	}
 </script>
 
@@ -639,7 +661,7 @@
 			<article class="card visual-card">
 				<div class="section-head">
 					<h4>Current sprint status</h4>
-					<span>{currentSprint ? currentSprint.name : 'No current sprint'}</span>
+					<span>{currentSprint ? formatSprintLabel(currentSprint.name, activeSprintIndex) : 'No current sprint'}</span>
 				</div>
 				{#if currentSprintTotal === 0}
 					<p class="empty-inline">No tasks in the current sprint yet.</p>
@@ -753,7 +775,7 @@
 							<div class="legend-row">
 								<div class="legend-left">
 									<span class="dot" style="background:{snapshot.color}"></span>
-									<span>{snapshot.name}</span>
+									<span>{snapshot.displayName}</span>
 								</div>
 								<strong>{snapshot.sharePct}%</strong>
 							</div>
@@ -803,7 +825,7 @@
 					{#each sprintSnapshots as snapshot (snapshot.id)}
 						<div class="runway-row" class:is-current={snapshot.isCurrent}>
 							<div class="runway-main">
-								<strong>{snapshot.name}</strong>
+								<strong>{snapshot.displayName}</strong>
 								<span>{snapshot.startLabel} - {snapshot.endLabel}</span>
 							</div>
 							<div class="runway-cells">
@@ -829,7 +851,7 @@
 			<div class="section-head">
 				<h4>
 					{currentSprint
-						? `${currentSprint.name} execution lanes`
+						? `${formatSprintLabel(currentSprint.name, activeSprintIndex)} execution lanes`
 						: 'Current sprint execution lanes'}
 				</h4>
 				<span>{activeWorkRows.length} task{activeWorkRows.length === 1 ? '' : 's'}</span>
@@ -839,7 +861,7 @@
 			{:else}
 				<div class="lane-list">
 					{#each visibleActiveRows as row (row.id)}
-						<div class="lane-row">
+						<button type="button" class="lane-row lane-row-button" on:click={() => handleLaneRowClick(row.id)}>
 							<div class="lane-top">
 								<div class="lane-title-wrap">
 									<strong class="lane-title" title={row.title}>{row.title}</strong>
@@ -881,7 +903,7 @@
 									<span class="assignee assignee-empty">--</span>
 								{/if}
 							</div>
-						</div>
+						</button>
 					{/each}
 				</div>
 				{#if hiddenActiveRows > 0}
@@ -1507,6 +1529,25 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.45rem;
+		cursor: pointer;
+		transition:
+			border-color 0.16s ease,
+			box-shadow 0.16s ease,
+			transform 0.16s ease;
+	}
+
+	.lane-row:hover {
+		border-color: color-mix(in srgb, var(--tb-blue) 34%, var(--tb-border));
+		box-shadow: var(--tb-shadow-hover);
+		transform: translateY(-1px);
+	}
+
+	.lane-row-button {
+		width: 100%;
+		text-align: left;
+		font: inherit;
+		color: inherit;
+		border: 1px solid var(--tb-border);
 	}
 
 	.lane-top {

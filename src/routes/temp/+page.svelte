@@ -1,0 +1,1273 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import LoginFooter from '$lib/components/home/LoginFooter.svelte';
+	import OtpCodeInput from '$lib/components/home/OtpCodeInput.svelte';
+	import MonochromeRoomBackground from '$lib/components/background/MonochromeRoomBackground.svelte';
+	import toraLogo from '$lib/assets/tora-logo.svg';
+	import { resolveApiBase } from '$lib/config/apiBase';
+	import { APP_LIMITS } from '$lib/config/limits';
+	import { activeRoomPassword, authToken, currentUser } from '$lib/store';
+	import { getOrInitIdentity, updateUsername } from '$lib/utils/identity';
+	import {
+		normalizeRoomCodeInput,
+		normalizeRoomIdValue,
+		normalizeRoomNameInput,
+		sanitizeRoomCodePartial,
+		normalizeUsernameInput,
+		type JoinMode
+	} from '$lib/utils/homeJoin';
+	import { generateRoomName } from '$lib/utils/nameGenerator';
+	import { captureCurrentRoom } from '$lib/utils/pendingRooms';
+	import { setSessionToken } from '$lib/utils/sessionToken';
+	import { onMount, tick } from 'svelte';
+
+	type TurnstileApi = {
+		render: (container: HTMLElement, options: Record<string, unknown>) => string;
+		execute: (widgetId?: string) => void;
+		reset: (widgetId?: string) => void;
+		remove: (widgetId?: string) => void;
+	};
+
+	type TurnstileHostWindow = Window & {
+		turnstile?: TurnstileApi;
+		onTurnstileSuccess?: (token: string) => void;
+	};
+
+	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
+	const API_BASE = resolveApiBase(API_BASE_RAW);
+	const TURNSTILE_SITE_KEY_RAW = import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined;
+	const TURNSTILE_SITE_KEY = TURNSTILE_SITE_KEY_RAW?.trim() ?? '';
+	const TURNSTILE_DEBUG_RAW = import.meta.env.VITE_TURNSTILE_DEBUG as string | undefined;
+	const TURNSTILE_DEBUG =
+		import.meta.env.DEV ||
+		['1', 'true', 'yes', 'on'].includes((TURNSTILE_DEBUG_RAW ?? '').trim().toLowerCase());
+	const TURNSTILE_VERIFY_TIMEOUT_MS = 12000;
+	const TURNSTILE_POLL_INTERVAL_MS = 120;
+	const ROOM_CODE_DIGITS = APP_LIMITS.room.codeDigits;
+	const ROOM_NAME_MAX_LENGTH = APP_LIMITS.room.nameMaxLength;
+	const ROOM_PASSWORD_MAX_LENGTH = APP_LIMITS.room.passwordMaxLength;
+	const INCOMPLETE_CODE_MESSAGE = `Enter all ${ROOM_CODE_DIGITS} digits or set a room name.`;
+	const ROOM_ACTION_GUARD_STORAGE_KEY = 'tora_room_action_guard';
+	const ROOM_ACTION_FAILURE_LIMIT = 3;
+	const ROOM_ACTION_LOCKOUT_MS = 30_000;
+	const ROOM_ACTION_LOCKOUT_TICK_MS = 250;
+	const TEMP_ROOM_DURATION_HOURS = 24;
+	const TEMP_AI_ENABLED = true;
+	const TEMP_E2E_ENABLED = false;
+
+	type RoomInputSource = 'name' | 'code';
+
+	let roomName = '';
+	let roomCode = '';
+	let guestUsername = '';
+	let roomPassword = '';
+	let activeActionMode: JoinMode | '' = '';
+	let lastRoomInputSource: RoomInputSource = 'name';
+	let isJoining = false;
+	let joinError = '';
+	let roomNameInputElement: HTMLInputElement | null = null;
+	let normalizedRoomName = '';
+	let normalizedRoomCode = '';
+	let partialRoomCode = '';
+	let subtleInputError = '';
+	let canCreate = false;
+	let canJoinExisting = false;
+	let failedRoomActionAttempts = 0;
+	let roomActionLockoutUntilMs = 0;
+	let roomActionNowMs = Date.now();
+	let roomActionLockoutTimer: ReturnType<typeof setInterval> | null = null;
+
+	let turnstileContainerElement: HTMLDivElement | null = null;
+	let turnstileWidgetID = '';
+	let turnstileToken = '';
+	let turnstileResolve: ((token: string) => void) | null = null;
+	let turnstileTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+	let turnstileMode: 'invisible' | 'interactive' = 'invisible';
+	let renderedTurnstileMode: 'invisible' | 'interactive' | '' = '';
+	let turnstileHelperMessage = '';
+
+	type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+	function normalizeErrorForLog(error: unknown) {
+		if (error instanceof Error) {
+			return {
+				name: error.name,
+				message: error.message,
+				stack: error.stack
+			};
+		}
+		return { message: String(error) };
+	}
+
+	function clientLog(event: string, payload?: unknown, level: ClientLogLevel = 'info') {
+		if (!event.startsWith('turnstile-')) {
+			return;
+		}
+		if ((level === 'debug' || level === 'info') && !TURNSTILE_DEBUG) {
+			return;
+		}
+		const message = `[Turnstile] ${event}`;
+		switch (level) {
+			case 'debug':
+				if (payload === undefined) {
+					console.debug(message);
+				} else {
+					console.debug(message, payload);
+				}
+				return;
+			case 'warn':
+				if (payload === undefined) {
+					console.warn(message);
+				} else {
+					console.warn(message, payload);
+				}
+				return;
+			case 'error':
+				if (payload === undefined) {
+					console.error(message);
+				} else {
+					console.error(message, payload);
+				}
+				return;
+			default:
+				if (payload === undefined) {
+					console.info(message);
+				} else {
+					console.info(message, payload);
+				}
+		}
+	}
+
+	function getTurnstileHostWindow() {
+		return window as TurnstileHostWindow;
+	}
+
+	function persistRoomActionGuard() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		try {
+			window.sessionStorage.setItem(
+				ROOM_ACTION_GUARD_STORAGE_KEY,
+				JSON.stringify({
+					failedAttempts: failedRoomActionAttempts,
+					lockoutUntilMs: roomActionLockoutUntilMs
+				})
+			);
+		} catch {
+			// Ignore storage write errors.
+		}
+	}
+
+	function syncRoomActionLockoutTimer() {
+		const isLocked = roomActionLockoutUntilMs > Date.now();
+		if (isLocked && roomActionLockoutTimer === null) {
+			roomActionLockoutTimer = setInterval(() => {
+				roomActionNowMs = Date.now();
+				if (roomActionLockoutUntilMs <= roomActionNowMs) {
+					failedRoomActionAttempts = 0;
+					roomActionLockoutUntilMs = 0;
+					persistRoomActionGuard();
+					if (roomActionLockoutTimer) {
+						clearInterval(roomActionLockoutTimer);
+						roomActionLockoutTimer = null;
+					}
+				}
+			}, ROOM_ACTION_LOCKOUT_TICK_MS);
+			return;
+		}
+		if (!isLocked && roomActionLockoutTimer) {
+			clearInterval(roomActionLockoutTimer);
+			roomActionLockoutTimer = null;
+		}
+	}
+
+	function hydrateRoomActionGuard() {
+		if (typeof window === 'undefined') {
+			return;
+		}
+		try {
+			const raw = window.sessionStorage.getItem(ROOM_ACTION_GUARD_STORAGE_KEY);
+			if (!raw) {
+				return;
+			}
+			const parsed = JSON.parse(raw) as {
+				failedAttempts?: unknown;
+				lockoutUntilMs?: unknown;
+			};
+			const parsedFailedAttempts = Number(parsed.failedAttempts);
+			const parsedLockoutUntil = Number(parsed.lockoutUntilMs);
+			failedRoomActionAttempts =
+				Number.isFinite(parsedFailedAttempts) && parsedFailedAttempts > 0
+					? Math.floor(parsedFailedAttempts)
+					: 0;
+			roomActionLockoutUntilMs =
+				Number.isFinite(parsedLockoutUntil) && parsedLockoutUntil > Date.now()
+					? Math.floor(parsedLockoutUntil)
+					: 0;
+			if (roomActionLockoutUntilMs === 0) {
+				failedRoomActionAttempts = 0;
+				persistRoomActionGuard();
+			}
+			roomActionNowMs = Date.now();
+			syncRoomActionLockoutTimer();
+		} catch {
+			failedRoomActionAttempts = 0;
+			roomActionLockoutUntilMs = 0;
+		}
+	}
+
+	function roomActionLockoutRemainingSeconds() {
+		const remainingMs = roomActionLockoutUntilMs - Date.now();
+		if (remainingMs <= 0) {
+			return 0;
+		}
+		return Math.ceil(remainingMs / 1000);
+	}
+
+	function isRoomActionLocked() {
+		return roomActionLockoutUntilMs > Date.now();
+	}
+
+	function registerRoomActionFailure() {
+		roomActionNowMs = Date.now();
+		if (isRoomActionLocked()) {
+			return;
+		}
+		failedRoomActionAttempts += 1;
+		if (failedRoomActionAttempts >= ROOM_ACTION_FAILURE_LIMIT) {
+			failedRoomActionAttempts = 0;
+			roomActionLockoutUntilMs = Date.now() + ROOM_ACTION_LOCKOUT_MS;
+		}
+		persistRoomActionGuard();
+		syncRoomActionLockoutTimer();
+	}
+
+	function clearRoomActionGuard() {
+		failedRoomActionAttempts = 0;
+		roomActionLockoutUntilMs = 0;
+		persistRoomActionGuard();
+		syncRoomActionLockoutTimer();
+	}
+
+	function clearTurnstilePendingState(options: { preserveResolve?: boolean } = {}) {
+		if (turnstileTimeoutHandle) {
+			clearTimeout(turnstileTimeoutHandle);
+			turnstileTimeoutHandle = null;
+		}
+		if (!options.preserveResolve) {
+			turnstileResolve = null;
+		}
+		clientLog('turnstile-clear-pending-state', undefined, 'debug');
+	}
+
+	function armTurnstileTimeout(timeoutMs: number, onTimeout: () => void) {
+		if (turnstileTimeoutHandle) {
+			clearTimeout(turnstileTimeoutHandle);
+		}
+		turnstileTimeoutHandle = setTimeout(onTimeout, timeoutMs);
+	}
+
+	function resetTurnstile() {
+		turnstileToken = '';
+		turnstileHelperMessage = '';
+		clearTurnstilePendingState();
+		const hostWindow = getTurnstileHostWindow();
+		if (turnstileWidgetID && hostWindow.turnstile?.reset) {
+			try {
+				hostWindow.turnstile.reset(turnstileWidgetID);
+				clientLog('turnstile-reset', { widgetId: turnstileWidgetID }, 'debug');
+			} catch (error) {
+				clientLog('turnstile-reset-error', { error: normalizeErrorForLog(error) }, 'error');
+			}
+		} else {
+			clientLog(
+				'turnstile-reset-skipped',
+				{
+					widgetExists: turnstileWidgetID !== '',
+					hasResetMethod: Boolean(hostWindow.turnstile?.reset)
+				},
+				'debug'
+			);
+		}
+	}
+
+	function initializeTurnstileWidget(forceRerender = false) {
+		if (turnstileWidgetID && !forceRerender && renderedTurnstileMode === turnstileMode) {
+			clientLog('turnstile-render-skip-existing-widget', { widgetId: turnstileWidgetID }, 'debug');
+			return true;
+		}
+		const hostWindow = getTurnstileHostWindow();
+		if (!TURNSTILE_SITE_KEY || !turnstileContainerElement || !hostWindow.turnstile?.render) {
+			clientLog(
+				'turnstile-render-prereq-missing',
+				{
+					siteKeyConfigured: TURNSTILE_SITE_KEY !== '',
+					siteKeyLength: TURNSTILE_SITE_KEY.length,
+					containerReady: Boolean(turnstileContainerElement),
+					apiLoaded: Boolean(hostWindow.turnstile?.render)
+				},
+				'error'
+			);
+			return false;
+		}
+
+		try {
+			if (turnstileWidgetID && hostWindow.turnstile?.remove) {
+				hostWindow.turnstile.remove(turnstileWidgetID);
+				turnstileWidgetID = '';
+				renderedTurnstileMode = '';
+			}
+			turnstileWidgetID = hostWindow.turnstile.render(turnstileContainerElement, {
+				sitekey: TURNSTILE_SITE_KEY,
+				execution: turnstileMode === 'interactive' ? 'render' : 'execute',
+				appearance: turnstileMode === 'interactive' ? 'always' : 'execute',
+				callback: (token: string) => {
+					clientLog('turnstile-callback-success', { tokenLength: token?.length ?? 0 }, 'debug');
+					const callbackWindow = getTurnstileHostWindow();
+					if (typeof callbackWindow.onTurnstileSuccess === 'function') {
+						callbackWindow.onTurnstileSuccess(token);
+					} else {
+						clientLog('turnstile-callback-missing-handler', undefined, 'warn');
+					}
+				},
+				'error-callback': (errorCode?: string) => {
+					clientLog(
+						'turnstile-error-callback',
+						{
+							errorCode: errorCode ?? 'unknown',
+							pendingRequest: Boolean(turnstileResolve),
+							mode: turnstileMode
+						},
+						'error'
+					);
+					if (turnstileMode === 'interactive') {
+						turnstileHelperMessage =
+							'Verification failed. Please click the Cloudflare checkbox again.';
+					}
+				},
+				'expired-callback': () => {
+					turnstileToken = '';
+					clientLog('turnstile-token-expired', { widgetId: turnstileWidgetID }, 'warn');
+					if (turnstileWidgetID) {
+						try {
+							hostWindow.turnstile?.reset?.(turnstileWidgetID);
+						} catch (error) {
+							clientLog(
+								'turnstile-reset-after-expiry-error',
+								{ error: normalizeErrorForLog(error) },
+								'error'
+							);
+						}
+					}
+				}
+			});
+			clientLog(
+				'turnstile-rendered',
+				{
+					widgetId: turnstileWidgetID,
+					siteKeyLength: TURNSTILE_SITE_KEY.length,
+					mode: turnstileMode
+				},
+				'info'
+			);
+			renderedTurnstileMode = turnstileMode;
+			return turnstileWidgetID !== '';
+		} catch (error) {
+			clientLog('turnstile-render-error', { error: normalizeErrorForLog(error) }, 'error');
+			turnstileWidgetID = '';
+			renderedTurnstileMode = '';
+			return false;
+		}
+	}
+
+	async function waitForTurnstileAPI(timeoutMs = TURNSTILE_VERIFY_TIMEOUT_MS) {
+		if (getTurnstileHostWindow().turnstile?.render) {
+			clientLog('turnstile-api-ready-immediate', undefined, 'debug');
+			return true;
+		}
+		clientLog('turnstile-api-wait-start', { timeoutMs }, 'debug');
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			await new Promise((resolve) => setTimeout(resolve, TURNSTILE_POLL_INTERVAL_MS));
+			if (getTurnstileHostWindow().turnstile?.render) {
+				clientLog('turnstile-api-ready-after-wait', { waitedMs: Date.now() - start }, 'debug');
+				return true;
+			}
+		}
+		clientLog('turnstile-api-timeout', { timeoutMs }, 'error');
+		return false;
+	}
+
+	function enableInteractiveTurnstile(message: string) {
+		turnstileMode = 'interactive';
+		turnstileHelperMessage = message;
+		const widgetReady = initializeTurnstileWidget(true);
+		if (!widgetReady) {
+			throw new Error('Security verification is unavailable. Refresh and try again.');
+		}
+	}
+
+	async function requestTurnstileToken() {
+		if (!TURNSTILE_SITE_KEY) {
+			clientLog(
+				'turnstile-missing-site-key',
+				{
+					environmentVariable: 'VITE_TURNSTILE_SITE_KEY',
+					siteKeyLength: TURNSTILE_SITE_KEY.length
+				},
+				'error'
+			);
+			throw new Error('Security verification is not configured');
+		}
+		const isReady = await waitForTurnstileAPI();
+		const hostWindow = getTurnstileHostWindow();
+		const isWidgetReady = initializeTurnstileWidget();
+		if (turnstileMode === 'interactive') {
+			if (!isReady || !isWidgetReady) {
+				throw new Error('Security verification is unavailable. Refresh and try again.');
+			}
+			if (turnstileToken) {
+				return turnstileToken;
+			}
+			clearTurnstilePendingState();
+			return await new Promise<string>((resolve, reject) => {
+				turnstileResolve = resolve;
+				armTurnstileTimeout(180000, () => {
+					clearTurnstilePendingState();
+					reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+				});
+			});
+		}
+		if (!isReady || !isWidgetReady || !hostWindow.turnstile?.execute) {
+			clientLog(
+				'turnstile-unavailable',
+				{
+					isReady,
+					isWidgetReady,
+					hasExecute: Boolean(hostWindow.turnstile?.execute),
+					widgetId: turnstileWidgetID
+				},
+				'error'
+			);
+			enableInteractiveTurnstile(
+				'Automatic verification is unavailable. Click the Cloudflare checkbox to continue.'
+			);
+			clearTurnstilePendingState();
+			return await new Promise<string>((resolve, reject) => {
+				turnstileResolve = resolve;
+				armTurnstileTimeout(180000, () => {
+					clearTurnstilePendingState();
+					reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+				});
+			});
+		}
+
+		turnstileToken = '';
+		turnstileHelperMessage = '';
+		clearTurnstilePendingState();
+		clientLog('turnstile-request-token-start', { widgetId: turnstileWidgetID }, 'debug');
+		return await new Promise<string>((resolve, reject) => {
+			turnstileResolve = resolve;
+			armTurnstileTimeout(TURNSTILE_VERIFY_TIMEOUT_MS, () => {
+				clientLog('turnstile-timeout', { timeoutMs: TURNSTILE_VERIFY_TIMEOUT_MS }, 'error');
+				clearTurnstilePendingState({ preserveResolve: true });
+				try {
+					enableInteractiveTurnstile(
+						'Automatic verification took too long. Use the Cloudflare checkbox to continue.'
+					);
+					armTurnstileTimeout(180000, () => {
+						clearTurnstilePendingState();
+						reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+					});
+				} catch (error) {
+					clearTurnstilePendingState();
+					reject(
+						error instanceof Error
+							? error
+							: new Error('Security verification timed out. Please retry.')
+					);
+				}
+			});
+			try {
+				hostWindow.turnstile?.reset?.(turnstileWidgetID);
+				hostWindow.turnstile?.execute(turnstileWidgetID);
+				clientLog('turnstile-execute-called', { widgetId: turnstileWidgetID }, 'debug');
+			} catch (error) {
+				clientLog('turnstile-execute-error', { error: normalizeErrorForLog(error) }, 'error');
+				clearTurnstilePendingState({ preserveResolve: true });
+				try {
+					enableInteractiveTurnstile(
+						'Automatic verification could not start. Use the Cloudflare checkbox to continue.'
+					);
+					armTurnstileTimeout(180000, () => {
+						clearTurnstilePendingState();
+						reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+					});
+				} catch (interactiveError) {
+					clearTurnstilePendingState();
+					reject(
+						interactiveError instanceof Error
+							? interactiveError
+							: new Error('Failed to run security verification.')
+					);
+				}
+			}
+		});
+	}
+
+	onMount(() => {
+		const hostWindow = getTurnstileHostWindow();
+		const previousTurnstileCallback = hostWindow.onTurnstileSuccess;
+		clientLog(
+			'turnstile-mount',
+			{
+				siteKeyConfigured: TURNSTILE_SITE_KEY !== '',
+				siteKeyLength: TURNSTILE_SITE_KEY.length
+			},
+			'info'
+		);
+		hostWindow.onTurnstileSuccess = (token: string) => {
+			turnstileToken = (token || '').trim();
+			turnstileHelperMessage = '';
+			clientLog('turnstile-token-received', { tokenLength: turnstileToken.length }, 'debug');
+			if (turnstileToken && turnstileResolve) {
+				turnstileResolve(turnstileToken);
+				clearTurnstilePendingState();
+			} else if (!turnstileToken) {
+				clientLog('turnstile-empty-token', undefined, 'warn');
+			}
+		};
+
+		roomName = generateRoomName();
+		const identity = getOrInitIdentity();
+		currentUser.set({ id: identity.id, username: identity.username });
+		hydrateRoomActionGuard();
+
+		return () => {
+			clearTurnstilePendingState();
+			const cleanupWindow = getTurnstileHostWindow();
+			if (turnstileWidgetID && cleanupWindow.turnstile?.remove) {
+				try {
+					cleanupWindow.turnstile.remove(turnstileWidgetID);
+					clientLog('turnstile-widget-removed', { widgetId: turnstileWidgetID }, 'debug');
+				} catch (error) {
+					clientLog('turnstile-remove-error', { error: normalizeErrorForLog(error) }, 'error');
+				}
+			}
+			turnstileWidgetID = '';
+			renderedTurnstileMode = '';
+			if (previousTurnstileCallback) {
+				cleanupWindow.onTurnstileSuccess = previousTurnstileCallback;
+			} else {
+				delete cleanupWindow.onTurnstileSuccess;
+			}
+			if (roomActionLockoutTimer) {
+				clearInterval(roomActionLockoutTimer);
+				roomActionLockoutTimer = null;
+			}
+		};
+	});
+
+	function selectRoomNameInput() {
+		tick().then(() => {
+			if (!roomNameInputElement) {
+				return;
+			}
+			roomNameInputElement.focus();
+			roomNameInputElement.select();
+		});
+	}
+
+	function onRoomNameFocus() {
+		const switchedFromCode = lastRoomInputSource === 'code';
+		lastRoomInputSource = 'name';
+		joinError = '';
+		if (switchedFromCode) {
+			roomName = generateRoomName();
+		}
+		selectRoomNameInput();
+	}
+
+	function onRoomCodeFocus() {
+		lastRoomInputSource = 'code';
+		joinError = '';
+	}
+
+	async function handleRoomAction(mode: JoinMode) {
+		roomActionNowMs = Date.now();
+		if (isRoomActionLocked()) {
+			joinError = `Too many unsuccessful attempts. Try again in ${roomActionLockoutRemainingSeconds()}s.`;
+			return;
+		}
+		const nextNormalizedRoomName = normalizeRoomNameInput(roomName);
+		const nextNormalizedRoomCode = normalizeRoomCodeInput(roomCode);
+		let requestRoomName = nextNormalizedRoomName;
+		let requestRoomCode = '';
+
+		if (lastRoomInputSource === 'code') {
+			if (!nextNormalizedRoomCode) {
+				joinError = INCOMPLETE_CODE_MESSAGE;
+				return;
+			}
+			requestRoomName = nextNormalizedRoomCode;
+			requestRoomCode = nextNormalizedRoomCode;
+		} else if (!nextNormalizedRoomName) {
+			if (mode === 'create') {
+				joinError = 'New rooms require a room name';
+			} else {
+				joinError = `Enter a room name or a ${ROOM_CODE_DIGITS}-digit room code`;
+			}
+			return;
+		}
+
+		isJoining = true;
+		activeActionMode = mode;
+		joinError = '';
+		roomName = lastRoomInputSource === 'code' ? '' : requestRoomName;
+		roomCode = lastRoomInputSource === 'code' ? requestRoomCode : '';
+
+		const identity = getOrInitIdentity();
+		const requestedUsername = normalizeUsernameInput(guestUsername);
+		const userIdentity = requestedUsername ? updateUsername(requestedUsername) : identity;
+		const userToJoin = userIdentity.username;
+		guestUsername = userToJoin;
+		const normalizedRoomPassword = (roomPassword || '').trim().slice(0, ROOM_PASSWORD_MAX_LENGTH);
+		activeRoomPassword.set(normalizedRoomPassword);
+		const sessionPreferences = {
+			aiEnabled: TEMP_AI_ENABLED,
+			e2eEnabled: TEMP_E2E_ENABLED
+		};
+		let requestTurnstileTokenValue = '';
+		let attemptedRoomRequest = false;
+
+		try {
+			if (mode === 'create') {
+				requestTurnstileTokenValue = await requestTurnstileToken();
+			}
+			clientLog('api-rooms-join-request', {
+				roomName: requestRoomName,
+				roomCode: requestRoomCode,
+				userToJoin,
+				mode,
+				roomDurationHours: TEMP_ROOM_DURATION_HOURS,
+				aiEnabled: sessionPreferences.aiEnabled,
+				e2eEnabled: sessionPreferences.e2eEnabled
+			});
+			attemptedRoomRequest = true;
+			const res = await fetch(`${API_BASE}/api/rooms/join`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					roomName: requestRoomName,
+					roomCode: requestRoomCode,
+					roomPassword: normalizedRoomPassword,
+					username: userToJoin,
+					userId: userIdentity.id,
+					type: 'persistent',
+					mode,
+					roomDurationHours: TEMP_ROOM_DURATION_HOURS,
+					turnstileToken: requestTurnstileTokenValue,
+					aiEnabled: sessionPreferences.aiEnabled,
+					e2eEnabled: sessionPreferences.e2eEnabled
+				})
+			});
+
+			const data = await res.json();
+			clientLog('api-rooms-join-response', { status: res.status, ok: res.ok, data });
+
+			if (!res.ok) throw new Error(data.error || 'Failed to join room');
+
+			currentUser.set({ id: data.userId || userIdentity.id, username: userToJoin });
+			authToken.set(data.token);
+			setSessionToken(data.token || '');
+
+			const resolvedRoomID = normalizeRoomIdValue(String(data.roomId || ''));
+			if (!resolvedRoomID) {
+				throw new Error('Server returned an invalid room id');
+			}
+			const resolvedRoomName =
+				lastRoomInputSource === 'code' ? requestRoomName : data.roomName || requestRoomName;
+			clientLog('navigate-chat-room', { roomId: resolvedRoomID, roomName: resolvedRoomName });
+			captureCurrentRoom(resolvedRoomID, resolvedRoomName);
+			const roomPasswordHash = normalizedRoomPassword
+				? `#key=${encodeURIComponent(normalizedRoomPassword)}`
+				: '';
+			goto(
+				`/temp/chat/${resolvedRoomID}?name=${encodeURIComponent(resolvedRoomName)}&member=1${roomPasswordHash}`
+			);
+			clearRoomActionGuard();
+		} catch (e: any) {
+			clientLog('api-rooms-join-error', { error: e?.message ?? String(e) });
+			if (attemptedRoomRequest) {
+				registerRoomActionFailure();
+			}
+			if (isRoomActionLocked()) {
+				joinError = `Too many unsuccessful attempts. Try again in ${roomActionLockoutRemainingSeconds()}s.`;
+			} else {
+				joinError = e?.message || 'Failed to complete room action';
+			}
+		} finally {
+			if (mode === 'create') {
+				resetTurnstile();
+			}
+			isJoining = false;
+			activeActionMode = '';
+		}
+	}
+
+	$: normalizedRoomName = normalizeRoomNameInput(roomName);
+	$: normalizedRoomCode = normalizeRoomCodeInput(roomCode);
+	$: partialRoomCode = sanitizeRoomCodePartial(roomCode);
+	$: if (lastRoomInputSource === 'code' && partialRoomCode !== '' && roomName !== '') {
+		roomName = '';
+	}
+	$: subtleInputError =
+		lastRoomInputSource === 'code' && !normalizedRoomCode ? INCOMPLETE_CODE_MESSAGE : '';
+	$: canCreate =
+		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
+	$: canJoinExisting =
+		lastRoomInputSource === 'code' ? normalizedRoomCode !== '' : normalizedRoomName !== '';
+	$: isRoomActionLockoutActive = roomActionLockoutUntilMs > roomActionNowMs;
+	$: roomActionLockoutSeconds = isRoomActionLockoutActive
+		? Math.max(1, Math.ceil((roomActionLockoutUntilMs - roomActionNowMs) / 1000))
+		: 0;
+	// Fixed once at load — never changes as the user types
+	const backgroundSeed = 'tora-' + new Date().toISOString().slice(0, 10);
+	const landingSchemaJson = JSON.stringify({
+		'@context': 'https://schema.org',
+		'@type': 'SoftwareApplication',
+		name: 'Tora',
+		applicationCategory: 'CommunicationApplication',
+		operatingSystem: 'Web',
+		description:
+			'Tora is a collaborative workspace with disappearing chat rooms, shared tasks, draw board, and an AI-assisted online IDE.'
+	});
+</script>
+
+<svelte:head>
+	<title>Tora | Disappearing Chat, Collaborative Workspace, AI IDE</title>
+	<meta
+		name="description"
+		content="Tora is a collaborative workspace with disappearing chat rooms, shared taskboards, free draw board, and an AI-assisted online IDE."
+	/>
+	<meta property="og:title" content="Tora | Disappearing Chat, Collaborative Workspace, AI IDE" />
+	<meta
+		property="og:description"
+		content="Collaborate instantly with temporary chat rooms, project tasks, live board, and AI-assisted code execution in Tora."
+	/>
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="application-name" content="Tora" />
+	<script type="application/ld+json">
+		{@html landingSchemaJson}
+	</script>
+</svelte:head>
+
+<div class="container">
+	<MonochromeRoomBackground seed={backgroundSeed} />
+	<header>
+		<div class="logo">
+			<div class="logo-mark-wrap">
+				<img src={toraLogo} alt="Tora logo" class="logo-mark" />
+			</div>
+			<span>Tora</span>
+		</div>
+	</header>
+
+	<main>
+		<div class="hero-box">
+			<h1>Disappearing chats. <br />Instant connections.</h1>
+			<p>Create a room. Share the link. Live the moment.</p>
+
+			{#if joinError}
+				<div class="error-msg">{joinError}</div>
+			{/if}
+
+			<div class="join-form">
+				<div class="room-inputs-row">
+					<div class="field-group room-name-group">
+						<label for="room-name-input">Room name</label>
+						<input
+							id="room-name-input"
+							type="text"
+							placeholder="e.g. Product Launch"
+							bind:value={roomName}
+							bind:this={roomNameInputElement}
+							maxlength={ROOM_NAME_MAX_LENGTH}
+							on:focus={onRoomNameFocus}
+						/>
+						<small>
+							Used as display name (max {ROOM_NAME_MAX_LENGTH} chars). Spaces are converted to underscores.
+						</small>
+					</div>
+					<div class="or-divider" aria-hidden="true">or</div>
+					<div class="field-group room-code-group" on:focusin={onRoomCodeFocus}>
+						<label for="room-code-digit-0">{ROOM_CODE_DIGITS}-digit code</label>
+						<OtpCodeInput idPrefix="room-code-digit" bind:value={roomCode} disabled={isJoining} />
+						{#if subtleInputError}
+							<small class="subtle-code-error">{subtleInputError}</small>
+						{/if}
+						<small>For quick join when someone shares a code.</small>
+					</div>
+				</div>
+
+				<div class="identity-inputs-row">
+					<div class="field-group">
+						<label for="username-input">Username (optional)</label>
+						<input
+							id="username-input"
+							type="text"
+							placeholder="e.g. dizzy_panda"
+							bind:value={guestUsername}
+							maxlength="32"
+							pattern="[-A-Za-z0-9 _]+"
+						/>
+						<small>Optional. Spaces and dashes are normalized to underscores.</small>
+					</div>
+
+					<div class="field-group">
+						<label for="room-password-input">Room Password (optional)</label>
+						<input
+							id="room-password-input"
+							type="password"
+							placeholder="Optional password"
+							bind:value={roomPassword}
+							maxlength={ROOM_PASSWORD_MAX_LENGTH}
+							autocomplete="off"
+						/>
+						<small>Private and lightweight when you need it.</small>
+					</div>
+				</div>
+
+				{#if TURNSTILE_SITE_KEY}
+					<div class="turnstile-shell" class:is-visible={turnstileMode === 'interactive'}>
+						<div
+							class="turnstile-widget-slot"
+							class:is-visible={turnstileMode === 'interactive'}
+							bind:this={turnstileContainerElement}
+							aria-hidden={turnstileMode !== 'interactive'}
+						></div>
+						{#if turnstileMode === 'interactive'}
+							<p class="turnstile-helper" role="status" aria-live="polite">
+								{turnstileHelperMessage ||
+									'Click the Cloudflare checkbox once to verify and continue.'}
+							</p>
+						{/if}
+					</div>
+				{/if}
+
+				<div class="ai-entry-note" role="note">
+					<span class="ai-entry-note-badge">Fast chat</span>
+					<span>
+						This temp flow keeps room creation lean while preserving discussions and in-room Tora chat.
+					</span>
+				</div>
+				<div class="action-row">
+					<button
+						class="btn-primary-action"
+						on:click={() => void handleRoomAction('create')}
+						disabled={isJoining || !canCreate || isRoomActionLockoutActive}
+					>
+						{isJoining && activeActionMode === 'create' ? 'Creating...' : 'New'}
+					</button>
+					<button
+						class="btn-secondary-action"
+						on:click={() => void handleRoomAction('join')}
+						disabled={isJoining || !canJoinExisting || isRoomActionLockoutActive}
+					>
+						{isJoining && activeActionMode === 'join' ? 'Joining...' : 'Existing'}
+					</button>
+				</div>
+				{#if isRoomActionLockoutActive}
+					<small class="action-lockout-note" aria-live="polite">
+						Too many unsuccessful attempts. Retry in {roomActionLockoutSeconds}s.
+					</small>
+				{/if}
+			</div>
+
+			<p class="hint">No signup required for ephemeral rooms.</p>
+		</div>
+	</main>
+	<LoginFooter />
+</div>
+
+<style>
+	:global(:root) {
+		--home-action-primary: #4f5f78;
+		--home-action-primary-hover: #45546b;
+		--home-action-secondary: #4f5f78;
+		--home-action-secondary-hover: #45546b;
+		--home-action-border: #4f5f78;
+		--home-action-text: #ffffff;
+		--home-action-focus: rgba(79, 95, 120, 0.35);
+		--home-action-shadow: rgba(79, 95, 120, 0.28);
+	}
+
+	:global(:root[data-theme='dark']),
+	:global(.theme-dark) {
+		--home-action-primary: #93c5fd;
+		--home-action-primary-hover: #bfdbfe;
+		--home-action-secondary: #7dd3fc;
+		--home-action-secondary-hover: #bae6fd;
+		--home-action-border: #7dd3fc;
+		--home-action-text: #0f172a;
+		--home-action-focus: rgba(147, 197, 253, 0.45);
+		--home-action-shadow: rgba(147, 197, 253, 0.22);
+	}
+
+	:global(html),
+	:global(body) {
+		margin: 0;
+		min-height: 100%;
+		font-family: sans-serif;
+		background: var(--bg-primary);
+	}
+
+	.container {
+		margin: 0 auto;
+		width: 100%;
+
+		min-height: 100svh;
+		min-height: 100dvh;
+		height: auto;
+		display: flex;
+		flex-direction: column;
+		position: relative;
+		isolation: isolate;
+		background: var(--bg-primary);
+		overflow-y: auto;
+		overflow-x: hidden;
+	}
+
+	/* Background art — visible in both themes, opacity driven by theme */
+	.container :global(.mrb-host),
+	.container :global(.monochrome-room-background) {
+		opacity: 0.72;
+		transition: opacity 0.3s ease;
+	}
+
+	:global(:root[data-theme='dark']) .container :global(.mrb-host),
+	:global(.theme-dark) .container :global(.mrb-host),
+	:global(:root[data-theme='dark']) .container :global(.monochrome-room-background),
+	:global(.theme-dark) .container :global(.monochrome-room-background) {
+		opacity: 1;
+	}
+
+	.container > :not(:first-child) {
+		position: relative;
+		z-index: 1;
+	}
+
+	header {
+		display: flex;
+		justify-content: center;
+		align-items: center;
+		width: 100%;
+		margin: 5rem 0 0.75rem;
+	}
+
+	.logo {
+		font-size: 2.4rem;
+		color: var(--text-primary);
+		display: flex;
+		align-items: center;
+		gap: 0.7rem;
+		font-weight: 800;
+		letter-spacing: -0.01em;
+	}
+
+	.logo-mark-wrap {
+		position: relative;
+		width: 56px;
+		height: 56px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.logo-mark {
+		width: 100%;
+		height: 100%;
+		filter: drop-shadow(0 8px 20px rgba(56, 189, 248, 0.32));
+	}
+
+	main {
+		flex: 1;
+		display: flex;
+		justify-content: center;
+		align-items: center;
+		padding: 15px;
+	}
+
+	.hero-box {
+		text-align: center;
+		background: var(--surface-primary);
+		padding: 40px;
+		border-radius: 12px;
+		box-shadow: var(--shadow-lg);
+		width: 100%;
+		max-width: 500px;
+		border: 1px solid var(--border-subtle);
+	}
+
+	h1 {
+		margin-top: 0;
+		color: var(--text-primary);
+	}
+	p {
+		color: var(--text-secondary);
+		margin-bottom: 30px;
+	}
+
+	.join-form {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.turnstile-shell {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.turnstile-widget-slot {
+		position: absolute;
+		width: 0;
+		height: 0;
+		overflow: hidden;
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.turnstile-widget-slot.is-visible {
+		position: static;
+		width: auto;
+		height: auto;
+		overflow: visible;
+		opacity: 1;
+		pointer-events: auto;
+	}
+
+	.turnstile-helper {
+		margin: 0;
+		font-size: 0.78rem;
+		line-height: 1.4;
+		color: var(--text-secondary);
+		text-align: center;
+		max-width: 320px;
+	}
+
+	.room-inputs-row {
+		display: flex;
+		align-items: stretch;
+		gap: 10px;
+		flex-wrap: nowrap;
+	}
+
+	.identity-inputs-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 10px;
+		flex-wrap: nowrap;
+	}
+
+	.identity-inputs-row .field-group {
+		flex: 1 1 50%;
+	}
+
+	.field-group {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		flex: 1;
+		text-align: left;
+		min-width: 0;
+	}
+
+	.field-group label {
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
+	.field-group small {
+		font-size: 0.75rem;
+		color: var(--text-tertiary);
+	}
+
+	.or-divider {
+		align-self: center;
+		font-size: 0.85rem;
+		font-weight: 700;
+		color: var(--text-tertiary);
+		padding: 0 2px;
+	}
+	.action-row {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.ai-entry-note {
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		margin-bottom: 0.55rem;
+		padding: 0.65rem 0.8rem;
+		border-radius: 0.9rem;
+		border: 1px solid color-mix(in srgb, var(--home-action-border) 24%, transparent);
+		background: color-mix(in srgb, var(--home-action-primary) 10%, var(--surface-primary));
+		color: var(--text-secondary);
+		font-size: 0.76rem;
+		line-height: 1.45;
+	}
+
+	.ai-entry-note-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.16rem 0.48rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--home-action-primary) 18%, transparent);
+		color: var(--text-primary);
+		font-size: 0.66rem;
+		font-weight: 800;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		white-space: nowrap;
+	}
+
+	.action-lockout-note {
+		display: block;
+		margin-top: 0.45rem;
+		font-size: 0.76rem;
+		color: color-mix(in srgb, var(--accent-danger) 74%, var(--text-secondary));
+	}
+
+	input {
+		background: var(--surface-primary);
+		color: var(--text-primary);
+		border: 1px solid var(--border-default);
+		border-radius: 6px;
+		padding: 10px;
+		font-size: 0.95rem;
+	}
+
+	input:focus {
+		outline: none;
+		border-color: var(--border-focus);
+		box-shadow: 0 0 0 3px var(--interactive-focus);
+	}
+
+	.btn-primary-action,
+	.btn-secondary-action {
+		padding: 10px;
+		border-radius: 6px;
+		font-size: 0.95rem;
+		font-weight: bold;
+		cursor: pointer;
+		transition:
+			background 0.2s,
+			border-color 0.2s,
+			box-shadow 0.2s;
+		color: var(--home-action-text);
+		border: 1px solid var(--home-action-border);
+		box-shadow: 0 6px 14px var(--home-action-shadow);
+	}
+
+	.btn-primary-action {
+		background: var(--home-action-primary);
+	}
+
+	.btn-secondary-action {
+		background: var(--home-action-secondary);
+	}
+
+	.btn-primary-action:disabled,
+	.btn-secondary-action:disabled {
+		background: var(--surface-active);
+		border-color: var(--border-default);
+		color: var(--text-tertiary);
+		box-shadow: none;
+		cursor: not-allowed;
+	}
+
+	.btn-primary-action:hover:not(:disabled) {
+		background: var(--home-action-primary-hover);
+		border-color: var(--home-action-primary-hover);
+	}
+
+	.btn-secondary-action:hover:not(:disabled) {
+		background: var(--home-action-secondary-hover);
+		border-color: var(--home-action-secondary-hover);
+	}
+
+	.btn-primary-action:focus-visible,
+	.btn-secondary-action:focus-visible {
+		outline: none;
+		box-shadow:
+			0 0 0 3px var(--home-action-focus),
+			0 6px 14px var(--home-action-shadow);
+	}
+
+	.error-msg {
+		color: var(--accent-danger);
+		background: var(--state-danger-bg);
+		border: 1px solid var(--state-danger-border);
+		padding: 10px;
+		border-radius: 4px;
+		margin-bottom: 15px;
+	}
+
+	.subtle-code-error {
+		color: color-mix(in srgb, var(--accent-danger) 72%, var(--text-secondary));
+	}
+
+	.hint {
+		font-size: 0.8rem;
+		color: var(--text-tertiary);
+		margin-top: 20px;
+	}
+
+	@media (max-width: 760px) {
+		header {
+			margin-top: 1rem;
+		}
+
+		.container {
+			min-height: 100svh;
+		}
+
+		main {
+			align-items: flex-start;
+		}
+
+		.hero-box {
+			padding: 26px 18px;
+		}
+
+		.room-inputs-row {
+			flex-wrap: wrap;
+		}
+
+		.room-name-group,
+		.room-code-group {
+			flex-basis: 100%;
+		}
+
+		.identity-inputs-row {
+			flex-wrap: wrap;
+		}
+
+		.identity-inputs-row .field-group {
+			flex-basis: 100%;
+		}
+
+		.or-divider {
+			width: 100%;
+			text-align: center;
+		}
+	}
+</style>

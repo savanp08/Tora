@@ -108,6 +108,7 @@ export type ComposerMediaPayload = {
 export type ChatThread = {
 	id: string;
 	name: string;
+	projectType?: string;
 	lastMessage: string;
 	lastActivity: number;
 	unread: number;
@@ -139,6 +140,7 @@ export type RoomMeta = {
 export type SidebarRoom = {
 	roomId: string;
 	roomName: string;
+	projectType?: string;
 	status: ThreadStatus;
 	parentRoomId?: string;
 	originMessageId?: string;
@@ -157,6 +159,10 @@ export type ReplyTarget = {
 	messageId: string;
 	senderName: string;
 	content: string;
+	type?: string;
+	mediaUrl?: string;
+	mediaType?: string;
+	fileName?: string;
 };
 
 export type SocketEnvelope = {

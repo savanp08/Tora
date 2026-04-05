@@ -81,7 +81,7 @@ func (r *AIRouter) RouteRequest(
 
 	if lastErr != nil {
 		println("All AI providers exhausted. Last error: " + lastErr.Error())
-		return nil, ErrAllAIProvidersExhausted
+		return nil, &ProvidersExhaustedError{LastErr: lastErr}
 	}
 	println("All AI providers exhausted with no specific error.")
 	return nil, ErrAllAIProvidersExhausted
@@ -213,5 +213,6 @@ func isRateLimitError(err error) bool {
 		return true
 	}
 
-	return strings.Contains(strings.ToLower(err.Error()), "429")
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "429") || isProviderRateLimitMessage(lower)
 }

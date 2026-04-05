@@ -27,7 +27,8 @@
 		edit_cost: 'Edit cost / budget',
 		import_sheet: 'Import spreadsheet',
 		edit_field_schema: 'Edit custom field',
-		remove_member: 'Remove member'
+		remove_member: 'Remove member',
+		edit_canvas: 'Edit canvas'
 	};
 
 	function handleKeydown(e: KeyboardEvent) {

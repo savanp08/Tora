@@ -16,6 +16,10 @@ type User struct {
 	FullName     string     `json:"fullName"`
 	AvatarURL    string     `json:"avatarUrl,omitempty"`
 	CreatedAt    time.Time  `json:"createdAt"`
+	// Tier is not stored in the database; it is resolved at response time
+	// based on server configuration (e.g. TEST_USER env var) and injected
+	// into the auth response so the frontend can display the correct plan badge.
+	Tier string `json:"tier,omitempty"`
 }
 
 type userJSON struct {
@@ -26,6 +30,7 @@ type userJSON struct {
 	FullName  string    `json:"fullName"`
 	AvatarURL string    `json:"avatarUrl,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
+	Tier      string    `json:"tier,omitempty"`
 }
 
 func (u User) MarshalJSON() ([]byte, error) {
@@ -37,5 +42,6 @@ func (u User) MarshalJSON() ([]byte, error) {
 		FullName:  u.FullName,
 		AvatarURL: u.AvatarURL,
 		CreatedAt: u.CreatedAt,
+		Tier:      u.Tier,
 	})
 }

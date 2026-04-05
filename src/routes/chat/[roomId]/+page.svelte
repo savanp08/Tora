@@ -5,6 +5,8 @@
 	import ChatComposer from '$lib/components/chat/ChatComposer.svelte';
 	import Board from '$lib/components/chat/Board.svelte';
 	import CodeCanvas from '$lib/components/canvas/CodeCanvas.svelte';
+	import ChangeRequestModal from '$lib/components/workspace/ChangeRequestModal.svelte';
+	import { canvasPermissionStore } from '$lib/stores/canvasPermissions';
 	import DiscussionModal from '$lib/components/chat/DiscussionModal.svelte';
 	import FloatingActivityBox from '$lib/components/chat/FloatingActivityBox.svelte';
 	import ChatRoomDetailsPanel from '$lib/components/chat/ChatRoomDetailsPanel.svelte';
@@ -19,6 +21,12 @@
 	import OnlinePanel from '$lib/components/chat/OnlinePanel.svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
 	import { resolveApiBase } from '$lib/config/apiBase';
+	import {
+		applyCanvasChangesToPersistedRoomCanvas,
+		type CanvasAgenticApplyResult,
+		type CanvasAgenticChange
+	} from '$lib/utils/canvasAgentApply';
+	import { currentWorkspace } from '$lib/stores/projectType';
 	import { clearTaskStore, initializeTaskStoreForRoom } from '$lib/stores/tasks';
 	import {
 		activeRoomPassword,
@@ -218,19 +226,16 @@
 		originMessageId: string;
 	};
 
-	type ToraCanvasActionChange = {
-		kind?: string;
-		file_path?: string;
-		content?: string;
-		description?: string;
-		lines?: number;
+	type ActiveToraComposerRun = {
+		originMessageId: string;
+		stopRequested: boolean;
 	};
 
 	type CodeCanvasAgentHandle = {
 		applyAgenticChanges?: (payload: {
 			text: string;
-			changes: ToraCanvasActionChange[];
-		}) => Promise<{ applied: number; failed: number }>;
+			changes: CanvasAgenticChange[];
+		}) => Promise<CanvasAgenticApplyResult>;
 	};
 
 	type CallStreamSlot = { userId: string; stream: MediaStream };
@@ -258,6 +263,7 @@
 		| 'open-board-tasks'
 		| 'mark-active-read';
 	type BoardWorkspaceModule = Exclude<WorkspaceModule, 'code'>;
+
 	type DashboardAddItemKind = 'note' | 'beacon' | 'task';
 	type DashboardAddItemRequestDetail =
 		| { kind: 'note'; text?: string }
@@ -504,6 +510,7 @@
 	let showPrivateAiChat = false;
 	let isCanvasOpen = false;
 	let isCanvasFullscreen = false;
+	let showCanvasEditRequest = false;
 	let canvasUser: CanvasPresenceUser = { id: 'guest', name: 'Guest', color: '#3b82f6' };
 	let themePreference: ThemePreference = 'system';
 	let removeSystemThemeListener: (() => void) | null = null;
@@ -550,6 +557,7 @@
 		'done'
 	] as const satisfies readonly ToraAgentEventKind[];
 	let toraLiveAgentEventsByRoom: Record<string, Record<string, ToraAgentEventRecord[]>> = {};
+	let activeToraComposerRunsByRoom: Record<string, ActiveToraComposerRun> = {};
 	let historyLoadingByRoom: Record<string, boolean> = {};
 	let historyHasMoreByRoom: Record<string, boolean> = {};
 	let offlineHydratedByRoom: Record<string, boolean> = {};
@@ -586,6 +594,7 @@
 	let isRinging = false;
 	let incomingCall: IncomingCallEvent | null = null;
 	let callType: CallType = 'audio';
+	$: activeToraComposerRun = activeToraComposerRunsByRoom[normalizeRoomIDValue(roomId)] ?? null;
 	let localCallStream: MediaStream | null = null;
 	let remoteCallStreams: CallStreamSlot[] = [];
 	let callParticipants: CallParticipantEntry[] = [];
@@ -601,12 +610,18 @@
 	let isMuted = false;
 	let isCameraEnabled = true;
 	let isCallMinimized = false;
+	let isScreenSharing = false;
+	let screenShareStream: MediaStream | null = null;
 	let callStartedAtMs = 0;
 	let callDurationLabel = '00:00';
 	let callDurationTicker: ReturnType<typeof setInterval> | null = null;
 	let incomingCallExpireTimer: ReturnType<typeof setTimeout> | null = null;
 	let callEmptyGraceTimer: ReturnType<typeof setTimeout> | null = null;
 	let callHadRemoteParticipant = false;
+	// Call user picker
+	let showCallPicker = false;
+	let callPickerMode: CallType = 'audio';
+	let callPickerSelectedIds = new Set<string>();
 	let webrtcContextKey = '';
 	let uiDialog: UiDialogState = { kind: 'none' };
 	const dialogController = createChatDialogController({
@@ -687,6 +702,11 @@
 		activeThread?.aiEnabled ?? $sessionAIEnabled,
 		activeThread?.e2eEnabled ?? $sessionE2EEnabled
 	);
+	$: currentWorkspace.set({
+		id: roomId,
+		name: activeThread?.name || roomNameFromURL || roomId || 'Room',
+		project_type: activeThread?.projectType || 'software'
+	});
 	$: activeRoomAllowsAI = activeRoomFeatures.aiEnabled && !activeRoomFeatures.e2eEnabled;
 	$: currentMessages = activeThread?.status === 'left' ? [] : (messagesByRoom[roomId] ?? []);
 	$: isDrawBoardActive = visibleBoardModules.includes('draw');
@@ -823,6 +843,7 @@
 	$: isActiveRoomAdmin = Boolean(activeThread?.isAdmin);
 	$: isMember = resolveRoomMembership(roomId, roomThreads, roomMemberHint);
 	$: canModerateBoard = isMember && !isRoomExpired && isActiveRoomAdmin;
+	$: canEditCanvas = isActiveRoomAdmin || canvasPermissionStore.hasEdit(roomId, normalizeIdentifier(currentUserId));
 	$: activeUnreadCount = activeThread?.unread ?? 0;
 	$: totalUnreadMessages = roomThreads.reduce((total, thread) => {
 		const unread = Number.isFinite(thread.unread) ? Math.max(0, Math.floor(thread.unread)) : 0;
@@ -2225,7 +2246,18 @@
 		applyReadProgress(roomId, outgoing.id);
 	}
 
-	async function startOutgoingCall(mode: CallType) {
+	function openCallPicker(mode: CallType) {
+		if (!roomId || !isMember || isRoomExpired) {
+			showErrorToast('Join an active room to start a call');
+			return;
+		}
+		callPickerMode = mode;
+		callPickerSelectedIds = new Set<string>();
+		showCallPicker = true;
+	}
+
+	async function startOutgoingCall(mode: CallType, explicitTargetIds?: string[]) {
+		showCallPicker = false;
 		if (!roomId || !isMember || isRoomExpired) {
 			showErrorToast('Join an active room to start a call');
 			return;
@@ -2260,7 +2292,10 @@
 				mode === 'video' &&
 				Boolean(localCallStream?.getVideoTracks().some((track) => track.enabled));
 
-			const targets = getCallInviteTargetUserIds().slice(0, webrtcManager.getAvailablePeerSlots());
+			const available = webrtcManager.getAvailablePeerSlots();
+			const targets = explicitTargetIds
+				? explicitTargetIds.slice(0, available)
+				: getCallInviteTargetUserIds().slice(0, available);
 			setRingingUserIds(targets);
 			webrtcManager.inviteToCall(mode, targets);
 			for (const targetUserId of targets) {
@@ -2269,6 +2304,58 @@
 		} catch (error) {
 			resetCallUiState();
 			showErrorToast(error instanceof Error ? error.message : 'Unable to start call');
+		}
+	}
+
+	async function toggleScreenShare() {
+		if (!webrtcManager || !localCallStream) return;
+		if (isScreenSharing && screenShareStream) {
+			// Stop sharing — restore camera track
+			for (const track of screenShareStream.getTracks()) {
+				track.stop();
+			}
+			screenShareStream = null;
+			isScreenSharing = false;
+			// Re-acquire camera if video call
+			if (callType === 'video') {
+				try {
+					const cam = await navigator.mediaDevices.getUserMedia({ video: true });
+					const [camTrack] = cam.getVideoTracks();
+					if (camTrack) {
+						for (const conn of (webrtcManager as any).peerConnections?.values?.() ?? []) {
+							const sender = (conn as RTCPeerConnection).getSenders().find((s) => s.track?.kind === 'video');
+							if (sender) void sender.replaceTrack(camTrack);
+						}
+						const oldVideoTracks = localCallStream.getVideoTracks();
+						for (const t of oldVideoTracks) { localCallStream.removeTrack(t); t.stop(); }
+						localCallStream.addTrack(camTrack);
+					}
+				} catch { /* silently skip camera restore */ }
+			}
+		} else {
+			try {
+				const display = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+				screenShareStream = display;
+				isScreenSharing = true;
+				const [screenTrack] = display.getVideoTracks();
+				if (screenTrack) {
+					// Replace video track in all peer connections
+					for (const conn of (webrtcManager as any).peerConnections?.values?.() ?? []) {
+						const sender = (conn as RTCPeerConnection).getSenders().find((s) => s.track?.kind === 'video');
+						if (sender) void sender.replaceTrack(screenTrack);
+					}
+					// Update local stream so preview shows screen
+					const oldVideoTracks = localCallStream.getVideoTracks();
+					for (const t of oldVideoTracks) { localCallStream.removeTrack(t); }
+					localCallStream.addTrack(screenTrack);
+					syncCallStreamsFromManager();
+					// Auto-stop when user ends share from browser UI
+					screenTrack.addEventListener('ended', () => {
+						isScreenSharing = false;
+						screenShareStream = null;
+					}, { once: true });
+				}
+			} catch { /* user cancelled or denied */ }
 		}
 	}
 
@@ -2546,42 +2633,79 @@
 		}, 3000);
 	}
 
+	function delay(ms: number) {
+		return new Promise<void>((resolve) => {
+			window.setTimeout(resolve, ms);
+		});
+	}
+
+	async function waitForCodeCanvasHandle(timeoutMs = 7000) {
+		const startedAt = Date.now();
+		while (Date.now() - startedAt < timeoutMs) {
+			if (codeCanvasRef?.applyAgenticChanges) {
+				return codeCanvasRef;
+			}
+			await tick();
+			await delay(60);
+		}
+		throw new Error('Canvas is still loading. Try again in a moment.');
+	}
+
 	async function applyCanvasAgentChanges(payload: {
 		text: string;
-		changes: Record<string, unknown>[];
-	}) {
+		changes: CanvasAgenticChange[];
+	}): Promise<CanvasAgenticApplyResult> {
 		const normalizedChanges = (payload.changes || [])
 			.map((change) => ({
 				kind: toStringValue(change.kind).trim(),
-				file_path: toStringValue(change.file_path ?? change.path).trim(),
+				file_path: toStringValue(change.file_path).trim(),
 				content: toStringValue(change.content),
 				description: toStringValue(change.description).trim(),
-				lines: toInt(change.lines)
+				lines: toInt(change.lines),
+				operation: toStringValue(change.operation).trim()
 			}))
 			.filter((change) => change.file_path && typeof change.content === 'string');
 		if (normalizedChanges.length === 0) {
 			throw new Error('No valid canvas changes were included in this proposal.');
 		}
 
-		isCanvasOpen = true;
-		await tick();
-		if (!codeCanvasRef?.applyAgenticChanges) {
-			throw new Error('Canvas is still loading. Open the canvas and try again.');
+		let result: CanvasAgenticApplyResult;
+		if (isCanvasOpen) {
+			const canvasHandle = await waitForCodeCanvasHandle();
+			result = await canvasHandle.applyAgenticChanges!({
+				text: payload.text || '',
+				changes: normalizedChanges
+			});
+		} else {
+			try {
+				result = await applyCanvasChangesToPersistedRoomCanvas({
+					apiBase: API_BASE,
+					roomId,
+					changes: normalizedChanges
+				});
+			} catch (error) {
+				isCanvasOpen = true;
+				await tick();
+				const canvasHandle = await waitForCodeCanvasHandle();
+				result = await canvasHandle.applyAgenticChanges!({
+					text: payload.text || '',
+					changes: normalizedChanges
+				});
+				if (error instanceof Error) {
+					console.warn('[canvas] background apply fallback used:', error.message);
+				}
+			}
 		}
-
-		const result = await codeCanvasRef.applyAgenticChanges({
-			text: payload.text || '',
-			changes: normalizedChanges
-		});
 		if (result.failed > 0) {
 			showErrorToast(`Applied ${result.applied} canvas change(s). ${result.failed} failed.`);
-			return;
+			return result;
 		}
 		showErrorToast(
 			result.applied === 1
 				? 'Applied 1 canvas change.'
 				: `Applied ${result.applied} canvas changes.`
 		);
+		return result;
 	}
 
 	async function openOptionalRoomPasswordDialog(initialValue = '') {
@@ -2888,6 +3012,11 @@
 				e2eEnabled:
 					roomThreads.find((thread) => thread.id === normalizedRoomID)?.e2eEnabled ?? false
 			});
+			const projectType =
+				toStringValue((data as { project_type?: unknown; projectType?: unknown }).project_type) ||
+				toStringValue((data as { project_type?: unknown; projectType?: unknown }).projectType) ||
+				roomThreads.find((thread) => thread.id === normalizedRoomID)?.projectType ||
+				'software';
 			if (createdAt > 0 || expiresAt > 0) {
 				ensureRoomMeta(normalizedRoomID, createdAt, expiresAt);
 			}
@@ -2896,6 +3025,7 @@
 					thread.id === normalizedRoomID
 						? {
 								...thread,
+								projectType,
 								aiEnabled: roomFeatureFlags.aiEnabled,
 								e2eEnabled: roomFeatureFlags.e2eEnabled
 							}
@@ -2960,6 +3090,10 @@
 					aiEnabled: prev?.aiEnabled ?? true,
 					e2eEnabled: prev?.e2eEnabled ?? false
 				});
+				const projectType =
+					toStringValue(roomRecord.projectType ?? roomRecord.project_type) ||
+					prev?.projectType ||
+					'software';
 				const shouldMaskPreview = roomStatus !== 'joined' && nextRequiresPassword;
 
 				const next: ChatThread = {
@@ -2980,6 +3114,7 @@
 					isAdmin: nextIsAdmin,
 					adminCode: nextIsAdmin ? nextAdminCode : '',
 					requiresPassword: nextRequiresPassword,
+					projectType,
 					aiEnabled: roomFeatureFlags.aiEnabled,
 					e2eEnabled: roomFeatureFlags.e2eEnabled
 				};
@@ -3861,8 +3996,63 @@
 			const originMessageId = extractToraWorkflowOriginMessageId(message);
 			if (originMessageId) {
 				clearToraLiveWorkflow(message.roomId, originMessageId);
+				clearActiveToraComposerRun(message.roomId, originMessageId);
 			}
 		}
+	}
+
+	function messageInvokesTora(text: string) {
+		return /(^|\s)@(toraai|tora)\b/i.test(text);
+	}
+
+	function setActiveToraComposerRun(targetRoomId: string, originMessageId: string) {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		const normalizedOriginMessageID = normalizeMessageID(originMessageId);
+		if (!normalizedRoomID || !normalizedOriginMessageID) {
+			return;
+		}
+		activeToraComposerRunsByRoom = {
+			...activeToraComposerRunsByRoom,
+			[normalizedRoomID]: {
+				originMessageId: normalizedOriginMessageID,
+				stopRequested: false
+			}
+		};
+	}
+
+	function clearActiveToraComposerRun(targetRoomId: string, originMessageId = '') {
+		const normalizedRoomID = normalizeRoomIDValue(targetRoomId);
+		if (!normalizedRoomID || !activeToraComposerRunsByRoom[normalizedRoomID]) {
+			return;
+		}
+		const activeRun = activeToraComposerRunsByRoom[normalizedRoomID];
+		const normalizedOriginMessageID = normalizeMessageID(originMessageId);
+		if (normalizedOriginMessageID && normalizedOriginMessageID !== activeRun.originMessageId) {
+			return;
+		}
+		const nextRuns = { ...activeToraComposerRunsByRoom };
+		delete nextRuns[normalizedRoomID];
+		activeToraComposerRunsByRoom = nextRuns;
+	}
+
+	function stopActiveToraComposerRun() {
+		const normalizedRoomID = normalizeRoomIDValue(roomId);
+		const activeRun = activeToraComposerRunsByRoom[normalizedRoomID];
+		if (!normalizedRoomID || !activeRun?.originMessageId || activeRun.stopRequested) {
+			return;
+		}
+		activeToraComposerRunsByRoom = {
+			...activeToraComposerRunsByRoom,
+			[normalizedRoomID]: {
+				...activeRun,
+				stopRequested: true
+			}
+		};
+		sendSocketPayload({
+			type: 'tora_cancel',
+			roomId: normalizedRoomID,
+			originMessageId: activeRun.originMessageId
+		});
 	}
 
 	function extractToraWorkflowOriginMessageId(message: ChatMessage) {
@@ -3928,6 +4118,7 @@
 			const originMessageId = extractToraWorkflowOriginMessageId(message);
 			if (originMessageId) {
 				clearToraLiveWorkflow(targetRoomId, originMessageId);
+				clearActiveToraComposerRun(targetRoomId, originMessageId);
 			}
 		}
 		if (incoming.length > 0) {
@@ -4320,6 +4511,9 @@
 		}
 
 		upsertMessage(roomId, outgoing, false);
+		if (!isMediaMessage && !isTaskMessage && !isBeaconMessage && activeRoomAllowsAI && messageInvokesTora(text)) {
+			setActiveToraComposerRun(roomId, outgoing.id);
+		}
 		if (isBeaconMessage && addBeaconMessageToDashboard(outgoing)) {
 			showErrorToast('Beacon added to dashboard');
 		}
@@ -5328,16 +5522,39 @@
 		}
 	}
 
+	function buildReplyTargetFromMessage(message: ChatMessage): ReplyTarget {
+		return {
+			messageId: normalizeMessageID(message.id),
+			senderName: normalizeUsernameValue(message.senderName) || 'User',
+			content: getMessagePreviewText(message).trim(),
+			type: (message.type || '').trim(),
+			mediaUrl: (message.mediaUrl || '').trim(),
+			mediaType: (message.mediaType || '').trim(),
+			fileName: (message.fileName || '').trim()
+		};
+	}
+
+	function normalizeReplyTarget(target: ReplyTarget): ReplyTarget {
+		return {
+			messageId: normalizeMessageID(target.messageId),
+			senderName: normalizeUsernameValue(target.senderName) || 'User',
+			content: (target.content || '').trim(),
+			type: (target.type || '').trim(),
+			mediaUrl: (target.mediaUrl || '').trim(),
+			mediaType: (target.mediaType || '').trim(),
+			fileName: (target.fileName || '').trim()
+		};
+	}
+
 	function onReplyRequest(event: CustomEvent<ReplyTarget>) {
 		const messageId = normalizeMessageID(event.detail.messageId);
 		if (!messageId) {
 			return;
 		}
-		activeReply = {
-			messageId,
-			senderName: normalizeUsernameValue(event.detail.senderName) || 'User',
-			content: (event.detail.content || '').trim()
-		};
+		activeReply = normalizeReplyTarget({
+			...event.detail,
+			messageId
+		});
 	}
 
 	function clearReplyTarget() {
@@ -5498,7 +5715,7 @@
 					roomName: requestedName,
 					username: currentUsername,
 					userId: normalizeIdentifier(currentUserId),
-					type: 'ephemeral',
+					type: 'persistent',
 					mode: roomMode
 				};
 				if (roomMode === 'create') {
@@ -6356,11 +6573,7 @@
 				showErrorToast('Deleted messages cannot be replied to');
 				return;
 			}
-			activeReply = {
-				messageId: message.id,
-				senderName: normalizeUsernameValue(message.senderName) || 'User',
-				content: getMessagePreviewText(message).trim()
-			};
+			activeReply = buildReplyTargetFromMessage(message);
 			setMessageActionMode('none');
 			return;
 		}
@@ -6438,11 +6651,7 @@
 		}
 
 		if (action === 'reply') {
-			activeReply = {
-				messageId: message.id,
-				senderName: normalizeUsernameValue(message.senderName) || 'User',
-				content: getMessagePreviewText(message).trim()
-			};
+			activeReply = buildReplyTargetFromMessage(message);
 			return;
 		}
 
@@ -6839,8 +7048,8 @@
 					remainingLabel={activeRemainingLabel}
 					on:showMobileList={showMobileRoomList}
 					on:openRoomDetails={openRoomDetails}
-					on:startAudioCall={() => void startOutgoingCall('audio')}
-					on:startVideoCall={() => void startOutgoingCall('video')}
+					on:startAudioCall={() => openCallPicker('audio')}
+					on:startVideoCall={() => openCallPicker('video')}
 					on:restoreMinimizedCall={restoreMinimizedCall}
 					on:toggleDashboardView={toggleDashboardView}
 					on:toggleBoardView={toggleBoardView}
@@ -6928,7 +7137,38 @@
 					</div>
 				{/if}
 
-				{#if activeCall && !isCallMinimized}
+				{#if activeCall && !callHadRemoteParticipant && !isCallMinimized}
+					<div class="call-ringing-overlay" role="region" aria-label="Outgoing call ringing">
+						<div class="call-ringing-pulse" aria-hidden="true"></div>
+						<div class="call-ringing-copy">
+							<span class="call-ringing-icon" aria-hidden="true">
+								<svg viewBox="0 0 24 24">
+									{#if callType === 'video'}
+										<rect x="3.5" y="6.5" width="12" height="11" rx="2" />
+										<path d="M15.5 10 21 7v10l-5.5-3" />
+									{:else}
+										<path d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z" />
+									{/if}
+								</svg>
+							</span>
+							<strong>Calling{callRingingParticipants.length > 0 ? ' ' + callRingingParticipants.map(p => p.name).join(', ') : '…'}</strong>
+							<span class="call-ringing-sub">Waiting for someone to answer</span>
+						</div>
+						<button
+							type="button"
+							class="call-control-btn hangup call-ringing-hangup"
+							on:click={() => void hangUpCall()}
+							aria-label="Cancel call"
+							title="Cancel call"
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z" />
+							</svg>
+						</button>
+					</div>
+				{/if}
+
+				{#if activeCall && callHadRemoteParticipant && !isCallMinimized}
 					<div class="call-active-overlay" role="region" aria-label="Active call">
 						<header class="call-active-header">
 							<div class="call-active-header-meta">
@@ -7101,6 +7341,22 @@
 							<button
 								type="button"
 								class="call-control-btn"
+								class:active={isScreenSharing}
+								on:click={() => void toggleScreenShare()}
+								aria-label={isScreenSharing ? 'Stop sharing screen' : 'Share screen'}
+								title={isScreenSharing ? 'Stop sharing screen' : 'Share screen'}
+							>
+								<svg viewBox="0 0 24 24" aria-hidden="true">
+									{#if isScreenSharing}
+										<path d="m4.5 4.5 15 15"></path>
+									{/if}
+									<rect x="2" y="3" width="20" height="14" rx="2" />
+									<path d="M8 21h8M12 17v4" />
+								</svg>
+							</button>
+							<button
+								type="button"
+								class="call-control-btn"
 								on:click={() => void inviteAnotherUserToCall()}
 								aria-label="Add user to call"
 								title="Invite user"
@@ -7224,6 +7480,7 @@
 							on:toggleTask={onTaskToggle}
 							on:addTask={onTaskAdd}
 							currentUserName={currentUsername}
+							canResolveToraChanges={isActiveRoomAdmin}
 							applyCanvasChanges={applyCanvasAgentChanges}
 							toraLiveAgentEventsByOrigin={toraLiveAgentEventsByRoom[roomId] ?? {}}
 						/>
@@ -7257,9 +7514,12 @@
 						isDarkMode={$isDarkMode}
 						{currentUsername}
 						aiEnabled={activeRoomAllowsAI}
+						showStopButton={Boolean(activeToraComposerRun)}
+						stopButtonDisabled={Boolean(activeToraComposerRun?.stopRequested)}
 						mentionCandidates={currentOnlineMembers.map((member) => member.name)}
 						messageLimit={MESSAGE_TEXT_MAX_BYTES}
 						on:send={(event) => void sendMessage(event.detail)}
+						on:stopAi={stopActiveToraComposerRun}
 						on:typing={onComposerTyping}
 						on:attach={handleComposerAttach}
 						on:removeAttachment={handleComposerRemoveAttachment}
@@ -7332,7 +7592,9 @@
 						currentUser={canvasUser}
 						isEphemeralRoom={isActiveRoomEphemeral}
 						aiEnabled={activeRoomAllowsAI}
+						canEdit={canEditCanvas}
 						on:sendSnippet={onCanvasSnippetSend}
+						on:requestCanvasEdit={() => { showCanvasEditRequest = true; }}
 					/>
 				</div>
 			</section>
@@ -7414,3 +7676,98 @@
 	on:removeMember={(event) => void removeMemberFromRoom(event.detail.memberId)}
 	on:promoted={(event) => void onRoomPromoted(event)}
 />
+
+<ChangeRequestModal
+	open={showCanvasEditRequest}
+	{roomId}
+	userId={normalizeIdentifier(currentUserId)}
+	userName={currentUsername}
+	action="edit_canvas"
+	targetLabel="Canvas"
+	on:submitted={() => { showCanvasEditRequest = false; }}
+	on:cancel={() => { showCanvasEditRequest = false; }}
+/>
+
+{#if showCallPicker}
+	<div class="call-picker-backdrop" role="dialog" aria-modal="true" aria-label="Start a call">
+		<div class="call-picker-modal">
+			<header class="call-picker-header">
+				<span class="call-picker-icon" aria-hidden="true">
+					<svg viewBox="0 0 24 24">
+						{#if callPickerMode === 'video'}
+							<rect x="3.5" y="6.5" width="12" height="11" rx="2" />
+							<path d="M15.5 10 21 7v10l-5.5-3" />
+						{:else}
+							<path d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z" />
+						{/if}
+					</svg>
+				</span>
+				<div class="call-picker-title-group">
+					<h3 class="call-picker-title">Start {callPickerMode === 'video' ? 'Video' : 'Voice'} Call</h3>
+					<p class="call-picker-subtitle">Select up to {CALL_MAX_PARTICIPANTS} people to call</p>
+				</div>
+			</header>
+
+			<div class="call-picker-list">
+				{#each currentOnlineMembers.filter(m => normalizeIdentifier(m.id) !== normalizeIdentifier(currentUserId)) as member (member.id)}
+					{@const memberId = normalizeIdentifier(member.id)}
+					{@const isSelected = callPickerSelectedIds.has(memberId)}
+					{@const isDisabled = !isSelected && callPickerSelectedIds.size >= CALL_MAX_PARTICIPANTS}
+					<button
+						type="button"
+						class="call-picker-member"
+						class:selected={isSelected}
+						class:disabled={isDisabled}
+						disabled={isDisabled}
+						aria-pressed={isSelected}
+						on:click={() => {
+							const next = new Set(callPickerSelectedIds);
+							if (next.has(memberId)) {
+								next.delete(memberId);
+							} else if (next.size < CALL_MAX_PARTICIPANTS) {
+								next.add(memberId);
+							}
+							callPickerSelectedIds = next;
+						}}
+					>
+						<span class="call-picker-avatar" aria-hidden="true">{member.name.slice(0, 2).toUpperCase()}</span>
+						<span class="call-picker-name">{member.name}</span>
+						{#if isSelected}
+							<span class="call-picker-check" aria-hidden="true">
+								<svg viewBox="0 0 24 24"><path d="m5 12 5 5L19 7" /></svg>
+							</span>
+						{/if}
+					</button>
+				{:else}
+					<p class="call-picker-empty">No other members are online.</p>
+				{/each}
+			</div>
+
+			<footer class="call-picker-footer">
+				<span class="call-picker-count">{callPickerSelectedIds.size} / {CALL_MAX_PARTICIPANTS} selected</span>
+				<div class="call-picker-actions">
+					<button type="button" class="call-picker-cancel" on:click={() => { showCallPicker = false; }}>Cancel</button>
+					<button
+						type="button"
+						class="call-picker-call"
+						disabled={callPickerSelectedIds.size === 0}
+						on:click={() => {
+							showCallPicker = false;
+							void startOutgoingCall(callPickerMode, Array.from(callPickerSelectedIds));
+						}}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true">
+							{#if callPickerMode === 'video'}
+								<rect x="3.5" y="6.5" width="12" height="11" rx="2" />
+								<path d="M15.5 10 21 7v10l-5.5-3" />
+							{:else}
+								<path d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z" />
+							{/if}
+						</svg>
+						Call
+					</button>
+				</div>
+			</footer>
+		</div>
+	</div>
+{/if}

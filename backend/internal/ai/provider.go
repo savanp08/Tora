@@ -53,6 +53,28 @@ type HTTPStatusError struct {
 	Err      error
 }
 
+type ProvidersExhaustedError struct {
+	LastErr error
+}
+
+func (e *ProvidersExhaustedError) Error() string {
+	if e == nil || e.LastErr == nil {
+		return ErrAllAIProvidersExhausted.Error()
+	}
+	return fmt.Sprintf("%s: %v", ErrAllAIProvidersExhausted.Error(), e.LastErr)
+}
+
+func (e *ProvidersExhaustedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.LastErr
+}
+
+func (e *ProvidersExhaustedError) Is(target error) bool {
+	return target == ErrAllAIProvidersExhausted
+}
+
 func (e *HTTPStatusError) Error() string {
 	if e == nil {
 		return ""

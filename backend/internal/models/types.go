@@ -35,6 +35,7 @@ type Message struct {
 type Room struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
+	ProjectType     string    `json:"project_type,omitempty"`
 	Participants    []string  `json:"participants"`
 	CreatedAt       time.Time `json:"createdAt"`
 	ParentRoomID    string    `json:"parentRoomId,omitempty"`
@@ -74,6 +75,7 @@ type Task struct {
 	Description     string      `json:"description"`
 	Status          string      `json:"status"`
 	SprintName      string      `json:"sprint_name,omitempty"`
+	GroupID         *gocql.UUID `json:"group_id,omitempty"`
 	AssigneeID      *gocql.UUID `json:"assignee_id,omitempty"`
 	StatusActorID   string      `json:"status_actor_id,omitempty"`
 	StatusActorName string      `json:"status_actor_name,omitempty"`

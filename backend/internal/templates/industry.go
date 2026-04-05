@@ -7,6 +7,7 @@ type IndustryTemplate struct {
 	Name            string          `json:"name"`
 	Description     string          `json:"description"`
 	Industries      []string        `json:"industries"`
+	ProjectType     string          `json:"project_type,omitempty"`
 	FieldSchemas    []TemplateField `json:"field_schemas"`
 	SampleTasks     []TemplateTask  `json:"sample_tasks,omitempty"`
 	AutomationRules []TemplateRule  `json:"automation_rules,omitempty"`
@@ -40,6 +41,7 @@ var builtInIndustryTemplates = []IndustryTemplate{
 		Name:        "Software Team Sprint",
 		Description: "Launch a product sprint with engineering-friendly starter fields, priorities, and a first delivery backlog.",
 		Industries:  []string{"Software", "Product", "Engineering"},
+		ProjectType: "software",
 		FieldSchemas: []TemplateField{
 			{Name: "Story Points", FieldType: "number", Position: 0},
 			{Name: "Type", FieldType: "select", Options: []string{"Feature", "Bug", "Chore", "Spike"}, Position: 1},
@@ -69,6 +71,7 @@ var builtInIndustryTemplates = []IndustryTemplate{
 		Name:        "Marketing Campaign",
 		Description: "Organize campaign planning, asset production, launch coordination, and reporting in one board.",
 		Industries:  []string{"Marketing", "Growth", "Content"},
+		ProjectType: "marketing",
 		FieldSchemas: []TemplateField{
 			{Name: "Channel", FieldType: "select", Options: []string{"Social", "Email", "Blog", "Paid", "SEO"}, Position: 0},
 			{Name: "Publish Date", FieldType: "date", Position: 1},
@@ -99,6 +102,7 @@ var builtInIndustryTemplates = []IndustryTemplate{
 		Name:        "Construction / Civil Project",
 		Description: "Track site work, permits, inspections, and handover across planning and execution phases.",
 		Industries:  []string{"Construction", "Civil", "Operations"},
+		ProjectType: "construction",
 		FieldSchemas: []TemplateField{
 			{Name: "Phase", FieldType: "select", Options: []string{"Planning", "Permits", "Foundation", "Structure", "Finishing", "Handover"}, Position: 0},
 			{Name: "Site Location", FieldType: "text", Position: 1},
@@ -121,6 +125,7 @@ var builtInIndustryTemplates = []IndustryTemplate{
 		Name:        "Journalism / Editorial",
 		Description: "Run a newsroom workflow from pitch through review, fact checking, and publication.",
 		Industries:  []string{"Editorial", "Publishing", "Journalism"},
+		ProjectType: "journalism",
 		FieldSchemas: []TemplateField{
 			{Name: "Publication", FieldType: "text", Position: 0},
 			{Name: "Section", FieldType: "select", Options: []string{"News", "Feature", "Opinion", "Review"}, Position: 1},
@@ -153,6 +158,7 @@ var builtInIndustryTemplates = []IndustryTemplate{
 		Name:        "Service Business Delivery",
 		Description: "Support agencies, consulting teams, and IT service operations with SLA and client tracking.",
 		Industries:  []string{"Agency", "Consulting", "IT Services"},
+		ProjectType: "business",
 		FieldSchemas: []TemplateField{
 			{Name: "Client", FieldType: "text", Position: 0},
 			{Name: "Priority", FieldType: "select", Options: []string{"Critical", "High", "Medium", "Low"}, Position: 1},
@@ -184,6 +190,7 @@ var builtInIndustryTemplates = []IndustryTemplate{
 		Name:        "General Project",
 		Description: "A lightweight starting point with just enough structure for broad planning and delivery work.",
 		Industries:  []string{"General", "Operations", "Cross-functional"},
+		ProjectType: "general",
 		FieldSchemas: []TemplateField{
 			{Name: "Priority", FieldType: "select", Options: []string{"High", "Medium", "Low"}, Position: 0},
 			{Name: "Due Date", FieldType: "date", Position: 1},
@@ -222,6 +229,7 @@ func cloneIndustryTemplate(template IndustryTemplate, includeTasks bool) Industr
 		Name:            template.Name,
 		Description:     template.Description,
 		Industries:      append([]string(nil), template.Industries...),
+		ProjectType:     template.ProjectType,
 		FieldSchemas:    append([]TemplateField(nil), template.FieldSchemas...),
 		AutomationRules: append([]TemplateRule(nil), template.AutomationRules...),
 	}

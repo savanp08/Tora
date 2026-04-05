@@ -31,6 +31,7 @@ import (
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/database"
 	"github.com/savanp08/converse/internal/models"
+	"github.com/savanp08/converse/internal/projectboard"
 	"github.com/savanp08/converse/internal/security"
 	"github.com/savanp08/converse/internal/websocket"
 	namegen "github.com/savanp08/converse/utils"
@@ -117,6 +118,7 @@ func NewRoomHandler(hub *websocket.Hub, redisStore *database.RedisStore, scyllaS
 	handler.ensureRoomSchema()
 	handler.ensureRoomMessageSoftExpirySchema()
 	handler.ensureTaskSchema()
+	handler.ensureGroupSchema()
 	handler.ensureTaskRelationSchema()
 	handler.ensureFieldSchemaSchema()
 	handler.ensureAutomationRuleSchema()
@@ -154,6 +156,8 @@ type JoinRoomRequest struct {
 	UserID            string  `json:"userId"`
 	Type              string  `json:"type"`
 	Mode              string  `json:"mode"`
+	ProjectType       string  `json:"project_type"`
+	ProjectTypeAlt    string  `json:"projectType"`
 	RoomDurationHours float64 `json:"roomDurationHours"`
 	AIEnabled         *bool   `json:"aiEnabled"`
 	AIEnabledAlt      *bool   `json:"ai_enabled"`
@@ -165,6 +169,7 @@ type JoinRoomRequest struct {
 type JoinRoomResponse struct {
 	RoomID           string `json:"roomId"`
 	RoomName         string `json:"roomName"`
+	ProjectType      string `json:"project_type,omitempty"`
 	RoomCode         string `json:"roomCode,omitempty"`
 	AdminCode        string `json:"adminCode,omitempty"`
 	UserID           string `json:"userId"`
@@ -239,6 +244,13 @@ type RenameRoomRequest struct {
 	RoomName string `json:"roomName"`
 }
 
+type PatchRoomRequest struct {
+	RoomName       *string `json:"room_name,omitempty"`
+	RoomNameAlt    *string `json:"roomName,omitempty"`
+	ProjectType    *string `json:"project_type,omitempty"`
+	ProjectTypeAlt *string `json:"projectType,omitempty"`
+}
+
 type RenameRoomResponse struct {
 	RoomID   string `json:"roomId"`
 	RoomName string `json:"roomName"`
@@ -261,6 +273,7 @@ type CreateBreakRoomRequest struct {
 type CreateBreakRoomResponse struct {
 	RoomID           string `json:"roomId"`
 	RoomName         string `json:"roomName"`
+	ProjectType      string `json:"project_type,omitempty"`
 	ParentRoomID     string `json:"parentRoomId"`
 	OriginMessageID  string `json:"originMessageId"`
 	CreatedAt        int64  `json:"createdAt"`
@@ -274,6 +287,7 @@ type CreateBreakRoomResponse struct {
 type SidebarRoom struct {
 	RoomID           string `json:"roomId"`
 	RoomName         string `json:"roomName"`
+	ProjectType      string `json:"project_type,omitempty"`
 	Status           string `json:"status"`
 	ParentRoomID     string `json:"parentRoomId,omitempty"`
 	OriginMessageID  string `json:"originMessageId,omitempty"`
@@ -296,6 +310,7 @@ type SidebarRoomsResponse struct {
 type RoomDetailsResponse struct {
 	RoomID           string `json:"roomId"`
 	RoomName         string `json:"roomName"`
+	ProjectType      string `json:"project_type,omitempty"`
 	RoomCode         string `json:"roomCode,omitempty"`
 	AdminCode        string `json:"adminCode,omitempty"`
 	MemberCount      int    `json:"memberCount"`
@@ -500,6 +515,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	requestedAIEnabled := resolveOptionalBool(req.AIEnabled, req.AIEnabledAlt)
 	requestedE2EEnabled := resolveOptionalBool(req.E2EEnabled, req.E2EEnabledAlt, req.E2EEEnabledAlt)
+	requestedProjectType := models.NormalizeProjectType(firstNonEmpty(req.ProjectType, req.ProjectTypeAlt))
 	requestedRoomFeatures := normalizeRoomFeatureFlags(roomDefaultAIEnabled, roomDefaultE2EE)
 	roomPasswordHash := ""
 	if mode == "create" {
@@ -572,6 +588,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 
 	finalRoomID := ""
 	finalRoomName := requestedRoomName
+	finalProjectType := models.DefaultProjectType
 	if mode == "join" {
 		if normalizedRoomCode != "" {
 			resolvedRoomID, err := h.resolveRoomIDByCode(ctx, normalizedRoomCode)
@@ -659,6 +676,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 				finalRoomName = "Room"
 			}
 		}
+		finalProjectType = h.getRoomProjectTypeOrDefault(ctx, finalRoomID)
 	} else {
 		// "New" must always create a room. If the requested root name exists,
 		// generate alternates before falling back to a 3-digit suffix.
@@ -683,6 +701,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			finalRoomID,
 			finalRoomName,
 			roomType,
+			requestedProjectType,
 			createdAt,
 			"",
 			"",
@@ -702,6 +721,10 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		security.RecordIPActivity(ctx, clientIP, "rooms_created")
+		finalProjectType = requestedProjectType
+	}
+	if finalProjectType == "" {
+		finalProjectType = h.getRoomProjectTypeOrDefault(ctx, finalRoomID)
 	}
 	resolvedRoomFeatures, roomFeatureErr := h.getRoomFeatureFlags(ctx, finalRoomID)
 	if roomFeatureErr != nil {
@@ -793,6 +816,7 @@ func (h *RoomHandler) JoinRoom(w http.ResponseWriter, r *http.Request) {
 	response := JoinRoomResponse{
 		RoomID:           finalRoomID,
 		RoomName:         finalRoomName,
+		ProjectType:      finalProjectType,
 		RoomCode:         roomCode,
 		AdminCode:        adminCode,
 		UserID:           userID,
@@ -976,6 +1000,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 		finalRoomID,
 		branchRoomName,
 		roomType,
+		h.getRoomProjectTypeOrDefault(ctx, parentRoomID),
 		createdAt,
 		parentRoomID,
 		originMessageID,
@@ -1055,6 +1080,7 @@ func (h *RoomHandler) CreateBreakRoom(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(CreateBreakRoomResponse{
 		RoomID:           finalRoomID,
 		RoomName:         finalRoomName,
+		ProjectType:      h.getRoomProjectTypeOrDefault(ctx, finalRoomID),
 		ParentRoomID:     parentRoomID,
 		OriginMessageID:  originMessageID,
 		CreatedAt:        createdAt,
@@ -1337,6 +1363,7 @@ func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
 	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
 	roomFeatures := parseRoomFeatureFlagsFromMeta(meta)
+	projectType := h.getRoomProjectTypeFromMeta(meta)
 	roomCode, codeErr := h.ensureRoomCode(ctx, roomID)
 	if codeErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1371,6 +1398,7 @@ func (h *RoomHandler) GetRoom(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(RoomDetailsResponse{
 		RoomID:           roomID,
 		RoomName:         roomName,
+		ProjectType:      projectType,
 		RoomCode:         roomCode,
 		AdminCode:        adminCode,
 		MemberCount:      int(memberCount64),
@@ -1898,7 +1926,7 @@ func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
 	if err := h.indexRoomName(ctx, roomID, nextName, time.Now().Unix()); err != nil {
 		log.Printf("[room] rename name-index update failed room=%s err=%v", roomID, err)
 	}
-	h.upsertRoomRecord(ctx, roomID, nextName, "", "", "", "")
+	h.upsertRoomRecord(ctx, roomID, nextName, "", "", "", "", "")
 	h.broadcastRoomEvent(roomID, "room_renamed", map[string]interface{}{
 		"roomName":  nextName,
 		"serverNow": time.Now().Unix(),
@@ -1910,6 +1938,101 @@ func (h *RoomHandler) RenameRoom(w http.ResponseWriter, r *http.Request) {
 		RoomID:   roomID,
 		RoomName: nextName,
 	})
+}
+
+func (h *RoomHandler) PatchRoom(w http.ResponseWriter, r *http.Request) {
+	roomID := normalizeRoomID(firstNonEmpty(chi.URLParam(r, "id"), chi.URLParam(r, "roomId"), chi.URLParam(r, "workspaceId")))
+	if roomID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "room id is required"})
+		return
+	}
+
+	var req PatchRoomRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON format"})
+		return
+	}
+
+	ctx := r.Context()
+	exists, err := h.roomExists(ctx, roomID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access room storage"})
+		return
+	}
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Room not found"})
+		return
+	}
+
+	nextName := ""
+	if req.RoomName != nil {
+		nextName = normalizeRoomName(*req.RoomName)
+	}
+	if nextName == "" && req.RoomNameAlt != nil {
+		nextName = normalizeRoomName(*req.RoomNameAlt)
+	}
+	if nextName != "" {
+		previousLookup := ""
+		if storedLookup, lookupErr := h.redis.Client.HGet(ctx, roomKey(roomID), "name_lookup").Result(); lookupErr == nil {
+			previousLookup = strings.TrimSpace(storedLookup)
+		}
+		nextLookup := normalizeRoomNameLookup(nextName)
+		if err := h.redis.Client.HSet(ctx, roomKey(roomID), map[string]any{
+			"name":        nextName,
+			"name_lookup": nextLookup,
+			"updated_at":  time.Now().Unix(),
+		}).Err(); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update room name"})
+			return
+		}
+		if previousLookup != "" && previousLookup != nextLookup {
+			_ = h.redis.Client.ZRem(ctx, roomNameLookupKey(previousLookup), roomID).Err()
+		}
+		if err := h.indexRoomName(ctx, roomID, nextName, time.Now().Unix()); err != nil {
+			log.Printf("[room] patch name-index update failed room=%s err=%v", roomID, err)
+		}
+	}
+
+	projectType := ""
+	if req.ProjectType != nil {
+		projectType = models.NormalizeProjectType(*req.ProjectType)
+	}
+	if projectType == "" && req.ProjectTypeAlt != nil {
+		projectType = models.NormalizeProjectType(*req.ProjectTypeAlt)
+	}
+	if projectType != "" {
+		if err := h.updateRoomProjectType(ctx, roomID, projectType); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update project type"})
+			return
+		}
+	}
+
+	roomName, _ := h.getRoomName(ctx, roomID)
+	roomDetails := RoomDetailsResponse{
+		RoomID:      roomID,
+		RoomName:    normalizeRoomName(roomName),
+		ProjectType: h.getRoomProjectTypeOrDefault(ctx, roomID),
+		CreatedAt:   h.getRoomCreatedAtOrZero(ctx, roomID),
+		ExpiresAt:   h.getRoomExpiryUnix(ctx, roomID),
+		ServerNow:   time.Now().Unix(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(roomDetails)
+}
+
+func (h *RoomHandler) getRoomCreatedAtOrZero(ctx context.Context, roomID string) int64 {
+	createdAt, err := h.getRoomCreatedAt(ctx, roomID)
+	if err != nil {
+		return 0
+	}
+	return createdAt
 }
 
 func normalizeRoomID(raw string) string {
@@ -2760,6 +2883,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 		room_id text PRIMARY KEY,
 		name text,
 		type text,
+		project_type text,
 		parent_room_id text,
 		origin_message_id text,
 		admin_code text,
@@ -2782,6 +2906,7 @@ func (h *RoomHandler) ensureRoomSchema() {
 		fmt.Sprintf(`ALTER TABLE %s ADD admin_code text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD ai_enabled boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD e2ee_enabled boolean`, roomsTable),
+		fmt.Sprintf(`ALTER TABLE %s ADD project_type text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD canvas_has_data boolean`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD rolling_summary text`, roomsTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD expires_at timestamp`, roomsTable),
@@ -2790,6 +2915,15 @@ func (h *RoomHandler) ensureRoomSchema() {
 		if err := h.scylla.Session.Query(query).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
 			log.Printf("[room] ensure rooms schema alter failed: %v", err)
 		}
+	}
+}
+
+func (h *RoomHandler) ensureGroupSchema() {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		return
+	}
+	if err := projectboard.NewService(h.scylla).EnsureSchema(context.Background()); err != nil {
+		log.Printf("[group] ensure schema failed: %v", err)
 	}
 }
 
@@ -2819,7 +2953,7 @@ func isSchemaAlreadyAppliedError(err error) bool {
 		strings.Contains(lowered, "duplicate")
 }
 
-func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, roomType, parentRoomID, originMessageID, adminCode string) {
+func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, roomType, projectType, parentRoomID, originMessageID, adminCode string) {
 	if h == nil || h.scylla == nil || h.scylla.Session == nil {
 		return
 	}
@@ -2845,6 +2979,10 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 		if roomType == "" {
 			roomType = "ephemeral"
 		}
+	}
+	projectType = models.NormalizeProjectType(projectType)
+	if projectType == "" {
+		projectType = h.getRoomProjectTypeOrDefault(ctx, roomID)
 	}
 	parentRoomID = normalizeRoomID(parentRoomID)
 	if parentRoomID == "" {
@@ -2883,7 +3021,7 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 
 	roomsTable := h.scylla.Table("rooms")
 	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, name, type, parent_room_id, origin_message_id, admin_code, ai_enabled, e2ee_enabled, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
+		`INSERT INTO %s (room_id, name, type, project_type, parent_room_id, origin_message_id, admin_code, ai_enabled, e2ee_enabled, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL %d`,
 		roomsTable,
 		hardScyllaTTLSeconds,
 	)
@@ -2892,6 +3030,7 @@ func (h *RoomHandler) upsertRoomRecord(ctx context.Context, roomID, roomName, ro
 		roomID,
 		roomName,
 		roomType,
+		projectType,
 		parentRoomID,
 		originMessageID,
 		adminCode,
@@ -2910,6 +3049,7 @@ func (h *RoomHandler) tryCreateRoom(
 	roomID,
 	roomName,
 	roomType string,
+	projectType string,
 	createdAt int64,
 	parentRoomID string,
 	originMessageID string,
@@ -2931,6 +3071,7 @@ func (h *RoomHandler) tryCreateRoom(
 		roomID,
 		roomName,
 		roomType,
+		projectType,
 		createdAt,
 		parentRoomID,
 		originMessageID,
@@ -2992,6 +3133,49 @@ func (h *RoomHandler) getRoomType(ctx context.Context, roomID string) (string, e
 		return "", nil
 	}
 	return roomType, err
+}
+
+func (h *RoomHandler) getRoomProjectType(ctx context.Context, roomID string) (string, error) {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return "", nil
+	}
+	projectType, err := h.redis.Client.HGet(ctx, roomKey(normalizedRoomID), "project_type").Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return models.NormalizeProjectType(projectType), nil
+}
+
+func (h *RoomHandler) getRoomProjectTypeOrDefault(ctx context.Context, roomID string) string {
+	projectType, err := h.getRoomProjectType(ctx, roomID)
+	if err != nil {
+		return models.DefaultProjectType
+	}
+	return models.NormalizeProjectType(projectType)
+}
+
+func (h *RoomHandler) getRoomProjectTypeFromMeta(meta map[string]string) string {
+	if len(meta) == 0 {
+		return models.DefaultProjectType
+	}
+	return models.NormalizeProjectType(strings.TrimSpace(meta["project_type"]))
+}
+
+func (h *RoomHandler) updateRoomProjectType(ctx context.Context, roomID string, projectType string) error {
+	normalizedRoomID := normalizeRoomID(roomID)
+	if normalizedRoomID == "" {
+		return fmt.Errorf("room id is required")
+	}
+	normalizedProjectType := models.NormalizeProjectType(projectType)
+	if err := h.redis.Client.HSet(ctx, roomKey(normalizedRoomID), "project_type", normalizedProjectType).Err(); err != nil {
+		return err
+	}
+	h.upsertRoomRecord(ctx, normalizedRoomID, "", "", normalizedProjectType, "", "", "")
+	return nil
 }
 
 func (h *RoomHandler) getRoomPasswordHash(ctx context.Context, roomID string) (string, error) {
@@ -3483,6 +3667,7 @@ func (h *RoomHandler) createRoom(
 	roomID,
 	roomName,
 	roomType string,
+	projectType string,
 	createdAt int64,
 	parentRoomID string,
 	originMessageID string,
@@ -3508,12 +3693,14 @@ func (h *RoomHandler) createRoom(
 	normalizedOriginMessageID := strings.TrimSpace(originMessageID)
 	normalizedRoomPasswordHash := normalizeRoomPasswordHash(roomPasswordHash)
 	normalizedRoomFeatures := normalizeRoomFeatureFlags(aiEnabled, e2eEnabled)
+	normalizedProjectType := models.NormalizeProjectType(projectType)
 
 	if err := h.redis.Client.HSet(ctx, roomKey(normalizedRoomID), map[string]interface{}{
 		"id":                 normalizedRoomID,
 		"name":               normalizedRoomName,
 		"name_lookup":        normalizedNameLookup,
 		"type":               normalizedRoomType,
+		"project_type":       normalizedProjectType,
 		"created_at":         createdAt,
 		"parent_room_id":     normalizedParentID,
 		"origin_message_id":  normalizedOriginMessageID,
@@ -3549,6 +3736,7 @@ func (h *RoomHandler) createRoom(
 		normalizedRoomID,
 		normalizedRoomName,
 		normalizedRoomType,
+		normalizedProjectType,
 		normalizedParentID,
 		normalizedOriginMessageID,
 		adminCode,
@@ -3954,10 +4142,12 @@ func (h *RoomHandler) loadSidebarRoom(ctx context.Context, roomID, status string
 	expiresAt := h.getRoomExpiryUnix(ctx, roomID)
 	requiresPassword := normalizeRoomPasswordHash(meta["room_password_hash"]) != ""
 	roomFeatures := parseRoomFeatureFlagsFromMeta(meta)
+	projectType := h.getRoomProjectTypeFromMeta(meta)
 
 	return SidebarRoom{
 		RoomID:           roomID,
 		RoomName:         name,
+		ProjectType:      projectType,
 		Status:           status,
 		ParentRoomID:     normalizeRoomID(meta["parent_room_id"]),
 		OriginMessageID:  strings.TrimSpace(meta["origin_message_id"]),
@@ -4332,6 +4522,7 @@ func (h *RoomHandler) ReviveRoom(w http.ResponseWriter, r *http.Request) {
 		newRoomID,
 		roomName,
 		"ephemeral",
+		models.DefaultProjectType,
 		now.Unix(),
 		"",
 		"",

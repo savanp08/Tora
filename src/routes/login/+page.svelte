@@ -285,6 +285,7 @@
 					username?: string;
 					fullName?: string;
 					avatarUrl?: string;
+					tier?: string;
 				};
 			} | null;
 
@@ -300,12 +301,18 @@
 				buildFallbackName(accountEmail) ||
 				'User';
 
+			const validTiers = ['free', 'plus', 'pro', 'team'] as const;
+			const rawTier = data.user.tier?.trim().toLowerCase();
+			const tier = validTiers.includes(rawTier as (typeof validTiers)[number])
+				? (rawTier as (typeof validTiers)[number])
+				: undefined;
 			login(data.token, {
 				id: data.user.id.trim(),
 				email: accountEmail,
 				name: displayName,
 				avatarUrl: data.user.avatarUrl?.trim() || '',
-				role: 'member'
+				role: 'member',
+				tier
 			});
 
 			const postAuthRedirect = requestedRedirect || '/dashboard';

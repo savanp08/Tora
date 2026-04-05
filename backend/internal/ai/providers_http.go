@@ -12,32 +12,31 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/savanp08/converse/internal/monitor"
 )
 
 const (
-	defaultVertexModel  = "gemini-3.1-flash-lite"
+	defaultVertexModel  = "gemini-3-flash-preview"
 	defaultOpenAIModel  = "gpt-4o-mini"
 	defaultCohereModel  = "command-r"
-	defaultMistralModel = "codestral-latest"
+	defaultMistralModel = "mistral-small-latest"
 )
 
 var (
 	defaultVertexModels = []string{
-		defaultVertexModel, // gemini-3.1-flash-lite  $0.25/1M — default
-		"gemini-3-flash",   // $0.50/1M
-		"gemini-3.1-pro",   // $2.00/1M — fallback for capability
+		defaultVertexModel,          // gemini-3-flash-preview — frontier-class, default
+		"gemini-2.5-flash",          // stable GA fallback
+		"gemini-2.5-flash-lite",     // cheapest stable fallback
 	}
 	defaultGeminiModels = []string{
-		"gemini-3.1-pro",
-		"gemini-3.1-flash",
-		"gemini-3.1-flash-lite",
+		"gemini-3-flash-preview",    // frontier-class preview
+		"gemini-2.5-pro",            // stable GA heavy fallback
+		"gemini-2.5-flash",          // stable GA standard fallback
 	}
 	defaultMistralModels = []string{
 		defaultMistralModel,
-		"mistral-small-latest",
+		"mistral-medium-latest",
 	}
 	defaultGroqModels = []string{
 		"llama-3.3-70b-versatile",
@@ -52,13 +51,14 @@ var (
 // Per-tier model preference lists — models are tried in order within each
 // tier, then the provider's full configured cascade catches anything missed.
 //
-// Vertex Gemini 3 tiers (cost-optimised, staying under 140 K input tokens):
+// Vertex / Gemini tiers — preview first, stable GA as fallback:
 //
-//	light    → gemini-3.1-flash-lite  $0.25/1M input — conversational replies
-//	standard → gemini-3-flash         $0.50/1M input — data synthesis
-//	heavy    → gemini-3.1-pro         $2.00/1M input — reports / analysis
-//
-// Gemini Direct tiers — same cost logic, different model name set.
+//	light    → gemini-3.1-flash-lite-preview  fastest + cheapest preview
+//	           → gemini-2.5-flash-lite         stable GA fallback
+//	standard → gemini-3-flash-preview          frontier-class at low cost
+//	           → gemini-2.5-flash              stable GA fallback
+//	heavy    → gemini-3.1-pro-preview          best reasoning + agentic
+//	           → gemini-2.5-pro                stable GA fallback
 //
 // Groq tiers (free, Llama):
 //
@@ -67,14 +67,14 @@ var (
 //	heavy    → 70b versatile (best available on free Groq)
 var (
 	vertexTierModels = map[string][]string{
-		AIModelTierLight:    {"gemini-3.1-flash-lite"},
-		AIModelTierStandard: {"gemini-3-flash", "gemini-3.1-flash-lite"},
-		AIModelTierHeavy:    {"gemini-3.1-pro", "gemini-3-flash"},
+		AIModelTierLight:    {"gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"},
+		AIModelTierStandard: {"gemini-3-flash-preview", "gemini-2.5-flash"},
+		AIModelTierHeavy:    {"gemini-3.1-pro-preview", "gemini-2.5-pro"},
 	}
 	geminiTierModels = map[string][]string{
-		AIModelTierLight:    {"gemini-3.1-flash-lite", "gemini-3.1-flash"},
-		AIModelTierStandard: {"gemini-3.1-flash", "gemini-3.1-flash-lite"},
-		AIModelTierHeavy:    {"gemini-3.1-pro", "gemini-3.1-flash"},
+		AIModelTierLight:    {"gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"},
+		AIModelTierStandard: {"gemini-3-flash-preview", "gemini-2.5-flash"},
+		AIModelTierHeavy:    {"gemini-3.1-pro-preview", "gemini-2.5-pro"},
 	}
 	groqTierModels = map[string][]string{
 		AIModelTierLight:    {"llama-3.1-8b-instant", "llama-3.3-70b-versatile"},
@@ -95,46 +95,32 @@ func buildTieredModelList(configured []string, tier string, tierMaps map[string]
 	return mergeModelCascade(preferred, configured)
 }
 
-// buildDefaultProvidersFromEnv returns providers in fixed fallback order:
-// Vertex Gemini -> Gemini -> OpenAI -> Mistral -> Groq -> XAI.
+// splitSystemAndUserPrompt splits a combined prompt string into system and user parts.
+// The prompt is expected to end with a "--- USER MESSAGE ---\n<user text>" section.
+// Everything before the marker is the system/context part; everything after is the user message.
+// Handles both "--- USER MESSAGE ---\n" and "--- USER MESSAGE (private) ---\n" markers.
+func splitSystemAndUserPrompt(prompt string) (system string, user string) {
+	markers := []string{"--- USER MESSAGE (private) ---\n", "--- USER MESSAGE ---\n"}
+	for _, marker := range markers {
+		idx := strings.LastIndex(prompt, marker)
+		if idx >= 0 {
+			return strings.TrimSpace(prompt[:idx]), strings.TrimSpace(prompt[idx+len(marker):])
+		}
+	}
+	// No marker found — treat entire prompt as user message (backward compat)
+	return "", strings.TrimSpace(prompt)
+}
+
+// buildDefaultProvidersFromEnv returns the configured Vertex Gemini provider.
+// Non-Vertex providers are intentionally excluded from the default runtime
+// chain so all requests stay on Gemini models served through Vertex AI.
 func buildDefaultProvidersFromEnv() []Summarizer {
-	providers := make([]Summarizer, 0, 6)
+	providers := make([]Summarizer, 0, 1)
 
 	if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_VERTEX_API_KEY")); apiKey != "" {
 		providers = append(providers, NewVertexGeminiProvider(apiKey, parseModelCascadeFromEnv(
 			os.Getenv("GOOGLE_VERTEX_MODELS"),
 			os.Getenv("GOOGLE_VERTEX_MODEL"),
-		)))
-	}
-
-	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewGeminiProvider(apiKey, parseModelCascadeFromEnv(
-			os.Getenv("GEMINI_MODELS"),
-			os.Getenv("GEMINI_MODEL"),
-		)))
-	}
-	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewOpenAIProvider(apiKey, parseModelCascadeFromEnv(
-			os.Getenv("OPENAI_MODELS"),
-			os.Getenv("OPENAI_MODEL"),
-		)))
-	}
-	if apiKey := strings.TrimSpace(os.Getenv("MISTRAL_API_KEY")); apiKey != "" {
-		providers = append(providers, NewMistralProvider(apiKey, parseModelCascadeFromEnv(
-			os.Getenv("MISTRAL_MODELS"),
-			os.Getenv("MISTRAL_MODEL"),
-		)))
-	}
-	if apiKey := strings.TrimSpace(os.Getenv("GROQ_API_KEY")); apiKey != "" {
-		providers = append(providers, NewGroqProvider(apiKey, parseModelCascadeFromEnv(
-			os.Getenv("GROQ_MODELS"),
-			os.Getenv("GROQ_MODEL"),
-		)))
-	}
-	if apiKey := strings.TrimSpace(os.Getenv("XAI_API_KEY")); apiKey != "" {
-		providers = append(providers, NewXAIProvider(apiKey, parseModelCascadeFromEnv(
-			os.Getenv("XAI_MODELS"),
-			os.Getenv("XAI_MODEL"),
 		)))
 	}
 
@@ -190,6 +176,8 @@ func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt st
 	}
 
 	providerLabel := "google_vertex"
+	lastTemporaryStatus := 0
+	lastTemporaryMessage := ""
 	for _, model := range models {
 		endpoint := fmt.Sprintf(
 			"https://aiplatform.googleapis.com/v1/publishers/google/models/%s:streamGenerateContent?key=%s",
@@ -197,18 +185,24 @@ func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt st
 			url.QueryEscape(strings.TrimSpace(p.apiKey)),
 		)
 
+		systemPart, userPart := splitSystemAndUserPrompt(prompt)
 		payload := map[string]any{
 			"contents": []map[string]any{
 				{
 					"role": "user",
 					"parts": []map[string]string{
-						{"text": prompt},
+						{"text": userPart},
 					},
 				},
 			},
 			"generationConfig": map[string]any{
 				"temperature": 0.2,
 			},
+		}
+		if systemPart != "" {
+			payload["systemInstruction"] = map[string]any{
+				"parts": []map[string]string{{"text": systemPart}},
+			}
 		}
 
 		statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
@@ -219,7 +213,8 @@ func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt st
 
 		text, statusMessage := extractGeminiTextFromBody(body)
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+			if isTemporaryProviderStatus(statusCode) {
+				rememberTemporaryProviderFailure(&lastTemporaryStatus, &lastTemporaryMessage, statusCode, statusMessage)
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				recordAIRequest(providerLabel, "rate_limit")
 				continue
@@ -234,7 +229,7 @@ func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt st
 		recordAIRequest(providerLabel, "success")
 		return strings.TrimSpace(text), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, models)
+	return "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 type GeminiProvider struct {
@@ -283,6 +278,8 @@ func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, 
 	}
 
 	providerLabel := "gemini"
+	lastTemporaryStatus := 0
+	lastTemporaryMessage := ""
 	for _, model := range models {
 		endpoint := fmt.Sprintf(
 			"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
@@ -290,17 +287,23 @@ func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, 
 			url.QueryEscape(strings.TrimSpace(p.apiKey)),
 		)
 
+		systemPart, userPart := splitSystemAndUserPrompt(prompt)
 		payload := map[string]any{
 			"contents": []map[string]any{
 				{
 					"parts": []map[string]string{
-						{"text": prompt},
+						{"text": userPart},
 					},
 				},
 			},
 			"generationConfig": map[string]any{
 				"temperature": 0.2,
 			},
+		}
+		if systemPart != "" {
+			payload["systemInstruction"] = map[string]any{
+				"parts": []map[string]string{{"text": systemPart}},
+			}
 		}
 
 		statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
@@ -312,7 +315,8 @@ func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, 
 		text, statusMessage := extractGeminiTextFromBody(body)
 
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+			if isTemporaryProviderStatus(statusCode) {
+				rememberTemporaryProviderFailure(&lastTemporaryStatus, &lastTemporaryMessage, statusCode, statusMessage)
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				recordAIRequest(providerLabel, "rate_limit")
 				continue
@@ -327,7 +331,7 @@ func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, 
 		recordAIRequest(providerLabel, "success")
 		return strings.TrimSpace(text), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, models)
+	return "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 type MistralProvider struct {
@@ -369,19 +373,22 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 	}
 
 	providerLabel := "mistral"
+	systemPart, userPart := splitSystemAndUserPrompt(prompt)
+	lastTemporaryStatus := 0
+	lastTemporaryMessage := ""
 	for _, model := range p.models {
+		messages := make([]map[string]string, 0, 2)
+		if systemPart != "" {
+			messages = append(messages, map[string]string{"role": "system", "content": systemPart})
+		}
+		messages = append(messages, map[string]string{"role": "user", "content": userPart})
 		payload := map[string]any{
-			"model": model,
-			"messages": []map[string]string{
-				{
-					"role":    "user",
-					"content": prompt,
-				},
-			},
+			"model":       model,
+			"messages":    messages,
 			"temperature": 0.2,
 		}
 
-		statusCode, body, err := postJSON(ctx, p.client, "https://codestral.mistral.ai/v1/chat/completions", map[string]string{
+		statusCode, body, err := postJSON(ctx, p.client, "https://api.mistral.ai/v1/chat/completions", map[string]string{
 			"Authorization": "Bearer " + p.apiKey,
 		}, payload)
 		if err != nil {
@@ -403,7 +410,8 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
-			if statusCode == http.StatusTooManyRequests {
+			if isTemporaryProviderStatus(statusCode) {
+				rememberTemporaryProviderFailure(&lastTemporaryStatus, &lastTemporaryMessage, statusCode, statusMessage)
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				recordAIRequest(providerLabel, "rate_limit")
 				continue
@@ -424,14 +432,14 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 		recordAIRequest(providerLabel, "success")
 		return text, nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+	return "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *MistralProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
 	return generateOpenAICompatibleToolResponse(
 		ctx,
 		p.client,
-		"https://codestral.mistral.ai/v1/chat/completions",
+		"https://api.mistral.ai/v1/chat/completions",
 		map[string]string{
 			"Authorization": "Bearer " + p.apiKey,
 		},
@@ -477,15 +485,19 @@ func (p *OpenAIProvider) GenerateChatResponse(ctx context.Context, prompt string
 		return "", fmt.Errorf("openai prompt is empty")
 	}
 
+	providerLabel := "openai"
+	systemPart, userPart := splitSystemAndUserPrompt(prompt)
+	lastTemporaryStatus := 0
+	lastTemporaryMessage := ""
 	for _, model := range p.models {
+		messages := make([]map[string]string, 0, 2)
+		if systemPart != "" {
+			messages = append(messages, map[string]string{"role": "system", "content": systemPart})
+		}
+		messages = append(messages, map[string]string{"role": "user", "content": userPart})
 		payload := map[string]any{
-			"model": model,
-			"messages": []map[string]string{
-				{
-					"role":    "user",
-					"content": prompt,
-				},
-			},
+			"model":       model,
+			"messages":    messages,
 			"temperature": 0.2,
 		}
 
@@ -509,23 +521,25 @@ func (p *OpenAIProvider) GenerateChatResponse(ctx context.Context, prompt string
 		_ = json.Unmarshal(body, &parsed)
 
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
-				log.Printf("[ai] openai model=%s temporary failure status=%d msg=%s", model, statusCode, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body)))
+			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
+			if isTemporaryProviderStatus(statusCode) {
+				rememberTemporaryProviderFailure(&lastTemporaryStatus, &lastTemporaryMessage, statusCode, statusMessage)
+				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				continue
 			}
-			return "", toProviderStatusError("openai", statusCode, firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body)))
+			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Choices) == 0 {
-			return "", fmt.Errorf("openai model=%s returned empty response", model)
+			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
-			return "", fmt.Errorf("openai model=%s returned empty text", model)
+			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
 		return text, nil
 	}
-	return "", newModelCascadeExhaustedError("openai", p.models)
+	return "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *OpenAIProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
@@ -575,15 +589,18 @@ func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (
 	}
 
 	providerLabel := "xai"
+	systemPart, userPart := splitSystemAndUserPrompt(prompt)
+	lastTemporaryStatus := 0
+	lastTemporaryMessage := ""
 	for _, model := range p.models {
+		messages := make([]map[string]string, 0, 2)
+		if systemPart != "" {
+			messages = append(messages, map[string]string{"role": "system", "content": systemPart})
+		}
+		messages = append(messages, map[string]string{"role": "user", "content": userPart})
 		payload := map[string]any{
-			"model": model,
-			"messages": []map[string]string{
-				{
-					"role":    "user",
-					"content": prompt,
-				},
-			},
+			"model":       model,
+			"messages":    messages,
 			"temperature": 0.2,
 		}
 
@@ -608,7 +625,8 @@ func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (
 
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
-			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+			if isTemporaryProviderStatus(statusCode) {
+				rememberTemporaryProviderFailure(&lastTemporaryStatus, &lastTemporaryMessage, statusCode, statusMessage)
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				continue
 			}
@@ -624,7 +642,7 @@ func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (
 		}
 		return text, nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models)
+	return "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *XAIProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
@@ -687,15 +705,18 @@ func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, mo
 	}
 
 	providerLabel := "groq"
+	systemPart, userPart := splitSystemAndUserPrompt(prompt)
+	lastTemporaryStatus := 0
+	lastTemporaryMessage := ""
 	for _, model := range models {
+		messages := make([]map[string]string, 0, 2)
+		if systemPart != "" {
+			messages = append(messages, map[string]string{"role": "system", "content": systemPart})
+		}
+		messages = append(messages, map[string]string{"role": "user", "content": userPart})
 		payload := map[string]any{
-			"model": model,
-			"messages": []map[string]string{
-				{
-					"role":    "user",
-					"content": prompt,
-				},
-			},
+			"model":       model,
+			"messages":    messages,
 			"temperature": 0.2,
 		}
 
@@ -721,7 +742,8 @@ func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, mo
 
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 			statusMessage := firstNonEmpty(parsed.Error.Message, extractMessageFromBody(body))
-			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+			if isTemporaryProviderStatus(statusCode) {
+				rememberTemporaryProviderFailure(&lastTemporaryStatus, &lastTemporaryMessage, statusCode, statusMessage)
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				recordAIRequest(providerLabel, "rate_limit")
 				continue
@@ -742,7 +764,7 @@ func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, mo
 		recordAIRequest(providerLabel, "success")
 		return text, nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, models)
+	return "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *GroqProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
@@ -842,6 +864,8 @@ func generateOpenAICompatibleToolResponse(
 		return AgentProviderResponse{}, err
 	}
 	tools := buildOpenAICompatibleTools(req.Tools)
+	lastTemporaryStatus := 0
+	lastTemporaryMessage := ""
 	for _, model := range models {
 		payload := map[string]any{
 			"model":       strings.TrimSpace(model),
@@ -861,7 +885,8 @@ func generateOpenAICompatibleToolResponse(
 
 		response, parseErr, statusMessage := parseOpenAICompatibleToolResponse(body)
 		if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-			if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
+			if isTemporaryProviderStatus(statusCode) {
+				rememberTemporaryProviderFailure(&lastTemporaryStatus, &lastTemporaryMessage, statusCode, statusMessage)
 				log.Printf("[ai] %s model=%s temporary tool-use failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				recordAIRequest(providerLabel, "rate_limit")
 				continue
@@ -876,7 +901,7 @@ func generateOpenAICompatibleToolResponse(
 		recordAIRequest(providerLabel, "success")
 		return response, nil
 	}
-	return AgentProviderResponse{}, newModelCascadeExhaustedError(providerLabel, models)
+	return AgentProviderResponse{}, newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func buildOpenAICompatibleMessages(req AgentProviderRequest) ([]map[string]any, error) {
@@ -1136,9 +1161,10 @@ func buildRollingSummaryPrompt(previousState []byte, newMessages []Message) stri
 }
 
 func newProviderHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 45 * time.Second,
-	}
+	// No client-level timeout — callers pass a context with the appropriate
+	// deadline. A hard client timeout would cut off long agentic runs where
+	// the model needs more than 45 s to generate a complex response.
+	return &http.Client{}
 }
 
 func postJSON(
@@ -1164,6 +1190,13 @@ func postJSON(
 
 	response, err := client.Do(request)
 	if err != nil {
+		// Unwrap *url.Error to avoid leaking the request URL (which may contain
+		// API keys embedded as query parameters, e.g. ?key=...) into error messages
+		// that propagate to the frontend.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && urlErr.Err != nil {
+			return 0, nil, urlErr.Err
+		}
 		return 0, nil, err
 	}
 	defer response.Body.Close()
@@ -1180,11 +1213,7 @@ func toProviderStatusError(provider string, statusCode int, message string) erro
 	if normalizedMessage == "" {
 		normalizedMessage = http.StatusText(statusCode)
 	}
-	lower := strings.ToLower(normalizedMessage)
-	isRateLimit := statusCode == http.StatusTooManyRequests ||
-		strings.Contains(lower, "rate limit") ||
-		strings.Contains(lower, "quota") ||
-		strings.Contains(lower, "exceeded")
+	isRateLimit := statusCode == http.StatusTooManyRequests || isProviderRateLimitMessage(normalizedMessage)
 	if isRateLimit {
 		return &HTTPStatusError{
 			Code:     http.StatusTooManyRequests,
@@ -1196,6 +1225,48 @@ func toProviderStatusError(provider string, statusCode int, message string) erro
 		Code:     statusCode,
 		Provider: provider,
 		Err:      errors.New(normalizedMessage),
+	}
+}
+
+func isProviderRateLimitMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "rate-limit") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "quota exceeded") ||
+		strings.Contains(lower, "quota reached") ||
+		strings.Contains(lower, "quota") ||
+		strings.Contains(lower, "resource exhausted")
+}
+
+func isTemporaryProviderStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable
+}
+
+func rememberTemporaryProviderFailure(currentStatus *int, currentMessage *string, statusCode int, message string) {
+	if currentStatus != nil {
+		*currentStatus = mergeTemporaryProviderStatus(*currentStatus, statusCode)
+	}
+	if currentMessage != nil {
+		if trimmed := strings.TrimSpace(message); trimmed != "" {
+			*currentMessage = trimmed
+		}
+	}
+}
+
+func mergeTemporaryProviderStatus(currentStatus int, nextStatus int) int {
+	switch {
+	case currentStatus == 0:
+		return nextStatus
+	case nextStatus == 0:
+		return currentStatus
+	case currentStatus == nextStatus:
+		return currentStatus
+	default:
+		return http.StatusServiceUnavailable
 	}
 }
 
@@ -1326,16 +1397,32 @@ func mergeModelCascade(configured []string, defaults []string) []string {
 	return cascade
 }
 
-func newModelCascadeExhaustedError(provider string, attemptedModels []string) error {
+func newModelCascadeExhaustedError(provider string, attemptedModels []string, lastStatusCode int, lastMessage string) error {
 	modelList := strings.Join(attemptedModels, ",")
 	if strings.TrimSpace(modelList) == "" {
 		modelList = "none"
 	}
-	return toProviderStatusError(
-		provider,
-		http.StatusTooManyRequests,
-		fmt.Sprintf("%s models exhausted due to rate limit or temporary unavailability (%s)", provider, modelList),
-	)
+	detail := strings.TrimSpace(lastMessage)
+	switch lastStatusCode {
+	case http.StatusTooManyRequests:
+		message := fmt.Sprintf("%s models exhausted due to provider rate limits (%s)", provider, modelList)
+		if detail != "" {
+			message += ": " + detail
+		}
+		return toProviderStatusError(provider, http.StatusTooManyRequests, message)
+	case http.StatusServiceUnavailable:
+		message := fmt.Sprintf("%s models exhausted due to temporary provider unavailability (%s)", provider, modelList)
+		if detail != "" {
+			message += ": " + detail
+		}
+		return toProviderStatusError(provider, http.StatusServiceUnavailable, message)
+	default:
+		message := fmt.Sprintf("%s models exhausted after temporary provider failures (%s)", provider, modelList)
+		if detail != "" {
+			message += ": " + detail
+		}
+		return toProviderStatusError(provider, http.StatusServiceUnavailable, message)
+	}
 }
 
 func extractMessageFromBody(body []byte) string {

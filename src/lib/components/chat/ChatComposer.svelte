@@ -2,6 +2,7 @@
 	import IconSet from '$lib/components/icons/IconSet.svelte';
 	import AiDisclaimerModal from '$lib/components/chat/AiDisclaimerModal.svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
+	import { projectTypeConfig } from '$lib/stores/projectType';
 	import { getUTF8ByteLength, MESSAGE_TEXT_MAX_BYTES } from '$lib/utils/chat/core';
 	import {
 		compressMedia,
@@ -111,6 +112,8 @@
 	export let disabled = false;
 	export let isEphemeralRoom = false;
 	export let mentionCandidates: string[] = [];
+	export let showStopButton = false;
+	export let stopButtonDisabled = false;
 
 	let mediaInput: HTMLInputElement | null = null;
 	let fileInput: HTMLInputElement | null = null;
@@ -170,6 +173,9 @@
 	let mentionReplaceEnd = 0;
 	let aiTermsSessionStorageKey = '';
 	let loadedAITermsStorageKey = '';
+	let replyPreviewKind = 'text' as 'text' | 'image' | 'video' | 'audio' | 'file';
+	let replyPreviewMediaUrl = '';
+	let replyPreviewFileLabel = '';
 
 	$: normalizedDraftMessage = draftMessage.trim();
 	$: hasComposerInput = draftMessage.length > 0;
@@ -215,6 +221,9 @@
 				: activeMediaTab === 'meme'
 					? memeError
 					: '';
+	$: replyPreviewKind = getReplyPreviewKind();
+	$: replyPreviewMediaUrl = getReplyPreviewMediaUrl();
+	$: replyPreviewFileLabel = getReplyPreviewFileLabel();
 	$: activeMediaSearchPlaceholder =
 		activeMediaTab === 'gif'
 			? 'Search GIFs'
@@ -225,6 +234,7 @@
 		!isRecording && !taskDraftOpen && (hasPendingAttachment || normalizedDraftMessage.length > 0);
 	$: composerDisabled =
 		disabled || isProcessingAttachment || isRecording || taskDraftOpen || beaconDraftOpen;
+	$: taskTermPluralLabel = $projectTypeConfig.taskTermPlural.toLowerCase();
 	$: composerPlaceholder = disabled
 		? 'This room has expired. Extend time to continue chatting.'
 		: isRecording
@@ -233,7 +243,7 @@
 				? 'Task mode active. Press send when ready.'
 				: hasPendingAttachment
 					? 'Add a caption (optional)'
-					: 'Message — @ToraAI to ask · @Project to edit tasks · @Canvas for code';
+					: `Message — @ToraAI to ask · @Project to manage ${taskTermPluralLabel} · @Canvas for code`;
 
 	const dispatch = createEventDispatcher<{
 		send: ComposerMediaPayload | undefined;
@@ -243,6 +253,7 @@
 		typing: { value: string };
 		openPrivateAi: void;
 		toastError: { message: string };
+		stopAi: void;
 	}>();
 
 	function showStorageFullToastIfNeeded(message: string) {
@@ -1648,11 +1659,57 @@
 		if (!activeReply) {
 			return '';
 		}
-		const normalized = `${activeReply.senderName}: ${activeReply.content}`.trim();
+		const normalized = (activeReply.content || '').trim() || 'Message';
 		if (normalized.length <= 120) {
 			return normalized;
 		}
 		return `${normalized.slice(0, 117)}...`;
+	}
+
+	function getReplyPreviewKind() {
+		if (!activeReply) {
+			return 'text' as const;
+		}
+		const normalizedType = (activeReply.type || '').trim().toLowerCase();
+		const normalizedMediaType = (activeReply.mediaType || '').trim().toLowerCase();
+		const normalizedFileName = (activeReply.fileName || '').trim().toLowerCase();
+		const extension =
+			normalizedFileName && normalizedFileName.includes('.')
+				? normalizedFileName.split('.').pop() || ''
+				: '';
+
+		if (
+			normalizedType === 'image' ||
+			normalizedMediaType.startsWith('image/') ||
+			(normalizedType === 'file' && ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(extension))
+		) {
+			return 'image' as const;
+		}
+		if (
+			normalizedType === 'video' ||
+			normalizedMediaType.startsWith('video/') ||
+			(normalizedType === 'file' && ['mp4', 'webm', 'mov', 'm4v', 'ogg'].includes(extension))
+		) {
+			return 'video' as const;
+		}
+		if (normalizedType === 'audio' || normalizedMediaType.startsWith('audio/')) {
+			return 'audio' as const;
+		}
+		if (normalizedType === 'file') {
+			return 'file' as const;
+		}
+		return 'text' as const;
+	}
+
+	function getReplyPreviewMediaUrl() {
+		return (activeReply?.mediaUrl || '').trim();
+	}
+
+	function getReplyPreviewFileLabel() {
+		if (!activeReply) {
+			return '';
+		}
+		return (activeReply.fileName || '').trim();
 	}
 
 	function clearTaskDraft() {
@@ -1968,8 +2025,50 @@
 <footer class="composer" data-mode={isDarkMode ? 'dark' : 'light'}>
 	{#if activeReply}
 		<div class="reply-preview-panel">
-			<div class="reply-preview-label">Replying to</div>
-			<div class="reply-preview-content">{getReplyPreviewText()}</div>
+			<div class="reply-preview-main">
+				<div class="reply-preview-label">Replying to</div>
+				<div
+					class="reply-preview-body"
+					class:has-visual={replyPreviewKind === 'image' || replyPreviewKind === 'video'}
+				>
+					{#if (replyPreviewKind === 'image' || replyPreviewKind === 'video') && replyPreviewMediaUrl}
+						<div class="reply-preview-thumb">
+							{#if replyPreviewKind === 'image'}
+								<img
+									src={replyPreviewMediaUrl}
+									alt={replyPreviewFileLabel || 'Reply preview'}
+									class="reply-preview-thumb-media"
+								/>
+							{:else}
+								<!-- svelte-ignore a11y_media_has_caption -->
+								<video
+									src={replyPreviewMediaUrl}
+									class="reply-preview-thumb-media"
+									muted
+									playsinline
+									preload="metadata"
+								></video>
+							{/if}
+						</div>
+					{:else if replyPreviewKind === 'audio' || replyPreviewKind === 'file'}
+						<div class="reply-preview-icon" aria-hidden="true">
+							<IconSet name="file" size={14} />
+						</div>
+					{/if}
+					<div class="reply-preview-copy">
+						<div class="reply-preview-author">{activeReply.senderName}</div>
+						{#if replyPreviewKind !== 'image' && replyPreviewKind !== 'video'}
+							<div class="reply-preview-content">{getReplyPreviewText()}</div>
+						{/if}
+						{#if replyPreviewKind !== 'image' &&
+							replyPreviewKind !== 'video' &&
+							replyPreviewFileLabel &&
+							replyPreviewFileLabel !== getReplyPreviewText()}
+							<div class="reply-preview-file-name">{replyPreviewFileLabel}</div>
+						{/if}
+					</div>
+				</div>
+			</div>
 			<button type="button" class="reply-preview-cancel" on:click={cancelReply}>Cancel</button>
 		</div>
 	{/if}
@@ -2257,7 +2356,30 @@
 				</div>
 			{/if}
 		</div>
-		{#if showSendButton}
+		{#if showStopButton}
+			<button
+				type="button"
+				class="send-button is-stop"
+				on:click={() => dispatch('stopAi')}
+				disabled={stopButtonDisabled}
+				aria-label={stopButtonDisabled ? 'Stopping AI request' : 'Stop AI request'}
+				title={stopButtonDisabled ? 'Stopping AI request' : 'Stop AI request'}
+			>
+				<svg
+					width="14"
+					height="14"
+					viewBox="0 0 14 14"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.6"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+				>
+					<rect x="3.1" y="3.1" width="7.8" height="7.8" rx="1.2"></rect>
+				</svg>
+			</button>
+		{:else if showSendButton}
 			<button
 				type="button"
 				class="send-button"
@@ -2363,14 +2485,18 @@
 		padding: 0.56rem 0.62rem;
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) auto;
-		grid-template-rows: auto auto;
 		column-gap: 0.5rem;
-		row-gap: 0.18rem;
-		align-items: center;
+		align-items: stretch;
+	}
+
+	.reply-preview-main {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.24rem;
 	}
 
 	.reply-preview-label {
-		grid-column: 1;
 		font-size: 0.7rem;
 		font-weight: 700;
 		letter-spacing: 0.04em;
@@ -2378,17 +2504,81 @@
 		color: var(--text-secondary);
 	}
 
+	.reply-preview-body {
+		display: flex;
+		align-items: center;
+		gap: 0.58rem;
+		min-width: 0;
+	}
+
+	.reply-preview-body.has-visual {
+		align-items: flex-start;
+	}
+
+	.reply-preview-thumb {
+		width: 48px;
+		height: 48px;
+		border-radius: 10px;
+		overflow: hidden;
+		flex: 0 0 48px;
+		background: rgba(120, 134, 160, 0.16);
+		border: 1px solid var(--border-default);
+	}
+
+	.reply-preview-thumb-media {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		display: block;
+	}
+
+	.reply-preview-icon {
+		width: 36px;
+		height: 36px;
+		border-radius: 10px;
+		flex: 0 0 36px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		background: rgba(120, 134, 160, 0.14);
+		border: 1px solid var(--border-default);
+		color: var(--text-secondary);
+	}
+
+	.reply-preview-copy {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.12rem;
+	}
+
+	.reply-preview-author {
+		font-size: 0.76rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+	}
+
 	.reply-preview-content {
-		grid-column: 1;
 		font-size: 0.8rem;
 		color: var(--text-primary);
 		line-height: 1.28;
 		word-break: break-word;
+		display: -webkit-box;
+		line-clamp: 2;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.reply-preview-file-name {
+		font-size: 0.72rem;
+		color: var(--text-secondary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 
 	.reply-preview-cancel {
-		grid-column: 2;
-		grid-row: 1 / span 2;
 		border: 1px solid var(--border-default);
 		background: var(--surface-primary);
 		border-radius: 8px;
@@ -2396,6 +2586,7 @@
 		font-size: 0.72rem;
 		cursor: pointer;
 		color: var(--text-secondary);
+		align-self: stretch;
 	}
 
 	.attachment-preview-panel {
@@ -3204,6 +3395,17 @@
 	.send-button:hover:not(:disabled) {
 		background: var(--accent-primary-hover);
 		border-color: var(--accent-primary-hover);
+	}
+
+	.send-button.is-stop {
+		background: var(--accent-danger);
+		border-color: var(--accent-danger);
+		color: var(--text-inverse);
+	}
+
+	.send-button.is-stop:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--accent-danger) 82%, black);
+		border-color: color-mix(in srgb, var(--accent-danger) 82%, black);
 	}
 
 	.media-picker-wrap {

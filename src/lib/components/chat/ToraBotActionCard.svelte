@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount, createEventDispatcher } from 'svelte';
+	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
+	import { projectTypeConfig } from '$lib/stores/projectType';
 
 	type ActionKind = 'task_create' | 'task_update' | 'task_delete';
 
@@ -36,6 +38,15 @@
 		appliedAt: string;
 		counts: { created: number; updated: number; deleted: number };
 	};
+	type DismissedMeta = {
+		dismissedBy: string;
+		dismissedAt: string;
+	};
+	type PersistedResolution = {
+		state: 'applied' | 'rejected';
+		appliedMeta?: AppliedMeta;
+		dismissedMeta?: DismissedMeta;
+	};
 	type AuditTrailEntry = {
 		index: number;
 		kind: string;
@@ -61,6 +72,7 @@
 	export let authToken = '';
 	export let autoApply = false;
 	export let currentUserName = '';
+	export let canResolve = false;
 
 	const dispatch = createEventDispatcher<{ applied: { roomId: string } }>();
 
@@ -70,6 +82,7 @@
 	let applyProgress = 0;
 	let appliedCounts = { created: 0, updated: 0, deleted: 0 };
 	let appliedMeta: AppliedMeta | null = null;
+	let dismissedMeta: DismissedMeta | null = null;
 	let showModal = false;
 	let showAll = false;
 	let auditEntries: AuditTrailEntry[] = [];
@@ -83,12 +96,34 @@
 		day: 'numeric',
 		year: 'numeric'
 	});
-	const fieldLabels: Record<string, string> = {
+	let fieldLabels: Record<string, string> = {
 		title: 'Title',
 		description: 'Description',
 		status: 'Status',
 		sprint: 'Sprint',
 		sprint_name: 'Sprint',
+		task_type: 'Type',
+		budget: 'Budget',
+		start_date: 'Start date',
+		due_date: 'Due date',
+		roles: 'Roles',
+		assignee_id: 'Assignee',
+		actual_cost: 'Actual cost',
+		spent: 'Spent',
+		completion_percent: 'Completion',
+		blocked_by: 'Blocked by',
+		blocks: 'Blocks'
+	};
+	$: taskTerm = $projectTypeConfig.taskTerm;
+	$: groupTerm = $projectTypeConfig.groupTerm;
+	$: taskLabel = taskTerm.toLowerCase();
+	$: groupLabel = groupTerm.toLowerCase();
+	$: fieldLabels = {
+		title: 'Title',
+		description: 'Description',
+		status: 'Status',
+		sprint: groupTerm,
+		sprint_name: groupTerm,
 		task_type: 'Type',
 		budget: 'Budget',
 		start_date: 'Start date',
@@ -483,6 +518,18 @@
 		return `tora_applied_${roomId}_${hashActionsJson(actionsJson)}`;
 	}
 
+	function persistResolutionState(value: PersistedResolution) {
+		try {
+			localStorage.setItem(persistKey(), JSON.stringify(value));
+		} catch {
+			/* ignore */
+		}
+	}
+
+	function resolveActorName() {
+		return currentUserName.trim() || 'You';
+	}
+
 	$: {
 		try {
 			const parsed = JSON.parse(actionsJson);
@@ -533,25 +580,46 @@
 		try {
 			const saved = localStorage.getItem(persistKey());
 			if (saved) {
-				const meta: AppliedMeta = JSON.parse(saved);
-				appliedMeta = meta;
-				appliedCounts = meta.counts;
-				state = 'applied';
+				const parsed = JSON.parse(saved) as PersistedResolution | AppliedMeta;
+				if ('state' in parsed) {
+					if (parsed.state === 'applied' && parsed.appliedMeta) {
+						appliedMeta = parsed.appliedMeta;
+						appliedCounts = parsed.appliedMeta.counts;
+						state = 'applied';
+						return;
+					}
+					if (parsed.state === 'rejected' && parsed.dismissedMeta) {
+						dismissedMeta = parsed.dismissedMeta;
+						state = 'rejected';
+						return;
+					}
+				} else {
+					appliedMeta = parsed;
+					appliedCounts = parsed.counts;
+					state = 'applied';
+					return;
+				}
 				return;
 			}
 		} catch {
 			// ignore
 		}
-		if (autoApply && state === 'pending' && actions.length > 0) {
+		if (autoApply && canResolve && state === 'pending' && actions.length > 0) {
 			void applyActions();
 		}
 	});
 
 	async function applyActions() {
+		if (!canResolve) {
+			errorMsg = 'Only room admins can accept or dismiss these changes right now.';
+			state = 'error';
+			return;
+		}
 		state = 'applying';
 		errorMsg = '';
 		applyProgress = 0;
 		appliedCounts = { created: 0, updated: 0, deleted: 0 };
+		dismissedMeta = null;
 		actionResults = actions.map(() => ({ ok: false }));
 		const errors: string[] = [];
 
@@ -582,16 +650,13 @@
 			state = 'applied';
 			// Persist applied state so it survives page reload
 			const meta: AppliedMeta = {
-				appliedBy: currentUserName || 'You',
+				appliedBy: resolveActorName(),
 				appliedAt: new Date().toISOString(),
 				counts: { ...appliedCounts }
 			};
 			appliedMeta = meta;
-			try {
-				localStorage.setItem(persistKey(), JSON.stringify(meta));
-			} catch {
-				/* ignore */
-			}
+			dismissedMeta = null;
+			persistResolutionState({ state: 'applied', appliedMeta: meta });
 			dispatch('applied', { roomId });
 		} else {
 			state = 'error';
@@ -606,7 +671,7 @@
 
 		if (action.kind === 'task_create') {
 			const body: Record<string, unknown> = {
-				title: action.title ?? 'Untitled Task',
+				title: action.title ?? `Untitled ${taskTerm}`,
 				status: action.status ?? 'Todo',
 				task_type: action.task_type ?? 'sprint'
 			};
@@ -641,11 +706,23 @@
 	}
 
 	function reject() {
+		if (!canResolve) {
+			errorMsg = 'Only room admins can accept or dismiss these changes right now.';
+			state = 'error';
+			return;
+		}
+		appliedMeta = null;
+		const nextDismissedMeta: DismissedMeta = {
+			dismissedBy: resolveActorName(),
+			dismissedAt: new Date().toISOString()
+		};
+		dismissedMeta = nextDismissedMeta;
 		state = 'rejected';
+		persistResolutionState({ state: 'rejected', dismissedMeta: nextDismissedMeta });
 	}
 
 	function actionTitle(a: TaskAction): string {
-		if (a.kind === 'task_create') return a.title ?? 'New Task';
+		if (a.kind === 'task_create') return a.title ?? `New ${taskTerm}`;
 		return a.task_title ?? a.task_id ?? '(no title)';
 	}
 
@@ -660,7 +737,9 @@
 <div class="tora-card" class:applied={state === 'applied'} class:rejected={state === 'rejected'}>
 	<!-- AI explanation text -->
 	{#if text}
-		<p class="tora-text">{text}</p>
+		<div class="tora-text">
+			<RichTextContent text={text} />
+		</div>
 	{/if}
 
 	{#if actions.length > 0 && state !== 'rejected'}
@@ -684,7 +763,7 @@
 						{#if action.kind === 'task_create'}
 							<div class="row-chips">
 								{#if action.status}<span class="meta">status: {action.status}</span>{/if}
-								{#if action.sprint}<span class="meta">sprint: {action.sprint}</span>{/if}
+								{#if action.sprint}<span class="meta">{groupLabel}: {action.sprint}</span>{/if}
 								{#if action.task_type}<span class="meta">type: {action.task_type}</span>{/if}
 								{#if typeof action.budget === 'number'}<span class="meta meta-budget"
 										>${action.budget.toLocaleString()}</span
@@ -734,10 +813,10 @@
 
 						{#if action.kind === 'task_delete' || action.kind === 'task_update'}
 							<div class="row-context">
-								{#if action.task_sprint}<span class="ctx-tag">sprint: {action.task_sprint}</span
+								{#if action.task_sprint}<span class="ctx-tag">{groupLabel}: {action.task_sprint}</span
 									>{/if}
 								{#if action.task_parent}<span class="ctx-tag ctx-parent"
-										>subtask of: {action.task_parent}</span
+										>sub-{taskLabel} of: {action.task_parent}</span
 									>{/if}
 							</div>
 						{/if}
@@ -794,9 +873,14 @@
 
 		<!-- Action buttons -->
 		{#if state === 'pending'}
+			{#if !canResolve}
+				<div class="resolution-note">Only room admins can accept or dismiss these changes.</div>
+			{/if}
 			<div class="btn-row">
-				<button class="btn btn-apply" on:click={() => void applyActions()}>Apply changes</button>
-				<button class="btn btn-dismiss" on:click={reject}>Dismiss</button>
+				<button class="btn btn-apply" disabled={!canResolve} on:click={() => void applyActions()}
+					>Apply changes</button
+				>
+				<button class="btn btn-dismiss" disabled={!canResolve} on:click={reject}>Dismiss</button>
 			</div>
 		{:else if state === 'applying'}
 			<div class="progress-row">
@@ -830,13 +914,25 @@
 			{/if}
 		{:else if state === 'error'}
 			<div class="error-msg">{errorMsg}</div>
+			{#if !canResolve}
+				<div class="resolution-note">Only room admins can accept or dismiss these changes.</div>
+			{/if}
 			<div class="btn-row">
-				<button class="btn btn-apply" on:click={() => void applyActions()}>Retry</button>
-				<button class="btn btn-dismiss" on:click={reject}>Dismiss</button>
+				<button class="btn btn-apply" disabled={!canResolve} on:click={() => void applyActions()}
+					>Retry</button
+				>
+				<button class="btn btn-dismiss" disabled={!canResolve} on:click={reject}>Dismiss</button>
 			</div>
 		{/if}
 	{:else if state === 'rejected'}
 		<div class="dismissed-label">Dismissed</div>
+		{#if dismissedMeta}
+			<div class="applied-by">
+				Dismissed by <strong>{dismissedMeta.dismissedBy}</strong> · {new Date(
+					dismissedMeta.dismissedAt
+				).toLocaleString()}
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -863,10 +959,10 @@
 						{#each actions.filter((a) => a.kind === 'task_create') as a}
 							{@const idx = actions.indexOf(a)}
 							<div class="detail-item" class:detail-err={actionResults[idx]?.error}>
-								<div class="detail-title">{a.title ?? 'New Task'}</div>
+								<div class="detail-title">{a.title ?? `New ${taskTerm}`}</div>
 								<div class="detail-meta">
 									{#if a.status}<span class="meta">status: {a.status}</span>{/if}
-									{#if a.sprint}<span class="meta">sprint: {a.sprint}</span>{/if}
+									{#if a.sprint}<span class="meta">{groupLabel}: {a.sprint}</span>{/if}
 									{#if a.task_type}<span class="meta">type: {a.task_type}</span>{/if}
 									{#if typeof a.budget === 'number'}<span class="meta meta-budget"
 											>${a.budget.toLocaleString()}</span
@@ -909,9 +1005,9 @@
 							<div class="detail-item" class:detail-err={actionResults[idx]?.error}>
 								<div class="detail-title">{a.task_title ?? '(unknown)'}</div>
 								<div class="detail-context">
-									{#if a.task_sprint}<span class="ctx-tag">sprint: {a.task_sprint}</span>{/if}
+									{#if a.task_sprint}<span class="ctx-tag">{groupLabel}: {a.task_sprint}</span>{/if}
 									{#if a.task_parent}<span class="ctx-tag ctx-parent"
-											>subtask of: {a.task_parent}</span
+											>sub-{taskLabel} of: {a.task_parent}</span
 										>{/if}
 								</div>
 								{#if changeEntries.length > 0}
@@ -950,9 +1046,9 @@
 							<div class="detail-item" class:detail-err={actionResults[idx]?.error}>
 								<div class="detail-title">{a.task_title ?? '(no title)'}</div>
 								<div class="detail-context">
-									{#if a.task_sprint}<span class="ctx-tag">sprint: {a.task_sprint}</span>{/if}
+									{#if a.task_sprint}<span class="ctx-tag">{groupLabel}: {a.task_sprint}</span>{/if}
 									{#if a.task_parent}<span class="ctx-tag ctx-parent"
-											>subtask of: {a.task_parent}</span
+											>sub-{taskLabel} of: {a.task_parent}</span
 										>{/if}
 									{#if !a.task_id}<span class="warn-missing">⚠ missing ID — delete will fail</span
 										>{/if}
@@ -993,8 +1089,14 @@
 
 			<div class="modal-footer">
 				{#if state === 'pending'}
+					{#if !canResolve}
+						<div class="resolution-note modal-resolution-note">
+							Only room admins can accept or dismiss these changes.
+						</div>
+					{/if}
 					<button
 						class="btn btn-apply"
+						disabled={!canResolve}
 						on:click={() => {
 							void applyActions();
 							showModal = false;
@@ -1002,6 +1104,7 @@
 					>
 					<button
 						class="btn btn-dismiss"
+						disabled={!canResolve}
 						on:click={() => {
 							reject();
 							showModal = false;
@@ -1010,6 +1113,7 @@
 				{:else if state === 'error'}
 					<button
 						class="btn btn-apply"
+						disabled={!canResolve}
 						on:click={() => {
 							void applyActions();
 							showModal = false;
@@ -1373,6 +1477,10 @@
 	.btn:hover {
 		opacity: 0.85;
 	}
+	.btn:disabled {
+		cursor: not-allowed;
+		opacity: 0.45;
+	}
 
 	.btn-apply {
 		background: #2563eb;
@@ -1462,6 +1570,16 @@
 		font-size: 0.8em;
 		color: #dc2626;
 		line-height: 1.4;
+	}
+
+	.resolution-note {
+		font-size: 0.76em;
+		line-height: 1.45;
+		color: #94a3b8;
+		padding: 8px 10px;
+		border-radius: 8px;
+		background: rgba(148, 163, 184, 0.1);
+		border: 1px solid rgba(148, 163, 184, 0.18);
 	}
 
 	.dismissed-label {
@@ -1691,5 +1809,9 @@
 		padding: 10px 16px 14px;
 		border-top: 1px solid rgba(255, 255, 255, 0.08);
 		flex-shrink: 0;
+	}
+
+	.modal-resolution-note {
+		flex-basis: 100%;
 	}
 </style>

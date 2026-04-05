@@ -102,6 +102,8 @@ type aiOrganizeLimits struct {
 	NoteMaxLength   int
 	TopicMaxLength  int
 	TextMaxLength   int
+	MaxPromptLen    int
+	MaxOutputTokens int
 	RequestTimeout  time.Duration
 }
 
@@ -131,7 +133,13 @@ func getAIOrganizeLimits() aiOrganizeLimits {
 		limits.TextMaxLength = 3000
 	}
 	if limits.RequestTimeout <= 0 {
-		limits.RequestTimeout = 30 * time.Second
+		limits.RequestTimeout = 60 * time.Second
+	}
+	if limits.MaxPromptLen <= 0 {
+		limits.MaxPromptLen = 4000
+	}
+	if limits.MaxOutputTokens <= 0 {
+		limits.MaxOutputTokens = 2048
 	}
 	return limits
 }
@@ -443,39 +451,43 @@ func generateAIOrganizeStructuredJSON(
 	systemPrompt, userPrompt string,
 	limits aiOrganizeLimits,
 ) (string, error) {
+	return generateAIOrganizeStructuredJSONWithTier(ctx, systemPrompt, userPrompt, limits, "")
+}
+
+func generateAIOrganizeStructuredJSONWithTier(
+	ctx context.Context,
+	systemPrompt, userPrompt string,
+	limits aiOrganizeLimits,
+	modelTier string,
+) (string, error) {
 	if vertexKey := strings.TrimSpace(os.Getenv("GOOGLE_VERTEX_API_KEY")); vertexKey != "" {
-		if content, err := generateAIOrganizeWithVertex(ctx, vertexKey, systemPrompt, userPrompt, limits); err == nil {
+		if content, err := generateAIOrganizeWithVertex(ctx, vertexKey, systemPrompt, userPrompt, limits, modelTier); err == nil {
 			return content, nil
 		}
 	}
-	if openAIKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); openAIKey != "" {
-		if content, err := generateAIOrganizeWithOpenAI(ctx, openAIKey, systemPrompt, userPrompt, limits); err == nil {
-			return content, nil
-		}
+	fullPrompt := systemPrompt + "\n\nUser request:\n" + userPrompt
+	if hinted, ok := any(ai.DefaultRouter).(interface {
+		GenerateChatResponseWithHint(context.Context, string, string) (string, error)
+	}); ok && strings.TrimSpace(modelTier) != "" {
+		return hinted.GenerateChatResponseWithHint(ctx, fullPrompt, modelTier)
 	}
-	if geminiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); geminiKey != "" {
-		if content, err := generateAIOrganizeWithGemini(ctx, geminiKey, systemPrompt, userPrompt, limits); err == nil {
-			return content, nil
-		}
-	}
-	return ai.DefaultRouter.GenerateChatResponse(
-		ctx,
-		systemPrompt+"\n\nUser request:\n"+userPrompt,
-	)
+	return ai.DefaultRouter.GenerateChatResponse(ctx, fullPrompt)
 }
 
 func generateAIOrganizeWithVertex(
 	ctx context.Context,
 	apiKey, systemPrompt, userPrompt string,
 	limits aiOrganizeLimits,
+	modelTier string,
 ) (string, error) {
 	models := aiOrganizeModelCascade(
 		os.Getenv("GOOGLE_VERTEX_MODELS"),
 		os.Getenv("GOOGLE_VERTEX_MODEL"),
 	)
 	if len(models) == 0 {
-		models = []string{"gemini-2.5-flash-lite", "gemini-2.5-flash"}
+		models = []string{"gemini-3.1-flash-lite", "gemini-3-flash", "gemini-3.1-pro"}
 	}
+	models = aiOrganizeTieredVertexModels(models, modelTier)
 
 	var lastErr error
 	for _, model := range models {
@@ -501,6 +513,7 @@ func generateAIOrganizeWithVertex(
 			"generationConfig": map[string]interface{}{
 				"temperature":      0.1,
 				"responseMimeType": "application/json",
+				"maxOutputTokens":  limits.MaxOutputTokens,
 			},
 		}
 
@@ -662,6 +675,37 @@ func aiOrganizeModelCascade(values ...string) []string {
 		}
 	}
 	return cascade
+}
+
+func aiOrganizeTieredVertexModels(configured []string, tier string) []string {
+	var preferred []string
+	switch strings.TrimSpace(strings.ToLower(tier)) {
+	case ai.AIModelTierLight:
+		preferred = []string{"gemini-3.1-flash-lite-preview", "gemini-2.5-flash-lite"}
+	case ai.AIModelTierHeavy:
+		preferred = []string{"gemini-3.1-pro-preview", "gemini-2.5-pro"}
+	case ai.AIModelTierStandard:
+		preferred = []string{"gemini-3-flash-preview", "gemini-2.5-flash"}
+	default:
+		return configured
+	}
+	merged := make([]string, 0, len(preferred)+len(configured))
+	seen := make(map[string]struct{}, len(preferred)+len(configured))
+	for _, model := range append(preferred, configured...) {
+		trimmed := strings.TrimSpace(model)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		merged = append(merged, trimmed)
+	}
+	if len(merged) == 0 {
+		return configured
+	}
+	return merged
 }
 
 type aiOrganizeGeminiCandidate struct {

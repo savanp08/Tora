@@ -7,6 +7,7 @@
 	import { activeContext } from '$lib/stores/jiraContext';
 	import { addBoardActivity, type BoardActivityInput } from '$lib/stores/boardActivity';
 	import { fieldSchemaStore, type FieldSchema } from '$lib/stores/fieldSchema';
+	import { projectTypeConfig } from '$lib/stores/projectType';
 	import { applyTimelineTaskStatusUpdate, projectTimeline } from '$lib/stores/timeline';
 	import type { ProjectTimeline } from '$lib/types/timeline';
 	import {
@@ -33,6 +34,8 @@
 	export let boardView: BoardView = 'table';
 	export let externalEditTaskId = '';
 	export let onExternalEditHandled: (taskId: string) => void = () => {};
+	export let externalOpenTaskId = '';
+	export let onExternalOpenHandled: (taskId: string) => void = () => {};
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
 	const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:8080';
@@ -44,6 +47,10 @@
 		{ value: 'in_progress', label: 'Working on it' },
 		{ value: 'done', label: 'Done' }
 	] as const;
+	const TASK_NOTES_FIELD_KEY = 'task_notes';
+	const TASK_DETAIL_SUMMARY_FIELD_KEY = 'task_detail_summary';
+	const TASK_DETAIL_STEPS_FIELD_KEY = 'task_detail_steps';
+	const TASK_DETAIL_GENERATED_AT_FIELD_KEY = 'task_detail_generated_at';
 	const INLINE_GRID_EDIT_FIELDS: EditableField[] = ['title', 'assigneeId', 'budget', 'spent'];
 
 	type ColumnKey = (typeof STATUS_OPTIONS)[number]['value'];
@@ -243,14 +250,33 @@
 	let taskEditModal: DisplayTask | null = null;
 	let taskEditVals: {
 		title: string;
+		description: string;
+		notes: string;
 		assigneeId: string;
 		status: string;
 		budget: string;
 		spent: string;
 		dueDate: string;
 		startDate: string;
-	} = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '', dueDate: '', startDate: '' };
+	} = {
+		title: '',
+		description: '',
+		notes: '',
+		assigneeId: '',
+		status: 'todo',
+		budget: '',
+		spent: '',
+		dueDate: '',
+		startDate: ''
+	};
 	let taskModalSaving = false;
+	let taskDetailSaving = false;
+	let taskDetailGenerating = false;
+	let taskDetailSummary = '';
+	let taskDetailSteps: string[] = [];
+	let taskDetailGeneratedAt = '';
+	let taskDetailNotice = '';
+	let taskDetailError = '';
 	let hoveredTaskId = '';
 	let newTaskInput: HTMLInputElement | null = null;
 	let editingTask: DisplayTask | null = null;
@@ -305,6 +331,7 @@
 	let canCreateSprintTask = false;
 	const SPRINT_COMPOSER_MAX_TASKS = 25;
 	let externalEditInFlight = false;
+	let externalOpenInFlight = false;
 
 	onDestroy(() => {
 		if (boardToastTimer) {
@@ -316,7 +343,17 @@
 	$: sessionUserID = ($currentUser?.id || '').trim();
 	$: sessionUsername = ($currentUser?.username || '').trim();
 	$: normalizedRoomId = normalizeRoomIDValue(roomId);
-	$: boardTitle = contextAware ? $activeContext.name.trim() || 'Workspace Tasks' : 'Room Tasks';
+	$: taskTerm = $projectTypeConfig.taskTerm;
+	$: taskTermPlural = $projectTypeConfig.taskTermPlural;
+	$: groupTerm = $projectTypeConfig.groupTerm;
+	$: groupTermPlural = $projectTypeConfig.groupTermPlural;
+	$: taskLabel = taskTerm.toLowerCase();
+	$: taskPluralLabel = taskTermPlural.toLowerCase();
+	$: groupLabel = groupTerm.toLowerCase();
+	$: groupPluralLabel = groupTermPlural.toLowerCase();
+	$: boardTitle = contextAware
+		? $activeContext.name.trim() || `Workspace ${taskTermPlural}`
+		: `Room ${taskTermPlural}`;
 	$: contextKey = `${$activeContext.type}:${$activeContext.id}`;
 	$: sprintContextKey = contextAware ? contextKey : `room:${normalizedRoomId}`;
 	$: if (contextAware && contextKey !== lastContextKey) {
@@ -399,6 +436,23 @@
 				})();
 			} else if (!boardLoading || !canEdit) {
 				onExternalEditHandled(requestedExternalEditID);
+			}
+		}
+	}
+	$: {
+		const requestedExternalOpenID = externalOpenTaskId.trim();
+		if (!externalOpenInFlight && requestedExternalOpenID) {
+			const targetTask = boardTasks.find((task) => task.id === requestedExternalOpenID);
+			if (targetTask) {
+				externalOpenInFlight = true;
+				try {
+					openTaskDetails(targetTask);
+				} finally {
+					onExternalOpenHandled(requestedExternalOpenID);
+					externalOpenInFlight = false;
+				}
+			} else if (!boardLoading) {
+				onExternalOpenHandled(requestedExternalOpenID);
 			}
 		}
 	}
@@ -499,6 +553,41 @@
 				if (right.name === 'Backlog' && left.name !== 'Backlog') return -1;
 				return sprintNameCollator.compare(left.name, right.name);
 			});
+	})();
+	$: sprintDisplayNameByKey = (() => {
+		const grouped = new Map<string, SprintTaskGroup>();
+		for (const task of supportSourceTasks) {
+			const sprintName = task.sprintName.trim() || 'Backlog';
+			const key = sprintGroupKey(sprintName);
+			if (grouped.has(key)) {
+				continue;
+			}
+			grouped.set(key, {
+				key,
+				name: sprintName,
+				tasks: [],
+				lastUpdatedAt: 0
+			});
+		}
+		for (const draftSprintName of sprintDraftGroups) {
+			const trimmedDraftName = draftSprintName.trim();
+			const key = sprintGroupKey(trimmedDraftName);
+			if (!trimmedDraftName || grouped.has(key)) {
+				continue;
+			}
+			grouped.set(key, {
+				key,
+				name: trimmedDraftName,
+				tasks: [],
+				lastUpdatedAt: 0
+			});
+		}
+		const orderedGroups = [...grouped.values()].sort((left, right) => {
+			if (left.name === 'Backlog' && right.name !== 'Backlog') return 1;
+			if (right.name === 'Backlog' && left.name !== 'Backlog') return -1;
+			return sprintNameCollator.compare(left.name, right.name);
+		});
+		return buildSprintDisplayNameMap(orderedGroups);
 	})();
 	$: hasBoardDataForView = boardView === 'table' ? sprintTaskGroups.length > 0 : hasAnyTasks;
 	$: kanbanColumns = KANBAN_COLUMN_ORDER.map<KanbanColumn>((columnKey) => ({
@@ -1030,6 +1119,34 @@
 		return normalized;
 	}
 
+	function formatVisibleSprintName(name: string, sprintNumber: number) {
+		const trimmed = name.trim() || `Sprint ${sprintNumber}`;
+		if (sprintGroupKey(trimmed) === 'backlog') {
+			return 'Backlog';
+		}
+		return `${sprintNumber}. ${trimmed.replace(/^\d+\.\s*/, '')}`;
+	}
+
+	function buildSprintDisplayNameMap(groups: SprintTaskGroup[]) {
+		const labels = new Map<string, string>();
+		let sprintNumber = 1;
+		for (const group of groups) {
+			if (group.key === 'backlog') {
+				labels.set(group.key, 'Backlog');
+				continue;
+			}
+			labels.set(group.key, formatVisibleSprintName(group.name, sprintNumber));
+			sprintNumber += 1;
+		}
+		return labels;
+	}
+
+	function formatSprintDisplayName(name: string) {
+		const trimmed = name.trim() || 'Backlog';
+		const key = sprintGroupKey(trimmed);
+		return sprintDisplayNameByKey.get(key) ?? (key === 'backlog' ? 'Backlog' : trimmed);
+	}
+
 	function setSprintDraftGroupsForContext(contextValue: string, nextGroups: string[]) {
 		const contextLabel = contextValue.trim();
 		if (!contextLabel) {
@@ -1367,6 +1484,106 @@
 			return metadataBlock;
 		}
 		return `${metadata.base}\n\n${metadataBlock}`;
+	}
+
+	function replaceDescriptionBase(description: string, nextBase: string) {
+		const metadata = parseDescriptionMetadata(description);
+		const trimmedBase = nextBase.trim();
+		if (metadata.entries.length === 0) {
+			return trimmedBase;
+		}
+		const metadataBlock = `[${metadata.entries
+			.map((entry) => `${entry.label}: ${entry.value}`)
+			.join(' | ')}]`;
+		if (!trimmedBase) {
+			return metadataBlock;
+		}
+		return `${trimmedBase}\n\n${metadataBlock}`;
+	}
+
+	function readTaskCustomFieldText(task: DisplayTask, key: string) {
+		return toStringValue(task.customFields?.[key]).trim();
+	}
+
+	function readTaskCustomFieldSteps(task: DisplayTask) {
+		const rawValue = task.customFields?.[TASK_DETAIL_STEPS_FIELD_KEY];
+		if (Array.isArray(rawValue)) {
+			return rawValue
+				.map((entry) => toStringValue(entry).trim())
+				.filter(Boolean);
+		}
+		if (typeof rawValue === 'string') {
+			try {
+				const parsed = JSON.parse(rawValue);
+				if (Array.isArray(parsed)) {
+					return parsed
+						.map((entry) => toStringValue(entry).trim())
+						.filter(Boolean);
+				}
+			} catch {
+				return rawValue
+					.split(/\r?\n+/)
+					.map((entry) => entry.replace(/^[\-\d.)\s]+/, '').trim())
+					.filter(Boolean);
+			}
+		}
+		return [];
+	}
+
+	function readTaskDescriptionBase(task: DisplayTask) {
+		return parseDescriptionMetadata(task.description).base || '';
+	}
+
+	function syncTaskModalFromTask(task: DisplayTask, options?: { preserveCoreValues?: boolean }) {
+		taskEditModal = task;
+		if (!options?.preserveCoreValues) {
+			taskEditVals = {
+				title: task.title || '',
+				description: readTaskDescriptionBase(task),
+				notes: readTaskCustomFieldText(task, TASK_NOTES_FIELD_KEY),
+				assigneeId: task.assigneeId || '',
+				status: resolveColumn(task.status) || 'todo',
+				budget: task.budget != null ? String(task.budget) : '',
+				spent: task.spent != null ? String(task.spent) : '',
+				dueDate: msToDateInput(task.dueDate),
+				startDate: msToDateInput(task.startDate)
+			};
+		} else {
+			taskEditVals = {
+				...taskEditVals,
+				description: readTaskDescriptionBase(task),
+				notes: readTaskCustomFieldText(task, TASK_NOTES_FIELD_KEY)
+			};
+		}
+		taskDetailSummary = readTaskCustomFieldText(task, TASK_DETAIL_SUMMARY_FIELD_KEY);
+		taskDetailSteps = readTaskCustomFieldSteps(task);
+		taskDetailGeneratedAt = readTaskCustomFieldText(task, TASK_DETAIL_GENERATED_AT_FIELD_KEY);
+		taskDetailError = '';
+		taskDetailNotice = '';
+	}
+
+	function hasGeneratedTaskDetails(task: DisplayTask) {
+		return (
+			readTaskCustomFieldText(task, TASK_DETAIL_SUMMARY_FIELD_KEY).length > 0 ||
+			readTaskCustomFieldSteps(task).length > 0
+		);
+	}
+
+	function formatTaskDetailGeneratedAt(value: string) {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return '';
+		}
+		const parsed = new Date(trimmed);
+		if (Number.isNaN(parsed.getTime())) {
+			return trimmed;
+		}
+		return parsed.toLocaleString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			hour: 'numeric',
+			minute: '2-digit'
+		});
 	}
 
 	function isLikelyUUID(value: string) {
@@ -2285,26 +2502,43 @@
 		cancelEditing();
 	}
 
+	function openTaskDetails(task: DisplayTask) {
+		if (boardView !== 'table') {
+			boardView = 'table';
+		}
+		openTaskModal(task);
+	}
+
 	function openTaskModal(task: DisplayTask) {
-		taskEditModal = task;
-		taskEditVals = {
-			title: task.title || '',
-			assigneeId: task.assigneeId || '',
-			status: resolveColumn(task.status) || 'todo',
-			budget: task.budget != null ? String(task.budget) : '',
-			spent: task.spent != null ? String(task.spent) : '',
-			dueDate: msToDateInput(task.dueDate),
-			startDate: msToDateInput(task.startDate)
-		};
+		syncTaskModalFromTask(task);
 		taskModalSaving = false;
+		taskDetailSaving = false;
+		taskDetailGenerating = false;
 		statusMenuTaskId = '';
 		cancelEditing();
 	}
 
 	function closeTaskModal() {
 		taskEditModal = null;
-		taskEditVals = { title: '', assigneeId: '', status: 'todo', budget: '', spent: '', dueDate: '', startDate: '' };
+		taskEditVals = {
+			title: '',
+			description: '',
+			notes: '',
+			assigneeId: '',
+			status: 'todo',
+			budget: '',
+			spent: '',
+			dueDate: '',
+			startDate: ''
+		};
 		taskModalSaving = false;
+		taskDetailSaving = false;
+		taskDetailGenerating = false;
+		taskDetailSummary = '';
+		taskDetailSteps = [];
+		taskDetailGeneratedAt = '';
+		taskDetailError = '';
+		taskDetailNotice = '';
 	}
 
 	async function saveTaskModal() {
@@ -2778,6 +3012,228 @@
 		if (field === 'dueDate') return 'due date';
 		if (field === 'startDate') return 'start date';
 		return 'sprint';
+	}
+
+	function applyTaskResponseToBoard(
+		task: DisplayTask,
+		payload: unknown,
+		activitySubtitle: string
+	): DisplayTask {
+		const targetRoomID = contextAware
+			? normalizeRoomIDValue($activeContext.id)
+			: normalizeRoomIDValue(task.roomId || normalizedRoomId);
+		if (!targetRoomID) {
+			throw new Error('Invalid room id');
+		}
+
+		if (contextAware && task.source === 'room' && $activeContext.type === 'room') {
+			const normalizedUpdatedTask = normalizeRoomTask(payload);
+			if (!normalizedUpdatedTask) {
+				throw new Error('Invalid task update response');
+			}
+			const nextTask = { ...normalizedUpdatedTask, source: task.source };
+			contextTasks = contextTasks.map((entry) => (entry.id === task.id ? nextTask : entry));
+			sendSocketPayload(buildTaskSocketPayload('task_update', targetRoomID, nextTask));
+			publishRoomBoardActivity(targetRoomID, {
+				type: 'task_modified',
+				title: `Updated ${nextTask.title}`,
+				subtitle: activitySubtitle,
+				actor: sessionUsername || sessionUserID || 'Unknown'
+			});
+			return nextTask;
+		}
+
+		const updatedTask = upsertTaskStoreEntry(payload, targetRoomID);
+		if (!updatedTask) {
+			throw new Error('Invalid task update response');
+		}
+		publishRoomBoardActivity(targetRoomID, {
+			type: 'task_modified',
+			title: `Updated ${updatedTask.title}`,
+			subtitle: activitySubtitle,
+			actor: sessionUsername || sessionUserID || 'Unknown'
+		});
+		sendSocketPayload(buildTaskSocketPayload('task_update', targetRoomID, updatedTask));
+		return {
+			id: updatedTask.id,
+			roomId: updatedTask.roomId,
+			title: updatedTask.title,
+			description: updatedTask.description,
+			status: updatedTask.status,
+			taskType: updatedTask.taskType,
+			customFields: { ...(updatedTask.customFields ?? {}) },
+			blockedBy: [...(updatedTask.blockedBy ?? [])],
+			blocks: [...(updatedTask.blocks ?? [])],
+			subtasks: cloneDisplaySubtasks(updatedTask.subtasks ?? []),
+			completionPercent: updatedTask.completionPercent,
+			budget: updatedTask.budget,
+			spent: updatedTask.spent,
+			dueDate: updatedTask.dueDate,
+			startDate: updatedTask.startDate,
+			roles: task.roles,
+			sprintName: updatedTask.sprintName,
+			assigneeId: updatedTask.assigneeId,
+			statusActorId: updatedTask.statusActorId,
+			statusActorName: updatedTask.statusActorName,
+			statusChangedAt: updatedTask.statusChangedAt,
+			createdAt: updatedTask.createdAt,
+			updatedAt: updatedTask.updatedAt,
+			source: task.source
+		};
+	}
+
+	function updateLocalTaskDetails(
+		task: DisplayTask,
+		description: string,
+		notes: string,
+		generatedSummary?: string,
+		generatedSteps?: string[],
+		generatedAt?: string
+	) {
+		const nextDescription = replaceDescriptionBase(task.description, description);
+		const nextCustomFields = cloneCustomFieldMap(task.customFields ?? {});
+		if (notes.trim()) {
+			nextCustomFields[TASK_NOTES_FIELD_KEY] = notes.trim();
+		} else {
+			delete nextCustomFields[TASK_NOTES_FIELD_KEY];
+		}
+		if (typeof generatedSummary === 'string') {
+			if (generatedSummary.trim()) {
+				nextCustomFields[TASK_DETAIL_SUMMARY_FIELD_KEY] = generatedSummary.trim();
+			} else {
+				delete nextCustomFields[TASK_DETAIL_SUMMARY_FIELD_KEY];
+			}
+		}
+		if (Array.isArray(generatedSteps)) {
+			if (generatedSteps.length > 0) {
+				nextCustomFields[TASK_DETAIL_STEPS_FIELD_KEY] = [...generatedSteps];
+			} else {
+				delete nextCustomFields[TASK_DETAIL_STEPS_FIELD_KEY];
+			}
+		}
+		if (typeof generatedAt === 'string') {
+			if (generatedAt.trim()) {
+				nextCustomFields[TASK_DETAIL_GENERATED_AT_FIELD_KEY] = generatedAt.trim();
+			} else {
+				delete nextCustomFields[TASK_DETAIL_GENERATED_AT_FIELD_KEY];
+			}
+		}
+		const nextTask: DisplayTask = {
+			...task,
+			description: nextDescription,
+			customFields: nextCustomFields,
+			updatedAt: Date.now()
+		};
+		contextTasks = contextTasks.map((entry) => (entry.id === task.id ? nextTask : entry));
+		return nextTask;
+	}
+
+	async function saveTaskDetails() {
+		const task = taskEditModal;
+		if (!task) {
+			return;
+		}
+		taskDetailSaving = true;
+		taskDetailError = '';
+		taskDetailNotice = '';
+		clearBoardError();
+		try {
+			const nextDescription = replaceDescriptionBase(task.description, taskEditVals.description);
+			if (contextAware && task.source === 'personal') {
+				const nextTask = updateLocalTaskDetails(task, taskEditVals.description, taskEditVals.notes);
+				syncTaskModalFromTask(nextTask, { preserveCoreValues: true });
+				taskDetailNotice = 'Saved task details.';
+				return;
+			}
+			const targetRoomID = contextAware
+				? normalizeRoomIDValue($activeContext.id)
+				: normalizeRoomIDValue(task.roomId || normalizedRoomId);
+			if (!targetRoomID) {
+				throw new Error('Invalid room id');
+			}
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomID)}/tasks/${encodeURIComponent(task.id)}`,
+				{
+					method: 'PUT',
+					headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+					credentials: 'include',
+					body: JSON.stringify({
+						description: nextDescription,
+						custom_fields: {
+							[TASK_NOTES_FIELD_KEY]: taskEditVals.notes.trim() || null
+						}
+					})
+				}
+			);
+			if (!response.ok) {
+				throw new Error(await parseErrorMessage(response));
+			}
+			const payload = await response.json().catch(() => null);
+			const updatedTask = applyTaskResponseToBoard(task, payload, 'Updated task details');
+			syncTaskModalFromTask(updatedTask, { preserveCoreValues: true });
+			taskDetailNotice = 'Saved task details.';
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Failed to save task details';
+			taskDetailError = message;
+			setBoardError(message);
+		} finally {
+			taskDetailSaving = false;
+		}
+	}
+
+	async function generateTaskDetails() {
+		const task = taskEditModal;
+		if (!task || task.source !== 'room') {
+			return;
+		}
+		const targetRoomID = contextAware
+			? normalizeRoomIDValue($activeContext.id)
+			: normalizeRoomIDValue(task.roomId || normalizedRoomId);
+		if (!targetRoomID) {
+			taskDetailError = 'Invalid room id';
+			return;
+		}
+
+		taskDetailGenerating = true;
+		taskDetailError = '';
+		taskDetailNotice = '';
+		clearBoardError();
+		try {
+			const response = await fetch(
+				`${API_BASE}/api/rooms/${encodeURIComponent(targetRoomID)}/tasks/${encodeURIComponent(task.id)}/details/generate`,
+				{
+					method: 'POST',
+					headers: withSessionUserHeaders({ 'Content-Type': 'application/json' }),
+					credentials: 'include',
+					body: JSON.stringify({
+						description: taskEditVals.description.trim(),
+						notes: taskEditVals.notes.trim()
+					})
+				}
+			);
+			if (!response.ok) {
+				throw new Error(await parseErrorMessage(response));
+			}
+			const payload = await response.json().catch(() => null);
+			const updatedTask = applyTaskResponseToBoard(task, payload, 'Generated detailed task steps');
+			syncTaskModalFromTask(updatedTask, { preserveCoreValues: true });
+			taskDetailNotice = 'Generated and stored detailed steps for the team.';
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : 'Failed to generate detailed task steps';
+			taskDetailError = message;
+			setBoardError(message);
+		} finally {
+			taskDetailGenerating = false;
+		}
+	}
+
+	function handleTaskRowClick(task: DisplayTask, isEditMode: boolean) {
+		if (isEditMode) {
+			toggleTaskSelection(task.id);
+			return;
+		}
+		openTaskDetails(task);
 	}
 
 	async function updateContextRoomTaskField(
@@ -3643,7 +4099,7 @@
 		commitSprintComposerTaskEdit();
 		const normalizedSprintName = sprintComposerName.trim();
 		if (!normalizedSprintName) {
-			setBoardError('Sprint name is required');
+			setBoardError(`${groupTerm} name is required`);
 			await tick();
 			sprintComposerNameInput?.focus();
 			return;
@@ -3684,7 +4140,7 @@
 			sprintComposerActiveTaskIndex = -1;
 			sprintComposerRowMeta = {};
 		} catch (error) {
-			setBoardError(error instanceof Error ? error.message : 'Failed to create sprint');
+			setBoardError(error instanceof Error ? error.message : `Failed to create ${groupLabel}`);
 		} finally {
 			sprintComposerSaving = false;
 		}
@@ -3790,7 +4246,7 @@
 						type="search"
 						class="btb-search-input"
 						bind:value={taskSearchQuery}
-						placeholder="Search sprint, task, assignee, status…"
+						placeholder={`Search ${groupLabel}, ${taskLabel}, assignee, status…`}
 						autocomplete="off"
 						autofocus
 					/>
@@ -3807,7 +4263,9 @@
 				<div class="btb-title">
 					<h2>{boardTitle}</h2>
 					<div class="btb-meta">
-						<span class="btb-count">{boardTasks.length} task{boardTasks.length === 1 ? '' : 's'}</span>
+						<span class="btb-count">
+							{boardTasks.length} {boardTasks.length === 1 ? taskLabel : taskPluralLabel}
+						</span>
 						{#if boardLastUpdatedAt > 0}
 							<span class="btb-sep" aria-hidden="true">·</span>
 							<span class="btb-updated">{formatCellTime(boardLastUpdatedAt)}</span>
@@ -3821,8 +4279,8 @@
 							class="btb-icon-btn"
 							class:is-active={hasActiveTaskSearch}
 							on:click={() => (searchExpanded = true)}
-							aria-label="Search tasks"
-							title="Search tasks"
+							aria-label={`Search ${taskPluralLabel}`}
+							title={`Search ${taskPluralLabel}`}
 						>
 							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z"/></svg>
 						</button>
@@ -3835,7 +4293,7 @@
 							disabled={!canEdit || !canCreateSprintTask || sprintComposerSaving}
 						>
 							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-							<span>Add Sprint</span>
+							<span>Add {groupTerm}</span>
 						</button>
 					{:else if canEdit}
 						<button
@@ -3845,7 +4303,7 @@
 							disabled={sprintComposerSaving}
 						>
 							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/></svg>
-							<span>Request Sprint</span>
+							<span>Request {groupTerm}</span>
 						</button>
 					{/if}
 				</div>
@@ -3854,27 +4312,27 @@
 	{/if}
 
 	{#if (boardView === 'table' || boardView === 'kanban') && sprintComposerOpen}
-		<section class="sprint-composer" aria-label="Create sprint">
+		<section class="sprint-composer" aria-label={`Create ${groupLabel}`}>
 			{#if sprintComposerOpen}
 				<form
 					class="sprint-composer-form"
 					on:submit|preventDefault={() => void submitSprintComposer()}
 				>
 					<label class="sprint-composer-field">
-						<span>Sprint name</span>
+						<span>{groupTerm} name</span>
 						<input
 							bind:this={sprintComposerNameInput}
 							type="text"
 							bind:value={sprintComposerName}
-							placeholder="Sprint 5 - Stabilization"
+							placeholder={`${groupTerm} 5 - Planning`}
 							autocomplete="off"
 							disabled={sprintComposerSaving}
 							maxlength="160"
 						/>
 					</label>
-					<section class="sprint-preview-grid" aria-label="Sprint task preview">
+					<section class="sprint-preview-grid" aria-label={`${groupTerm} ${taskPluralLabel} preview`}>
 						<div class="sprint-preview-head">
-							<span>Task</span>
+							<span>{taskTerm}</span>
 							<span>Status</span>
 							<span>Assignee</span>
 							<span>Budget</span>
@@ -3893,7 +4351,7 @@
 												bind:value={sprintComposerTaskInputValue}
 												on:keydown={onSprintComposerTaskInputKeydown}
 												on:blur={commitSprintComposerTaskEdit}
-												placeholder="Task title..."
+												placeholder={`${taskTerm} title...`}
 												autocomplete="off"
 												maxlength="220"
 											/>
@@ -3905,7 +4363,7 @@
 												on:click={() => void startSprintComposerTaskEdit(previewRow.index)}
 												disabled={sprintComposerSaving || !canCreateSprintTask}
 											>
-												{previewRow.title || 'Click any cell in this row to add task'}
+												{previewRow.title || `Click any cell in this row to add ${taskLabel}`}
 											</button>
 										{/if}
 									</div>
@@ -3976,19 +4434,23 @@
 							disabled={sprintComposerSaving || !canCreateSprintTask || parseSprintComposerTasks(sprintComposerTaskDrafts).length >= SPRINT_COMPOSER_MAX_TASKS}
 						>
 							<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
-							Add task
+							Add {taskLabel}
 						</button>
 						<div class="spc-actions-right">
 							<button type="button" class="sprint-composer-cancel" on:click={closeSprintComposer}>
 								Cancel
 							</button>
 							<button
-								type="submit"
-								class="sprint-composer-submit"
-								disabled={sprintComposerSaving || !sprintComposerName.trim()}
-							>
-								{sprintComposerSaving ? 'Submitting…' : isAdmin ? 'Create sprint' : 'Request Add Sprint'}
-							</button>
+							type="submit"
+							class="sprint-composer-submit"
+							disabled={sprintComposerSaving || !sprintComposerName.trim()}
+						>
+							{sprintComposerSaving
+								? 'Submitting…'
+								: isAdmin
+									? `Create ${groupLabel}`
+									: `Request ${groupTerm}`}
+						</button>
 						</div>
 					</div>
 				</form>
@@ -4242,17 +4704,17 @@
 
 	<div class="board-content-slot">
 		{#if boardLoading}
-			<div class="board-state">Loading tasks...</div>
+			<div class="board-state">Loading {taskPluralLabel}...</div>
 		{:else if boardError}
-			<div class="board-state error">Unable to load tasks: {boardError}</div>
+			<div class="board-state error">Unable to load {taskPluralLabel}: {boardError}</div>
 		{:else if !hasBoardDataForView}
 			<div class="board-state">
 				{#if boardView === 'table' && hasActiveTaskSearch}
-					No tasks matched "{taskSearchQuery.trim()}".
+					No {taskPluralLabel} matched "{taskSearchQuery.trim()}".
 				{:else if contextAware}
-					No tasks yet. Use + Add Sprint to start planning.
+					No {taskPluralLabel} yet. Use + Add {groupTerm} to start planning.
 				{:else}
-					No tasks yet. Add one to start planning.
+					No {taskPluralLabel} yet. Add one to start planning.
 				{/if}
 			</div>
 		{:else if boardView === 'calendar'}
@@ -4275,7 +4737,7 @@
 					<header class="support-composer-head">
 						<div>
 							<h3>Support Tickets</h3>
-							<p>Current sprint: {supportCurrentSprintName}</p>
+							<p>Current {groupLabel}: {formatSprintDisplayName(supportCurrentSprintName)}</p>
 						</div>
 						<span>{supportTicketCards.length} tickets</span>
 					</header>
@@ -4315,11 +4777,11 @@
 					<div class="support-pickers">
 						<div class="support-picker">
 							<div class="support-picker-head">
-								<h4>Choose task(s)</h4>
+								<h4>Choose {taskLabel}(s)</h4>
 								<span>{selectedSupportTaskIds.length} selected</span>
 							</div>
 							{#if supportSourceTasksForSprint.length === 0}
-								<div class="support-empty-inline">No tasks in {supportCurrentSprintName}.</div>
+								<div class="support-empty-inline">No {taskPluralLabel} in {formatSprintDisplayName(supportCurrentSprintName)}.</div>
 							{:else}
 								<div class="support-task-list">
 									{#each supportSourceTasksForSprint as sourceTask (sourceTask.id)}
@@ -4393,11 +4855,11 @@
 
 				<section class="support-ticket-board">
 					<header class="support-ticket-head">
-						<h3>Tickets in {supportCurrentSprintName}</h3>
+						<h3>Tickets in {formatSprintDisplayName(supportCurrentSprintName)}</h3>
 						<span>{supportTicketCards.length}</span>
 					</header>
 					{#if supportTicketCards.length === 0}
-						<div class="support-empty">No support tickets yet for this sprint.</div>
+						<div class="support-empty">No support tickets yet for this {groupLabel}.</div>
 					{:else}
 						<div class="support-card-grid">
 							{#each supportTicketCards as supportCard (supportCard.task.id)}
@@ -4442,7 +4904,7 @@
 											{/if}
 										</div>
 										<span class="support-sprint-chip"
-											>{supportCard.task.sprintName.trim() || 'Backlog'}</span
+											>{formatSprintDisplayName(supportCard.task.sprintName)}</span
 										>
 									</div>
 								</article>
@@ -4463,7 +4925,7 @@
 						</header>
 						<div class="kanban-column-body" role="list" aria-label={`${column.label} tasks`}>
 							{#if column.tasks.length === 0}
-								<div class="kanban-empty">No tasks</div>
+								<div class="kanban-empty">No {taskPluralLabel}</div>
 							{:else}
 								{#each column.tasks as task (task.id)}
 									<article class="kanban-card" role="listitem">
@@ -4471,8 +4933,8 @@
 											<button
 												type="button"
 												class="kanban-card-title"
-												on:click|stopPropagation={() => void startEditing(task, 'title')}
-												on:dblclick|stopPropagation={() => void startEditing(task, 'title')}
+												on:click|stopPropagation={() => openTaskDetails(task)}
+												on:dblclick|stopPropagation={() => openTaskDetails(task)}
 											>
 												{task.title}
 											</button>
@@ -4591,7 +5053,7 @@
 										{/if}
 
 										<footer class="kanban-card-footer">
-											<span>{task.sprintName.trim() || 'Backlog'}</span>
+											<span>{formatSprintDisplayName(task.sprintName)}</span>
 											<time datetime={new Date(task.updatedAt).toISOString()}>
 												{formatCellTime(task.updatedAt)}
 											</time>
@@ -4604,20 +5066,20 @@
 				{/each}
 			</div>
 		{:else}
-			<div class="sprint-groups" role="list" aria-label="Sprint task groups">
+			<div class="sprint-groups" role="list" aria-label={`${groupTermPlural} ${taskTermPlural}`}>
 				{#each sprintTaskGroups as sprintGroup (sprintGroup.key)}
 					{@const selCount = sprintSelectedCount(sprintGroup)}
 					{@const isEditMode = sprintEditKeys.has(sprintGroup.key)}
 					<section
 						class="sprint-group"
 						role="listitem"
-						aria-label={`${sprintGroup.name} task grid`}
+						aria-label={`${formatSprintDisplayName(sprintGroup.name)} ${taskLabel} grid`}
 					>
 						<header class="sprint-group-header">
 							<div class="sgh-left">
-								<h3>{sprintGroup.name}</h3>
+								<h3>{formatSprintDisplayName(sprintGroup.name)}</h3>
 								<p>
-									{sprintGroup.tasks.length} tasks · {formatCellTime(sprintGroup.lastUpdatedAt)}
+									{sprintGroup.tasks.length} {sprintGroup.tasks.length === 1 ? taskLabel : taskPluralLabel} · {formatCellTime(sprintGroup.lastUpdatedAt)}
 								</p>
 							</div>
 							<div class="sgh-actions">
@@ -4673,7 +5135,7 @@
 						</header>
 
 						<div class="grid-shell">
-							<table class="task-grid" role="grid" aria-label={`${sprintGroup.name} tasks`}>
+							<table class="task-grid" role="grid" aria-label={`${formatSprintDisplayName(sprintGroup.name)} ${taskPluralLabel}`}>
 								<thead>
 									<tr>
 										{#if isEditMode}
@@ -4683,7 +5145,7 @@
 													checked={isSprintAllSelected(sprintGroup)}
 													indeterminate={selCount > 0 && !isSprintAllSelected(sprintGroup)}
 													on:change={() => toggleSprintSelection(sprintGroup)}
-													aria-label="Select all in sprint"
+													aria-label={`Select all in ${groupLabel}`}
 												/>
 											</th>
 										{/if}
@@ -4693,9 +5155,9 @@
 												class="th-sort-btn"
 												class:is-active={sprintSortDirection(sprintGroup.key, 'title') !== ''}
 												on:click={() => toggleSprintSort(sprintGroup.key, 'title')}
-												aria-label={`Sort ${sprintGroup.name} by task name`}
+												aria-label={`Sort ${formatSprintDisplayName(sprintGroup.name)} by ${taskLabel} name`}
 											>
-												<span>Task</span>
+												<span>{taskTerm}</span>
 												<span class="th-sort-icon" aria-hidden="true"
 													>{sprintSortIcon(sprintGroup.key, 'title')}</span
 												>
@@ -4707,7 +5169,7 @@
 												class="th-sort-btn"
 												class:is-active={sprintSortDirection(sprintGroup.key, 'status') !== ''}
 												on:click={() => toggleSprintSort(sprintGroup.key, 'status')}
-												aria-label={`Sort ${sprintGroup.name} by status`}
+												aria-label={`Sort ${formatSprintDisplayName(sprintGroup.name)} by status`}
 											>
 												<span>Status</span>
 												<span class="th-sort-icon" aria-hidden="true"
@@ -4721,7 +5183,7 @@
 												class="th-sort-btn"
 												class:is-active={sprintSortDirection(sprintGroup.key, 'owner') !== ''}
 												on:click={() => toggleSprintSort(sprintGroup.key, 'owner')}
-												aria-label={`Sort ${sprintGroup.name} by assignee`}
+												aria-label={`Sort ${formatSprintDisplayName(sprintGroup.name)} by assignee`}
 											>
 												<span>Assignee</span>
 												<span class="th-sort-icon" aria-hidden="true"
@@ -4735,7 +5197,7 @@
 												class="th-sort-btn"
 												class:is-active={sprintSortDirection(sprintGroup.key, 'budget') !== ''}
 												on:click={() => toggleSprintSort(sprintGroup.key, 'budget')}
-												aria-label={`Sort ${sprintGroup.name} by budget`}
+												aria-label={`Sort ${formatSprintDisplayName(sprintGroup.name)} by budget`}
 											>
 												<span>Budget</span>
 												<span class="th-sort-icon" aria-hidden="true"
@@ -4749,7 +5211,7 @@
 												class="th-sort-btn"
 												class:is-active={sprintSortDirection(sprintGroup.key, 'spent') !== ''}
 												on:click={() => toggleSprintSort(sprintGroup.key, 'spent')}
-												aria-label={`Sort ${sprintGroup.name} by spent`}
+												aria-label={`Sort ${formatSprintDisplayName(sprintGroup.name)} by spent`}
 											>
 												<span>Cost</span>
 												<span class="th-sort-icon" aria-hidden="true"
@@ -4765,7 +5227,7 @@
 												class="th-sort-btn"
 												class:is-active={sprintSortDirection(sprintGroup.key, 'updated') !== ''}
 												on:click={() => toggleSprintSort(sprintGroup.key, 'updated')}
-												aria-label={`Sort ${sprintGroup.name} by updated time`}
+												aria-label={`Sort ${formatSprintDisplayName(sprintGroup.name)} by updated time`}
 											>
 												<span>Updated</span>
 												<span class="th-sort-icon" aria-hidden="true"
@@ -4779,7 +5241,7 @@
 									{#if sprintGroup.tasks.length === 0}
 										<tr>
 											<td class="cell empty-sprint-row" colspan={isEditMode ? 10 : 9}>
-												No tasks in this sprint yet. Use + Add row or + Add Sprint.
+												No {taskPluralLabel} in this {groupLabel} yet. Use + Add row or + Add {groupTerm}.
 											</td>
 										</tr>
 									{:else}
@@ -4797,7 +5259,7 @@
 												on:mouseleave={() => {
 													hoveredTaskId = '';
 												}}
-												on:click={() => openTaskModal(task)}
+												on:click={() => handleTaskRowClick(task, isEditMode)}
 											>
 												<!-- Checkbox -->
 												{#if isEditMode}
@@ -4927,6 +5389,88 @@
 												<tr class="edit-expand-row">
 													<td class="edit-expand-cell" colspan={isEditMode ? 10 : 9}>
 														<div class="edit-expand-inner">
+															<div class="task-detail-section">
+																<div class="task-detail-copy">
+																	<div class="eef eef-full">
+																		<label class="eef-label" for="eef-description-{task.id}"
+																			>Description</label
+																		>
+																		<textarea
+																			id="eef-description-{task.id}"
+																			class="eef-input eef-textarea"
+																			rows="4"
+																			bind:value={taskEditVals.description}
+																			placeholder="Add a short description so someone opening this task knows the goal."
+																			disabled={!canEdit}
+																		></textarea>
+																	</div>
+																	<div class="eef eef-full">
+																		<label class="eef-label" for="eef-notes-{task.id}">Notes</label>
+																		<textarea
+																			id="eef-notes-{task.id}"
+																			class="eef-input eef-textarea"
+																			rows="3"
+																			bind:value={taskEditVals.notes}
+																			placeholder="Shared notes, links, or context for the team."
+																			disabled={!canEdit}
+																		></textarea>
+																	</div>
+																	<div class="task-detail-actions">
+																		<button
+																			type="button"
+																			class="eef-save"
+																			on:click={() => void saveTaskDetails()}
+																			disabled={!canEdit || taskDetailSaving || taskDetailGenerating}
+																		>
+																			{taskDetailSaving ? 'Saving details…' : 'Save details'}
+																		</button>
+																		<button
+																			type="button"
+																			class="eef-secondary"
+																			on:click={() => void generateTaskDetails()}
+																			disabled={task.source !== 'room' || !canEdit || taskDetailGenerating}
+																		>
+																			{taskDetailGenerating
+																				? 'Generating steps…'
+																				: hasGeneratedTaskDetails(task)
+																					? 'Regenerate detailed steps'
+																					: 'Generate detailed steps'}
+																		</button>
+																	</div>
+																	{#if taskDetailNotice}
+																		<p class="task-detail-notice">{taskDetailNotice}</p>
+																	{/if}
+																	{#if taskDetailError}
+																		<p class="task-detail-error">{taskDetailError}</p>
+																	{/if}
+																</div>
+																<div class="task-detail-guide">
+																	<div class="task-detail-guide-head">
+																		<h4>Detailed guide</h4>
+																		{#if taskDetailGeneratedAt}
+																			<span
+																				>Updated {formatTaskDetailGeneratedAt(
+																					taskDetailGeneratedAt
+																				)}</span
+																			>
+																		{/if}
+																	</div>
+																	{#if taskDetailSummary}
+																		<p class="task-detail-summary">{taskDetailSummary}</p>
+																	{:else}
+																		<p class="task-detail-empty">
+																			Keep the description short here, then generate a fuller guide only when someone needs it.
+																		</p>
+																	{/if}
+																	{#if taskDetailSteps.length > 0}
+																		<ol class="task-detail-steps">
+																			{#each taskDetailSteps as step, stepIndex (`${task.id}-step-${stepIndex}`)}
+																				<li>{step}</li>
+																			{/each}
+																		</ol>
+																	{/if}
+																</div>
+															</div>
 															<div class="edit-expand-fields">
 																<div class="eef eef-wide">
 																	<label class="eef-label" for="eef-title-{task.id}">Title</label>
@@ -5054,7 +5598,7 @@
 								<input
 									type="text"
 									bind:value={sprintAddContent}
-									placeholder="Task name…"
+									placeholder={`${taskTerm} name…`}
 									autocomplete="off"
 									disabled={sprintAddCreating}
 									autofocus
@@ -5820,6 +6364,72 @@
 		gap: 0.6rem;
 	}
 
+	.task-detail-section {
+		display: grid;
+		grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+		gap: 0.75rem;
+		padding: 0.15rem 0 0.2rem;
+	}
+
+	.task-detail-copy,
+	.task-detail-guide {
+		border: 1px solid var(--tb-editor-border);
+		border-radius: 12px;
+		background: color-mix(in srgb, var(--tb-editor-bg) 86%, transparent);
+		padding: 0.78rem 0.85rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.55rem;
+	}
+
+	.task-detail-guide-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.65rem;
+	}
+
+	.task-detail-guide-head h4 {
+		margin: 0;
+		font-size: 0.86rem;
+		color: var(--tb-cell-text);
+	}
+
+	.task-detail-guide-head span,
+	.task-detail-notice,
+	.task-detail-error,
+	.task-detail-empty {
+		font-size: 0.76rem;
+	}
+
+	.task-detail-notice {
+		margin: 0;
+		color: color-mix(in srgb, var(--tb-status-done) 72%, var(--tb-cell-text));
+	}
+
+	.task-detail-error {
+		margin: 0;
+		color: color-mix(in srgb, #b91c1c 72%, var(--tb-cell-text));
+	}
+
+	.task-detail-summary,
+	.task-detail-empty {
+		margin: 0;
+		color: var(--tb-cell-muted);
+		line-height: 1.5;
+	}
+
+	.task-detail-steps {
+		margin: 0;
+		padding-left: 1.1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.38rem;
+		color: var(--tb-cell-text);
+		font-size: 0.8rem;
+		line-height: 1.45;
+	}
+
 	.edit-expand-fields {
 		display: flex;
 		flex-wrap: wrap;
@@ -5836,6 +6446,10 @@
 
 	.eef-wide {
 		flex: 1 1 220px;
+	}
+
+	.eef-full {
+		width: 100%;
 	}
 
 	.eef-label {
@@ -5864,6 +6478,12 @@
 			box-shadow 0.12s;
 	}
 
+	.eef-textarea {
+		min-height: 5.5rem;
+		resize: vertical;
+		line-height: 1.45;
+	}
+
 	.eef-input:focus,
 	.eef-select:focus {
 		border-color: var(--tb-accent-strong);
@@ -5876,6 +6496,12 @@
 
 	.edit-expand-actions {
 		display: flex;
+		gap: 0.45rem;
+	}
+
+	.task-detail-actions {
+		display: flex;
+		flex-wrap: wrap;
 		gap: 0.45rem;
 	}
 
@@ -5895,6 +6521,22 @@
 	}
 	.eef-save:not(:disabled):hover {
 		opacity: 0.82;
+	}
+
+	.eef-secondary {
+		padding: 0.3rem 0.8rem;
+		border-radius: 7px;
+		border: 1px solid var(--tb-editor-border);
+		background: var(--tb-grid-bg);
+		color: var(--tb-cell-text);
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.eef-secondary:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 
 	.eef-cancel {
@@ -7696,6 +8338,10 @@
 
 		.sprint-add-form {
 			flex-wrap: wrap;
+		}
+
+		.task-detail-section {
+			grid-template-columns: minmax(0, 1fr);
 		}
 
 		.task-grid {

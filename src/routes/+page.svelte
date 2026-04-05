@@ -98,6 +98,9 @@
 	let turnstileToken = '';
 	let turnstileResolve: ((token: string) => void) | null = null;
 	let turnstileTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+	let turnstileMode: 'invisible' | 'interactive' = 'invisible';
+	let renderedTurnstileMode: 'invisible' | 'interactive' | '' = '';
+	let turnstileHelperMessage = '';
 
 	type ClientLogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -291,17 +294,27 @@
 		syncRoomActionLockoutTimer();
 	}
 
-	function clearTurnstilePendingState() {
+	function clearTurnstilePendingState(options: { preserveResolve?: boolean } = {}) {
 		if (turnstileTimeoutHandle) {
 			clearTimeout(turnstileTimeoutHandle);
 			turnstileTimeoutHandle = null;
 		}
-		turnstileResolve = null;
+		if (!options.preserveResolve) {
+			turnstileResolve = null;
+		}
 		clientLog('turnstile-clear-pending-state', undefined, 'debug');
+	}
+
+	function armTurnstileTimeout(timeoutMs: number, onTimeout: () => void) {
+		if (turnstileTimeoutHandle) {
+			clearTimeout(turnstileTimeoutHandle);
+		}
+		turnstileTimeoutHandle = setTimeout(onTimeout, timeoutMs);
 	}
 
 	function resetTurnstile() {
 		turnstileToken = '';
+		turnstileHelperMessage = '';
 		clearTurnstilePendingState();
 		const hostWindow = getTurnstileHostWindow();
 		if (turnstileWidgetID && hostWindow.turnstile?.reset) {
@@ -323,8 +336,8 @@
 		}
 	}
 
-	function initializeTurnstileWidget() {
-		if (turnstileWidgetID) {
+	function initializeTurnstileWidget(forceRerender = false) {
+		if (turnstileWidgetID && !forceRerender && renderedTurnstileMode === turnstileMode) {
 			clientLog('turnstile-render-skip-existing-widget', { widgetId: turnstileWidgetID }, 'debug');
 			return true;
 		}
@@ -344,9 +357,15 @@
 		}
 
 		try {
+			if (turnstileWidgetID && hostWindow.turnstile?.remove) {
+				hostWindow.turnstile.remove(turnstileWidgetID);
+				turnstileWidgetID = '';
+				renderedTurnstileMode = '';
+			}
 			turnstileWidgetID = hostWindow.turnstile.render(turnstileContainerElement, {
 				sitekey: TURNSTILE_SITE_KEY,
-				execution: 'execute',
+				execution: turnstileMode === 'interactive' ? 'render' : 'execute',
+				appearance: turnstileMode === 'interactive' ? 'always' : 'execute',
 				callback: (token: string) => {
 					clientLog('turnstile-callback-success', { tokenLength: token?.length ?? 0 }, 'debug');
 					const callbackWindow = getTurnstileHostWindow();
@@ -361,10 +380,15 @@
 						'turnstile-error-callback',
 						{
 							errorCode: errorCode ?? 'unknown',
-							pendingRequest: Boolean(turnstileResolve)
+							pendingRequest: Boolean(turnstileResolve),
+							mode: turnstileMode
 						},
 						'error'
 					);
+					if (turnstileMode === 'interactive') {
+						turnstileHelperMessage =
+							'Verification failed. Please click the Cloudflare checkbox again.';
+					}
 				},
 				'expired-callback': () => {
 					turnstileToken = '';
@@ -386,14 +410,17 @@
 				'turnstile-rendered',
 				{
 					widgetId: turnstileWidgetID,
-					siteKeyLength: TURNSTILE_SITE_KEY.length
+					siteKeyLength: TURNSTILE_SITE_KEY.length,
+					mode: turnstileMode
 				},
 				'info'
 			);
+			renderedTurnstileMode = turnstileMode;
 			return turnstileWidgetID !== '';
 		} catch (error) {
 			clientLog('turnstile-render-error', { error: normalizeErrorForLog(error) }, 'error');
 			turnstileWidgetID = '';
+			renderedTurnstileMode = '';
 			return false;
 		}
 	}
@@ -416,6 +443,15 @@
 		return false;
 	}
 
+	function enableInteractiveTurnstile(message: string) {
+		turnstileMode = 'interactive';
+		turnstileHelperMessage = message;
+		const widgetReady = initializeTurnstileWidget(true);
+		if (!widgetReady) {
+			throw new Error('Security verification is unavailable. Refresh and try again.');
+		}
+	}
+
 	async function requestTurnstileToken() {
 		if (!TURNSTILE_SITE_KEY) {
 			clientLog(
@@ -431,6 +467,22 @@
 		const isReady = await waitForTurnstileAPI();
 		const hostWindow = getTurnstileHostWindow();
 		const isWidgetReady = initializeTurnstileWidget();
+		if (turnstileMode === 'interactive') {
+			if (!isReady || !isWidgetReady) {
+				throw new Error('Security verification is unavailable. Refresh and try again.');
+			}
+			if (turnstileToken) {
+				return turnstileToken;
+			}
+			clearTurnstilePendingState();
+			return await new Promise<string>((resolve, reject) => {
+				turnstileResolve = resolve;
+				armTurnstileTimeout(180000, () => {
+					clearTurnstilePendingState();
+					reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+				});
+			});
+		}
 		if (!isReady || !isWidgetReady || !hostWindow.turnstile?.execute) {
 			clientLog(
 				'turnstile-unavailable',
@@ -442,27 +494,68 @@
 				},
 				'error'
 			);
-			throw new Error('Security verification is unavailable. Refresh and try again.');
+			enableInteractiveTurnstile(
+				'Automatic verification is unavailable. Click the Cloudflare checkbox to continue.'
+			);
+			clearTurnstilePendingState();
+			return await new Promise<string>((resolve, reject) => {
+				turnstileResolve = resolve;
+				armTurnstileTimeout(180000, () => {
+					clearTurnstilePendingState();
+					reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+				});
+			});
 		}
 
 		turnstileToken = '';
+		turnstileHelperMessage = '';
 		clearTurnstilePendingState();
 		clientLog('turnstile-request-token-start', { widgetId: turnstileWidgetID }, 'debug');
 		return await new Promise<string>((resolve, reject) => {
 			turnstileResolve = resolve;
-			turnstileTimeoutHandle = setTimeout(() => {
+			armTurnstileTimeout(TURNSTILE_VERIFY_TIMEOUT_MS, () => {
 				clientLog('turnstile-timeout', { timeoutMs: TURNSTILE_VERIFY_TIMEOUT_MS }, 'error');
-				clearTurnstilePendingState();
-				reject(new Error('Security verification timed out. Please retry.'));
-			}, TURNSTILE_VERIFY_TIMEOUT_MS);
+				clearTurnstilePendingState({ preserveResolve: true });
+				try {
+					enableInteractiveTurnstile(
+						'Automatic verification took too long. Use the Cloudflare checkbox to continue.'
+					);
+					armTurnstileTimeout(180000, () => {
+						clearTurnstilePendingState();
+						reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+					});
+				} catch (error) {
+					clearTurnstilePendingState();
+					reject(
+						error instanceof Error
+							? error
+							: new Error('Security verification timed out. Please retry.')
+					);
+				}
+			});
 			try {
 				hostWindow.turnstile?.reset?.(turnstileWidgetID);
 				hostWindow.turnstile?.execute(turnstileWidgetID);
 				clientLog('turnstile-execute-called', { widgetId: turnstileWidgetID }, 'debug');
 			} catch (error) {
 				clientLog('turnstile-execute-error', { error: normalizeErrorForLog(error) }, 'error');
-				clearTurnstilePendingState();
-				reject(new Error('Failed to run security verification.'));
+				clearTurnstilePendingState({ preserveResolve: true });
+				try {
+					enableInteractiveTurnstile(
+						'Automatic verification could not start. Use the Cloudflare checkbox to continue.'
+					);
+					armTurnstileTimeout(180000, () => {
+						clearTurnstilePendingState();
+						reject(new Error('Please complete the Cloudflare checkbox to continue.'));
+					});
+				} catch (interactiveError) {
+					clearTurnstilePendingState();
+					reject(
+						interactiveError instanceof Error
+							? interactiveError
+							: new Error('Failed to run security verification.')
+					);
+				}
 			}
 		});
 	}
@@ -480,6 +573,7 @@
 		);
 		hostWindow.onTurnstileSuccess = (token: string) => {
 			turnstileToken = (token || '').trim();
+			turnstileHelperMessage = '';
 			clientLog('turnstile-token-received', { tokenLength: turnstileToken.length }, 'debug');
 			if (turnstileToken && turnstileResolve) {
 				turnstileResolve(turnstileToken);
@@ -519,6 +613,7 @@
 				}
 			}
 			turnstileWidgetID = '';
+			renderedTurnstileMode = '';
 			if (previousTurnstileCallback) {
 				cleanupWindow.onTurnstileSuccess = previousTurnstileCallback;
 			} else {
@@ -737,7 +832,7 @@
 					roomPassword: normalizedRoomPassword,
 					username: userToJoin,
 					userId: userIdentity.id,
-					type: 'ephemeral',
+					type: 'persistent',
 					mode,
 					roomDurationHours,
 					turnstileToken: requestTurnstileTokenValue,
@@ -875,7 +970,7 @@
 						<input
 							id="room-name-input"
 							type="text"
-							placeholder="e.g. Product Sprint"
+							placeholder="e.g. Product Launch"
 							bind:value={roomName}
 							bind:this={roomNameInputElement}
 							maxlength={ROOM_NAME_MAX_LENGTH}
@@ -1014,11 +1109,20 @@
 				{/if}
 
 				{#if TURNSTILE_SITE_KEY}
-					<div
-						class="turnstile-widget-slot"
-						bind:this={turnstileContainerElement}
-						aria-hidden="true"
-					></div>
+					<div class="turnstile-shell" class:is-visible={turnstileMode === 'interactive'}>
+						<div
+							class="turnstile-widget-slot"
+							class:is-visible={turnstileMode === 'interactive'}
+							bind:this={turnstileContainerElement}
+							aria-hidden={turnstileMode !== 'interactive'}
+						></div>
+						{#if turnstileMode === 'interactive'}
+							<p class="turnstile-helper" role="status" aria-live="polite">
+								{turnstileHelperMessage ||
+									'Click the Cloudflare checkbox once to verify and continue.'}
+							</p>
+						{/if}
+					</div>
 				{/if}
 
 				<div class="ai-entry-note" role="note">
@@ -1242,6 +1346,13 @@
 		gap: 12px;
 	}
 
+	.turnstile-shell {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 8px;
+	}
+
 	.turnstile-widget-slot {
 		position: absolute;
 		width: 0;
@@ -1249,6 +1360,24 @@
 		overflow: hidden;
 		opacity: 0;
 		pointer-events: none;
+	}
+
+	.turnstile-widget-slot.is-visible {
+		position: static;
+		width: auto;
+		height: auto;
+		overflow: visible;
+		opacity: 1;
+		pointer-events: auto;
+	}
+
+	.turnstile-helper {
+		margin: 0;
+		font-size: 0.78rem;
+		line-height: 1.4;
+		color: var(--text-secondary);
+		text-align: center;
+		max-width: 320px;
 	}
 
 	.advanced-toggle {

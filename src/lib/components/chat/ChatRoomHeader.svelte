@@ -19,6 +19,13 @@
 	export let hasMinimizedCall = false;
 	export let minimizedCallLabel = '00:00';
 	export let minimizedCallType: 'audio' | 'video' = 'audio';
+	export let showCallControls = true;
+	export let showWorkspaceControls = true;
+	export let showDashboardWorkspaceAction = true;
+	export let showBoardWorkspaceAction = true;
+	export let showTaskWorkspaceAction = true;
+	export let showCanvasWorkspaceAction = true;
+	export let showBreakSelectionAction = true;
 
 	const dispatch = createEventDispatcher<{
 		showMobileList: void;
@@ -46,9 +53,9 @@
 
 	let showRoomMenu = false;
 	let showCallMenu = false;
-	let showWorkspaceMenu = false;
+	let isWorkspaceMenuOpen = false;
 	let headerActionsEl: HTMLDivElement | null = null;
-	$: if (hasMinimizedCall && showCallMenu) {
+	$: if ((!showCallControls || hasMinimizedCall) && showCallMenu) {
 		showCallMenu = false;
 	}
 
@@ -71,7 +78,7 @@
 	function closeAllMenus() {
 		showRoomMenu = false;
 		showCallMenu = false;
-		showWorkspaceMenu = false;
+		isWorkspaceMenuOpen = false;
 	}
 
 	function closeMenuThen(
@@ -94,13 +101,19 @@
 	}
 
 	function toggleCallMenu() {
+		if (!showCallControls) {
+			return;
+		}
 		showCallMenu = !showCallMenu;
-		showWorkspaceMenu = false;
+		isWorkspaceMenuOpen = false;
 		showRoomMenu = false;
 	}
 
 	function toggleWorkspaceMenu() {
-		showWorkspaceMenu = !showWorkspaceMenu;
+		if (!showWorkspaceControls) {
+			return;
+		}
+		isWorkspaceMenuOpen = !isWorkspaceMenuOpen;
 		showCallMenu = false;
 		showRoomMenu = false;
 	}
@@ -108,7 +121,7 @@
 	function toggleRoomMenu() {
 		showRoomMenu = !showRoomMenu;
 		showCallMenu = false;
-		showWorkspaceMenu = false;
+		isWorkspaceMenuOpen = false;
 	}
 
 	function startCall(type: 'audio' | 'video') {
@@ -117,7 +130,7 @@
 	}
 
 	function toggleWorkspace(target: 'dashboard' | 'board' | 'tasks' | 'canvas') {
-		showWorkspaceMenu = false;
+		isWorkspaceMenuOpen = false;
 		if (target === 'dashboard') {
 			dispatch('toggleDashboardView');
 			return;
@@ -170,154 +183,166 @@
 	</button>
 
 	<div class="header-actions" bind:this={headerActionsEl}>
-		<div class="header-menu-wrapper">
-			{#if hasMinimizedCall}
-				<button
-					type="button"
-					class="call-minimized-chip"
-					on:click|stopPropagation={restoreMinimizedCall}
-					title="Open active call"
-					aria-label="Open active call"
-				>
-					<svg class="call-minimized-icon" viewBox="0 0 24 24" aria-hidden="true">
-						{#if minimizedCallType === 'video'}
-							<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
-							<path d="M15.5 10 21 7v10l-5.5-3"></path>
-						{:else}
-							<path d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z" />
-							<path d="M6.5 10.8a5.5 5.5 0 0 0 11 0M12 16.3V20M9.3 20h5.4" />
-						{/if}
-					</svg>
-					<span class="call-minimized-time">{minimizedCallLabel}</span>
-				</button>
-			{:else}
+		{#if showCallControls}
+			<div class="header-menu-wrapper">
+				{#if hasMinimizedCall}
+					<button
+						type="button"
+						class="call-minimized-chip"
+						on:click|stopPropagation={restoreMinimizedCall}
+						title="Open active call"
+						aria-label="Open active call"
+					>
+						<svg class="call-minimized-icon" viewBox="0 0 24 24" aria-hidden="true">
+							{#if minimizedCallType === 'video'}
+								<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
+								<path d="M15.5 10 21 7v10l-5.5-3"></path>
+							{:else}
+								<path d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z" />
+								<path d="M6.5 10.8a5.5 5.5 0 0 0 11 0M12 16.3V20M9.3 20h5.4" />
+							{/if}
+						</svg>
+						<span class="call-minimized-time">{minimizedCallLabel}</span>
+					</button>
+				{:else}
+					<button
+						type="button"
+						class="icon-button menu-trigger"
+						on:click|stopPropagation={toggleCallMenu}
+						title=""
+						aria-label="Call options"
+						aria-expanded={showCallMenu}
+					>
+						<svg class="menu-trigger-icon" viewBox="0 0 24 24" aria-hidden="true">
+							<path
+								d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
+							/>
+							<path d="m16.5 4.2 1.3 1.3m-2.8.2 3.6 3.6" />
+						</svg>
+
+					</button>
+					{#if showCallMenu}
+						<div class="header-dropdown call-dropdown" role="menu" aria-label="Call options">
+							<button
+								type="button"
+								class="dropdown-option call-dropdown-option"
+								role="menuitem"
+								on:click={() => startCall('audio')}
+								aria-label="Start voice call"
+							>
+								<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+									<path d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z" />
+									<path d="M6.5 10.8a5.5 5.5 0 0 0 11 0M12 16.3V20M9.3 20h5.4" />
+								</svg>
+								<span class="call-dropdown-option-label">Voice call</span>
+							</button>
+							<button
+								type="button"
+								class="dropdown-option call-dropdown-option"
+								role="menuitem"
+								on:click={() => startCall('video')}
+								aria-label="Start video call"
+							>
+								<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+									<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
+									<path d="M15.5 10 21 7v10l-5.5-3"></path>
+								</svg>
+								<span class="call-dropdown-option-label">Video call</span>
+							</button>
+						</div>
+					{/if}
+				{/if}
+			</div>
+		{/if}
+		{#if showWorkspaceControls}
+			<div class="header-menu-wrapper">
 				<button
 					type="button"
 					class="icon-button menu-trigger"
-					on:click|stopPropagation={toggleCallMenu}
+					on:click|stopPropagation={toggleWorkspaceMenu}
 					title=""
-					aria-label="Call options"
-					aria-expanded={showCallMenu}
+					aria-label="Workspace options"
+					aria-expanded={isWorkspaceMenuOpen}
 				>
 					<svg class="menu-trigger-icon" viewBox="0 0 24 24" aria-hidden="true">
-						<path
-							d="M6.6 10.8c1.6 3.1 3.9 5.5 7 7l2.3-2.3a1 1 0 0 1 1.1-.24c1.2.4 2.5.6 3.8.6a1 1 0 0 1 1 1V21a1 1 0 0 1-1 1C11 22 2 13 2 2a1 1 0 0 1 1-1h4.1a1 1 0 0 1 1 1c0 1.3.2 2.6.6 3.8a1 1 0 0 1-.24 1.1L6.6 10.8Z"
-						/>
-						<path d="m16.5 4.2 1.3 1.3m-2.8.2 3.6 3.6" />
+						<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
+						<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
 					</svg>
-
 				</button>
-				{#if showCallMenu}
-					<div class="header-dropdown call-dropdown" role="menu" aria-label="Call options">
-						<button
-							type="button"
-							class="dropdown-option call-dropdown-option"
-							role="menuitem"
-							on:click={() => startCall('audio')}
-							aria-label="Start voice call"
-						>
-							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M12 14.5a3.2 3.2 0 0 0 3.2-3.2V7.2A3.2 3.2 0 0 0 12 4a3.2 3.2 0 0 0-3.2 3.2v4.1a3.2 3.2 0 0 0 3.2 3.2Z" />
-								<path d="M6.5 10.8a5.5 5.5 0 0 0 11 0M12 16.3V20M9.3 20h5.4" />
-							</svg>
-							<span class="call-dropdown-option-label">Voice call</span>
-						</button>
-						<button
-							type="button"
-							class="dropdown-option call-dropdown-option"
-							role="menuitem"
-							on:click={() => startCall('video')}
-							aria-label="Start video call"
-						>
-							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
-								<rect x="3.5" y="6.5" width="12" height="11" rx="2"></rect>
-								<path d="M15.5 10 21 7v10l-5.5-3"></path>
-							</svg>
-							<span class="call-dropdown-option-label">Video call</span>
-						</button>
+				{#if isWorkspaceMenuOpen}
+					<div class="header-dropdown" role="menu" aria-label="Workspace options">
+						{#if showDashboardWorkspaceAction}
+							<button
+								type="button"
+								class="dropdown-option"
+								class:active={isDashboardView}
+								role="menuitem"
+								on:click={() => toggleWorkspace('dashboard')}
+							>
+								<span class="dropdown-option-content">
+									<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M4.5 4.5h6.75v6.75H4.5zM12.75 4.5h6.75V9h-6.75zM12.75 10.5h6.75v9h-6.75zM4.5 12.75h6.75v6.75H4.5z" />
+									</svg>
+									<span>{isDashboardView ? 'Close dashboard' : 'Open dashboard'}</span>
+								</span>
+							</button>
+						{/if}
+						{#if showBoardWorkspaceAction}
+							<button
+								type="button"
+								class="dropdown-option"
+								class:active={isBoardView}
+								role="menuitem"
+								on:click={() => toggleWorkspace('board')}
+							>
+								<span class="dropdown-option-content">
+									<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+										<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
+										<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
+									</svg>
+									<span>{isBoardView ? 'Close draw board' : 'Open draw board'}</span>
+								</span>
+							</button>
+						{/if}
+						{#if showTaskWorkspaceAction}
+							<button
+								type="button"
+								class="dropdown-option"
+								class:active={isTaskBoardView}
+								role="menuitem"
+								on:click={() => toggleWorkspace('tasks')}
+							>
+								<span class="dropdown-option-content">
+									<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+										<path d="M8 7h11M8 12h11M8 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01" />
+									</svg>
+									<span>{isTaskBoardView ? 'Close Project' : 'Open Project'}</span>
+								</span>
+							</button>
+						{/if}
+						{#if showCanvasWorkspaceAction}
+							<button
+								type="button"
+								class="dropdown-option"
+								class:active={isCanvasOpen}
+								role="menuitem"
+								on:click={() => toggleWorkspace('canvas')}
+							>
+								<span class="dropdown-option-content">
+									<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
+										<path
+											d="M5.5 6.5h13a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-4.5L9 21v-3.5H5.5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"
+										/>
+										<path d="M8.5 10.5h7M8.5 14h4.5" />
+									</svg>
+									<span>{isCanvasOpen ? 'Close canvas' : 'Open canvas'}</span>
+								</span>
+							</button>
+						{/if}
 					</div>
 				{/if}
-			{/if}
-		</div>
-		<div class="header-menu-wrapper">
-			<button
-				type="button"
-				class="icon-button menu-trigger"
-				on:click|stopPropagation={toggleWorkspaceMenu}
-				title=""
-				aria-label="Workspace options"
-				aria-expanded={showWorkspaceMenu}
-			>
-				<svg class="menu-trigger-icon" viewBox="0 0 24 24" aria-hidden="true">
-					<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
-					<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
-				</svg>
-			</button>
-			{#if showWorkspaceMenu}
-				<div class="header-dropdown" role="menu" aria-label="Workspace options">
-					<button
-						type="button"
-						class="dropdown-option"
-						class:active={isDashboardView}
-						role="menuitem"
-						on:click={() => toggleWorkspace('dashboard')}
-					>
-						<span class="dropdown-option-content">
-							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M4.5 4.5h6.75v6.75H4.5zM12.75 4.5h6.75V9h-6.75zM12.75 10.5h6.75v9h-6.75zM4.5 12.75h6.75v6.75H4.5z" />
-							</svg>
-							<span>{isDashboardView ? 'Close dashboard' : 'Open dashboard'}</span>
-						</span>
-					</button>
-					<button
-						type="button"
-						class="dropdown-option"
-						class:active={isBoardView}
-						role="menuitem"
-						on:click={() => toggleWorkspace('board')}
-					>
-						<span class="dropdown-option-content">
-							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
-								<rect x="4.5" y="4.5" width="15" height="15" rx="2" ry="2" fill="none" />
-								<path d="M9.5 4.5v15M14.5 4.5v15M4.5 9.5h15M4.5 14.5h15" />
-							</svg>
-							<span>{isBoardView ? 'Close draw board' : 'Open draw board'}</span>
-						</span>
-					</button>
-					<button
-						type="button"
-						class="dropdown-option"
-						class:active={isTaskBoardView}
-						role="menuitem"
-						on:click={() => toggleWorkspace('tasks')}
-					>
-						<span class="dropdown-option-content">
-							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
-								<path d="M8 7h11M8 12h11M8 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01" />
-							</svg>
-							<span>{isTaskBoardView ? 'Close Project' : 'Open Project'}</span>
-						</span>
-					</button>
-					<button
-						type="button"
-						class="dropdown-option"
-						class:active={isCanvasOpen}
-						role="menuitem"
-						on:click={() => toggleWorkspace('canvas')}
-					>
-						<span class="dropdown-option-content">
-							<svg class="dropdown-option-icon" viewBox="0 0 24 24" aria-hidden="true">
-								<path
-									d="M5.5 6.5h13a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-4.5L9 21v-3.5H5.5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"
-								/>
-								<path d="M8.5 10.5h7M8.5 14h4.5" />
-							</svg>
-							<span>{isCanvasOpen ? 'Close canvas' : 'Open canvas'}</span>
-						</span>
-					</button>
-				</div>
-			{/if}
-		</div>
+			</div>
+		{/if}
 		<button
 			type="button"
 			class="expiry-pill"
@@ -341,12 +366,14 @@
 					{showRoomSearch ? 'Hide search' : 'Search messages'}
 				</button>
 				
-				<button
-					type="button"
-					on:click|stopPropagation={() => closeMenuThen('toggleBreakSelectionMode')}
-				>
-					{messageActionMode === 'break' ? 'Cancel Break Mode' : 'Branch / Break'}
-				</button>
+				{#if showBreakSelectionAction}
+					<button
+						type="button"
+						on:click|stopPropagation={() => closeMenuThen('toggleBreakSelectionMode')}
+					>
+						{messageActionMode === 'break' ? 'Cancel Break Mode' : 'Branch / Break'}
+					</button>
+				{/if}
 				<button
 					type="button"
 					on:click|stopPropagation={() => closeMenuThen('toggleDiscussionSelectionMode')}

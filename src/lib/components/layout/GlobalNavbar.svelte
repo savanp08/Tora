@@ -4,7 +4,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { fade, scale } from 'svelte/transition';
 	import toraLogo from '$lib/assets/tora-logo.svg';
-	import { authState, logout } from '$lib/stores/auth';
+	import { authState, logout, sessionTier } from '$lib/stores/auth';
 	import { isDarkMode } from '$lib/store';
 
 	export let isHighContrast = false;
@@ -583,6 +583,7 @@
 			<div class="mobile-auth-section">
 				{#if !$authState.isAuthenticated}
 					<button type="button" class="mobile-auth-button" on:click={handleDesktopLogin}>Login</button>
+					<span class="user-tier-badge tier-{$sessionTier}">{$sessionTier.toUpperCase()}</span>
 				{:else}
 					<div class="mobile-user-summary">
 						<div class="mobile-avatar">
@@ -597,6 +598,7 @@
 							{#if userEmail}
 								<small>{userEmail}</small>
 							{/if}
+							<span class="user-tier-badge tier-{$sessionTier}">{$sessionTier.toUpperCase()}</span>
 						</div>
 					</div>
 					<button type="button" class="mobile-auth-button secondary" on:click={handleSettings}>
@@ -1064,5 +1066,37 @@
 		color: var(--navbar-mobile-muted);
 		font-size: 0.64rem;
 		font-family: 'JetBrains Mono', monospace;
+	}
+
+	.user-tier-badge {
+		display: inline-block;
+		margin-top: 0.22rem;
+		padding: 0.08rem 0.38rem;
+		border-radius: 999px;
+		font-size: 0.55rem;
+		font-weight: 700;
+		font-family: 'JetBrains Mono', monospace;
+		letter-spacing: 0.04em;
+		background: rgba(120, 140, 180, 0.18);
+		color: var(--navbar-mobile-muted);
+		border: 1px solid rgba(120, 140, 180, 0.22);
+	}
+
+	.user-tier-badge.tier-plus {
+		background: rgba(96, 165, 250, 0.14);
+		color: #60a5fa;
+		border-color: rgba(96, 165, 250, 0.28);
+	}
+
+	.user-tier-badge.tier-pro {
+		background: rgba(167, 139, 250, 0.14);
+		color: #a78bfa;
+		border-color: rgba(167, 139, 250, 0.28);
+	}
+
+	.user-tier-badge.tier-team {
+		background: rgba(52, 211, 153, 0.14);
+		color: #34d399;
+		border-color: rgba(52, 211, 153, 0.28);
 	}
 </style>

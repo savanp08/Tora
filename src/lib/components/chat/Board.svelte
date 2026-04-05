@@ -81,6 +81,7 @@
 	const WHITEBOARD_CONTEXT_MAX_LINES = 120;
 	const WHITEBOARD_CONTEXT_MAX_CHARS = 5000;
 	const CONNECTOR_SNAP_DISTANCE_PX = 20;
+	const BOARD_TEXT_EDIT_IDLE_SYNC_MS = 2000;
 	const THEME_ADAPTIVE_LIGHT_INK = '#111827';
 	const THEME_ADAPTIVE_DARK_INK = '#f8fafc';
 	const THEME_ADAPTIVE_LIGHT_INK_CANDIDATES = new Set([
@@ -318,6 +319,8 @@
 	let localUndoStack: LocalBoardAction[] = [];
 	let localRedoStack: LocalBoardAction[] = [];
 	let pendingTransformSnapshotByElementId = new Map<string, BoardElementWire>();
+	let pendingTextEditSyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	let pendingTextEditSnapshotByElementId = new Map<string, BoardElementWire>();
 
 	let removeMessageSubscription: (() => void) | null = null;
 	let resizeObserver: ResizeObserver | null = null;
@@ -483,6 +486,11 @@
 	});
 
 	function cleanupBoard() {
+		for (const timeoutHandle of pendingTextEditSyncTimers.values()) {
+			clearTimeout(timeoutHandle);
+		}
+		pendingTextEditSyncTimers.clear();
+		pendingTextEditSnapshotByElementId.clear();
 		flushPendingBoardUpdates();
 		stopBoardUpdateFlushLoop();
 		pendingTapGesture = null;
@@ -1204,6 +1212,31 @@
 		fabricCanvas.on('object:modified', () => {
 			updateSelectionControlsPosition();
 			syncSelectedConnectorState();
+		});
+		fabricCanvas.on('text:editing:entered', (event: any) => {
+			const target = event?.target as FabricObjectLike | null;
+			if (!target || !isTextEditableBoardObject(target) || !canMutateBoardObject(target)) {
+				return;
+			}
+			rememberTextEditSnapshot(target);
+		});
+		fabricCanvas.on('text:changed', (event: any) => {
+			const target = event?.target as FabricObjectLike | null;
+			if (!target || !canEdit || isApplyingRemoteEvent || isRestoringHistory) {
+				return;
+			}
+			schedulePendingTextEditSync(target);
+		});
+		fabricCanvas.on('text:editing:exited', (event: any) => {
+			const target = event?.target as FabricObjectLike | null;
+			if (!target || !isTextEditableBoardObject(target)) {
+				return;
+			}
+			const elementId = rememberTextEditSnapshot(target);
+			if (!elementId) {
+				return;
+			}
+			void flushPendingTextEditSync(elementId, { clearSnapshot: true });
 		});
 		fabricCanvas.on('after:render', () => {
 			updateSelectionControlsPosition();
@@ -3245,6 +3278,115 @@
 		return findObjectByElementId(pendingInsertElementId);
 	}
 
+	function isTextEditableBoardObject(object: FabricObjectLike | null) {
+		if (!object || object === boardBoundsRect) {
+			return false;
+		}
+		const elementType = toStringValue((object as Record<string, unknown>).elementType)
+			.trim()
+			.toLowerCase();
+		return elementType === 'text_box' || elementType === 'sticky_note';
+	}
+
+	function clearPendingTextEditSync(elementId: string) {
+		const existingTimer = pendingTextEditSyncTimers.get(elementId);
+		if (!existingTimer) {
+			return;
+		}
+		clearTimeout(existingTimer);
+		pendingTextEditSyncTimers.delete(elementId);
+	}
+
+	function rememberTextEditSnapshot(object: FabricObjectLike) {
+		const element = boardObjectToElement(object);
+		if (!element) {
+			return '';
+		}
+		if (!pendingTextEditSnapshotByElementId.has(element.elementId)) {
+			pendingTextEditSnapshotByElementId.set(element.elementId, cloneBoardElement(element));
+		}
+		return element.elementId;
+	}
+
+	async function flushPendingTextEditSync(
+		elementId: string,
+		options: { clearSnapshot?: boolean } = {}
+	) {
+		const normalizedElementId = normalizeMessageID(elementId);
+		if (!normalizedElementId) {
+			return;
+		}
+		clearPendingTextEditSync(normalizedElementId);
+		const target = findObjectByElementId(normalizedElementId);
+		if (
+			!target ||
+			target === boardBoundsRect ||
+			!isTextEditableBoardObject(target) ||
+			!canMutateBoardObject(target) ||
+			isApplyingRemoteEvent ||
+			isRestoringHistory
+		) {
+			if (options.clearSnapshot) {
+				pendingTextEditSnapshotByElementId.delete(normalizedElementId);
+			}
+			return;
+		}
+
+		const afterElement = boardObjectToElement(target);
+		if (!afterElement) {
+			if (options.clearSnapshot) {
+				pendingTextEditSnapshotByElementId.delete(normalizedElementId);
+			}
+			return;
+		}
+		target.set?.({ content: afterElement.content });
+
+		await emitBoardElementAddEncrypted(target);
+		flushPendingBoardUpdates();
+
+		const beforeElement = pendingTextEditSnapshotByElementId.get(normalizedElementId);
+		if (
+			beforeElement &&
+			!elementsEquivalent(beforeElement, afterElement) &&
+			!isApplyingLocalAction
+		) {
+			recordLocalAction({
+				kind: 'move',
+				elementId: afterElement.elementId,
+				before: cloneBoardElement(beforeElement),
+				after: cloneBoardElement(afterElement)
+			});
+		}
+		captureHistorySnapshot();
+
+		if (options.clearSnapshot) {
+			pendingTextEditSnapshotByElementId.delete(normalizedElementId);
+			return;
+		}
+		pendingTextEditSnapshotByElementId.set(
+			normalizedElementId,
+			cloneBoardElement(afterElement)
+		);
+	}
+
+	function schedulePendingTextEditSync(object: FabricObjectLike | null) {
+		if (!object || !isTextEditableBoardObject(object) || isPendingObject(object)) {
+			return;
+		}
+		const elementId = rememberTextEditSnapshot(object);
+		if (!elementId) {
+			return;
+		}
+		clearPendingTextEditSync(elementId);
+		pendingTextEditSyncTimers.set(
+			elementId,
+			setTimeout(() => {
+				pendingTextEditSyncTimers.delete(elementId);
+				void flushPendingTextEditSync(elementId);
+			}, BOARD_TEXT_EDIT_IDLE_SYNC_MS)
+		);
+	}
+
 	function cancelPendingOperation(captureSnapshot = true) {
 		if (pendingInsertElementId && fabricCanvas) {
 			const pendingObject = getPendingInsertObject();
@@ -3595,6 +3737,10 @@
 				fontSize: normalizeOptionalPositiveNumber(objectRecord.fontSize),
 				lineHeight: normalizeOptionalPositiveNumber(objectRecord.lineHeight)
 			});
+		}
+
+		if (elementType === 'sticky_note') {
+			return toStringValue(objectRecord.text);
 		}
 
 		if (elementType === 'stroke') {

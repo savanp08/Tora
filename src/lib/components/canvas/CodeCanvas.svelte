@@ -1,6 +1,10 @@
 <script lang="ts">
 	import { zipSync, unzipSync } from 'fflate';
 	import { initFileSystem as initLightningFS } from '$lib/utils/fs';
+	import type {
+		CanvasAgenticApplyResult,
+		CanvasAgenticChange
+	} from '$lib/utils/canvasAgentApply';
 	import {
 		ExecutionManager,
 		type ExecutionOutputLine,
@@ -10,6 +14,7 @@
 	import { applyUpdate, encodeStateAsUpdate } from 'yjs';
 	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
 	import { APP_LIMITS } from '$lib/config/limits';
+	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
 	import 'xterm/css/xterm.css';
 
 	export let roomId: string;
@@ -19,6 +24,7 @@
 	export let remoteSyncEnabled = true;
 	export let initialTerminalHeight = 200;
 	export let requestScope: 'default' | 'ide' = 'default';
+	export let canEdit = true;
 
 	type ProjectFileEntry = {
 		path: string;
@@ -176,11 +182,7 @@
 		changes: CanvasAIChangeDraft[];
 	};
 
-	type ExternalAgenticCanvasChange = {
-		file_path?: string;
-		content?: string;
-		description?: string;
-	};
+	type ExternalAgenticCanvasChange = CanvasAgenticChange;
 
 	type TerminalPanelTab = 'out' | 'in' | 'smart';
 
@@ -274,7 +276,7 @@ Return ONLY valid JSON with this exact shape:
   ]
 }
 Rules:
-- assistant_reply: concise, plain text, no markdown.
+- assistant_reply: concise and user-friendly; markdown like headings, bullets, bold, and inline code is allowed when it improves readability.
 - changes: include every file modification needed.
 - file_path must match workspace relative paths exactly.
 - action:
@@ -536,9 +538,18 @@ Rules:
 	let ydocSnapshotBeforeLocalTransaction: Uint8Array | null = null;
 	let isRevertingOversizedYDocState = false;
 	let lastYDocLimitAlertAt = 0;
+	let canvasInitReady = false;
+	let canvasInitError = '';
+	let resolveCanvasInitReady: (() => void) | null = null;
+	let rejectCanvasInitReady: ((reason?: unknown) => void) | null = null;
+	const canvasInitReadyPromise = new Promise<void>((resolve, reject) => {
+		resolveCanvasInitReady = resolve;
+		rejectCanvasInitReady = reject;
+	});
 	const presenceSessionId = createPresenceSessionId();
 	const dispatch = createEventDispatcher<{
 		sendSnippet: CanvasSnippetPayload;
+		requestCanvasEdit: void;
 	}>();
 
 	$: activeCanvasAIDiff = canvasAITempDiffFiles[currentFile] ?? null;
@@ -547,6 +558,33 @@ Rules:
 	function canvasClientLog(_event: string, _payload?: unknown) {}
 
 	function canvasClientNarrative(_message: string, _payload?: unknown) {}
+
+	function markCanvasInitReady() {
+		if (canvasInitReady) {
+			return;
+		}
+		canvasInitReady = true;
+		canvasInitError = '';
+		resolveCanvasInitReady?.();
+		resolveCanvasInitReady = null;
+		rejectCanvasInitReady = null;
+	}
+
+	function markCanvasInitFailed(message: string) {
+		canvasInitError = message;
+		if (rejectCanvasInitReady) {
+			rejectCanvasInitReady(new Error(message));
+			resolveCanvasInitReady = null;
+			rejectCanvasInitReady = null;
+		}
+	}
+
+	async function waitForCanvasInitialization() {
+		if (canvasInitReady) {
+			return;
+		}
+		await canvasInitReadyPromise;
+	}
 
 	function describeSocketPayload(payload: unknown) {
 		if (typeof payload === 'string') {
@@ -4564,6 +4602,23 @@ Rules:
 		}
 	}
 
+	async function collectMissingDirectoryPaths(path: string) {
+		const normalized = (path || '').replace(/\/+$/, '');
+		if (!normalized) {
+			return [] as string[];
+		}
+		const segments = normalized.split('/').filter(Boolean);
+		let currentPath = '';
+		const missingPaths: string[] = [];
+		for (const segment of segments) {
+			currentPath += `/${segment}`;
+			if (!(await pathExists(currentPath))) {
+				missingPaths.push(currentPath);
+			}
+		}
+		return missingPaths;
+	}
+
 	async function ensureZipDirectoryTarget(path: string) {
 		try {
 			const stat = await getActiveFS().promises.stat(path);
@@ -6232,7 +6287,8 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	export async function applyAgenticChanges(payload: {
 		text: string;
 		changes: ExternalAgenticCanvasChange[];
-	}) {
+	}): Promise<CanvasAgenticApplyResult> {
+		await waitForCanvasInitialization();
 		const incomingChanges = Array.isArray(payload?.changes) ? payload.changes : [];
 		const drafts: CanvasAIChangeDraft[] = incomingChanges
 			.map((change) => {
@@ -6252,12 +6308,26 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			.filter((change): change is CanvasAIChangeDraft => Boolean(change));
 
 		if (drafts.length === 0) {
-			return { applied: 0, failed: 0 };
+			return {
+				applied: 0,
+				failed: 0,
+				changesApplied: 0,
+				foldersCreated: 0,
+				filesCreated: 0,
+				filesUpdated: 0
+			};
 		}
 
 		const proposedChanges = await buildCanvasAIProposedChanges(drafts);
 		if (proposedChanges.length === 0) {
-			return { applied: 0, failed: 0 };
+			return {
+				applied: 0,
+				failed: 0,
+				changesApplied: 0,
+				foldersCreated: 0,
+				filesCreated: 0,
+				filesUpdated: 0
+			};
 		}
 
 		const messageId = appendCanvasAIMessage(
@@ -6270,10 +6340,25 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 		const succeededIds = new Set<string>();
 		const failedById = new Map<string, string>();
+		const createdDirectoryPaths = new Set<string>();
+		let filesCreated = 0;
+		let filesUpdated = 0;
 		for (const change of proposedChanges) {
+			const missingDirectories =
+				change.action === 'create'
+					? await collectMissingDirectoryPaths(splitPath(toProjectPath(change.filePath)).dir)
+					: [];
 			try {
 				await applyCanvasAIChangeToWorkspace(change);
 				succeededIds.add(change.id);
+				if (change.action === 'create') {
+					filesCreated += 1;
+					for (const directoryPath of missingDirectories) {
+						createdDirectoryPaths.add(directoryPath);
+					}
+				} else if (change.action === 'replace') {
+					filesUpdated += 1;
+				}
 			} catch (error) {
 				failedById.set(
 					change.id,
@@ -6308,7 +6393,11 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		}
 		return {
 			applied: succeededIds.size,
-			failed: failedById.size
+			failed: failedById.size,
+			changesApplied: succeededIds.size,
+			foldersCreated: createdDirectoryPaths.size,
+			filesCreated,
+			filesUpdated
 		};
 	}
 
@@ -6376,6 +6465,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				'name' in error &&
 				(error as { name?: string }).name === 'AbortError';
 			if (isAbortError) {
+				writeTerminalLine('\x1b[35m> AI generation stopped.\x1b[0m');
 				return;
 			}
 			const message = error instanceof Error ? error.message : 'Failed to generate code with AI.';
@@ -6385,6 +6475,18 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			isCanvasAIGenerating = false;
 			canvasAIAbortController = null;
 		}
+	}
+
+	function stopCanvasAIMessage() {
+		if (!isCanvasAIGenerating) {
+			return;
+		}
+		canvasAIAbortController?.abort();
+		canvasAIAbortController = null;
+		isCanvasAIGenerating = false;
+		canvasAIError = '';
+		fileExplorerError = '';
+		writeTerminalLine('\x1b[35m> AI generation stopped.\x1b[0m');
 	}
 
 	function parseCanvasAIPromptPixel(value: string) {
@@ -7529,6 +7631,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 			if (!vfs) {
 				fileExplorerError = 'File system is unavailable in this environment';
 				canvasClientLog('init-fs-unavailable', { roomId });
+				markCanvasInitFailed(fileExplorerError);
 				return;
 			}
 			canvasClientLog('init-fs-ready', { roomId });
@@ -7558,6 +7661,7 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 
 			const model = editor.getModel();
 			if (!model) {
+				markCanvasInitFailed('Canvas editor model is unavailable.');
 				return;
 			}
 			cursorSelectionDisposable = editor.onDidChangeCursorSelection(() => {
@@ -7767,16 +7871,21 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 				currentFile: currentFile || ''
 			});
 			renderRemotePresenceStyles();
+			markCanvasInitReady();
 		} catch (error) {
 			canvasClientLog('init-error', {
 				roomId,
 				error: error instanceof Error ? error.message : String(error)
 			});
 			fileExplorerError = error instanceof Error ? error.message : 'Canvas failed to initialize';
+			markCanvasInitFailed(fileExplorerError);
 		}
 	});
 
 	onDestroy(() => {
+		if (!canvasInitReady && rejectCanvasInitReady) {
+			markCanvasInitFailed('Canvas closed before it finished loading.');
+		}
 		void persistCurrentFileToFS();
 		canvasAIAbortController?.abort();
 		canvasAIAbortController = null;
@@ -7885,6 +7994,27 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 	{#if showReadOnlyWarning}
 		<div class="canvas-readonly-warning" role="status" aria-live="polite">
 			Max 5 editors reached. You are in read-only mode.
+		</div>
+	{/if}
+	{#if !canEdit}
+		<div class="canvas-noedit-overlay" role="dialog" aria-label="Canvas edit access required">
+			<div class="canvas-noedit-card">
+				<span class="canvas-noedit-icon" aria-hidden="true">
+					<svg viewBox="0 0 24 24">
+						<rect x="5" y="11" width="14" height="10" rx="2" />
+						<path d="M8 11V7a4 4 0 0 1 8 0v4" />
+					</svg>
+				</span>
+				<h3 class="canvas-noedit-title">View only</h3>
+				<p class="canvas-noedit-body">You don't have edit access to this canvas. Ask the room admin to grant it, or submit a request below.</p>
+				<button
+					type="button"
+					class="canvas-noedit-btn"
+					on:click={() => dispatch('requestCanvasEdit')}
+				>
+					Request edit access
+				</button>
+			</div>
 		</div>
 	{/if}
 	{#if snippetsEnabled && showSnippetComposer}
@@ -8497,7 +8627,13 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 												})}
 											</time>
 										</header>
-										<p class="canvas-ai-message-text">{message.text}</p>
+										<div class="canvas-ai-message-text">
+											{#if message.role === 'assistant'}
+												<RichTextContent text={message.text} />
+											{:else}
+												{message.text}
+											{/if}
+										</div>
 										{#if message.changes && message.changes.length > 0}
 											<div class="canvas-ai-change-list">
 												<div class="canvas-ai-change-list-header">
@@ -8571,19 +8707,25 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 							<button
 								type="button"
 								class="canvas-ai-send-button"
-								on:click={() => void sendCanvasAIMessage()}
-								disabled={!canSendCanvasAIPrompt()}
-								aria-label={isCanvasAIGenerating ? 'AI is thinking' : 'Send AI prompt'}
-								title={isCanvasAIGenerating ? 'AI is thinking' : 'Send'}
+								class:is-stop={isCanvasAIGenerating}
+								on:click={() =>
+									isCanvasAIGenerating
+										? stopCanvasAIMessage()
+										: void sendCanvasAIMessage()}
+								disabled={isCanvasAIGenerating ? false : !canSendCanvasAIPrompt()}
+								aria-label={isCanvasAIGenerating ? 'Stop AI generation' : 'Send AI prompt'}
+								title={isCanvasAIGenerating ? 'Stop' : 'Send'}
 							>
 								{#if isCanvasAIGenerating}
-									<span class="canvas-ai-send-spinner" aria-hidden="true"></span>
+									<svg viewBox="0 0 14 14" aria-hidden="true">
+										<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="1.2"></rect>
+									</svg>
 								{:else}
 									<svg viewBox="0 0 14 14" aria-hidden="true">
 										<path d="M2 7h10M8 3l4 4-4 4"></path>
 									</svg>
 								{/if}
-								<span class="canvas-ai-sr-only">Send</span>
+								<span class="canvas-ai-sr-only">{isCanvasAIGenerating ? 'Stop' : 'Send'}</span>
 							</button>
 						</div>
 						<div class="canvas-ai-composer-footer">
@@ -8838,7 +8980,13 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 														})}
 													</time>
 												</header>
-												<p class="canvas-ai-message-text">{message.text}</p>
+												<div class="canvas-ai-message-text">
+													{#if message.role === 'assistant'}
+														<RichTextContent text={message.text} />
+													{:else}
+														{message.text}
+													{/if}
+												</div>
 												{#if message.changes && message.changes.length > 0}
 													<div class="canvas-ai-change-list">
 														<div class="canvas-ai-change-list-header">
@@ -8910,19 +9058,25 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 									<button
 										type="button"
 										class="canvas-ai-send-button"
-										on:click={() => void sendCanvasAIMessage()}
-										disabled={!canSendCanvasAIPrompt()}
-										aria-label={isCanvasAIGenerating ? 'AI is thinking' : 'Send AI prompt'}
-										title={isCanvasAIGenerating ? 'AI is thinking' : 'Send'}
+										class:is-stop={isCanvasAIGenerating}
+										on:click={() =>
+											isCanvasAIGenerating
+												? stopCanvasAIMessage()
+												: void sendCanvasAIMessage()}
+										disabled={isCanvasAIGenerating ? false : !canSendCanvasAIPrompt()}
+										aria-label={isCanvasAIGenerating ? 'Stop AI generation' : 'Send AI prompt'}
+										title={isCanvasAIGenerating ? 'Stop' : 'Send'}
 									>
 										{#if isCanvasAIGenerating}
-											<span class="canvas-ai-send-spinner" aria-hidden="true"></span>
+											<svg viewBox="0 0 14 14" aria-hidden="true">
+												<rect x="3.2" y="3.2" width="7.6" height="7.6" rx="1.2"></rect>
+											</svg>
 										{:else}
 											<svg viewBox="0 0 14 14" aria-hidden="true">
 												<path d="M2 7h10M8 3l4 4-4 4"></path>
 											</svg>
 										{/if}
-										<span class="canvas-ai-sr-only">Send</span>
+										<span class="canvas-ai-sr-only">{isCanvasAIGenerating ? 'Stop' : 'Send'}</span>
 									</button>
 								</div>
 								<div class="canvas-ai-composer-footer">
@@ -11213,6 +11367,16 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		box-shadow: 0 4px 16px rgba(26, 115, 232, 0.48);
 	}
 
+	.canvas-ai-send-button.is-stop {
+		background: #b3261e;
+		box-shadow: 0 2px 10px rgba(179, 38, 30, 0.34);
+	}
+
+	.canvas-ai-send-button.is-stop:hover:not(:disabled) {
+		background: #8f1f19;
+		box-shadow: 0 4px 16px rgba(179, 38, 30, 0.4);
+	}
+
 	.canvas-ai-send-button:disabled {
 		background: rgba(255, 255, 255, 0.08);
 		opacity: 1;
@@ -11974,6 +12138,87 @@ Return only JSON with keys "assistant_reply" and "changes".`;
 		line-height: 1.2;
 		box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
 		max-width: min(90%, 340px);
+	}
+
+	.canvas-noedit-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 40;
+		background: rgba(10, 12, 18, 0.72);
+		backdrop-filter: blur(4px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1.5rem;
+	}
+
+	.canvas-noedit-card {
+		background: #1e2130;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 16px;
+		padding: 2rem 1.75rem;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.75rem;
+		max-width: 340px;
+		width: 100%;
+		text-align: center;
+		box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+	}
+
+	.canvas-noedit-icon {
+		width: 2.8rem;
+		height: 2.8rem;
+		border-radius: 50%;
+		background: rgba(99, 102, 241, 0.15);
+		border: 1px solid rgba(99, 102, 241, 0.3);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+	}
+
+	.canvas-noedit-icon svg {
+		width: 1.35rem;
+		height: 1.35rem;
+		stroke: #818cf8;
+		stroke-width: 1.8;
+		fill: none;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.canvas-noedit-title {
+		margin: 0;
+		font-size: 1.05rem;
+		font-weight: 700;
+		color: #e8eaf0;
+	}
+
+	.canvas-noedit-body {
+		margin: 0;
+		font-size: 0.82rem;
+		color: #9096b0;
+		line-height: 1.55;
+	}
+
+	.canvas-noedit-btn {
+		margin-top: 0.35rem;
+		height: 2.2rem;
+		padding: 0 1.2rem;
+		border-radius: 8px;
+		border: none;
+		background: #6366f1;
+		color: #fff;
+		font-size: 0.82rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background 0.14s;
+	}
+
+	.canvas-noedit-btn:hover {
+		background: #4f52d4;
 	}
 
 	.explorer-context-menu {

@@ -112,6 +112,14 @@
 	const LEFT_COLUMN_WIDTH_PX = 440;
 	const DAY_COLUMN_WIDTH_PX = 86;
 
+	function formatSprintDisplayName(name: string, sprintIndex: number) {
+		const trimmed = name.trim() || `Sprint ${sprintIndex + 1}`;
+		if (trimmed.toLowerCase() === 'backlog') {
+			return 'Backlog';
+		}
+		return `${sprintIndex + 1}. ${trimmed.replace(/^\d+\.\s*/, '')}`;
+	}
+
 	// ── State ──────────────────────────────────────────────────────────────────
 	let smartInput = '';
 	let smartInputError = '';
@@ -633,7 +641,7 @@
 			return aStart - bStart;
 		});
 
-		for (const sprint of sortedSprints) {
+		for (const [sortedIndex, sprint] of sortedSprints.entries()) {
 			// Sprint header row
 			const sprintStartDate = sprint.start_date
 				? startOfDay(parseDate(sprint.start_date, today))
@@ -648,7 +656,7 @@
 
 			rows.push({
 				id: sprint.id,
-				title: sprint.name,
+				title: formatSprintDisplayName(sprint.name, sortedIndex),
 				type: 'sprint',
 				status: 'todo',
 				priority: 'medium',
@@ -807,8 +815,8 @@
 						{#if sprints.length > 0}
 							<option value={PROJECT_GANTT_ID}>All Sprints</option>
 						{/if}
-						{#each sprints as sprint (sprint.id)}
-							<option value={sprint.id}>{sprint.name}</option>
+						{#each sprints as sprint, sprintIndex (sprint.id)}
+							<option value={sprint.id}>{formatSprintDisplayName(sprint.name, sprintIndex)}</option>
 						{/each}
 					</select>
 				</label>
@@ -1387,7 +1395,7 @@
 	.timeline-card.is-fullscreen {
 		position: fixed;
 		inset: 0.75rem;
-		z-index: 1100; /* above online pane, toast (500), tora panel (900), all overlays */
+		z-index: 1600; /* keep the fullscreen gantt above chat side panes like the online list */
 		border-radius: 20px;
 		padding: 1rem;
 		box-shadow: 0 24px 72px rgba(9, 14, 28, 0.38);
@@ -1396,7 +1404,7 @@
 	.timeline-fullscreen-backdrop {
 		position: fixed;
 		inset: 0;
-		z-index: 1099;
+		z-index: 1599;
 		background: rgba(11, 16, 30, 0.55);
 		backdrop-filter: blur(12px);
 	}
@@ -1442,6 +1450,11 @@
 		flex-shrink: 0;
 	}
 
+	.timeline-card.is-fullscreen .timeline-head-actions {
+		position: relative;
+		z-index: 2;
+	}
+
 	.overlap-warning {
 		height: 1.5rem;
 		display: inline-flex;
@@ -1470,6 +1483,8 @@
 		color: color-mix(in srgb, var(--gantt-accent) 80%, var(--gantt-text) 20%);
 		cursor: pointer;
 		flex-shrink: 0;
+		position: relative;
+		z-index: 1;
 		transition: box-shadow 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
 	}
 

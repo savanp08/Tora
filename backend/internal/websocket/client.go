@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	jwtauth "github.com/savanp08/converse/internal/auth"
 	"github.com/savanp08/converse/internal/config"
 	"github.com/savanp08/converse/internal/models"
 	"github.com/savanp08/converse/internal/monitor"
@@ -315,6 +317,31 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	go client.writePump()
 	go client.readPump()
+
+	// Immediately push resolved tier so the client knows its plan on connect.
+	tier := resolveTierFromRequest(r)
+	log.Printf("[ws] session_info user=%s tier=%s", userID, tier)
+	client.Send <- map[string]string{"type": "session_info", "tier": tier}
+}
+
+// resolveTierFromRequest returns the tier label for the connecting user.
+// Authenticated users (valid tora_auth cookie JWT) and unauthenticated guests
+// both get "pro" when TEST_USER=true, otherwise "free".
+func resolveTierFromRequest(r *http.Request) string {
+	isTestUser := strings.EqualFold(strings.TrimSpace(os.Getenv("TEST_USER")), "true")
+	isAuthenticated := false
+	if cookie, err := r.Cookie("tora_auth"); err == nil {
+		if token := strings.TrimSpace(cookie.Value); token != "" {
+			if claims, err := jwtauth.ValidateToken(token); err == nil && claims != nil && strings.TrimSpace(claims.UserID) != "" {
+				isAuthenticated = true
+			}
+		}
+	}
+	_ = isAuthenticated // reserved for per-user tier lookup once billing is wired up
+	if isTestUser {
+		return "pro"
+	}
+	return "free"
 }
 
 func (c *Client) readPump() {
@@ -446,6 +473,10 @@ func (c *Client) readPump() {
 			c.forwardSignalingEvent(signalingEvent)
 			continue
 		}
+		if toraCancel, isToraCancel := parseToraCancelPayload(raw); isToraCancel {
+			c.handleToraCancelPayload(toraCancel)
+			continue
+		}
 
 		var msg models.Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
@@ -542,6 +573,23 @@ func (c *Client) dispatchTaskPayload(taskPayload TaskPayload) {
 		Client:  c,
 		Payload: taskPayload,
 	}
+}
+
+func (c *Client) handleToraCancelPayload(payload toraCancelPayload) {
+	if c == nil || c.Hub == nil {
+		return
+	}
+	if payload.RoomID == "" || payload.OriginMessageID == "" {
+		return
+	}
+	if !c.isSubscribedToRoom(payload.RoomID) || !c.canWriteToRoom(payload.RoomID) {
+		return
+	}
+	if !c.Hub.isClientRoomMember(c.UserID, payload.RoomID) {
+		c.subscribeToRoom(payload.RoomID, false)
+		return
+	}
+	c.Hub.cancelToraRun(payload.RoomID, payload.OriginMessageID, c.UserID)
 }
 
 func (c *Client) canProcessRoomBoardBroadcast(roomID string) bool {
@@ -1820,6 +1868,44 @@ func parseBoardElementIDFromEnvelope(envelopeMap map[string]interface{}) string 
 		}
 	}
 	return ""
+}
+
+type toraCancelPayload struct {
+	RoomID          string
+	OriginMessageID string
+}
+
+func parseToraCancelPayload(raw []byte) (toraCancelPayload, bool) {
+	var envelope map[string]interface{}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return toraCancelPayload{}, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(readStringFromMap(envelope, "type")), "tora_cancel") {
+		return toraCancelPayload{}, false
+	}
+
+	roomID := normalizeRoomID(readStringFromMap(envelope, "roomId", "room_id"))
+	originMessageID := normalizeMessageID(
+		readStringFromMap(envelope, "originMessageId", "origin_message_id"),
+	)
+	if payloadMap, ok := envelope["payload"].(map[string]interface{}); ok {
+		if roomID == "" {
+			roomID = normalizeRoomID(readStringFromMap(payloadMap, "roomId", "room_id"))
+		}
+		if originMessageID == "" {
+			originMessageID = normalizeMessageID(
+				readStringFromMap(payloadMap, "originMessageId", "origin_message_id"),
+			)
+		}
+	}
+
+	if roomID == "" || originMessageID == "" {
+		return toraCancelPayload{}, false
+	}
+	return toraCancelPayload{
+		RoomID:          roomID,
+		OriginMessageID: originMessageID,
+	}, true
 }
 
 func readStringFromMap(source map[string]interface{}, keys ...string) string {

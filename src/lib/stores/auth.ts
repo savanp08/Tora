@@ -7,6 +7,7 @@ export interface User {
 	name: string;
 	avatarUrl: string;
 	role: 'admin' | 'member' | 'viewer';
+	tier?: 'free' | 'plus' | 'pro' | 'team';
 }
 
 export interface AuthState {
@@ -29,6 +30,33 @@ const initialState: AuthState = {
 };
 
 export const authState = writable<AuthState>(initialState);
+
+// Server-resolved tier for this browser tab. Updated on every WebSocket connect
+// via session_info. Scoped to the tab (sessionStorage) so multiple tabs with
+// different rooms/users don't overwrite each other.
+export type UserTier = 'free' | 'plus' | 'pro' | 'team';
+const SESSION_TIER_KEY = 'converse.session.tier';
+function readSessionTier(): UserTier {
+	if (!browser) return 'free';
+	try {
+		const raw = sessionStorage.getItem(SESSION_TIER_KEY)?.trim().toLowerCase();
+		if (raw === 'plus' || raw === 'pro' || raw === 'team') return raw;
+	} catch { /* ignore */ }
+	return 'free';
+}
+export const sessionTier = writable<UserTier>(readSessionTier());
+export function applyServerTier(tier: UserTier) {
+	sessionTier.set(tier);
+	try { sessionStorage.setItem(SESSION_TIER_KEY, tier); } catch { /* ignore */ }
+	// Also patch the user object if logged in so the tier persists on full reload
+	// via login-time storage (localStorage is intentional here — it's the auth
+	// record, not the per-tab value; the sessionStorage copy above is authoritative
+	// during the tab's lifetime).
+	authState.update((s) => {
+		if (!s.user) return s;
+		return { ...s, user: { ...s.user, tier } };
+	});
+}
 
 function readCookieToken() {
 	if (!browser) {
@@ -78,10 +106,14 @@ function parseStoredUser(raw: string | null): User | null {
 		const name = typeof parsed.name === 'string' ? parsed.name.trim() : '';
 		const avatarUrl = typeof parsed.avatarUrl === 'string' ? parsed.avatarUrl.trim() : '';
 		const role = parsed.role === 'admin' || parsed.role === 'viewer' ? parsed.role : 'member';
+		const validTiers = ['free', 'plus', 'pro', 'team'] as const;
+		const tier = validTiers.includes(parsed.tier as (typeof validTiers)[number])
+			? (parsed.tier as User['tier'])
+			: undefined;
 		if (!id || !email || !name) {
 			return null;
 		}
-		return { id, email, name, avatarUrl, role };
+		return { id, email, name, avatarUrl, role, tier };
 	} catch {
 		return null;
 	}
@@ -148,6 +180,28 @@ export function initializeAuth() {
 	// Keep storage and cookie in sync for downstream route middleware and reloads.
 	window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
 	writeCookieToken(token);
+
+	// If the stored user has no tier (logged in before tier support, or OAuth),
+	// fetch the resolved tier from the server and patch the store.
+	if (user && !user.tier) {
+		fetch(`${API_BASE}/api/auth/me`, {
+			headers: { Authorization: `Bearer ${token}` },
+			credentials: 'include'
+		})
+			.then((r) => (r.ok ? r.json() : null))
+			.then((data: { tier?: string } | null) => {
+				const validTiers = ['free', 'plus', 'pro', 'team'] as const;
+				const raw = data?.tier?.trim().toLowerCase();
+				const tier = validTiers.includes(raw as (typeof validTiers)[number])
+					? (raw as User['tier'])
+					: undefined;
+				if (!tier) return;
+				const patched: User = { ...user, tier };
+				authState.update((s) => ({ ...s, user: patched }));
+				window.localStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(patched));
+			})
+			.catch(() => {/* non-critical, ignore */});
+	}
 }
 
 if (browser) {

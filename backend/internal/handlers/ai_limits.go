@@ -108,23 +108,105 @@ func (e *privateAILimitExceededError) PublicMessage() string {
 		return "AI request limit reached. Please try again later."
 	}
 
-	scopeLabel := "this context"
-	switch strings.TrimSpace(e.Scope) {
-	case aiLimitScopeUser:
-		scopeLabel = "this user"
-	case aiLimitScopeRoom:
-		scopeLabel = "this room"
-	case aiLimitScopeIP:
-		scopeLabel = "this IP"
-	case aiLimitScopeDeviceID:
-		scopeLabel = "this device"
+	scopeLabel := privateAILimitScopeLabel(e.Scope)
+	windowLabel := privateAILimitWindowLabel(e.Window)
+	current := e.Current
+	if current < e.Limit {
+		current = e.Limit
 	}
 
-	windowLabel := strings.TrimSpace(e.Window)
-	if windowLabel == "" {
-		windowLabel = "current window"
+	usageText := ""
+	if e.Limit > 0 {
+		usageText = fmt.Sprintf(" (%d/%d requests)", current, e.Limit)
 	}
-	return fmt.Sprintf("AI request limit reached for %s in the %s window. Please try again later.", scopeLabel, windowLabel)
+
+	return fmt.Sprintf(
+		"AI request limit reached for %s in the %s window%s. %s",
+		scopeLabel,
+		windowLabel,
+		usageText,
+		formatPrivateAILimitResetMessage(e.ResetAt, e.ResetIn),
+	)
+}
+
+func privateAILimitScopeLabel(scope string) string {
+	switch strings.TrimSpace(scope) {
+	case aiLimitScopeUser:
+		return "this user"
+	case aiLimitScopeRoom:
+		return "this room"
+	case aiLimitScopeIP:
+		return "this IP address"
+	case aiLimitScopeDeviceID:
+		return "this device"
+	default:
+		return "this context"
+	}
+}
+
+func privateAILimitWindowLabel(window string) string {
+	switch strings.TrimSpace(window) {
+	case aiLimitWindowHour:
+		return "hourly"
+	case aiLimitWindowDay:
+		return "daily"
+	case aiLimitWindowWeek:
+		return "weekly"
+	case aiLimitWindowMonth:
+		return "monthly"
+	default:
+		return "current"
+	}
+}
+
+func formatPrivateAILimitResetMessage(resetAt time.Time, resetIn time.Duration) string {
+	resolvedResetAt := resetAt.UTC()
+	if resetIn <= 0 && !resolvedResetAt.IsZero() {
+		resetIn = time.Until(resolvedResetAt)
+	}
+	if resetIn < 0 {
+		resetIn = 0
+	}
+	if resolvedResetAt.IsZero() && resetIn > 0 {
+		resolvedResetAt = time.Now().UTC().Add(resetIn)
+	}
+	if resolvedResetAt.IsZero() {
+		return "Reset timing unavailable."
+	}
+	return fmt.Sprintf(
+		"Resets in %s at %s.",
+		formatPrivateAILimitDuration(resetIn),
+		resolvedResetAt.Format(time.RFC3339),
+	)
+}
+
+func formatPrivateAILimitDuration(value time.Duration) string {
+	if value <= 0 {
+		return "0s"
+	}
+	value = value.Round(time.Second)
+	days := value / (24 * time.Hour)
+	value %= 24 * time.Hour
+	hours := value / time.Hour
+	value %= time.Hour
+	minutes := value / time.Minute
+	value %= time.Minute
+	seconds := value / time.Second
+
+	parts := make([]string, 0, 2)
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 && len(parts) < 2 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if minutes > 0 && len(parts) < 2 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%ds", seconds))
+	}
+	return strings.Join(parts, "")
 }
 
 func enforcePrivateAIRequestLimits(

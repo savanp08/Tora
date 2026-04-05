@@ -125,6 +125,9 @@ func buildCanvasActionsFromAudit(events []AgentEvent) []map[string]any {
 			"description":     auditStringField(event.Input, "description"),
 			"already_applied": false,
 		}
+		if operation := auditStringField(event.Result, "operation", "Operation"); operation != "" {
+			change["operation"] = strings.ToLower(strings.TrimSpace(operation))
+		}
 		if lines, ok := auditIntField(event.Result, "lines", "Lines"); ok {
 			change["lines"] = lines
 		}

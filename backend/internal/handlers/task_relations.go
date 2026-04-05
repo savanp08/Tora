@@ -324,7 +324,7 @@ func (h *RoomHandler) loadSingleRoomTaskRecord(
 	taskID gocql.UUID,
 ) (TaskRecordResponse, error) {
 	selectQuery := fmt.Sprintf(
-		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at FROM %s WHERE room_id = ? AND id = ?`,
+		`SELECT id, title, description, status, custom_fields, sprint_name, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ? AND id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	var (
@@ -340,6 +340,10 @@ func (h *RoomHandler) loadSingleRoomTaskRecord(
 		statusChangedAt *time.Time
 		createdAt       time.Time
 		updatedAt       time.Time
+		taskType        string
+		dueDate         *time.Time
+		startDate       *time.Time
+		rolesRaw        *string
 	)
 	if err := h.scylla.Session.Query(selectQuery, roomUUID, taskID).WithContext(ctx).Scan(
 		&foundTaskID,
@@ -354,6 +358,10 @@ func (h *RoomHandler) loadSingleRoomTaskRecord(
 		&statusChangedAt,
 		&createdAt,
 		&updatedAt,
+		&taskType,
+		&dueDate,
+		&startDate,
+		&rolesRaw,
 	); err != nil {
 		return TaskRecordResponse{}, err
 	}
@@ -364,12 +372,14 @@ func (h *RoomHandler) loadSingleRoomTaskRecord(
 		Title:           strings.TrimSpace(title),
 		Description:     strings.TrimSpace(description),
 		Status:          normalizeTaskStatusValue(status),
+		TaskType:        normalizeTaskTypeValue(taskType),
 		CustomFields:    parseTaskCustomFieldsFromNullableString(customFieldsRaw),
 		SprintName:      strings.TrimSpace(sprintName),
 		StatusActorID:   strings.TrimSpace(statusActorID),
 		StatusActorName: strings.TrimSpace(statusActorName),
 		CreatedAt:       createdAt.UTC(),
 		UpdatedAt:       updatedAt.UTC(),
+		Roles:           parseTaskRoles(rolesRaw),
 	}
 	response.Budget = extractTaskBudget(response.Description)
 	response.ActualCost = extractTaskActualCost(response.Description)
@@ -379,6 +389,14 @@ func (h *RoomHandler) loadSingleRoomTaskRecord(
 	if statusChangedAt != nil && !statusChangedAt.IsZero() {
 		statusChangedAtUTC := statusChangedAt.UTC()
 		response.StatusChangedAt = &statusChangedAtUTC
+	}
+	if dueDate != nil && !dueDate.IsZero() {
+		dueDateUTC := dueDate.UTC()
+		response.DueDate = &dueDateUTC
+	}
+	if startDate != nil && !startDate.IsZero() {
+		startDateUTC := startDate.UTC()
+		response.StartDate = &startDateUTC
 	}
 	return response, nil
 }

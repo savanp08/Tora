@@ -161,6 +161,7 @@ func New(
 		r.Post("/auth/anonymous", authHandler.Anonymous)
 		r.Get("/auth/google", authHandler.GoogleLogin)
 		r.Get("/auth/google/callback", authHandler.GoogleCallback)
+		r.With(authJWTContextMiddleware()).Get("/auth/me", authHandler.Me)
 		r.With(authJWTContextMiddleware()).Get("/dashboard/rooms", dashboardHandler.GetRooms)
 		r.With(authJWTContextMiddleware()).Get("/dashboard/overview", dashboardHandler.GetOverview)
 		r.With(authJWTContextMiddleware()).Route("/personal/items", func(r chi.Router) {
@@ -180,6 +181,15 @@ func New(
 		r.Delete("/rooms/{roomId}/tasks/{taskId}", roomHandler.DeleteRoomTask)
 		r.Put("/rooms/{roomId}/tasks/{taskId}", roomHandler.UpdateRoomTask)
 		r.Patch("/rooms/{roomId}/tasks/{taskId}", roomHandler.UpdateRoomTask)
+		r.Post("/rooms/{roomId}/tasks/{taskId}/details/generate", roomHandler.GenerateRoomTaskDetails)
+		r.Get("/rooms/{roomId}/groups", roomHandler.ListGroups)
+		r.Post("/rooms/{roomId}/groups", roomHandler.CreateGroup)
+		r.Put("/rooms/{roomId}/groups/{groupId}", roomHandler.UpdateGroup)
+		r.Delete("/rooms/{roomId}/groups/{groupId}", roomHandler.DeleteGroup)
+		r.Get("/workspaces/{workspaceId}/groups", roomHandler.ListGroups)
+		r.Post("/workspaces/{workspaceId}/groups", roomHandler.CreateGroup)
+		r.Put("/workspaces/{workspaceId}/groups/{groupId}", roomHandler.UpdateGroup)
+		r.Delete("/workspaces/{workspaceId}/groups/{groupId}", roomHandler.DeleteGroup)
 		r.Put("/rooms/{roomId}/tasks/{taskId}/status", roomHandler.UpdateRoomTaskStatus)
 		r.Post("/rooms/{roomId}/tasks/{taskId}/relations", roomHandler.CreateRoomTaskRelation)
 		r.Patch("/rooms/{roomId}/tasks/{taskId}/relations/{toTaskId}", roomHandler.UpdateRoomTaskRelation)
@@ -207,6 +217,8 @@ func New(
 		r.Post("/rooms/break", roomHandler.CreateBreakRoom)
 		r.Post("/rooms/remove-member", roomHandler.RemoveRoomMember)
 		r.Post("/rooms/delete", roomHandler.DeleteRoom)
+		r.Patch("/rooms/{id}", roomHandler.PatchRoom)
+		r.Patch("/workspaces/{id}", roomHandler.PatchRoom)
 		r.With(rateLimitMiddleware(promoteLimiter, "Admin promotion rate limit exceeded")).Post(
 			"/rooms/{id}/promote",
 			roomHandler.PromoteToAdmin,
@@ -218,7 +230,9 @@ func New(
 		r.Get("/rooms/{roomId}/messages", roomHandler.GetRoomMessages)
 		r.Post("/rooms/{roomId}/ai-organize", roomHandler.AIOrganizeDashboard)
 		r.Post("/rooms/{roomId}/ai-timeline", roomHandler.HandleAIGenerateTimeline)
+		r.Post("/rooms/{roomId}/ai-timeline/stream", roomHandler.HandleAIGenerateTimelineStream)
 		r.Post("/rooms/{roomId}/ai-edit", roomHandler.HandleAIEditTimeline)
+		r.Post("/rooms/{roomId}/ai-edit/stream", roomHandler.HandleAIEditTimelineStream)
 		r.Post("/rooms/{roomId}/pins", roomHandler.UpsertRoomPin)
 		r.Get("/rooms/{roomId}/pins/navigate", roomHandler.NavigateRoomPins)
 		r.Get("/rooms/{roomId}/pins/{pinMessageId}/discussion/comments", roomHandler.GetPinnedDiscussionComments)

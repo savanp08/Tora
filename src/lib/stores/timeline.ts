@@ -10,6 +10,7 @@ import type {
 import { addBoardActivity } from '$lib/stores/boardActivity';
 import { currentUser } from '$lib/store';
 import { normalizeRoomIDValue } from '$lib/utils/chat/core';
+import { recordProjectServerDataDEBUG_DELETE_LATER } from '$lib/debug/projectServerDataDEBUG_DELETE_LATER';
 import { sendSocketPayload } from '$lib/ws';
 import { buildBoardActivitySocketPayload } from '$lib/ws/client';
 
@@ -19,6 +20,13 @@ const API_BASE = API_BASE_RAW?.trim() ? API_BASE_RAW.trim() : 'http://127.0.0.1:
 type TimelineErrorResponse = {
 	error?: string;
 	message?: string;
+	code?: string;
+	stage?: string;
+	detail?: string;
+	retryable?: boolean;
+	provider_status?: number;
+	timeout_ms?: number;
+	prompt_timeout_ms?: number;
 };
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -69,6 +77,83 @@ export type AITimelineResult = {
 	timeline: ProjectTimeline | null;
 	assistantReply: string;
 	intent?: AITimelineIntent;
+};
+export type StreamAITimelineBlueprintEvent = {
+	projectName: string;
+	assistantReply: string;
+	sprintNames: string[];
+};
+export type StreamAITimelineSprintEvent = {
+	sprintIndex: number;
+	sprintTotal: number;
+	sprintName: string;
+	taskCount: number;
+	taskTitles: string[];
+};
+export type StreamAITimelineDoneEvent = {
+	assistantReply: string;
+	isPartial: boolean;
+	missingSprints: string[];
+};
+export type StreamAITimelineErrorEvent = {
+	message: string;
+	isStopped: boolean;
+};
+export type StreamAIStatusMeta = {
+	timeoutMs?: number;
+	promptTimeoutMs?: number;
+	strategy?: string;
+};
+export type StreamAITimelineCallbacks = {
+	onStatus?: (
+		step: string,
+		label: string,
+		sprintIndex?: number,
+		sprintTotal?: number,
+		meta?: StreamAIStatusMeta
+	) => void;
+	onChat?: (intent: string, assistantReply: string) => void;
+	onBlueprint?: (event: StreamAITimelineBlueprintEvent) => void;
+	onSprint?: (event: StreamAITimelineSprintEvent) => void;
+	onDone?: (event: StreamAITimelineDoneEvent) => void;
+	onError?: (event: StreamAITimelineErrorEvent) => void;
+};
+export type StreamAIEditTimelineCallbacks = {
+	onStatus?: (
+		step: string,
+		label: string,
+		appliedCount?: number,
+		operationTotal?: number,
+		meta?: StreamAIStatusMeta
+	) => void;
+	onPlan?: (assistantReply: string, operationTotal: number) => void;
+	onOperation?: (summary: string, appliedCount: number, operationTotal: number) => void;
+	onChat?: (intent: string, assistantReply: string) => void;
+	onError?: (message: string, meta?: { isStopped?: boolean }) => void;
+};
+
+type TimelineEditProjectPatch = {
+	project_name?: string;
+	tech_stack?: string[];
+	target_audience?: string;
+	estimated_cost?: string;
+	roles_needed?: string[];
+};
+
+type TimelineEditOperation = {
+	op: 'add_task' | 'update_task' | 'delete_task';
+	task_id?: string;
+	id?: string;
+	sprint_name?: string;
+	title?: string;
+	status?: string;
+	task_type?: string;
+	assignee_id?: string;
+	budget?: number;
+	actual_cost?: number;
+	duration_unit?: TimelineTaskDurationUnit;
+	duration_value?: number;
+	description?: string;
 };
 
 // ─── AI Output Format Schema (injected into every AI prompt) ─────────────────
@@ -124,9 +209,59 @@ export const timelineError = writable('');
 export const activeProjectTab = writable<ProjectTab>('overview');
 export const isProjectNew = writable<boolean>(true);
 export const lastAIAssistantReply = writable('');
+export const timelineCanStop = writable(false);
 
 let activeTimelineRoomId = '';
 let activeTimelineLoadToken = 0;
+let activeTimelineRequestState:
+	| {
+			controller: AbortController;
+			kind: 'generate' | 'edit';
+			roomId: string;
+			stopRequested: boolean;
+	  }
+	| null = null;
+
+export class TimelineRequestStoppedError extends Error {
+	timeline: ProjectTimeline | null;
+	assistantReply: string;
+
+	constructor(message: string, timeline: ProjectTimeline | null = null, assistantReply = '') {
+		super(message);
+		this.name = 'TimelineRequestStoppedError';
+		this.timeline = timeline;
+		this.assistantReply = assistantReply;
+	}
+}
+
+export function isTimelineRequestStoppedError(
+	error: unknown
+): error is TimelineRequestStoppedError {
+	return error instanceof Error && error.name === 'TimelineRequestStoppedError';
+}
+
+function setActiveTimelineRequest(
+	state:
+		| {
+				controller: AbortController;
+				kind: 'generate' | 'edit';
+				roomId: string;
+				stopRequested: boolean;
+		  }
+		| null
+) {
+	activeTimelineRequestState = state;
+	timelineCanStop.set(Boolean(state));
+}
+
+export function stopActiveTimelineRequest() {
+	if (!activeTimelineRequestState) {
+		return false;
+	}
+	activeTimelineRequestState.stopRequested = true;
+	activeTimelineRequestState.controller.abort();
+	return true;
+}
 
 function toRecord(value: unknown): Record<string, unknown> | null {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -137,6 +272,15 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function toStringValue(value: unknown) {
 	return typeof value === 'string' ? value.trim() : '';
+}
+
+function isAbortError(error: unknown) {
+	return Boolean(
+		error &&
+			typeof error === 'object' &&
+			'name' in error &&
+			(error as { name?: string }).name === 'AbortError'
+	);
 }
 
 function toNumberValue(value: unknown, fallback: number) {
@@ -361,7 +505,45 @@ function normalizeTimeline(payload: unknown): ProjectTimeline {
 
 async function parseErrorMessage(response: Response) {
 	const payload = (await response.json().catch(() => null)) as TimelineErrorResponse | null;
-	return payload?.error?.trim() || payload?.message?.trim() || `HTTP ${response.status}`;
+	return formatTimelineErrorMessage(payload, response.status);
+}
+
+function formatTimelineErrorMessage(
+	payload: TimelineErrorResponse | null | undefined,
+	status?: number
+) {
+	if (!payload) {
+		return typeof status === 'number' ? `HTTP ${status}` : 'Request failed';
+	}
+	const primary = payload.error?.trim() || payload.message?.trim();
+	const detail = payload.detail?.trim();
+	const stage = payload.stage?.trim();
+	const code = payload.code?.trim();
+	const timeoutMs = typeof payload.timeout_ms === 'number' && payload.timeout_ms > 0 ? payload.timeout_ms : undefined;
+	const promptTimeoutMs = typeof payload.prompt_timeout_ms === 'number' && payload.prompt_timeout_ms > 0 ? payload.prompt_timeout_ms : undefined;
+	const parts: string[] = [];
+	if (primary) {
+		parts.push(primary);
+	}
+	if (stage) {
+		parts.push(`Stage: ${stage}`);
+	}
+	if (code) {
+		parts.push(`Code: ${code}`);
+	}
+	if (timeoutMs !== undefined) {
+		parts.push(`Step budget: ${Math.round(timeoutMs / 1000)}s`);
+	}
+	if (promptTimeoutMs !== undefined) {
+		parts.push(`Total budget: ${Math.round(promptTimeoutMs / 1000)}s`);
+	}
+	if (detail) {
+		parts.push(detail);
+	}
+	if (parts.length > 0) {
+		return parts.join('\n');
+	}
+	return typeof status === 'number' ? `HTTP ${status}` : 'Request failed';
 }
 
 function withTimelineUserHeaders(userID: string, headers: Record<string, string> = {}) {
@@ -806,10 +988,12 @@ export function calculateTotalProgress(timeline: ProjectTimeline) {
 	return Number(((completed / total) * 100).toFixed(1));
 }
 
-export function setProjectTimeline(value: ProjectTimeline | null) {
+function applyProjectTimelineState(value: ProjectTimeline | null, preserveProjectNew = false) {
 	if (!value) {
 		projectTimeline.set(null);
-		isProjectNew.set(true);
+		if (!preserveProjectNew) {
+			isProjectNew.set(true);
+		}
 		return;
 	}
 	const timelineWithDefaults: ProjectTimeline = {
@@ -827,7 +1011,17 @@ export function setProjectTimeline(value: ProjectTimeline | null) {
 		total_progress: calculateTotalProgress(timelineWithDates)
 	};
 	projectTimeline.set(nextValue);
-	isProjectNew.set(false);
+	if (!preserveProjectNew) {
+		isProjectNew.set(false);
+	}
+}
+
+function previewProjectTimeline(value: ProjectTimeline | null) {
+	applyProjectTimelineState(value, true);
+}
+
+export function setProjectTimeline(value: ProjectTimeline | null) {
+	applyProjectTimelineState(value, false);
 }
 
 function extractTimelinePayloadFromAIResponse(payload: unknown): unknown {
@@ -884,6 +1078,264 @@ export function applyTimelinePayload(payload: unknown) {
 	setProjectTimeline(normalized);
 	timelineError.set('');
 	return normalized;
+}
+
+function cloneTimelineState(timeline: ProjectTimeline) {
+	if (typeof structuredClone === 'function') {
+		return structuredClone(timeline);
+	}
+	return JSON.parse(JSON.stringify(timeline)) as ProjectTimeline;
+}
+
+function normalizeTimelineEditProjectPatch(payload: unknown): TimelineEditProjectPatch | null {
+	const source = toRecord(payload);
+	if (!source) {
+		return null;
+	}
+	const techStackSource = Array.isArray(source.tech_stack ?? source.techStack)
+		? ((source.tech_stack ?? source.techStack) as unknown[])
+		: [];
+	const techStack = techStackSource.map((entry: unknown) => toStringValue(entry)).filter(Boolean);
+	const rolesNeededSource = Array.isArray(source.roles_needed ?? source.rolesNeeded)
+		? ((source.roles_needed ?? source.rolesNeeded) as unknown[])
+		: [];
+	const rolesNeeded = rolesNeededSource
+		.map((entry: unknown) => toStringValue(entry))
+		.filter(Boolean);
+	const patch: TimelineEditProjectPatch = {};
+	const projectName = toStringValue(source.project_name ?? source.projectName);
+	if (projectName) patch.project_name = projectName;
+	if (techStack.length > 0) patch.tech_stack = techStack;
+	const targetAudience = toStringValue(source.target_audience ?? source.targetAudience);
+	if (targetAudience) patch.target_audience = targetAudience;
+	const estimatedCost = toStringValue(source.estimated_cost ?? source.estimatedCost);
+	if (estimatedCost) patch.estimated_cost = estimatedCost;
+	if (rolesNeeded.length > 0) patch.roles_needed = rolesNeeded;
+	return Object.keys(patch).length > 0 ? patch : null;
+}
+
+function normalizeTimelineEditOperationPayload(payload: unknown): TimelineEditOperation | null {
+	const source = toRecord(payload);
+	if (!source) {
+		return null;
+	}
+	const durationSource = toRecord(source.duration);
+	const op = toStringValue(source.op ?? source.action).toLowerCase();
+	if (op !== 'add_task' && op !== 'update_task' && op !== 'delete_task') {
+		return null;
+	}
+	const durationUnit = normalizeDurationUnit(
+		source.duration_unit ?? source.durationUnit ?? durationSource?.unit
+	);
+	const durationValueRaw =
+		source.duration_value ?? source.durationValue ?? durationSource?.value ?? undefined;
+	const durationValue =
+		durationValueRaw === undefined ? undefined : normalizeDurationValue(durationValueRaw, durationUnit);
+	const normalized: TimelineEditOperation = {
+		op,
+		task_id: toStringValue(source.task_id ?? source.taskId),
+		id: toStringValue(source.id),
+		sprint_name: toStringValue(source.sprint_name ?? source.sprintName ?? source.sprint),
+		title: toStringValue(source.title),
+		status: toStringValue(source.status),
+		task_type: toStringValue(source.task_type ?? source.taskType ?? source.type),
+		assignee_id: toStringValue(source.assignee_id ?? source.assigneeId ?? source.assignee),
+		description: toStringValue(source.description)
+	};
+	if (source.budget !== undefined) {
+		normalized.budget = Math.max(0, toNumberValue(source.budget, 0));
+	}
+	if (source.actual_cost !== undefined || source.actualCost !== undefined || source.spent !== undefined) {
+		normalized.actual_cost = Math.max(
+			0,
+			toNumberValue(source.actual_cost ?? source.actualCost ?? source.spent, 0)
+		);
+	}
+	if (durationUnit) {
+		normalized.duration_unit = durationUnit;
+	}
+	if (durationValue !== undefined) {
+		normalized.duration_value = durationValue;
+	}
+	return normalized;
+}
+
+function ensureTimelineSprintState(project: ProjectTimeline, sprintName: string) {
+	const normalizedTarget = sprintName.trim();
+	if (!normalizedTarget) {
+		if (project.sprints.length === 0) {
+			project.sprints = [
+				{
+					id: 'sprint-1',
+					name: 'Sprint 1',
+					start_date: '',
+					end_date: '',
+					tasks: []
+				}
+			];
+		}
+		return 0;
+	}
+	const existingIndex = project.sprints.findIndex(
+		(sprint) => sprint.name.trim().toLowerCase() === normalizedTarget.toLowerCase()
+	);
+	if (existingIndex >= 0) {
+		return existingIndex;
+	}
+	project.sprints = [
+		...project.sprints,
+		{
+			id: `sprint-${project.sprints.length + 1}`,
+			name: normalizedTarget,
+			start_date: '',
+			end_date: '',
+			tasks: []
+		}
+	];
+	return project.sprints.length - 1;
+}
+
+function findTimelineTaskPosition(project: ProjectTimeline, taskId: string) {
+	const normalizedTaskID = taskId.trim();
+	if (!normalizedTaskID) {
+		return { sprintIndex: -1, taskIndex: -1 };
+	}
+	for (let sprintIndex = 0; sprintIndex < project.sprints.length; sprintIndex += 1) {
+		const taskIndex = project.sprints[sprintIndex]?.tasks.findIndex(
+			(task) => task.id.trim() === normalizedTaskID
+		);
+		if ((taskIndex ?? -1) >= 0) {
+			return { sprintIndex, taskIndex: taskIndex as number };
+		}
+	}
+	return { sprintIndex: -1, taskIndex: -1 };
+}
+
+function applyTimelineProjectPatchToState(
+	current: ProjectTimeline,
+	patch: TimelineEditProjectPatch | null
+) {
+	if (!patch) {
+		return current;
+	}
+	const next = cloneTimelineState(current);
+	if (patch.project_name) next.project_name = patch.project_name;
+	if (patch.tech_stack && patch.tech_stack.length > 0) next.tech_stack = patch.tech_stack;
+	if (patch.target_audience) next.target_audience = patch.target_audience;
+	if (patch.estimated_cost) next.estimated_cost = patch.estimated_cost;
+	if (patch.roles_needed && patch.roles_needed.length > 0) next.roles_needed = patch.roles_needed;
+	return normalizeTimeline(next);
+}
+
+function applyTimelineEditOperationToState(
+	current: ProjectTimeline,
+	operation: TimelineEditOperation | null
+) {
+	if (!operation) {
+		return current;
+	}
+	const next = cloneTimelineState(current);
+	switch (operation.op) {
+		case 'delete_task': {
+			const { sprintIndex, taskIndex } = findTimelineTaskPosition(
+				next,
+				operation.task_id || operation.id || ''
+			);
+			if (sprintIndex < 0 || taskIndex < 0) {
+				return current;
+			}
+			next.sprints[sprintIndex].tasks.splice(taskIndex, 1);
+			break;
+		}
+		case 'update_task': {
+			const { sprintIndex, taskIndex } = findTimelineTaskPosition(
+				next,
+				operation.task_id || operation.id || ''
+			);
+			if (sprintIndex < 0 || taskIndex < 0) {
+				return current;
+			}
+			const updatedTask = { ...next.sprints[sprintIndex].tasks[taskIndex] };
+			if (operation.title) updatedTask.title = operation.title;
+			if (operation.status) updatedTask.status = normalizeTaskStatus(operation.status);
+			if (operation.task_type) updatedTask.type = operation.task_type;
+			if (operation.assignee_id) updatedTask.assignee = operation.assignee_id;
+			if (operation.budget !== undefined) updatedTask.budget = operation.budget;
+			if (operation.actual_cost !== undefined) updatedTask.actual_cost = operation.actual_cost;
+			if (operation.duration_unit) updatedTask.duration_unit = operation.duration_unit;
+			if (operation.duration_value !== undefined) {
+				const durationUnit = updatedTask.duration_unit ?? operation.duration_unit ?? 'days';
+				updatedTask.duration_value = normalizeDurationValue(operation.duration_value, durationUnit);
+			}
+			if (operation.description) updatedTask.description = operation.description;
+			next.sprints[sprintIndex].tasks[taskIndex] = updatedTask;
+
+			if (operation.sprint_name) {
+				const targetSprintIndex = ensureTimelineSprintState(next, operation.sprint_name);
+				if (targetSprintIndex >= 0 && targetSprintIndex !== sprintIndex) {
+					const [movedTask] = next.sprints[sprintIndex].tasks.splice(taskIndex, 1);
+					if (movedTask) {
+						next.sprints[targetSprintIndex].tasks = [...next.sprints[targetSprintIndex].tasks, movedTask];
+					}
+				}
+			}
+			break;
+		}
+		case 'add_task': {
+			const targetSprintIndex = ensureTimelineSprintState(next, operation.sprint_name || '');
+			const durationUnit = operation.duration_unit ?? 'days';
+			const durationValue =
+				operation.duration_value !== undefined
+					? normalizeDurationValue(operation.duration_value, durationUnit)
+					: durationUnit === 'hours'
+						? 4
+						: 1;
+			const taskId =
+				operation.task_id ||
+				operation.id ||
+				`ai-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			next.sprints[targetSprintIndex].tasks = [
+				...next.sprints[targetSprintIndex].tasks,
+				{
+					id: taskId,
+					title: operation.title || 'New task',
+					status: normalizeTaskStatus(operation.status || 'todo'),
+					effort_score: 1,
+					budget: operation.budget,
+					actual_cost: operation.actual_cost,
+					type: operation.task_type || 'general',
+					assignee: operation.assignee_id,
+					description: operation.description,
+					duration_unit: durationUnit,
+					duration_value: durationValue
+				}
+			];
+			break;
+		}
+	}
+	return normalizeTimeline(next);
+}
+
+function summarizeTimelineEditOperation(operation: TimelineEditOperation | null) {
+	if (!operation) {
+		return 'Applied board change.';
+	}
+	const title = operation.title?.trim();
+	switch (operation.op) {
+		case 'add_task':
+			if (title && operation.sprint_name) return `Added "${title}" to ${operation.sprint_name}.`;
+			if (title) return `Added "${title}".`;
+			return 'Added a new task.';
+		case 'update_task':
+			if (title && operation.sprint_name) return `Updated "${title}" in ${operation.sprint_name}.`;
+			if (title) return `Updated "${title}".`;
+			return 'Updated a task.';
+		case 'delete_task':
+			if (title) return `Deleted "${title}".`;
+			return 'Deleted a task.';
+		default:
+			return 'Applied board change.';
+	}
 }
 
 export function updateTaskDates(taskId: string, newStart: Date | string) {
@@ -1096,25 +1548,28 @@ export async function generateAITimeline(
 	const enrichedPrompt = `${AI_TIMELINE_FORMAT_HINT}\n\n${buildClientTimeContext()}\n\nUSER REQUEST:\n${normalizedPrompt}`;
 	const normalizedConversationHistory =
 		buildTimelineConversationHistoryPayload(conversationHistory);
+	const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/ai-timeline`;
+	const requestPayloadDEBUG_DELETE_LATER = {
+		prompt: enrichedPrompt,
+		userId: sessionUserID,
+		conversation_history: normalizedConversationHistory
+	};
 
 	timelineLoading.set(true);
 	timelineError.set('');
+	const generateAbort = new AbortController();
+	const generateTimeoutId = setTimeout(() => generateAbort.abort(), 15 * 60 * 1000); // 15-min hard cap
 	try {
-		const response = await fetch(
-			`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/ai-timeline`,
-			{
-				method: 'POST',
-				headers: withTimelineUserHeaders(sessionUserID, {
-					'Content-Type': 'application/json'
-				}),
-				credentials: 'include',
-				body: JSON.stringify({
-					prompt: enrichedPrompt,
-					userId: sessionUserID,
-					conversation_history: normalizedConversationHistory
-				})
-			}
-		);
+		const response = await fetch(endpoint, {
+			method: 'POST',
+			headers: withTimelineUserHeaders(sessionUserID, {
+				'Content-Type': 'application/json'
+			}),
+			credentials: 'include',
+			signal: generateAbort.signal,
+			body: JSON.stringify(requestPayloadDEBUG_DELETE_LATER)
+		});
+		clearTimeout(generateTimeoutId);
 		if (!response.ok) {
 			throw new Error(await parseErrorMessage(response));
 		}
@@ -1153,11 +1608,395 @@ export async function generateAITimeline(
 	}
 }
 
+/**
+ * streamAITimeline streams project generation from the /ai-timeline/stream SSE endpoint.
+ * Sprint tasks arrive incrementally and are applied to the store as each sprint completes,
+ * so the board populates in real-time rather than after the full generation finishes.
+ */
+export async function streamAITimeline(
+	roomId: string,
+	prompt: string,
+	conversationHistory: AITimelineConversationMessage[] = [],
+	callbacks: StreamAITimelineCallbacks = {},
+	fitToTier = false
+): Promise<AITimelineResult> {
+	const normalizedRoomID = roomId.trim();
+	const normalizedPrompt = prompt.trim();
+	const sessionUserID = (get(currentUser)?.id ?? '').trim();
+	if (!normalizedRoomID) throw new Error('roomId is required');
+	if (!normalizedPrompt) throw new Error('prompt is required');
+
+	const enrichedPrompt = `${AI_TIMELINE_FORMAT_HINT}\n\n${buildClientTimeContext()}\n\nUSER REQUEST:\n${normalizedPrompt}`;
+	const normalizedConversationHistory = buildTimelineConversationHistoryPayload(conversationHistory);
+	const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/ai-timeline/stream`;
+	const requestPayloadDEBUG_DELETE_LATER = {
+		prompt: enrichedPrompt,
+		userId: sessionUserID,
+		conversation_history: normalizedConversationHistory,
+		...(fitToTier ? { fit_to_tier: true } : {})
+	};
+
+	timelineLoading.set(true);
+	timelineError.set('');
+
+	// Accumulated state built from SSE events
+	let blueprintMeta: {
+		project_name: string;
+		assistant_reply: string;
+		tech_stack: string[];
+		target_audience: string;
+		estimated_cost: string;
+		roles_needed: string[];
+		sprint_shells: Array<{ id: string; name: string; start_date: string; end_date: string }>;
+	} | null = null;
+	// Sparse array indexed by sprint_index so out-of-order events work correctly
+	const completedSprints: (Sprint | undefined)[] = [];
+
+	function buildAccumulatedTimeline(isPartial: boolean, missingSprints: string[]): ProjectTimeline {
+		const meta = blueprintMeta!;
+		const derivedMissingSprints = meta.sprint_shells
+			.filter((_shell, index) => !completedSprints[index])
+			.map((shell) => shell.name)
+			.filter(Boolean);
+		const resolvedMissingSprints = Array.from(
+			new Set((missingSprints.length > 0 ? missingSprints : isPartial ? derivedMissingSprints : []).filter(Boolean))
+		);
+		const timeline: ProjectTimeline = {
+			project_name: meta.project_name || 'Project Timeline',
+			tech_stack: meta.tech_stack,
+			target_audience: meta.target_audience,
+			estimated_cost: meta.estimated_cost,
+			roles_needed: meta.roles_needed,
+			is_partial: isPartial,
+			missing_sprints: resolvedMissingSprints,
+			total_progress: 0,
+			sprints: meta.sprint_shells.map((shell, index) => {
+				const completedSprint = completedSprints[index];
+				if (completedSprint) {
+					return completedSprint;
+				}
+				return {
+					id: shell.id || `sprint-${index + 1}`,
+					name: shell.name || `Sprint ${index + 1}`,
+					start_date: shell.start_date || '',
+					end_date: shell.end_date || '',
+					tasks: []
+				} satisfies Sprint;
+			})
+		};
+		timeline.total_progress = calculateTotalProgress(timeline);
+		return timeline;
+	}
+
+	const abortController = new AbortController();
+	const requestState = {
+		controller: abortController,
+		kind: 'generate' as const,
+		roomId: normalizedRoomID,
+		stopRequested: false
+	};
+	let timedOut = false;
+	const timeoutId = setTimeout(() => {
+		timedOut = true;
+		abortController.abort();
+	}, 15 * 60 * 1000);
+
+	try {
+		setActiveTimelineRequest(requestState);
+
+		const response = await fetch(endpoint, {
+			method: 'POST',
+			headers: withTimelineUserHeaders(sessionUserID, { 'Content-Type': 'application/json' }),
+			credentials: 'include',
+			signal: abortController.signal,
+			body: JSON.stringify(requestPayloadDEBUG_DELETE_LATER)
+		});
+
+		if (!response.ok) {
+			clearTimeout(timeoutId);
+			throw new Error(await parseErrorMessage(response));
+		}
+		if (!response.body) {
+			clearTimeout(timeoutId);
+			throw new Error('Streaming not supported by server');
+		}
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let currentEvent = '';
+		let currentData = '';
+		type SSEDonePayload = {
+			is_partial?: boolean;
+			missing_sprints?: unknown[];
+			assistant_reply?: string;
+		};
+		let chatResult: AITimelineResult | null = null;
+		let donePayload: SSEDonePayload | null = null;
+		let streamError: string | null = null;
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+
+				const lines = buffer.split('\n');
+				buffer = lines.pop() ?? '';
+
+				for (const line of lines) {
+					if (line.startsWith('event: ')) {
+						currentEvent = line.slice(7).trim();
+					} else if (line.startsWith('data: ')) {
+						currentData = line.slice(6).trim();
+					} else if (line === '') {
+						if (currentEvent && currentData) {
+							try {
+								const payload = JSON.parse(currentData) as Record<string, unknown>;
+								recordProjectServerDataDEBUG_DELETE_LATER({
+									source: 'ai_generate_stream',
+									direction: 'stream',
+									roomId: normalizedRoomID,
+									endpoint,
+									method: 'POST',
+									status: response.status,
+									event: currentEvent,
+									payload
+								});
+
+								if (currentEvent === 'status') {
+									callbacks.onStatus?.(
+										String(payload.step ?? ''),
+										String(payload.label ?? ''),
+										typeof payload.sprint_index === 'number' ? payload.sprint_index : undefined,
+										typeof payload.sprint_total === 'number' ? payload.sprint_total : undefined,
+										{
+											timeoutMs:
+												typeof payload.timeout_ms === 'number'
+													? payload.timeout_ms
+													: undefined,
+											promptTimeoutMs:
+												typeof payload.prompt_timeout_ms === 'number'
+													? payload.prompt_timeout_ms
+													: undefined,
+											strategy:
+												typeof payload.strategy === 'string'
+													? payload.strategy
+													: undefined
+										}
+									);
+								} else if (currentEvent === 'chat') {
+									const intent = String(payload.intent ?? 'chat');
+									const assistantReply = String(payload.assistant_reply ?? '');
+									callbacks.onChat?.(intent, assistantReply);
+									lastAIAssistantReply.set(assistantReply);
+									chatResult = {
+										timeline: get(projectTimeline),
+										assistantReply,
+										intent: intent as AITimelineIntent
+									};
+								} else if (currentEvent === 'blueprint') {
+									blueprintMeta = {
+										project_name: String(payload.project_name ?? 'Project Timeline'),
+										assistant_reply: String(payload.assistant_reply ?? ''),
+										tech_stack: Array.isArray(payload.tech_stack)
+											? payload.tech_stack.map(String)
+											: [],
+										target_audience: String(payload.target_audience ?? ''),
+										estimated_cost: String(payload.estimated_cost ?? ''),
+										roles_needed: Array.isArray(payload.roles_needed)
+											? payload.roles_needed.map(String)
+											: [],
+										sprint_shells: Array.isArray(payload.sprints)
+											? payload.sprints.map((s: unknown) => {
+													const sr = s as Record<string, unknown>;
+													return {
+														id: String(sr.id ?? ''),
+														name: String(sr.name ?? ''),
+														start_date: String(sr.start_date ?? ''),
+														end_date: String(sr.end_date ?? '')
+													};
+												})
+											: []
+									};
+									callbacks.onBlueprint?.({
+										projectName: blueprintMeta.project_name,
+										assistantReply: blueprintMeta.assistant_reply,
+										sprintNames: blueprintMeta.sprint_shells
+											.map((shell) => shell.name)
+											.filter(Boolean)
+									});
+									previewProjectTimeline(buildAccumulatedTimeline(true, []));
+								} else if (currentEvent === 'sprint_tasks') {
+									if (blueprintMeta) {
+										const sprintIndex =
+											typeof payload.sprint_index === 'number' ? payload.sprint_index : 0;
+										const sprintName = String(
+											payload.sprint_name ?? `Sprint ${sprintIndex + 1}`
+										);
+										const shell = blueprintMeta.sprint_shells[sprintIndex];
+										const sprint: Sprint = {
+											id:
+												String(payload.sprint_id ?? shell?.id ?? '') ||
+												`sprint-${sprintIndex + 1}`,
+											name: sprintName,
+											start_date: String(payload.start_date ?? shell?.start_date ?? ''),
+											end_date: String(payload.end_date ?? shell?.end_date ?? ''),
+											tasks: (Array.isArray(payload.tasks) ? payload.tasks : [])
+												.map((t, i) =>
+													normalizeTask(t, `task-${sprintIndex + 1}-${i + 1}`)
+												)
+												.filter((t): t is TimelineTask => Boolean(t))
+										};
+										completedSprints[sprintIndex] = sprint;
+										// Incrementally update the board as each sprint arrives.
+										previewProjectTimeline(buildAccumulatedTimeline(true, []));
+										callbacks.onSprint?.({
+											sprintIndex,
+											sprintTotal: blueprintMeta.sprint_shells.length,
+											sprintName,
+											taskCount: sprint.tasks.length,
+											taskTitles: sprint.tasks
+												.map((task) => task.title)
+												.filter(Boolean)
+										});
+									}
+								} else if (currentEvent === 'done') {
+									donePayload = payload as SSEDonePayload;
+								} else if (currentEvent === 'error') {
+									streamError = formatTimelineErrorMessage(
+										payload as TimelineErrorResponse,
+										response.status
+									);
+									callbacks.onError?.({
+										message: streamError,
+										isStopped: false
+									});
+								}
+							} catch {
+								// ignore malformed SSE frames
+							}
+						}
+						currentEvent = '';
+						currentData = '';
+					}
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+
+		// Chat/clarify short-circuit
+		if (chatResult) {
+			return chatResult;
+		}
+
+		if (streamError && !blueprintMeta) {
+			throw new Error(streamError);
+		}
+
+		// Apply final (possibly partial) timeline
+		const assistantReply = (donePayload?.assistant_reply ?? '') || blueprintMeta?.assistant_reply || '';
+		const missingSprintsFromDone = Array.isArray(donePayload?.missing_sprints)
+			? donePayload!.missing_sprints!.map(String).filter(Boolean)
+			: [];
+
+		if (blueprintMeta) {
+			const inferredMissingSprints = blueprintMeta.sprint_shells
+				.filter((_shell, index) => !completedSprints[index])
+				.map((shell) => shell.name)
+				.filter(Boolean);
+			const missingSprints =
+				missingSprintsFromDone.length > 0 ? missingSprintsFromDone : inferredMissingSprints;
+			const isPartial =
+				Boolean(donePayload?.is_partial) || Boolean(streamError) || missingSprints.length > 0;
+			const finalTimeline = buildAccumulatedTimeline(isPartial, missingSprints);
+			previewProjectTimeline(finalTimeline);
+			timelineError.set('');
+			if (streamError) {
+				timelineError.set(streamError);
+			}
+			lastAIAssistantReply.set(assistantReply);
+			callbacks.onDone?.({
+				assistantReply,
+				isPartial: finalTimeline.is_partial === true,
+				missingSprints: finalTimeline.missing_sprints ?? []
+			});
+			const boardActivityEvent = addBoardActivity({
+				type: 'board_generated',
+				title: 'Board generated by Tora AI',
+				subtitle: finalTimeline.project_name
+			});
+			sendSocketPayload(buildBoardActivitySocketPayload(normalizedRoomID, boardActivityEvent));
+			return {
+				timeline: finalTimeline,
+				assistantReply,
+				intent: 'generate_project'
+			};
+		}
+
+		if (streamError) throw new Error(streamError);
+		throw new Error('AI did not return a timeline. Please provide more detail and try again.');
+	} catch (error) {
+		const userStopped = requestState.stopRequested && isAbortError(error);
+		if (userStopped) {
+			let partialTimeline: ProjectTimeline | null = null;
+			const assistantReply = blueprintMeta?.assistant_reply || '';
+			if (blueprintMeta) {
+				const missingSprints = blueprintMeta.sprint_shells
+					.filter((_shell, index) => !completedSprints[index])
+					.map((shell) => shell.name)
+					.filter(Boolean);
+				partialTimeline = buildAccumulatedTimeline(true, missingSprints);
+				previewProjectTimeline(partialTimeline);
+			}
+			timelineError.set('');
+			callbacks.onError?.({
+				message: partialTimeline
+					? 'AI generation stopped. Partial workspace kept.'
+					: 'AI generation stopped.',
+				isStopped: true
+			});
+			throw new TimelineRequestStoppedError(
+				partialTimeline
+					? 'AI generation stopped. Partial workspace kept.'
+					: 'AI generation stopped.',
+				partialTimeline,
+				assistantReply
+			);
+		}
+		if (timedOut && isAbortError(error)) {
+			const message = 'AI timeline request timed out';
+			timelineError.set(message);
+			callbacks.onError?.({
+				message,
+				isStopped: false
+			});
+			throw new Error(message);
+		}
+		const message =
+			error instanceof Error ? error.message : 'Failed to generate project timeline';
+		timelineError.set(message);
+		callbacks.onError?.({
+			message,
+			isStopped: false
+		});
+		throw error instanceof Error ? error : new Error(message);
+	} finally {
+		clearTimeout(timeoutId);
+		if (activeTimelineRequestState === requestState) {
+			setActiveTimelineRequest(null);
+		}
+		timelineLoading.set(false);
+	}
+}
+
 export async function editAITimeline(
 	roomId: string,
 	prompt: string,
 	currentState: ProjectTimeline | null,
-	conversationHistory: AITimelineConversationMessage[] = []
+	conversationHistory: AITimelineConversationMessage[] = [],
+	callbacks: StreamAIEditTimelineCallbacks = {}
 ): Promise<AITimelineResult> {
 	const normalizedRoomID = roomId.trim();
 	const normalizedPrompt = prompt.trim();
@@ -1168,67 +2007,271 @@ export async function editAITimeline(
 	if (!normalizedPrompt) {
 		throw new Error('prompt is required');
 	}
+	const initialTimeline = currentState ?? get(projectTimeline);
+	if (!initialTimeline) {
+		throw new Error('current_state is required');
+	}
 
 	const enrichedEditPrompt = `${buildClientTimeContext()}\n\nEDIT REQUEST:\n${normalizedPrompt}`;
 	const normalizedConversationHistory =
 		buildTimelineConversationHistoryPayload(conversationHistory);
+	const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/ai-edit/stream`;
+	const requestPayloadDEBUG_DELETE_LATER = {
+		prompt: enrichedEditPrompt,
+		current_state: compressTimelineForAI(initialTimeline),
+		userId: sessionUserID,
+		conversation_history: normalizedConversationHistory
+	};
 
 	timelineLoading.set(true);
 	timelineError.set('');
+	const editAbort = new AbortController();
+	const requestState = {
+		controller: editAbort,
+		kind: 'edit' as const,
+		roomId: normalizedRoomID,
+		stopRequested: false
+	};
+	let timedOut = false;
+	const editTimeoutId = setTimeout(() => {
+		timedOut = true;
+		editAbort.abort();
+	}, 15 * 60 * 1000);
+	let workingTimeline = cloneTimelineState(initialTimeline);
+	let planAssistantReply = '';
+	let sawStateChange = false;
 	try {
-		const response = await fetch(
-			`${API_BASE}/api/rooms/${encodeURIComponent(normalizedRoomID)}/ai-edit`,
-			{
-				method: 'POST',
-				headers: withTimelineUserHeaders(sessionUserID, {
-					'Content-Type': 'application/json'
-				}),
-				credentials: 'include',
-				body: JSON.stringify({
-					prompt: enrichedEditPrompt,
-					current_state: currentState ? compressTimelineForAI(currentState) : null,
-					userId: sessionUserID,
-					conversation_history: normalizedConversationHistory
-				})
-			}
-		);
+		setActiveTimelineRequest(requestState);
+		const response = await fetch(endpoint, {
+			method: 'POST',
+			headers: withTimelineUserHeaders(sessionUserID, {
+				'Content-Type': 'application/json'
+			}),
+			credentials: 'include',
+			signal: editAbort.signal,
+			body: JSON.stringify(requestPayloadDEBUG_DELETE_LATER)
+		});
 		if (!response.ok) {
 			throw new Error(await parseErrorMessage(response));
 		}
-
-		const payload = (await response.json().catch(() => null)) as unknown;
-		const intent = extractIntentFromAIResponse(payload);
-		const assistantReply = extractAssistantReplyFromAIResponse(payload);
-		if (intent === 'chat' || intent === 'clarify') {
-			const fallbackTimeline = currentState ?? get(projectTimeline);
-			if (!fallbackTimeline) {
-				throw new Error('AI returned a chat response but no active timeline is available.');
-			}
-			lastAIAssistantReply.set(assistantReply);
-			return {
-				timeline: fallbackTimeline,
-				assistantReply,
-				intent
-			};
+		if (!response.body) {
+			throw new Error('Streaming not supported by server');
 		}
-		const normalized = applyTimelinePayload(payload);
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		let currentEvent = '';
+		let currentData = '';
+		let chatResult: AITimelineResult | null = null;
+		let donePayload: Record<string, unknown> | null = null;
+		let streamError: string | null = null;
+		let appliedCount = 0;
+		let operationTotal = 0;
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+
+				const lines = buffer.split('\n');
+				buffer = lines.pop() ?? '';
+
+				for (const line of lines) {
+					if (line.startsWith('event: ')) {
+						currentEvent = line.slice(7).trim();
+					} else if (line.startsWith('data: ')) {
+						currentData = line.slice(6).trim();
+					} else if (line === '') {
+						if (currentEvent && currentData) {
+							try {
+								const payload = JSON.parse(currentData) as Record<string, unknown>;
+								recordProjectServerDataDEBUG_DELETE_LATER({
+									source: 'ai_edit_stream',
+									direction: 'stream',
+									roomId: normalizedRoomID,
+									endpoint,
+									method: 'POST',
+									status: response.status,
+									event: currentEvent,
+									payload
+								});
+
+								if (currentEvent === 'status') {
+									const nextAppliedCount = toNumberValue(
+										payload.applied_count ?? payload.appliedCount,
+										appliedCount
+									);
+									const nextOperationTotal = toNumberValue(
+										payload.operation_total ?? payload.operationTotal,
+										operationTotal
+									);
+									appliedCount = Math.max(appliedCount, nextAppliedCount);
+									operationTotal = Math.max(operationTotal, nextOperationTotal);
+									callbacks.onStatus?.(
+										String(payload.step ?? ''),
+										String(payload.label ?? ''),
+										appliedCount,
+										operationTotal,
+										{
+											timeoutMs:
+												typeof payload.timeout_ms === 'number'
+													? payload.timeout_ms
+													: undefined,
+											promptTimeoutMs:
+												typeof payload.prompt_timeout_ms === 'number'
+													? payload.prompt_timeout_ms
+													: undefined,
+											strategy:
+												typeof payload.strategy === 'string'
+													? payload.strategy
+													: undefined
+										}
+									);
+								} else if (currentEvent === 'chat') {
+									const intent = String(payload.intent ?? 'chat') as AITimelineIntent;
+									const assistantReply = String(payload.assistant_reply ?? '');
+									callbacks.onChat?.(intent, assistantReply);
+									lastAIAssistantReply.set(assistantReply);
+									chatResult = {
+										timeline: initialTimeline,
+										assistantReply,
+										intent
+									};
+								} else if (currentEvent === 'plan') {
+									planAssistantReply = String(payload.assistant_reply ?? '').trim();
+									operationTotal = Math.max(
+										operationTotal,
+										toNumberValue(payload.operation_total ?? payload.operationTotal, operationTotal)
+									);
+									const projectPatch = normalizeTimelineEditProjectPatch(
+										payload.project_patch ?? payload.projectPatch
+									);
+									if (projectPatch) {
+										workingTimeline = applyTimelineProjectPatchToState(workingTimeline, projectPatch);
+										setProjectTimeline(workingTimeline);
+										sawStateChange = true;
+									}
+									callbacks.onPlan?.(planAssistantReply, operationTotal);
+								} else if (currentEvent === 'operation_applied') {
+									appliedCount = Math.max(
+										appliedCount,
+										toNumberValue(payload.applied_count ?? payload.appliedCount, appliedCount + 1)
+									);
+									operationTotal = Math.max(
+										operationTotal,
+										toNumberValue(payload.operation_total ?? payload.operationTotal, operationTotal)
+									);
+									const operation = normalizeTimelineEditOperationPayload(payload.operation);
+									workingTimeline = applyTimelineEditOperationToState(workingTimeline, operation);
+									setProjectTimeline(workingTimeline);
+									sawStateChange = true;
+									callbacks.onOperation?.(
+										summarizeTimelineEditOperation(operation),
+										appliedCount,
+										operationTotal
+									);
+								} else if (currentEvent === 'done') {
+									donePayload = payload;
+								} else if (currentEvent === 'error') {
+									streamError = formatTimelineErrorMessage(
+										payload as TimelineErrorResponse,
+										response.status
+									);
+									callbacks.onError?.(streamError, { isStopped: false });
+								}
+							} catch {
+								// ignore malformed SSE frames
+							}
+						}
+						currentEvent = '';
+						currentData = '';
+					}
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+
+		if (chatResult) {
+			return chatResult;
+		}
+
+		if (donePayload?.timeline) {
+			workingTimeline = applyTimelinePayload(donePayload.timeline);
+			sawStateChange = true;
+		} else if (sawStateChange) {
+			setProjectTimeline(workingTimeline);
+		}
+
+		if (streamError && !sawStateChange) {
+			throw new Error(streamError);
+		}
+		if (!sawStateChange && !donePayload) {
+			throw new Error('AI did not return any board changes. Please try again.');
+		}
+
+		if (streamError) {
+			timelineError.set(streamError);
+		} else {
+			timelineError.set('');
+		}
+
+		const assistantReply =
+			extractAssistantReplyFromAIResponse(donePayload) || planAssistantReply || 'Board updated.';
 		lastAIAssistantReply.set(assistantReply);
+		const finalTimeline = workingTimeline ?? get(projectTimeline);
+		if (!finalTimeline) {
+			throw new Error('AI edit finished without an active board timeline.');
+		}
 		const boardActivityEvent = addBoardActivity({
 			type: 'board_edited',
 			title: 'Board updated by Tora AI',
-			subtitle: normalized.project_name
+			subtitle: finalTimeline.project_name
 		});
 		sendSocketPayload(buildBoardActivitySocketPayload(normalizedRoomID, boardActivityEvent));
 		return {
-			timeline: normalized,
+			timeline: finalTimeline,
 			assistantReply,
-			intent: intent || 'modify_project'
+			intent: extractIntentFromAIResponse(donePayload) || 'modify_project'
 		};
 	} catch (error) {
+		const userStopped = requestState.stopRequested && isAbortError(error);
+		if (userStopped) {
+			if (sawStateChange) {
+				setProjectTimeline(workingTimeline);
+			}
+			timelineError.set('');
+			callbacks.onError?.(
+				sawStateChange
+					? 'AI board update stopped. Partial changes were kept.'
+					: 'AI board update stopped.',
+				{ isStopped: true }
+			);
+			throw new TimelineRequestStoppedError(
+				sawStateChange
+					? 'AI board update stopped. Partial changes were kept.'
+					: 'AI board update stopped.',
+				workingTimeline,
+				planAssistantReply
+			);
+		}
+		if (timedOut && isAbortError(error)) {
+			const message = 'AI timeline edit request timed out';
+			timelineError.set(message);
+			callbacks.onError?.(message, { isStopped: false });
+			throw new Error(message);
+		}
 		const message = error instanceof Error ? error.message : 'Failed to edit project timeline';
 		timelineError.set(message);
+		callbacks.onError?.(message, { isStopped: false });
 		throw error instanceof Error ? error : new Error(message);
 	} finally {
+		clearTimeout(editTimeoutId);
+		if (activeTimelineRequestState === requestState) {
+			setActiveTimelineRequest(null);
+		}
 		timelineLoading.set(false);
 	}
 }
@@ -1259,15 +2302,13 @@ export async function initializeProjectTimelineForRoom(
 
 	const fetchImpl = options?.fetchImpl ?? fetch;
 	const apiBase = options?.apiBase?.trim() || API_BASE;
+	const endpoint = `${apiBase}/api/rooms/${encodeURIComponent(normalizedRoomID)}/tasks`;
 
 	try {
-		const response = await fetchImpl(
-			`${apiBase}/api/rooms/${encodeURIComponent(normalizedRoomID)}/tasks`,
-			{
-				method: 'GET',
-				credentials: 'include'
-			}
-		);
+		const response = await fetchImpl(endpoint, {
+			method: 'GET',
+			credentials: 'include'
+		});
 		if (!response.ok) {
 			throw new Error(await parseErrorMessage(response));
 		}
