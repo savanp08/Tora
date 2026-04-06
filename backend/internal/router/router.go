@@ -22,6 +22,47 @@ import (
 	"github.com/go-chi/cors"
 )
 
+const (
+	apiDefaultRequestTimeout = 60 * time.Second
+	apiLongAIRequestTimeout  = 20 * time.Minute
+)
+
+func isLongRunningAIAPIPath(path string) bool {
+	normalizedPath := strings.ToLower(strings.TrimSpace(path))
+	switch {
+	case strings.HasSuffix(normalizedPath, "/ai-organize"):
+		return true
+	case strings.HasSuffix(normalizedPath, "/ai-timeline"):
+		return true
+	case strings.HasSuffix(normalizedPath, "/ai-timeline/stream"):
+		return true
+	case strings.HasSuffix(normalizedPath, "/ai-edit"):
+		return true
+	case strings.HasSuffix(normalizedPath, "/ai-edit/stream"):
+		return true
+	default:
+		return false
+	}
+}
+
+func apiTimeoutMiddleware() func(http.Handler) http.Handler {
+	defaultTimeout := middleware.Timeout(apiDefaultRequestTimeout)
+	longAITimeout := middleware.Timeout(apiLongAIRequestTimeout)
+
+	return func(next http.Handler) http.Handler {
+		defaultHandler := defaultTimeout(next)
+		longAIHandler := longAITimeout(next)
+
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isLongRunningAIAPIPath(r.URL.Path) {
+				longAIHandler.ServeHTTP(w, r)
+				return
+			}
+			defaultHandler.ServeHTTP(w, r)
+		})
+	}
+}
+
 func New(
 	hub *websocket.Hub,
 	redisStore *database.RedisStore,
@@ -144,7 +185,7 @@ func New(
 	})
 
 	r.Route("/api", func(r chi.Router) {
-		r.Use(middleware.Timeout(60 * time.Second))
+		r.Use(apiTimeoutMiddleware())
 		r.Post("/ide/execute", handlers.HandleIDECodeExecution)
 		r.Post("/ide/ai/chat", handlers.HandleIDEPrivateAIChat)
 		r.Post("/ide/ai/private-chat", handlers.HandleIDEPrivateAIChat)

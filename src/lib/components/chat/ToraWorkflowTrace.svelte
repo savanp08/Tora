@@ -168,7 +168,7 @@
 
 	function buildOverlayStyle(bounds: WorkflowViewportBounds | null) {
 		if (!bounds || bounds.width <= 0 || bounds.height <= 0) return '';
-		return `top:${bounds.top}px;right:${bounds.right}px;bottom:${bounds.bottom}px;left:${bounds.left}px;`;
+		return `top:${bounds.top}px;right:${bounds.right}px;bottom:${bounds.bottom}px;left:${bounds.left}px;--wf-overlay-width:${bounds.width}px;--wf-overlay-height:${bounds.height}px;`;
 	}
 
 	function resolvePanelTitle(
@@ -682,9 +682,9 @@
 	}
 
 	.wf-panel {
-		width: min(36rem, 100%);
-		max-height: calc(100vh - 2rem);
-		margin-top: clamp(0rem, 5vh, 3rem);
+		width: min(36rem, calc(var(--wf-overlay-width, 100vw) - 2rem));
+		max-height: min(calc(var(--wf-overlay-height, 100vh) - 2rem), calc(100vh - 2rem));
+		margin-top: 0;
 		border-radius: 16px;
 		border: 1px solid rgba(148, 163, 184, 0.18);
 		background: #ffffff;
@@ -817,6 +817,8 @@
 		flex: 1 1 auto;
 		min-height: 0;
 		overflow-y: auto;
+		-webkit-overflow-scrolling: touch;
+		overscroll-behavior: contain;
 		padding: 8px 0 12px;
 		scroll-behavior: smooth;
 	}
@@ -1032,7 +1034,7 @@
 			width: 100%;
 			margin-top: 0;
 			border-radius: 16px 16px 0 0;
-			max-height: 80vh;
+			max-height: min(calc(var(--wf-overlay-height, 100vh) - 1rem), 80vh);
 		}
 	}
 </style>
