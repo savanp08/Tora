@@ -1425,6 +1425,7 @@ block at the very END of your response, after your explanation:
   {
     "kind": "task_update",
     "task_id": "exact-uuid-from-task-board-data",
+    "task_number": 7,
     "task_title": "Current task title",
     "task_sprint": "Sprint the task currently belongs to",
     "task_parent": "Parent task title if this is a subtask, omit if top-level",
@@ -1446,6 +1447,7 @@ block at the very END of your response, after your explanation:
   {
     "kind": "task_delete",
     "task_id": "exact-uuid-from-task-board-data",
+    "task_number": 7,
     "task_title": "Task title",
     "task_sprint": "Sprint the task belongs to",
     "task_parent": "Parent task title if subtask, omit if top-level"
@@ -1455,7 +1457,7 @@ block at the very END of your response, after your explanation:
 
 Rules:
 - Only include actions you are confident about.
-- For task_update / task_delete: task_id MUST be an exact ID from the {id:...} tags in the task board data above. Never invent IDs.
+- For task_update / task_delete: task_id MUST be an exact ID from the {id:...} tags in the task board data above. Never invent IDs. Also include task_number from the #N tag next to the task (e.g. if you see {id:abc123}  #7, include "task_number": 7). task_number is used as a reliable fallback identifier if the UUID is unavailable.
 - Always populate task_sprint and task_parent (when applicable) so the user can identify which task is being changed without seeing internal IDs.
 - For task_update: only include fields in "changes" that should actually change.
 - For task_update: keep "changes" API-safe and include only the new values to apply.
@@ -1892,7 +1894,7 @@ func (d *toraDryRunExecutor) buildPendingActionsJSON() string {
 			}
 		case "update_task":
 			action = map[string]any{"kind": "task_update", "already_applied": false}
-			for _, k := range []string{"task_id", "task_title"} {
+			for _, k := range []string{"task_id", "task_title", "task_number"} {
 				if v, ok := w.input[k]; ok && v != nil {
 					action[k] = v
 				}
@@ -1902,7 +1904,7 @@ func (d *toraDryRunExecutor) buildPendingActionsJSON() string {
 			}
 			changes := map[string]any{}
 			for k, v := range w.input {
-				if k == "task_id" || k == "task_title" || k == "sprint_name" {
+				if k == "task_id" || k == "task_title" || k == "sprint_name" || k == "task_number" {
 					continue
 				}
 				changes[k] = v
@@ -1913,7 +1915,7 @@ func (d *toraDryRunExecutor) buildPendingActionsJSON() string {
 			}
 		case "delete_task":
 			action = map[string]any{"kind": "task_delete", "already_applied": false}
-			for _, k := range []string{"task_id", "task_title"} {
+			for _, k := range []string{"task_id", "task_title", "task_number"} {
 				if v, ok := w.input[k]; ok && v != nil {
 					action[k] = v
 				}
@@ -2531,7 +2533,7 @@ func (h *Hub) ensureToraContextBuilder() *ai.ContextBuilder {
 	if h.msgService == nil || h.msgService.Scylla == nil {
 		return nil
 	}
-	h.contextBuilder = ai.NewContextBuilder(h.msgService.Scylla)
+	h.contextBuilder = ai.NewContextBuilder(h.msgService.Scylla).WithRedis(h.msgService.Redis)
 	return h.contextBuilder
 }
 
@@ -3864,6 +3866,7 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 	// ── STEP 1: tasks ────────────────────────────────────────────────────────
 	type taskRow struct {
 		id              string
+		taskNumber      int
 		title           string
 		status          string
 		taskType        string
@@ -3877,7 +3880,7 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 	}
 
 	tasksQuery := fmt.Sprintf(
-		`SELECT id, title, status, task_type, description, sprint_name, assignee_id, status_actor_name, due_date, start_date, roles FROM %s WHERE room_id = ?`,
+		`SELECT id, task_number, title, status, task_type, description, sprint_name, assignee_id, status_actor_name, due_date, start_date, roles FROM %s WHERE room_id = ?`,
 		h.msgService.Scylla.Table("tasks"),
 	)
 	tasksIter := h.msgService.Scylla.Session.Query(tasksQuery, roomUUID).WithContext(ctx).Iter()
@@ -3890,6 +3893,7 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 
 	var (
 		taskID          gocql.UUID
+		taskNumPtr      *int
 		title           string
 		status          string
 		taskType        string
@@ -3901,7 +3905,7 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 		toraStartDate   *time.Time
 		toraRolesRaw    *string
 	)
-	for tasksIter.Scan(&taskID, &title, &status, &taskType, &description, &sprint, &assigneeUUIDPtr, &statusActorName, &toraDueDate, &toraStartDate, &toraRolesRaw) {
+	for tasksIter.Scan(&taskID, &taskNumPtr, &title, &status, &taskType, &description, &sprint, &assigneeUUIDPtr, &statusActorName, &toraDueDate, &toraStartDate, &toraRolesRaw) {
 		row := taskRow{
 			id:              strings.TrimSpace(taskID.String()),
 			title:           strings.TrimSpace(title),
@@ -3913,6 +3917,9 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 			dueDate:         toraDueDate,
 			startDate:       toraStartDate,
 			rolesRaw:        toraRolesRaw,
+		}
+		if taskNumPtr != nil {
+			row.taskNumber = *taskNumPtr
 		}
 		if assigneeUUIDPtr != nil {
 			row.assigneeID = strings.TrimSpace(assigneeUUIDPtr.String())
@@ -4062,12 +4069,17 @@ func (h *Hub) fetchToraWorkspaceContext(ctx context.Context, roomID string, plan
 		}
 		// Always include the full task ID — the AI needs it to produce valid
 		// task_update / task_delete action payloads.
+		// task_number is a short stable number the AI can use as a fallback identifier.
 		// Include sprint so the AI can distinguish duplicate-named tasks.
 		var line string
+		numTag := ""
+		if t.taskNumber > 0 {
+			numTag = fmt.Sprintf("  #%d", t.taskNumber)
+		}
 		if t.sprint != "" {
-			line = fmt.Sprintf("  - [%s] %s  {id:%s}  sprint:%q", t.status, t.title, t.id, t.sprint)
+			line = fmt.Sprintf("  - [%s] %s  {id:%s}%s  sprint:%q", t.status, t.title, t.id, numTag, t.sprint)
 		} else {
-			line = fmt.Sprintf("  - [%s] %s  {id:%s}  sprint:(none)", t.status, t.title, t.id)
+			line = fmt.Sprintf("  - [%s] %s  {id:%s}%s  sprint:(none)", t.status, t.title, t.id, numTag)
 		}
 
 		// Assignee — show resolved name when available, fall back to status actor

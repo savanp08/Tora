@@ -2483,6 +2483,7 @@
 											{apiBase}
 											authToken={chatAuthToken}
 											autoApply={toraAutoApply}
+											currentUserId={currentUserId}
 											{currentUserName}
 											canResolve={canResolveToraChanges}
 										/>

@@ -195,7 +195,7 @@ func NewHub(service *MessageService, tracker *monitor.UsageTracker) *Hub {
 	}
 
 	if service != nil && service.Scylla != nil {
-		hub.contextBuilder = ai.NewContextBuilder(service.Scylla)
+		hub.contextBuilder = ai.NewContextBuilder(service.Scylla).WithRedis(service.Redis)
 		hub.agentEngine = ai.NewAgentEngineFactory(hub.contextBuilder, resolveToraAgentProvider)
 	}
 

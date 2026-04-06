@@ -83,6 +83,19 @@ func (r *RedisStore) Close() error {
 	return r.Client.Close()
 }
 
+// IncrTaskNumber atomically increments the task counter for a room and returns
+// the new value. This is used to assign short, human-readable task numbers.
+func (r *RedisStore) IncrTaskNumber(ctx context.Context, roomID string) (int, error) {
+	if r == nil || r.Client == nil {
+		return 0, fmt.Errorf("redis client is not configured")
+	}
+	n, err := r.Client.Incr(ctx, fmt.Sprintf("task_counter:%s", roomID)).Result()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
 func (r *RedisStore) SetRoomSummary(ctx context.Context, roomID string, summary string) error {
 	if r == nil || r.Client == nil {
 		return fmt.Errorf("redis client is not configured")

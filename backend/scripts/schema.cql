@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS converse.tasks (
 
 CREATE INDEX IF NOT EXISTS tasks_assignee_id_idx ON converse.tasks (assignee_id);
 ALTER TABLE converse.tasks ADD sprint_name text;
+ALTER TABLE converse.tasks ADD task_number int;
 
 ALTER TABLE converse.rooms ADD is_direct boolean;
 

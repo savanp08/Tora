@@ -241,6 +241,7 @@
 	let editingSubtasksBaseline: DisplaySubtask[] = [];
 	let savingRelations = false;
 	let savingCellKey = '';
+	let savingStatusTaskId = '';
 	let quickEditVisible = false;
 	let quickEditorElement: HTMLInputElement | HTMLSelectElement | null = null;
 	let inlineEditorElement: HTMLInputElement | HTMLSelectElement | null = null;
@@ -2405,6 +2406,10 @@
 		return savingCellKey === makeCellKey(taskId, field);
 	}
 
+	function isSavingStatus(taskId: string) {
+		return savingStatusTaskId === taskId;
+	}
+
 	function shouldUseInlineGridEditor(field: EditableField, mode: 'auto' | 'inline' | 'panel') {
 		if (mode === 'inline') {
 			return true;
@@ -2967,6 +2972,7 @@
 		editingTaskId = '';
 		editingField = '';
 		editingValue = '';
+		quickEditVisible = false;
 		editingCustomFields = {};
 		editingCustomFieldsBaseline = {};
 		editingBlockedBy = [];
@@ -3641,7 +3647,7 @@
 	function toggleStatusMenu(event: MouseEvent, task: DisplayTask) {
 		event.stopPropagation();
 		cancelEditing();
-		if (!canEditTaskStatus(task)) {
+		if (!canEditTaskStatus(task) || isSavingStatus(task.id)) {
 			return;
 		}
 		statusMenuTaskId = statusMenuTaskId === task.id ? '' : task.id;
@@ -3649,6 +3655,9 @@
 
 	async function applyStatus(task: DisplayTask, nextStatus: ColumnKey) {
 		if (!canEditTaskStatus(task)) {
+			return;
+		}
+		if (isSavingStatus(task.id)) {
 			return;
 		}
 		if (resolveColumn(task.status) === nextStatus) {
@@ -3666,8 +3675,7 @@
 			return;
 		}
 
-		const cellKey = makeCellKey(task.id, 'status');
-		savingCellKey = cellKey;
+		savingStatusTaskId = task.id;
 		clearBoardError();
 		try {
 			if (contextAware) {
@@ -3678,8 +3686,8 @@
 		} catch (error) {
 			setBoardError(error instanceof Error ? error.message : 'Failed to update task status');
 		} finally {
-			if (savingCellKey === cellKey) {
-				savingCellKey = '';
+			if (savingStatusTaskId === task.id) {
+				savingStatusTaskId = '';
 			}
 			statusMenuTaskId = '';
 		}
@@ -4965,7 +4973,7 @@
 													type="button"
 													class={`status-pill status-${resolveColumn(task.status)}`}
 													on:click|stopPropagation={(event) => toggleStatusMenu(event, task)}
-													disabled={!canEditTaskStatus(task) || isSaving(task.id, 'status')}
+													disabled={!canEditTaskStatus(task) || isSavingStatus(task.id)}
 												>
 													{statusLabel(resolveColumn(task.status))}
 												</button>
@@ -5251,6 +5259,7 @@
 												class:row-todo={resolveColumn(task.status) === 'todo'}
 												class:row-progress={resolveColumn(task.status) === 'in_progress'}
 												class:row-done={resolveColumn(task.status) === 'done'}
+												class:row-status-open={statusMenuTaskId === task.id}
 												class:row-selected={isEditMode && isTaskSelected(task.id)}
 												class:row-modal-open={taskEditModal?.id === task.id}
 												on:mouseenter={() => {
@@ -5317,13 +5326,17 @@
 												</td>
 
 												<!-- Status -->
-												<td class="cell status-cell" on:click|stopPropagation>
+												<td
+													class="cell status-cell"
+													class:menu-open={statusMenuTaskId === task.id}
+													on:click|stopPropagation
+												>
 													<div class="status-wrap">
 														<button
 															type="button"
 															class={`status-pill status-${resolveColumn(task.status)}`}
 															on:click|stopPropagation={(e) => toggleStatusMenu(e, task)}
-															disabled={!canEditTaskStatus(task) || isSaving(task.id, 'status')}
+															disabled={!canEditTaskStatus(task) || isSavingStatus(task.id)}
 														>
 															{statusLabel(resolveColumn(task.status))}
 														</button>
@@ -7719,6 +7732,7 @@
 	}
 
 	.task-grid tbody tr {
+		position: relative;
 		transition:
 			background 0.18s ease,
 			box-shadow 0.18s ease;
@@ -7764,6 +7778,10 @@
 
 	.task-grid tbody tr.row-selected {
 		background: color-mix(in srgb, var(--tb-grid-head-bg) 8%, transparent);
+	}
+
+	.task-grid tbody tr.row-status-open {
+		z-index: 14;
 	}
 
 	.th-check,
@@ -7812,8 +7830,20 @@
 	.status-cell {
 		width: 14%;
 		max-width: 0;
-		overflow: hidden;
 		padding: 0.3rem 0.4rem;
+	}
+
+	.th-status {
+		overflow: hidden;
+	}
+
+	.status-cell {
+		overflow: hidden;
+	}
+
+	.status-cell.menu-open {
+		overflow: visible;
+		z-index: 18;
 	}
 
 	.th-owner,
@@ -8063,6 +8093,10 @@
 		overflow: visible;
 	}
 
+	.status-cell.menu-open .status-wrap {
+		z-index: 20;
+	}
+
 	.status-pill {
 		width: 100%;
 		height: 1.6rem;
@@ -8121,7 +8155,7 @@
 		position: absolute;
 		top: calc(100% + 0.35rem);
 		left: 0;
-		z-index: 8;
+		z-index: 24;
 		min-width: 9.25rem;
 		display: grid;
 		gap: 0.24rem;

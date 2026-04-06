@@ -53,6 +53,7 @@ type UserCtx struct {
 
 type TaskCtx struct {
 	ID           string
+	TaskNumber   int // short sequential number within the room; 0 = not assigned
 	Title        string
 	Description  string
 	Status       string
@@ -113,10 +114,31 @@ type BuildOptions struct {
 
 type ContextBuilder struct {
 	scylla *database.ScyllaStore
+	redis  *database.RedisStore // optional — enables task number generation
 }
 
 func NewContextBuilder(scylla *database.ScyllaStore) *ContextBuilder {
 	return &ContextBuilder{scylla: scylla}
+}
+
+// WithRedis attaches an optional Redis store used for atomic task number generation.
+func (cb *ContextBuilder) WithRedis(redis *database.RedisStore) *ContextBuilder {
+	cb.redis = redis
+	return cb
+}
+
+// IncrTaskNumber atomically increments the task counter for a room.
+// Returns 0 if Redis is not configured (task_number will not be set).
+func (cb *ContextBuilder) IncrTaskNumber(ctx context.Context, roomID string) int {
+	if cb == nil || cb.redis == nil {
+		return 0
+	}
+	n, err := cb.redis.IncrTaskNumber(ctx, roomID)
+	if err != nil {
+		log.Printf("[ai/ctx] task number incr failed room=%s: %v", roomID, err)
+		return 0
+	}
+	return n
 }
 
 func (cb *ContextBuilder) Build(ctx context.Context, roomID string, requestedByID string, opts BuildOptions) (*WorkspaceContext, error) {
@@ -455,6 +477,7 @@ func (cb *ContextBuilder) loadMembers(ctx context.Context, rawRoomID, normalized
 func (cb *ContextBuilder) loadTasks(ctx context.Context, roomUUID gocql.UUID, taskLimit int) ([]TaskCtx, []TaskCtx, []SprintCtx, error) {
 	type taskRow struct {
 		ID           string
+		TaskNumber   int
 		Title        string
 		Description  string
 		Status       string
@@ -469,7 +492,7 @@ func (cb *ContextBuilder) loadTasks(ctx context.Context, roomUUID gocql.UUID, ta
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, title, description, status, task_type, sprint_name, assignee_id, custom_fields, due_date, start_date, roles, updated_at FROM %s WHERE room_id = ? LIMIT %d`,
+		`SELECT id, task_number, title, description, status, task_type, sprint_name, assignee_id, custom_fields, due_date, start_date, roles, updated_at FROM %s WHERE room_id = ? LIMIT %d`,
 		cb.scylla.Table("tasks"),
 		taskLimit,
 	)
@@ -480,6 +503,7 @@ func (cb *ContextBuilder) loadTasks(ctx context.Context, roomUUID gocql.UUID, ta
 
 	var (
 		taskID       gocql.UUID
+		taskNumber   *int
 		title        string
 		description  string
 		status       string
@@ -494,6 +518,7 @@ func (cb *ContextBuilder) loadTasks(ctx context.Context, roomUUID gocql.UUID, ta
 	)
 	for iter.Scan(
 		&taskID,
+		&taskNumber,
 		&title,
 		&description,
 		&status,
@@ -518,6 +543,9 @@ func (cb *ContextBuilder) loadTasks(ctx context.Context, roomUUID gocql.UUID, ta
 			StartDate:    cloneTimePtr(startDate),
 			RolesRaw:     rolesRaw,
 			UpdatedAt:    updatedAt.UTC(),
+		}
+		if taskNumber != nil {
+			row.TaskNumber = *taskNumber
 		}
 		if assigneeID != nil {
 			row.AssigneeID = strings.TrimSpace(assigneeID.String())
@@ -547,6 +575,7 @@ func (cb *ContextBuilder) loadTasks(ctx context.Context, roomUUID gocql.UUID, ta
 		customFieldsMap := parseJSONMap(row.CustomFields)
 		task := TaskCtx{
 			ID:           row.ID,
+			TaskNumber:   row.TaskNumber,
 			Title:        firstContextValue(row.Title, "(untitled task)"),
 			Description:  row.Description,
 			Status:       row.Status,

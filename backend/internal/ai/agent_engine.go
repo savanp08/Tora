@@ -393,14 +393,18 @@ func BuiltInAnthropicTools() []AnthropicTool {
 		},
 		{
 			Name:        "update_task",
-			Description: "Update an existing task by task_id.",
+			Description: "Update an existing task by task_id. Always include task_number (the #N shown next to the task in board data) as a reliable fallback.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": mergeSchemaProperties(
 					map[string]any{
 						"task_id": map[string]any{
 							"type":        "string",
-							"description": "Exact task UUID to update.",
+							"description": "Exact task UUID from {id:...} tag in board data.",
+						},
+						"task_number": map[string]any{
+							"type":        "integer",
+							"description": "Short task number from the #N tag in board data. Used as fallback if task_id is unavailable.",
 						},
 					},
 					taskMutationProperties,
@@ -410,13 +414,17 @@ func BuiltInAnthropicTools() []AnthropicTool {
 		},
 		{
 			Name:        "delete_task",
-			Description: "Delete a task by task_id. 404 should be treated as success.",
+			Description: "Delete a task by task_id. 404 should be treated as success. Always include task_number as a reliable fallback.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"task_id": map[string]any{
 						"type":        "string",
-						"description": "Exact task UUID to delete.",
+						"description": "Exact task UUID from {id:...} tag in board data.",
+					},
+					"task_number": map[string]any{
+						"type":        "integer",
+						"description": "Short task number from the #N tag in board data. Used as fallback if task_id is unavailable.",
 					},
 					"task_title": map[string]any{
 						"type":        "string",
@@ -940,30 +948,42 @@ func (e *AgentEngine) agentCreateTask(ctx context.Context, input map[string]any)
 	}
 
 	now := time.Now().UTC()
-	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		store.Table("tasks"),
-	)
-	if err := store.Session.Query(
-		query,
-		roomUUID,
-		taskUUID,
-		title,
-		description,
-		status,
-		sprintName,
-		assigneeUUID,
-		customFieldsJSON,
-		nullableText(e.authContext.UserID),
-		nullableText(e.authContext.UserName),
-		now,
-		now,
-		now,
-		nullableText(taskType),
-		startDateOrNil(dueDate),
-		startDateOrNil(startDate),
-		marshalAgentRoles(roles),
-	).WithContext(ctx).Exec(); err != nil {
+	taskNumber := 0
+	if e.ctxBuilder != nil {
+		taskNumber = e.ctxBuilder.IncrTaskNumber(ctx, e.roomID)
+	}
+	var query string
+	var queryArgs []any
+	if taskNumber > 0 {
+		query = fmt.Sprintf(
+			`INSERT INTO %s (room_id, id, task_number, title, description, status, sprint_name, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			store.Table("tasks"),
+		)
+		queryArgs = []any{
+			roomUUID, taskUUID, taskNumber,
+			title, description, status, sprintName,
+			assigneeUUID, customFieldsJSON,
+			nullableText(e.authContext.UserID), nullableText(e.authContext.UserName),
+			now, now, now,
+			nullableText(taskType), startDateOrNil(dueDate), startDateOrNil(startDate),
+			marshalAgentRoles(roles),
+		}
+	} else {
+		query = fmt.Sprintf(
+			`INSERT INTO %s (room_id, id, title, description, status, sprint_name, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			store.Table("tasks"),
+		)
+		queryArgs = []any{
+			roomUUID, taskUUID,
+			title, description, status, sprintName,
+			assigneeUUID, customFieldsJSON,
+			nullableText(e.authContext.UserID), nullableText(e.authContext.UserName),
+			now, now, now,
+			nullableText(taskType), startDateOrNil(dueDate), startDateOrNil(startDate),
+			marshalAgentRoles(roles),
+		}
+	}
+	if err := store.Session.Query(query, queryArgs...).WithContext(ctx).Exec(); err != nil {
 		return nil, fmt.Errorf("failed to create task: %w", err)
 	}
 	if err := e.ensureAgentTaskRelationSchema(ctx); err != nil {
@@ -991,17 +1011,26 @@ func (e *AgentEngine) agentUpdateTask(ctx context.Context, input map[string]any)
 	if err != nil {
 		return nil, err
 	}
-	taskUUID, err := parseFlexibleUUID(taskIDRaw)
-	if err != nil {
-		return nil, &agentToolInputError{
-			Field:   "task_id",
-			Message: "invalid field: task_id must be a valid UUID",
-		}
-	}
 
 	store, roomUUID, err := e.taskStoreAndRoomUUID()
 	if err != nil {
 		return nil, err
+	}
+
+	taskUUID, parseErr := parseFlexibleUUID(taskIDRaw)
+	if parseErr != nil {
+		// Fallback: look up by task_number when task_id is not a valid UUID
+		taskNum, numPresent, numErr := optionalIntField(input, "task_number")
+		if numErr != nil || !numPresent || taskNum <= 0 {
+			return nil, &agentToolInputError{
+				Field:   "task_id",
+				Message: "invalid field: task_id must be a valid UUID",
+			}
+		}
+		taskUUID, err = e.loadTaskUUIDByNumber(ctx, roomUUID, taskNum)
+		if err != nil {
+			return nil, fmt.Errorf("task #%d not found: %w", taskNum, err)
+		}
 	}
 
 	existing, err := e.loadRawTaskRow(ctx, roomUUID, taskUUID)
@@ -1200,17 +1229,31 @@ func (e *AgentEngine) agentDeleteTask(ctx context.Context, input map[string]any)
 	if err != nil {
 		return nil, err
 	}
-	taskUUID, err := parseFlexibleUUID(taskIDRaw)
-	if err != nil {
-		return nil, &agentToolInputError{
-			Field:   "task_id",
-			Message: "invalid field: task_id must be a valid UUID",
-		}
-	}
 
 	store, roomUUID, err := e.taskStoreAndRoomUUID()
 	if err != nil {
 		return nil, err
+	}
+
+	taskUUID, parseErr := parseFlexibleUUID(taskIDRaw)
+	if parseErr != nil {
+		// Fallback: look up by task_number when task_id is not a valid UUID
+		taskNum, numPresent, numErr := optionalIntField(input, "task_number")
+		if numErr != nil || !numPresent || taskNum <= 0 {
+			return nil, &agentToolInputError{
+				Field:   "task_id",
+				Message: "invalid field: task_id must be a valid UUID",
+			}
+		}
+		taskUUID, err = e.loadTaskUUIDByNumber(ctx, roomUUID, taskNum)
+		if err != nil {
+			// Treat not-found as success (idempotent delete)
+			return map[string]any{
+				"deleted":    true,
+				"task_id":    taskIDRaw,
+				"task_title": taskTitle,
+			}, nil
+		}
 	}
 
 	_, loadErr := e.loadRawTaskRow(ctx, roomUUID, taskUUID)
@@ -1560,6 +1603,7 @@ func (e *AgentEngine) resolveAuthAssigneeUUID() *gocql.UUID {
 
 type agentRawTaskRow struct {
 	ID           gocql.UUID
+	TaskNumber   int
 	Title        string
 	Description  string
 	Status       string
@@ -1585,13 +1629,15 @@ func (e *AgentEngine) loadRawTaskRow(ctx context.Context, roomUUID gocql.UUID, t
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, title, description, status, task_type, sprint_name, assignee_id, custom_fields, due_date, start_date, roles, updated_at FROM %s WHERE room_id = ? AND id = ? LIMIT 1`,
+		`SELECT id, task_number, title, description, status, task_type, sprint_name, assignee_id, custom_fields, due_date, start_date, roles, updated_at FROM %s WHERE room_id = ? AND id = ? LIMIT 1`,
 		store.Table("tasks"),
 	)
 
+	var taskNumber *int
 	row := &agentRawTaskRow{}
 	if err := store.Session.Query(query, roomUUID, taskUUID).WithContext(ctx).Scan(
 		&row.ID,
+		&taskNumber,
 		&row.Title,
 		&row.Description,
 		&row.Status,
@@ -1606,7 +1652,38 @@ func (e *AgentEngine) loadRawTaskRow(ctx context.Context, roomUUID gocql.UUID, t
 	); err != nil {
 		return nil, err
 	}
+	if taskNumber != nil {
+		row.TaskNumber = *taskNumber
+	}
 	return row, nil
+}
+
+// loadTaskUUIDByNumber scans room tasks to find the UUID for a given task_number.
+// O(n) scan — acceptable for typical board sizes.
+func (e *AgentEngine) loadTaskUUIDByNumber(ctx context.Context, roomUUID gocql.UUID, taskNumber int) (gocql.UUID, error) {
+	store := e.scyllaStore()
+	if store == nil || store.Session == nil {
+		return gocql.UUID{}, fmt.Errorf("task storage not configured")
+	}
+	query := fmt.Sprintf(
+		`SELECT id, task_number FROM %s WHERE room_id = ?`,
+		store.Table("tasks"),
+	)
+	iter := store.Session.Query(query, roomUUID).WithContext(ctx).Iter()
+	var (
+		scanID      gocql.UUID
+		scanNumPtr  *int
+	)
+	for iter.Scan(&scanID, &scanNumPtr) {
+		if scanNumPtr != nil && *scanNumPtr == taskNumber {
+			_ = iter.Close()
+			return scanID, nil
+		}
+	}
+	if err := iter.Close(); err != nil {
+		return gocql.UUID{}, err
+	}
+	return gocql.UUID{}, fmt.Errorf("task #%d not found", taskNumber)
 }
 
 func (e *AgentEngine) loadTaskByID(ctx context.Context, roomUUID gocql.UUID, taskUUID gocql.UUID) (*TaskCtx, error) {
@@ -1626,6 +1703,7 @@ func (e *AgentEngine) loadTaskByID(ctx context.Context, roomUUID gocql.UUID, tas
 	customFields := parseJSONMap(row.CustomFields)
 	task := &TaskCtx{
 		ID:           strings.TrimSpace(row.ID.String()),
+		TaskNumber:   row.TaskNumber,
 		Title:        strings.TrimSpace(row.Title),
 		Description:  strings.TrimSpace(row.Description),
 		Status:       normalizeAgentTaskStatus(row.Status),

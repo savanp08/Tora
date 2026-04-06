@@ -11,6 +11,7 @@
 		kind: ActionKind;
 		already_applied?: boolean;
 		task_id?: string; // internal — used for API calls, never shown
+		task_number?: number; // short sequential ID; preferred over title matching for lookup
 		task_title?: string;
 		task_sprint?: string; // sprint the task belongs to (for update/delete context)
 		task_parent?: string; // parent task title if subtask (for update/delete context)
@@ -71,6 +72,7 @@
 	export let apiBase = '';
 	export let authToken = '';
 	export let autoApply = false;
+	export let currentUserId = '';
 	export let currentUserName = '';
 	export let canResolve = false;
 
@@ -621,6 +623,7 @@
 		appliedCounts = { created: 0, updated: 0, deleted: 0 };
 		dismissedMeta = null;
 		actionResults = actions.map(() => ({ ok: false }));
+		_cachedTasks = null; // reset per-apply cache
 		const errors: string[] = [];
 
 		for (let i = 0; i < actions.length; i++) {
@@ -665,9 +668,112 @@
 		}
 	}
 
-	async function applyAction(action: TaskAction) {
+	const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+	const HEX32_RE = /^[0-9a-f]{32}$/i;
+
+	function isRealTaskId(id: string): boolean {
+		return UUID_RE.test(id) || HEX32_RE.test(id);
+	}
+
+	type TaskLookupRecord = {
+		id: string;
+		task_number?: number;
+		title: string;
+	};
+
+	function buildRequestHeaders(): Record<string, string> {
 		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 		if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+		if (currentUserId.trim()) {
+			headers['X-User-Id'] = currentUserId.trim();
+		}
+		if (currentUserName.trim()) {
+			headers['X-User-Name'] = currentUserName.trim();
+		}
+		return headers;
+	}
+
+	async function parseActionError(response: Response, fallback: string) {
+		const payload = (await response.json().catch(() => null)) as
+			| { error?: string; message?: string }
+			| null;
+		const detail = payload?.error?.trim() || payload?.message?.trim();
+		return detail ? `${fallback}: ${detail}` : `${fallback} (${response.status})`;
+	}
+
+	function normalizeTaskLookupRecord(raw: unknown): TaskLookupRecord | null {
+		const record = toRecord(raw);
+		if (!record) {
+			return null;
+		}
+		const id =
+			(typeof record.id === 'string' && record.id.trim()) ||
+			(typeof record.task_id === 'string' && record.task_id.trim()) ||
+			'';
+		if (!id) {
+			return null;
+		}
+		const title = typeof record.title === 'string' ? record.title : '';
+		const taskNumber =
+			typeof record.task_number === 'number' && Number.isFinite(record.task_number)
+				? Math.trunc(record.task_number)
+				: undefined;
+		return {
+			id,
+			task_number: taskNumber,
+			title
+		};
+	}
+
+	let _cachedTasks: TaskLookupRecord[] | null = null;
+
+	async function fetchRoomTasks(hdrs: Record<string, string>): Promise<TaskLookupRecord[]> {
+		if (_cachedTasks) return _cachedTasks;
+		const res = await fetch(`${apiBase}/api/rooms/${roomId}/tasks`, {
+			headers: hdrs,
+			credentials: 'include'
+		});
+		if (!res.ok) return [];
+		const data = await res.json();
+		const rawList: unknown[] = Array.isArray(data)
+			? data
+			: Array.isArray(data?.tasks)
+				? data.tasks
+				: [];
+		const list = rawList
+			.map((entry) => normalizeTaskLookupRecord(entry))
+			.filter((entry): entry is TaskLookupRecord => Boolean(entry));
+		_cachedTasks = list;
+		return list;
+	}
+
+	async function resolveTaskId(
+		id: string,
+		taskNumber: number | undefined,
+		title: string | undefined,
+		hdrs: Record<string, string>
+	): Promise<string> {
+		if (isRealTaskId(id)) return id;
+		// Preview ID — resolve via task_number first (reliable), then title (fuzzy fallback)
+		const tasks = await fetchRoomTasks(hdrs);
+		if (taskNumber && taskNumber > 0) {
+			const byNum = tasks.find((t) => t.task_number === taskNumber);
+			if (byNum) return byNum.id;
+		}
+		if (title) {
+			const needle = title.trim().toLowerCase();
+			const byTitle = tasks.find((t) => t.title?.trim().toLowerCase() === needle);
+			if (byTitle) return byTitle.id;
+		}
+		throw new Error(
+			taskNumber
+				? `Task #${taskNumber} not found`
+				: `Task not found: "${title ?? id}"`
+		);
+	}
+
+	async function applyAction(action: TaskAction) {
+		const headers = buildRequestHeaders();
 
 		if (action.kind === 'task_create') {
 			const body: Record<string, unknown> = {
@@ -684,24 +790,27 @@
 			const res = await fetch(`${apiBase}/api/rooms/${roomId}/tasks`, {
 				method: 'POST',
 				headers,
+				credentials: 'include',
 				body: JSON.stringify(body)
 			});
-			if (!res.ok) throw new Error(`Create failed (${res.status})`);
+			if (!res.ok) throw new Error(await parseActionError(res, 'Create failed'));
 		} else if (action.kind === 'task_update') {
 			if (!action.task_id) throw new Error(`Update skipped — no task_id provided`);
+			const resolvedId = await resolveTaskId(action.task_id, action.task_number, action.task_title, headers);
 			const body = action.changes ?? {};
 			const res = await fetch(
-				`${apiBase}/api/rooms/${roomId}/tasks/${encodeURIComponent(action.task_id)}`,
-				{ method: 'PUT', headers, body: JSON.stringify(body) }
+				`${apiBase}/api/rooms/${roomId}/tasks/${encodeURIComponent(resolvedId)}`,
+				{ method: 'PUT', headers, credentials: 'include', body: JSON.stringify(body) }
 			);
-			if (!res.ok) throw new Error(`Update failed (${res.status})`);
+			if (!res.ok) throw new Error(await parseActionError(res, 'Update failed'));
 		} else if (action.kind === 'task_delete') {
 			if (!action.task_id) throw new Error(`Delete skipped — no task_id provided`);
+			const resolvedId = await resolveTaskId(action.task_id, action.task_number, action.task_title, headers);
 			const res = await fetch(
-				`${apiBase}/api/rooms/${roomId}/tasks/${encodeURIComponent(action.task_id)}`,
-				{ method: 'DELETE', headers }
+				`${apiBase}/api/rooms/${roomId}/tasks/${encodeURIComponent(resolvedId)}`,
+				{ method: 'DELETE', headers, credentials: 'include' }
 			);
-			if (!res.ok) throw new Error(`Delete failed (${res.status})`);
+			if (!res.ok) throw new Error(await parseActionError(res, 'Delete failed'));
 		}
 	}
 

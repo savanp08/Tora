@@ -26,6 +26,7 @@ type TaskRole struct {
 
 type TaskRecordResponse struct {
 	ID              string                 `json:"id"`
+	TaskNumber      int                    `json:"task_number,omitempty"`
 	RoomID          string                 `json:"room_id"`
 	Title           string                 `json:"title"`
 	Description     string                 `json:"description"`
@@ -532,7 +533,15 @@ func (h *RoomHandler) ensureTaskSchema() {
 		log.Printf("[task] ensure tasks assignee index failed: %v", err)
 	}
 
-	alterQueries := []string{
+	for _, alterQuery := range taskSchemaAlterQueries(tasksTable) {
+		if err := h.scylla.Session.Query(alterQuery).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
+			log.Printf("[task] ensure tasks schema alter failed: %v", err)
+		}
+	}
+}
+
+func taskSchemaAlterQueries(tasksTable string) []string {
+	return []string{
 		fmt.Sprintf(`ALTER TABLE %s ADD sprint_name text`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD group_id uuid`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD status_actor_id text`, tasksTable),
@@ -543,11 +552,7 @@ func (h *RoomHandler) ensureTaskSchema() {
 		fmt.Sprintf(`ALTER TABLE %s ADD due_date timestamp`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD start_date timestamp`, tasksTable),
 		fmt.Sprintf(`ALTER TABLE %s ADD roles text`, tasksTable),
-	}
-	for _, alterQuery := range alterQueries {
-		if err := h.scylla.Session.Query(alterQuery).Exec(); err != nil && !isSchemaAlreadyAppliedError(err) {
-			log.Printf("[task] ensure tasks schema alter failed: %v", err)
-		}
+		fmt.Sprintf(`ALTER TABLE %s ADD task_number int`, tasksTable),
 	}
 }
 
@@ -567,7 +572,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, title, description, status, custom_fields, sprint_name, group_id, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ?`,
+		`SELECT id, task_number, title, description, status, custom_fields, sprint_name, group_id, assignee_id, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles FROM %s WHERE room_id = ?`,
 		h.scylla.Table("tasks"),
 	)
 	iter := h.scylla.Session.Query(query, roomUUID).WithContext(r.Context()).Iter()
@@ -575,6 +580,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	tasks := make([]TaskRecordResponse, 0, 64)
 	var (
 		taskID          gocql.UUID
+		taskNumber      *int
 		title           string
 		description     string
 		status          string
@@ -594,6 +600,7 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 	)
 	for iter.Scan(
 		&taskID,
+		&taskNumber,
 		&title,
 		&description,
 		&status,
@@ -625,6 +632,9 @@ func (h *RoomHandler) GetRoomTasks(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:       createdAt.UTC(),
 			UpdatedAt:       updatedAt.UTC(),
 			Roles:           parseTaskRoles(rolesRaw),
+		}
+		if taskNumber != nil && *taskNumber > 0 {
+			task.TaskNumber = *taskNumber
 		}
 		if groupID != nil {
 			task.GroupID = strings.TrimSpace(groupID.String())
@@ -758,6 +768,13 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 
+	taskNumber := 0
+	if h.redis != nil {
+		if n, incrErr := h.redis.IncrTaskNumber(r.Context(), normalizedRoomID); incrErr == nil {
+			taskNumber = n
+		}
+	}
+
 	assigneeID := resolveTaskRequesterAssigneeUUID(r)
 	if trimmedReqAssignee := strings.TrimSpace(req.AssigneeID); trimmedReqAssignee != "" {
 		if parsed, parseErr := gocql.ParseUUID(trimmedReqAssignee); parseErr == nil {
@@ -774,31 +791,36 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := fmt.Sprintf(
-		`INSERT INTO %s (room_id, id, title, description, status, sprint_name, group_id, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		h.scylla.Table("tasks"),
-	)
-	if err := h.scylla.Session.Query(
-		query,
-		roomUUID,
-		taskUUID,
-		title,
-		description,
-		status,
-		sprintName,
-		groupUUID,
-		assigneeID,
-		nullableTaskCustomFieldsJSON(customFieldsJSON),
-		nullableTrimmedText(statusActorID),
-		nullableTrimmedText(statusActorName),
-		now,
-		now,
-		now,
-		nullableTrimmedText(taskType),
-		req.DueDate,
-		req.StartDate,
-		marshalTaskRoles(req.Roles),
-	).WithContext(r.Context()).Exec(); err != nil {
+	var insertQuery string
+	var insertArgs []any
+	if taskNumber > 0 {
+		insertQuery = fmt.Sprintf(
+			`INSERT INTO %s (room_id, id, task_number, title, description, status, sprint_name, group_id, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			h.scylla.Table("tasks"),
+		)
+		insertArgs = []any{
+			roomUUID, taskUUID, taskNumber,
+			title, description, status, sprintName, groupUUID, assigneeID,
+			nullableTaskCustomFieldsJSON(customFieldsJSON),
+			nullableTrimmedText(statusActorID), nullableTrimmedText(statusActorName),
+			now, now, now,
+			nullableTrimmedText(taskType), req.DueDate, req.StartDate, marshalTaskRoles(req.Roles),
+		}
+	} else {
+		insertQuery = fmt.Sprintf(
+			`INSERT INTO %s (room_id, id, title, description, status, sprint_name, group_id, assignee_id, custom_fields, status_actor_id, status_actor_name, status_changed_at, created_at, updated_at, task_type, due_date, start_date, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			h.scylla.Table("tasks"),
+		)
+		insertArgs = []any{
+			roomUUID, taskUUID,
+			title, description, status, sprintName, groupUUID, assigneeID,
+			nullableTaskCustomFieldsJSON(customFieldsJSON),
+			nullableTrimmedText(statusActorID), nullableTrimmedText(statusActorName),
+			now, now, now,
+			nullableTrimmedText(taskType), req.DueDate, req.StartDate, marshalTaskRoles(req.Roles),
+		}
+	}
+	if err := h.scylla.Session.Query(insertQuery, insertArgs...).WithContext(r.Context()).Exec(); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create room task"})
 		return
@@ -806,6 +828,7 @@ func (h *RoomHandler) CreateRoomTask(w http.ResponseWriter, r *http.Request) {
 
 	response := TaskRecordResponse{
 		ID:              strings.TrimSpace(taskUUID.String()),
+		TaskNumber:      taskNumber,
 		RoomID:          normalizedRoomID,
 		Title:           title,
 		Description:     description,
