@@ -85,6 +85,7 @@
 		| ((payload: { text: string; changes: CanvasAgenticChange[] }) => Promise<CanvasAgenticApplyResult>)
 		| null = null;
 	export let toraLiveAgentEventsByOrigin: Record<string, ToraWorkflowEvent[]> = {};
+	export let activeToraWorkflowHint: ActiveToraWorkflowHint | null = null;
 
 	type PersistedToraWorkflow = {
 		id: string;
@@ -93,6 +94,13 @@
 		workflowKind: string;
 		status: string;
 		events: ToraWorkflowEvent[];
+	};
+
+	type ActiveToraWorkflowHint = {
+		originMessageId: string;
+		workflowKind?: string;
+		model?: string;
+		effort?: string;
 	};
 
 	const dispatch = createEventDispatcher<{
@@ -952,6 +960,8 @@
 					: undefined,
 			result: source.result,
 			text: String(source.text ?? '').trim(),
+			model: String(source.model ?? source.modelId ?? source.model_id ?? '').trim(),
+			effort: String(source.effort ?? source.effortTier ?? source.effort_tier ?? '').trim(),
 			turn,
 			totalTurns,
 			error: String(source.error ?? '').trim(),
@@ -984,6 +994,27 @@
 				summary: '',
 				workflowKind: liveEvents[liveEvents.length - 1]?.workflowKind || '',
 				events: liveEvents,
+				isLive: true
+			};
+		}
+		const hintedOriginMessageId = normalizeMessageID(activeToraWorkflowHint?.originMessageId ?? '');
+		if (hintedOriginMessageId && candidateOriginIds.includes(hintedOriginMessageId)) {
+			return {
+				summary: '',
+				workflowKind: (activeToraWorkflowHint?.workflowKind || '').trim(),
+				events: [
+					{
+						id: `${hintedOriginMessageId}-pending`,
+						kind: 'thinking' as const,
+						text: '',
+						model: (activeToraWorkflowHint?.model || '').trim(),
+						effort: (activeToraWorkflowHint?.effort || '').trim(),
+						turn: 1,
+						totalTurns: 1,
+						timestamp: Date.now(),
+						workflowKind: (activeToraWorkflowHint?.workflowKind || '').trim()
+					}
+				],
 				isLive: true
 			};
 		}
@@ -2479,6 +2510,7 @@
 											auditTrail={Array.isArray(toraPayload.auditTrail)
 												? toraPayload.auditTrail
 												: []}
+											messageId={message.id ?? ''}
 											{roomId}
 											{apiBase}
 											authToken={chatAuthToken}

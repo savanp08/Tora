@@ -13,12 +13,14 @@
 	import WorkloadView from '$lib/components/workspace/WorkloadView.svelte';
 	import ActivityFeedPanel from './ActivityFeedPanel.svelte';
 	import ChangeRequestPanel from './ChangeRequestPanel.svelte';
+	import TaskAdvisoryPanel from './TaskAdvisoryPanel.svelte';
 	import ProjectTypePicker from './ProjectTypePicker.svelte';
 	import {
 		changeRequestStore,
 		pendingCount,
 		handleIncomingChangeRequest
 	} from '$lib/stores/changeRequests';
+	import { taskAdvisoryCounts } from '$lib/stores/taskAdvisories';
 	import { resolveApiBase } from '$lib/config/apiBase';
 	import { currentUser } from '$lib/store';
 	import { currentWorkspace, projectTypeConfig, type ProjectType } from '$lib/stores/projectType';
@@ -792,6 +794,14 @@
 						<svg viewBox="0 0 24 24" aria-hidden="true">
 							<path d={BELL_ICON}></path>
 						</svg>
+						{#if $taskAdvisoryCounts.total > 0}
+							<span
+								class="notif-header-badge"
+								aria-label="{$taskAdvisoryCounts.total} AI alerts"
+							>
+								{$taskAdvisoryCounts.total}
+							</span>
+						{/if}
 					</button>
 
 					<!-- Change request bell: visible only to admins -->
@@ -1039,7 +1049,7 @@
 				on:keydown|stopPropagation
 			>
 				<header class="notif-panel-header">
-					<h3>Activity</h3>
+					<h3>Alerts & activity</h3>
 					<button
 						type="button"
 						class="notif-close-btn"
@@ -1052,7 +1062,15 @@
 					</button>
 				</header>
 				<div class="notif-panel-body">
-					<ActivityFeedPanel />
+					<div class="notif-panel-stack">
+						<TaskAdvisoryPanel
+							on:openTask={(event) => {
+								requestTaskOpen(event.detail?.taskId ?? '');
+								notificationOpen = false;
+							}}
+						/>
+						<ActivityFeedPanel />
+					</div>
 				</div>
 			</div>
 		</div>
@@ -1541,6 +1559,10 @@
 		background: rgba(217, 119, 6, 0.1);
 	}
 
+	.notif-btn {
+		position: relative;
+	}
+
 	.cr-notif-btn {
 		position: relative;
 	}
@@ -1560,6 +1582,24 @@
 		padding: 0 3px;
 		border-radius: 7px;
 		background: #ef4444;
+		color: #fff;
+		font-size: 0.58rem;
+		font-weight: 800;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+	}
+
+	.notif-header-badge {
+		position: absolute;
+		top: -3px;
+		right: -3px;
+		min-width: 14px;
+		height: 14px;
+		padding: 0 3px;
+		border-radius: 7px;
+		background: #d97706;
 		color: #fff;
 		font-size: 0.58rem;
 		font-weight: 800;
@@ -1904,6 +1944,12 @@
 		flex: 1;
 		min-height: 0;
 		overflow: hidden auto;
+	}
+
+	.notif-panel-stack {
+		display: grid;
+		grid-template-rows: auto minmax(0, 1fr);
+		min-height: 100%;
 	}
 
 	/* ── Template picker modal ────────────────────────────────── */

@@ -77,6 +77,8 @@ export type ToraWorkflowEvent = {
 	input?: Record<string, unknown>;
 	result?: unknown;
 	text?: string;
+	model?: string;
+	effort?: string;
 	turn: number;
 	totalTurns: number;
 	error?: string;

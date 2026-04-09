@@ -80,7 +80,7 @@ func sweepR2OrphansOnce(
 
 	startedAt := time.Now()
 	roomsTable := scyllaStore.Table("rooms")
-	roomExistsCache := make(map[string]bool)
+	roomActiveCache := make(map[string]bool)
 	batchKeys := make([]string, 0, r2OrphanDeleteBatchSize)
 	var batchBytes int64
 	var scannedCount int64
@@ -128,16 +128,16 @@ func sweepR2OrphansOnce(
 			continue
 		}
 
-		exists, cached := roomExistsCache[roomID]
+		isActive, cached := roomActiveCache[roomID]
 		if !cached {
-			roomFound, lookupErr := sweeperRoomExists(ctx, scyllaStore, roomsTable, roomID)
+			roomFound, lookupErr := sweeperRoomIsActive(ctx, scyllaStore, roomsTable, roomID, startedAt)
 			if lookupErr != nil {
 				return fmt.Errorf("lookup room %s: %w", roomID, lookupErr)
 			}
-			exists = roomFound
-			roomExistsCache[roomID] = roomFound
+			isActive = roomFound
+			roomActiveCache[roomID] = roomFound
 		}
-		if exists {
+		if isActive {
 			continue
 		}
 
@@ -163,17 +163,18 @@ func sweepR2OrphansOnce(
 		skippedCount,
 		orphanCount,
 		deletedCount,
-		len(roomExistsCache),
+		len(roomActiveCache),
 		time.Since(startedAt).Milliseconds(),
 	)
 	return nil
 }
 
-func sweeperRoomExists(
+func sweeperRoomIsActive(
 	ctx context.Context,
 	scyllaStore *database.ScyllaStore,
 	roomsTable string,
 	roomID string,
+	now time.Time,
 ) (bool, error) {
 	if scyllaStore == nil || scyllaStore.Session == nil {
 		return false, fmt.Errorf("scylla store is not configured")
@@ -202,10 +203,11 @@ func sweeperRoomExists(
 
 	for _, candidate := range candidates {
 		var foundRoomID string
+		var expiresAt *time.Time
 		err := scyllaStore.Session.Query(
-			fmt.Sprintf(`SELECT room_id FROM %s WHERE room_id = ? LIMIT %d`, roomsTable, r2OrphanScyllaQueryLimit),
+			fmt.Sprintf(`SELECT room_id, expires_at FROM %s WHERE room_id = ? LIMIT %d`, roomsTable, r2OrphanScyllaQueryLimit),
 			candidate,
-		).WithContext(ctx).Scan(&foundRoomID)
+		).WithContext(ctx).Scan(&foundRoomID, &expiresAt)
 		if errors.Is(err, gocql.ErrNotFound) {
 			continue
 		}
@@ -213,6 +215,9 @@ func sweeperRoomExists(
 			return false, err
 		}
 		if strings.TrimSpace(foundRoomID) != "" {
+			if expiresAt != nil && !expiresAt.IsZero() && !expiresAt.UTC().After(now.UTC()) {
+				return false, nil
+			}
 			return true, nil
 		}
 	}

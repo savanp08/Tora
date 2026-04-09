@@ -126,8 +126,13 @@ export type StreamAIEditTimelineCallbacks = {
 		operationTotal?: number,
 		meta?: StreamAIStatusMeta
 	) => void;
+	// Heartbeat label updates during long LLM calls — does NOT create a new
+	// workflow entry, only updates the label on the currently active one.
+	onProgress?: (step: string, label: string) => void;
 	onPlan?: (assistantReply: string, operationTotal: number) => void;
 	onOperation?: (summary: string, appliedCount: number, operationTotal: number) => void;
+	// Incremental text chunks for the final assistant reply (typing effect).
+	onTextDelta?: (delta: string) => void;
 	onChat?: (intent: string, assistantReply: string) => void;
 	onError?: (message: string, meta?: { isStopped?: boolean }) => void;
 };
@@ -2172,6 +2177,15 @@ export async function editAITimeline(
 										appliedCount,
 										operationTotal
 									);
+								} else if (currentEvent === 'progress') {
+									// Heartbeat during LLM generation — update active step label only.
+									callbacks.onProgress?.(
+										String(payload.step ?? ''),
+										String(payload.label ?? '')
+									);
+								} else if (currentEvent === 'text_delta') {
+									// Streaming assistant reply chunk.
+									callbacks.onTextDelta?.(String(payload.delta ?? ''));
 								} else if (currentEvent === 'done') {
 									donePayload = payload;
 								} else if (currentEvent === 'error') {

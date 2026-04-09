@@ -25,6 +25,18 @@ type ModelHintProvider interface {
 	GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error)
 }
 
+// DetailedChatProvider is an optional capability interface for providers that
+// can report the exact model identifier used for a chat response.
+type DetailedChatProvider interface {
+	GenerateChatResponseDetailed(ctx context.Context, prompt string) (response string, model string, err error)
+}
+
+// DetailedModelHintProvider is an optional capability interface for providers
+// that support model-tier hints and can also report the exact model used.
+type DetailedModelHintProvider interface {
+	GenerateChatResponseWithModelHintDetailed(ctx context.Context, prompt, tier string) (response string, model string, err error)
+}
+
 // ContextLimiter is defined in compactor.go.
 // It is an optional interface — providers that implement it report their
 // maximum input token budget so the router can compact prompts before

@@ -71,6 +71,8 @@ type AgentProviderRequest struct {
 
 type AgentProviderResponse struct {
 	Content    []AgentProviderContentBlock `json:"content,omitempty"`
+	Model      string                      `json:"model,omitempty"`
+	Effort     string                      `json:"effort,omitempty"`
 	StopReason string                      `json:"stop_reason,omitempty"`
 }
 
@@ -116,6 +118,7 @@ type AgentConfig struct {
 	MaxTurns        int
 	Timeout         time.Duration
 	Model           string
+	Effort          string
 	SystemPrompt    string
 	ContextOptions  BuildOptions
 	Workspace       *WorkspaceContext
@@ -136,6 +139,8 @@ type AgentEvent struct {
 	Turn            int
 	TotalTurns      int
 	Timestamp       int64
+	Model           string
+	Effort          string
 	OriginMessageID string
 	WorkflowKind    string
 }
@@ -203,26 +208,47 @@ func (p *PromptToolUseProvider) GenerateToolResponse(ctx context.Context, req Ag
 	}
 
 	prompt := buildPromptToolUseRequest(req)
-	raw, err := p.generateToolLoopText(ctx, prompt)
+	raw, model, err := p.generateToolLoopText(ctx, prompt)
 	if err != nil {
 		return AgentProviderResponse{}, err
 	}
-	return parsePromptToolUseResponse(raw)
+	response, err := parsePromptToolUseResponse(raw)
+	if err != nil {
+		return AgentProviderResponse{}, err
+	}
+	response.Model = strings.TrimSpace(model)
+	response.Effort = strings.TrimSpace(p.modelHint)
+	return response, nil
 }
 
-func (p *PromptToolUseProvider) generateToolLoopText(ctx context.Context, prompt string) (string, error) {
+func (p *PromptToolUseProvider) generateToolLoopText(ctx context.Context, prompt string) (string, string, error) {
 	if p == nil || p.base == nil {
-		return "", fmt.Errorf("base provider is not configured")
+		return "", "", fmt.Errorf("base provider is not configured")
 	}
 	if strings.TrimSpace(p.modelHint) != "" {
+		if hinted, ok := p.base.(DetailedModelHintProvider); ok {
+			return hinted.GenerateChatResponseWithModelHintDetailed(ctx, prompt, p.modelHint)
+		}
+		if hinted, ok := any(p.base).(DetailedModelHintProvider); ok {
+			return hinted.GenerateChatResponseWithModelHintDetailed(ctx, prompt, p.modelHint)
+		}
 		if hinted, ok := p.base.(agentModelHintGenerator); ok {
-			return hinted.GenerateChatResponseWithHint(ctx, prompt, p.modelHint)
+			response, err := hinted.GenerateChatResponseWithHint(ctx, prompt, p.modelHint)
+			return response, "", err
 		}
 		if hinted, ok := any(p.base).(agentModelHintGenerator); ok {
-			return hinted.GenerateChatResponseWithHint(ctx, prompt, p.modelHint)
+			response, err := hinted.GenerateChatResponseWithHint(ctx, prompt, p.modelHint)
+			return response, "", err
 		}
 	}
-	return p.base.GenerateChatResponse(ctx, prompt)
+	if detailed, ok := p.base.(DetailedChatProvider); ok {
+		return detailed.GenerateChatResponseDetailed(ctx, prompt)
+	}
+	if detailed, ok := any(p.base).(DetailedChatProvider); ok {
+		return detailed.GenerateChatResponseDetailed(ctx, prompt)
+	}
+	response, err := p.base.GenerateChatResponse(ctx, prompt)
+	return response, "", err
 }
 
 func (e *AgentEngine) SetRoomBroadcaster(broadcaster AgentRoomBroadcaster) {
@@ -644,8 +670,9 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 		// Emit a pre-call event so the frontend knows the agent is active and
 		// the workflow button appears immediately on turn 1.
 		events = e.recordEvent(events, cfg, cfg.MaxTurns, turn, AgentEvent{
-			Kind: "thinking",
-			Text: "",
+			Kind:   "thinking",
+			Text:   "",
+			Effort: strings.TrimSpace(cfg.Effort),
 		})
 
 		response, responseErr := toolProvider.GenerateToolResponse(runCtx, AgentProviderRequest{
@@ -665,6 +692,12 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 				return finalText, events, nil
 			}
 			return lastResponseText, events, responseErr
+		}
+
+		turnModel := strings.TrimSpace(response.Model)
+		turnEffort := strings.TrimSpace(response.Effort)
+		if turnEffort == "" {
+			turnEffort = strings.TrimSpace(cfg.Effort)
 		}
 
 		assistantBlocks := cloneAgentContentBlocks(response.Content)
@@ -691,8 +724,10 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 					continue
 				}
 				events = e.recordEvent(events, cfg, cfg.MaxTurns, turn, AgentEvent{
-					Kind: "thinking",
-					Text: text,
+					Kind:   "thinking",
+					Text:   text,
+					Model:  turnModel,
+					Effort: turnEffort,
 				})
 
 			case "text":
@@ -702,17 +737,21 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 				}
 				turnTextParts = append(turnTextParts, text)
 				events = e.recordEvent(events, cfg, cfg.MaxTurns, turn, AgentEvent{
-					Kind: "text",
-					Text: text,
+					Kind:   "text",
+					Text:   text,
+					Model:  turnModel,
+					Effort: turnEffort,
 				})
 
 			case "tool_use":
 				sawToolUse = true
 				toolInput := cloneStringAnyMap(block.Input)
 				events = e.recordEvent(events, cfg, cfg.MaxTurns, turn, AgentEvent{
-					Kind:  "tool_call",
-					Tool:  strings.TrimSpace(block.Name),
-					Input: toolInput,
+					Kind:   "tool_call",
+					Tool:   strings.TrimSpace(block.Name),
+					Input:  toolInput,
+					Model:  turnModel,
+					Effort: turnEffort,
 				})
 
 				toolName := strings.TrimSpace(block.Name)
@@ -736,6 +775,8 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 					Tool:   strings.TrimSpace(block.Name),
 					Input:  toolInput,
 					Result: result,
+					Model:  turnModel,
+					Effort: turnEffort,
 				})
 
 				toolResults = append(toolResults, AgentProviderContentBlock{
@@ -777,8 +818,10 @@ func (e *AgentEngine) Run(ctx context.Context, userMessage string, cfg AgentConf
 		}
 
 		events = e.recordEvent(events, cfg, cfg.MaxTurns, turn, AgentEvent{
-			Kind: "done",
-			Text: finalText,
+			Kind:   "done",
+			Text:   finalText,
+			Model:  turnModel,
+			Effort: turnEffort,
 		})
 		return finalText, events, nil
 	}
@@ -1671,8 +1714,8 @@ func (e *AgentEngine) loadTaskUUIDByNumber(ctx context.Context, roomUUID gocql.U
 	)
 	iter := store.Session.Query(query, roomUUID).WithContext(ctx).Iter()
 	var (
-		scanID      gocql.UUID
-		scanNumPtr  *int
+		scanID     gocql.UUID
+		scanNumPtr *int
 	)
 	for iter.Scan(&scanID, &scanNumPtr) {
 		if scanNumPtr != nil && *scanNumPtr == taskNumber {
@@ -2542,6 +2585,9 @@ func (e *AgentEngine) recordEvent(events []AgentEvent, cfg AgentConfig, totalTur
 	if strings.TrimSpace(event.WorkflowKind) == "" {
 		event.WorkflowKind = strings.TrimSpace(cfg.WorkflowKind)
 	}
+	if strings.TrimSpace(event.Effort) == "" {
+		event.Effort = strings.TrimSpace(cfg.Effort)
+	}
 	events = append(events, event)
 	if e != nil && e.broadcaster != nil {
 		payload := map[string]interface{}{
@@ -2556,6 +2602,12 @@ func (e *AgentEngine) recordEvent(events []AgentEvent, cfg AgentConfig, totalTur
 			"timestamp":       event.Timestamp,
 			"originMessageId": event.OriginMessageID,
 			"workflowKind":    event.WorkflowKind,
+		}
+		if strings.TrimSpace(event.Model) != "" {
+			payload["model"] = strings.TrimSpace(event.Model)
+		}
+		if strings.TrimSpace(event.Effort) != "" {
+			payload["effort"] = strings.TrimSpace(event.Effort)
 		}
 		if strings.TrimSpace(event.Error) != "" {
 			payload["error"] = event.Error

@@ -13,6 +13,7 @@
 		isExpandable: boolean;
 		chipLabel: string;
 		chipClass: string;
+		metadataChips: string[];
 		detailRows: Array<{ key: string; value: string }>;
 		resultSummary: string;
 		durationMs: number | null;
@@ -84,6 +85,8 @@
 					id: event.id || `workflow-${index}-${safeTimestamp}`,
 					tool: (event.tool || '').trim(),
 					text: (event.text || '').trim(),
+					model: (event.model || '').trim(),
+					effort: (event.effort || '').trim(),
 					error: (event.error || '').trim(),
 					timestamp: safeTimestamp,
 					turn: Math.max(1, Math.trunc(Number(event.turn) || 1)),
@@ -119,6 +122,7 @@
 				isExpandable: event.kind === 'tool_call' && Boolean(pairedResult),
 				chipLabel: resolveToolChip(event).chipLabel,
 				chipClass: resolveToolChip(event).chipClass,
+				metadataChips: buildMetadataChips(event, pairedResult),
 				detailRows: event.kind === 'tool_call' ? buildDetailRows(event.input) : [],
 				resultSummary: formatResultSummary(pairedResult ?? event),
 				durationMs:
@@ -412,6 +416,29 @@
 		return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s`;
 	}
 
+	function buildMetadataChips(event: WorkflowEvent, pairedResult: WorkflowEvent | null) {
+		const model = (pairedResult?.model || event.model || '').trim();
+		const effort = (pairedResult?.effort || event.effort || '').trim();
+		const chips: string[] = [];
+		if (model) chips.push(`Model: ${model}`);
+		if (effort) chips.push(`Effort: ${formatEffortLabel(effort)}`);
+		return chips;
+	}
+
+	function formatEffortLabel(value: string) {
+		const normalized = value.trim().toLowerCase();
+		switch (normalized) {
+			case 'light': return 'Light';
+			case 'standard': return 'Standard';
+			case 'heavy': return 'Heavy';
+			case 'fast': return 'Fast';
+			case 'extended': return 'Extended';
+			case 'max': return 'Max';
+			default:
+				return value.trim();
+		}
+	}
+
 	function resolveStepVerb(tool: string): string {
 		switch (tool) {
 			case 'create_task': return `Creating ${taskLabel}`;
@@ -544,6 +571,13 @@
 												<span class="wf-dur">{formatDuration(row.durationMs)}</span>
 											{/if}
 										</div>
+										{#if row.metadataChips.length > 0}
+											<div class="wf-step-meta">
+												{#each row.metadataChips as chip}
+													<span class="wf-meta-chip">{chip}</span>
+												{/each}
+											</div>
+										{/if}
 										{#if row.status === 'running'}
 											<div class="wf-step-result running-text">{resolveStepVerb(row.event.tool ?? '')}…</div>
 										{:else if row.resultSummary && row.resultSummary !== row.label}
@@ -577,6 +611,13 @@
 											{row.event.kind === 'done' ? 'prose-done' : ''}
 											{row.event.kind === 'thinking' ? 'prose-think' : ''}
 										">{row.label}</div>
+										{#if row.metadataChips.length > 0}
+											<div class="wf-step-meta">
+												{#each row.metadataChips as chip}
+													<span class="wf-meta-chip">{chip}</span>
+												{/each}
+											</div>
+										{/if}
 									{/if}
 								</div>
 							</div>
@@ -943,6 +984,23 @@
 	.running-text {
 		color: #6366f1;
 		font-style: italic;
+	}
+
+	.wf-step-meta {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		padding-left: 2px;
+	}
+
+	.wf-meta-chip {
+		padding: 2px 7px;
+		border-radius: 999px;
+		background: rgba(226, 232, 240, 0.72);
+		color: #475569;
+		font-size: 0.61rem;
+		font-weight: 600;
+		letter-spacing: 0.02em;
 	}
 
 	.wf-expand-btn {

@@ -121,6 +121,32 @@ func (r *AIRouter) GenerateChatResponse(ctx context.Context, prompt string) (str
 	return response, nil
 }
 
+func (r *AIRouter) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
+	type detailedChatResult struct {
+		Response string
+		Model    string
+	}
+
+	result, err := r.RouteRequest(ctx, func(callCtx context.Context, provider Summarizer) (any, error) {
+		compacted := compactForProvider(prompt, provider)
+		if detailedProvider, ok := provider.(DetailedChatProvider); ok {
+			response, model, detailedErr := detailedProvider.GenerateChatResponseDetailed(callCtx, compacted)
+			return detailedChatResult{Response: response, Model: model}, detailedErr
+		}
+		response, basicErr := provider.GenerateChatResponse(callCtx, compacted)
+		return detailedChatResult{Response: response}, basicErr
+	})
+	if err != nil {
+		return "", "", err
+	}
+	detailed, ok := result.(detailedChatResult)
+	if !ok {
+		println("AIRouter: unexpected detailed result type from provider")
+		return "", "", ErrAllAIProvidersExhausted
+	}
+	return detailed.Response, detailed.Model, nil
+}
+
 // GenerateChatResponseWithHint routes the request using the model tier hint
 // when the provider supports it (ModelHintProvider), falling back to the
 // default GenerateChatResponse for providers that don't.
@@ -147,6 +173,42 @@ func (r *AIRouter) GenerateChatResponseWithHint(ctx context.Context, prompt, mod
 		return "", ErrAllAIProvidersExhausted
 	}
 	return response, nil
+}
+
+func (r *AIRouter) GenerateChatResponseWithHintDetailed(ctx context.Context, prompt, modelTier string) (string, string, error) {
+	type detailedChatResult struct {
+		Response string
+		Model    string
+	}
+
+	result, err := r.RouteRequest(ctx, func(callCtx context.Context, provider Summarizer) (any, error) {
+		compacted := compactForProvider(prompt, provider)
+		if modelTier != "" {
+			if detailedHintProvider, ok := provider.(DetailedModelHintProvider); ok {
+				response, model, detailedErr := detailedHintProvider.GenerateChatResponseWithModelHintDetailed(callCtx, compacted, modelTier)
+				return detailedChatResult{Response: response, Model: model}, detailedErr
+			}
+			if hintProvider, ok := provider.(ModelHintProvider); ok {
+				response, hintedErr := hintProvider.GenerateChatResponseWithModelHint(callCtx, compacted, modelTier)
+				return detailedChatResult{Response: response}, hintedErr
+			}
+		}
+		if detailedProvider, ok := provider.(DetailedChatProvider); ok {
+			response, model, detailedErr := detailedProvider.GenerateChatResponseDetailed(callCtx, compacted)
+			return detailedChatResult{Response: response, Model: model}, detailedErr
+		}
+		response, basicErr := provider.GenerateChatResponse(callCtx, compacted)
+		return detailedChatResult{Response: response}, basicErr
+	})
+	if err != nil {
+		return "", "", err
+	}
+	detailed, ok := result.(detailedChatResult)
+	if !ok {
+		println("AIRouter: unexpected hinted detailed result type from provider")
+		return "", "", ErrAllAIProvidersExhausted
+	}
+	return detailed.Response, detailed.Model, nil
 }
 
 func (r *AIRouter) SupportsToolUse() bool {

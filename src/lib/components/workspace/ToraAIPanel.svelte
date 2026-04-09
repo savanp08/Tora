@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
+	import AIModelSelector from '$lib/components/ai/AIModelSelector.svelte';
+	import { compactContext } from '$lib/stores/aiSettings';
 	import {
 		type AITimelineConversationMessage,
 		type AITimelineIntent,
@@ -51,16 +53,14 @@
 	let messages: ToraMessage[] = [];
 	let submitError = '';
 	let liveStatus = '';
-	let liveAssistantPreview = '';
-	let liveAppliedCount = 0;
-	let liveOperationTotal = 0;
 	let liveWorkflowEntries: LiveWorkflowEntry[] = [];
+	// Streaming response text — accumulated from `text_delta` SSE events.
+	let streamingText = '';
 	let lastWorkflowStatusKey = '';
 	let activeWorkflowEntryId = '';
 	let activeWorkflowStepKey = '';
 	let liveWorkflowRunStartedAt = 0;
 	let liveWorkflowRunFinishedAt = 0;
-	let liveWorkflowPromptBudgetMs = 15 * 60 * 1000;
 	let liveWorkflowClockNow = Date.now();
 	let liveWorkflowTimer: number | null = null;
 	let threadElement: HTMLDivElement | null = null;
@@ -116,8 +116,6 @@
 	$: boardStatusText = currentState
 		? `${sprints.length} sprints \u00B7 ${totalTasks} tasks`
 		: 'No project loaded';
-	$: liveProgressLabel =
-		liveOperationTotal > 0 ? `${Math.min(liveAppliedCount, liveOperationTotal)}/${liveOperationTotal} changes applied` : '';
 	$: if (conversationStorageKey !== loadedConversationKey) {
 		loadedConversationKey = conversationStorageKey;
 		loadConversationForKey(conversationStorageKey);
@@ -241,6 +239,28 @@
 		scrollThreadToBottom();
 	}
 
+	let isCompacting = false;
+
+	async function compactBoardConversation() {
+		if (isCompacting || messages.length < 4) return;
+		isCompacting = true;
+		const turns = messages.map((m) => ({ role: m.role, content: m.text }));
+		const result = await compactContext(turns, normalizedRoomID, false);
+		if (result?.summary) {
+			messages = [
+				{
+					id: createMessageID(),
+					role: 'assistant',
+					text: `[Context compacted]\n\n${result.summary}`,
+					timestamp: Date.now()
+				}
+			];
+			persistConversationForKey(conversationStorageKey);
+			scrollThreadToBottom();
+		}
+		isCompacting = false;
+	}
+
 	function appendMessage(role: ToraMessage['role'], text: string, intent?: AITimelineIntent) {
 		const normalizedText = String(text || '').trim();
 		if (!normalizedText) {
@@ -331,24 +351,6 @@
 		return Math.max(0, end - entry.timing.startedAt);
 	}
 
-	function getLiveWorkflowEntryTimingChips(entry: LiveWorkflowEntry) {
-		if (!entry.timing) {
-			return [] as string[];
-		}
-		const chips: string[] = [];
-		const elapsedMs = getLiveWorkflowEntryElapsedMs(entry);
-		if (elapsedMs > 0) {
-			chips.push(`Step ${formatWorkflowDuration(elapsedMs)}`);
-		}
-		if (entry.timing.stepBudgetMs && entry.timing.stepBudgetMs > 0) {
-			chips.push(`Budget ${formatWorkflowDuration(entry.timing.stepBudgetMs)}`);
-		}
-		if (entry.timing.strategy) {
-			chips.push(entry.timing.strategy.replace(/_/g, ' '));
-		}
-		return chips;
-	}
-
 	function getLiveWorkflowTotalElapsedMs() {
 		if (!liveWorkflowRunStartedAt) {
 			return 0;
@@ -356,31 +358,10 @@
 		return Math.max(0, getLiveWorkflowReferenceNow() - liveWorkflowRunStartedAt);
 	}
 
-	function getLiveWorkflowCurrentStepElapsedMs() {
-		const entry = activeWorkflowEntryId ? getLiveWorkflowEntry(activeWorkflowEntryId) : null;
-		return entry ? getLiveWorkflowEntryElapsedMs(entry) : 0;
-	}
-
-	function getLiveWorkflowSummary() {
-		if (!liveWorkflowRunStartedAt) {
-			return '';
-		}
-		const parts = [`Elapsed ${formatWorkflowDuration(getLiveWorkflowTotalElapsedMs())}`];
-		const currentStepElapsedMs = getLiveWorkflowCurrentStepElapsedMs();
-		if (currentStepElapsedMs > 0) {
-			parts.push(`Current step ${formatWorkflowDuration(currentStepElapsedMs)}`);
-		}
-		if (liveWorkflowPromptBudgetMs > 0) {
-			parts.push(`Prompt budget ${formatWorkflowDuration(liveWorkflowPromptBudgetMs)}`);
-		}
-		return parts.join(' • ');
-	}
-
-	function startLiveWorkflowRun(promptBudgetMs = 15 * 60 * 1000) {
+	function startLiveWorkflowRun() {
 		const startedAt = Date.now();
 		liveWorkflowRunStartedAt = startedAt;
 		liveWorkflowRunFinishedAt = 0;
-		liveWorkflowPromptBudgetMs = promptBudgetMs;
 		startLiveWorkflowClock(startedAt);
 	}
 
@@ -412,16 +393,22 @@
 	function resetLiveState() {
 		stopLiveWorkflowClock();
 		liveStatus = '';
-		liveAssistantPreview = '';
-		liveAppliedCount = 0;
-		liveOperationTotal = 0;
 		liveWorkflowEntries = [];
+		streamingText = '';
 		lastWorkflowStatusKey = '';
 		activeWorkflowEntryId = '';
 		activeWorkflowStepKey = '';
 		liveWorkflowRunStartedAt = 0;
 		liveWorkflowRunFinishedAt = 0;
-		liveWorkflowPromptBudgetMs = 15 * 60 * 1000;
+	}
+
+	// Silently update the active step's label (used for heartbeat progress events).
+	function updateActiveStepLabel(label: string) {
+		const trimmed = label.trim();
+		if (!trimmed || !activeWorkflowEntryId) return;
+		liveWorkflowEntries = liveWorkflowEntries.map((e) =>
+			e.id === activeWorkflowEntryId ? { ...e, title: trimmed } : e
+		);
 	}
 
 	function appendWorkflowEntry(entry: Omit<LiveWorkflowEntry, 'id'>) {
@@ -442,9 +429,6 @@
 			return;
 		}
 		const normalizedStepKey = String(stepKey || normalizedLabel).trim() || normalizedLabel;
-		if (meta?.promptTimeoutMs && meta.promptTimeoutMs > 0) {
-			liveWorkflowPromptBudgetMs = meta.promptTimeoutMs;
-		}
 		const statusKey = `${normalizedStepKey}::${normalizedLabel}::${progress ?? ''}`;
 		if (activeWorkflowEntryId && normalizedStepKey === activeWorkflowStepKey) {
 			liveWorkflowEntries = liveWorkflowEntries.map((entry) =>
@@ -533,31 +517,21 @@
 				{
 					onStatus: (step, label, appliedCount, operationTotal, meta) => {
 						liveStatus = label || 'Applying board updates...';
-						if (meta?.promptTimeoutMs && meta.promptTimeoutMs > 0) {
-							liveWorkflowPromptBudgetMs = meta.promptTimeoutMs;
-						}
-						if (typeof appliedCount === 'number') {
-							liveAppliedCount = appliedCount;
-						}
-						if (typeof operationTotal === 'number') {
-							liveOperationTotal = operationTotal;
-						}
 						const progressLabel =
 							typeof operationTotal === 'number' && operationTotal > 0
 								? `${Math.min(appliedCount ?? 0, operationTotal)}/${operationTotal}`
 								: undefined;
-						addWorkflowStatus(
-							step || liveStatus,
-							liveStatus,
-							progressLabel,
-							meta
-						);
+						addWorkflowStatus(step || liveStatus, liveStatus, progressLabel, meta);
+					},
+					onProgress: (_step, label) => {
+						// Heartbeat label — update the active step in-place, no new entry.
+						updateActiveStepLabel(label);
+					},
+					onTextDelta: (delta) => {
+						streamingText += delta;
+						scrollThreadToBottom();
 					},
 					onPlan: (assistantReply, operationTotal) => {
-						liveAssistantPreview = assistantReply || 'Preparing board changes...';
-						if (typeof operationTotal === 'number') {
-							liveOperationTotal = operationTotal;
-						}
 						appendWorkflowEntry({
 							title: 'Plan ready',
 							detail: assistantReply || 'Board change plan prepared.',
@@ -567,8 +541,6 @@
 					},
 					onOperation: (summary, appliedCount, operationTotal) => {
 						liveStatus = summary || 'Applied a board change.';
-						liveAppliedCount = appliedCount;
-						liveOperationTotal = operationTotal;
 						appendWorkflowEntry({
 							title: summary || 'Applied a board change.',
 							detail:
@@ -579,8 +551,8 @@
 							tone: 'success'
 						});
 					},
-					onChat: (_intent, assistantReply) => {
-						liveAssistantPreview = assistantReply || '';
+					onChat: (_intent, _assistantReply) => {
+						// Chat reply is streamed as text_delta; no preview variable needed.
 					},
 					onError: (message, meta) => {
 						finishLiveWorkflowRun();
@@ -658,13 +630,24 @@
 			</div>
 		</div>
 		<div class="tora-meta">
+			{#if messages.length >= 4}
+				<button
+					type="button"
+					class="tora-clear-btn"
+					on:click={() => void compactBoardConversation()}
+					disabled={$timelineLoading || isCompacting}
+					title="Compact conversation context"
+				>
+					{isCompacting ? '…' : '⊡'}
+				</button>
+			{/if}
 			<button
 				type="button"
 				class="tora-clear-btn"
 				on:click={() => clearConversationForKey(conversationStorageKey)}
 				disabled={$timelineLoading || messages.length === 0}
 			>
-				Clear chat
+				Clear
 			</button>
 			<span>{boardStatusText}</span>
 			{#if isLargeProject}
@@ -707,57 +690,80 @@
 				{/if}
 			{/each}
 		{/if}
-		{#if ($timelineLoading || liveWorkflowEntries.length > 0) && currentState}
-			<div class="ai-loading-panel">
-				{#if $timelineLoading}
-					<div class="ai-loading-row">
-						<span class="ai-spinner" aria-hidden="true"></span>
-						<div class="ai-loading-copy">
-							<strong>{liveStatus || 'Applying board updates...'}</strong>
-							{#if liveAssistantPreview}
-								<p>{liveAssistantPreview}</p>
+		{#if ($timelineLoading || liveWorkflowEntries.length > 0 || streamingText) && currentState}
+			<!-- ── Claude Code-style streaming console ── -->
+			<div class="ai-console" class:ai-console--live={$timelineLoading} role="status" aria-live="polite">
+
+				<!-- Header row -->
+				<div class="ai-console-head">
+					{#if $timelineLoading}
+						<span class="console-live-badge">
+							<span class="console-live-dot" aria-hidden="true"></span>
+							Live
+						</span>
+					{:else}
+						<span class="console-done-badge">
+							<span class="console-done-icon" aria-hidden="true">✓</span>
+							Done
+						</span>
+					{/if}
+					{#if liveWorkflowRunStartedAt}
+						<span class="console-elapsed">{formatWorkflowDuration(getLiveWorkflowTotalElapsedMs())}</span>
+					{/if}
+				</div>
+
+				<!-- Step rows -->
+				{#each liveWorkflowEntries as entry (entry.id)}
+					{@const isActive = entry.id === activeWorkflowEntryId && $timelineLoading}
+					{@const isDone = !!entry.timing?.endedAt}
+					{@const stepElapsed = isDone && entry.timing
+						? formatWorkflowDuration((entry.timing.endedAt ?? 0) - entry.timing.startedAt)
+						: null}
+					<div
+						class="console-step"
+						class:console-step--active={isActive}
+						class:console-step--done={isDone}
+						class:console-step--warn={entry.tone === 'warning'}
+					>
+						<!-- Status icon -->
+						<span class="console-step-icon" aria-hidden="true">
+							{#if entry.tone === 'warning'}
+								<svg viewBox="0 0 12 12" fill="none"><path d="M6 1L11 10H1L6 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M6 5v2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="6" cy="8.5" r="0.5" fill="currentColor"/></svg>
+							{:else if isDone}
+								<svg viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+							{:else if isActive}
+								<span class="step-spinner" aria-hidden="true"></span>
+							{:else}
+								<span class="step-dot-idle" aria-hidden="true"></span>
 							{/if}
-							{#if getLiveWorkflowSummary()}
-								<span class="ai-loading-progress">{getLiveWorkflowSummary()}</span>
+						</span>
+
+						<!-- Label -->
+						<span class="console-step-label">{entry.title}</span>
+
+						<!-- Right side: count badge or elapsed -->
+						<span class="console-step-right">
+							{#if entry.progress}
+								<span class="console-step-count">{entry.progress}</span>
 							{/if}
-							{#if liveProgressLabel}
-								<span class="ai-loading-progress">{liveProgressLabel}</span>
+							{#if stepElapsed}
+								<span class="console-step-time">{stepElapsed}</span>
+							{:else if isActive}
+								<span class="console-step-dots" aria-hidden="true">
+									<span></span><span></span><span></span>
+								</span>
 							{/if}
-						</div>
+						</span>
 					</div>
-				{:else}
-					<div class="ai-loading-copy">
-						<strong>Latest board AI workflow</strong>
-						<p>The last run has finished. Its step history stays visible here for debugging and review.</p>
-						{#if getLiveWorkflowSummary()}
-							<span class="ai-loading-progress">{getLiveWorkflowSummary()}</span>
-						{/if}
+				{/each}
+
+				<!-- Streaming response text -->
+				{#if streamingText}
+					<div class="console-response">
+						<p class="console-response-text">{streamingText}{#if $timelineLoading}<span class="console-cursor" aria-hidden="true">|</span>{/if}</p>
 					</div>
 				{/if}
-				{#if liveWorkflowEntries.length > 0}
-					<div class="ai-workflow-list" role="status" aria-live="polite">
-						{#each liveWorkflowEntries as entry (entry.id)}
-							<section class={`ai-workflow-entry tone-${entry.tone}`}>
-								<div class="ai-workflow-entry-head">
-									<strong>{entry.title}</strong>
-									{#if entry.progress}
-										<span class="ai-workflow-progress">{entry.progress}</span>
-									{/if}
-								</div>
-								{#if entry.detail}
-									<p>{entry.detail}</p>
-								{/if}
-								{#if getLiveWorkflowEntryTimingChips(entry).length > 0}
-									<div class="ai-workflow-tags">
-										{#each getLiveWorkflowEntryTimingChips(entry) as chip}
-											<span>{chip}</span>
-										{/each}
-									</div>
-								{/if}
-							</section>
-						{/each}
-					</div>
-				{/if}
+
 			</div>
 		{/if}
 	</div>
@@ -795,6 +801,7 @@
 				disabled={$timelineLoading || !currentState}
 			></textarea>
 			<div class="tora-toolbar">
+				<AIModelSelector compact={true} />
 				<span class="tora-hint" class:tora-hint-warn={[...draft].length > 2700}>
 					{#if !currentState}
 						Create a project to start chatting
@@ -1071,123 +1078,226 @@
 		word-break: break-word;
 	}
 
-	.ai-loading-panel {
-		display: grid;
-		gap: 0.7rem;
-		padding: 0.78rem 0.82rem;
-		border-radius: 0.96rem;
-		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03)),
-			rgba(16, 18, 22, 0.9);
-		border: 1px solid rgba(255, 255, 255, 0.06);
-		color: #c9d1d9;
-	}
+	/* ── Claude Code–style streaming console ───────────────────────────────── */
 
-	.ai-loading-row {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.65rem;
-	}
-
-	.ai-loading-copy {
-		display: grid;
-		gap: 0.2rem;
-		min-width: 0;
-	}
-
-	.ai-loading-copy strong {
-		font-size: 0.8rem;
-		font-weight: 600;
-		color: #e8eaed;
-	}
-
-	.ai-loading-copy p {
-		margin: 0;
-		font-size: 0.74rem;
-		line-height: 1.45;
-		color: #9aa0a6;
-	}
-
-	.ai-loading-progress {
-		font-size: 0.7rem;
-		color: #8ab4f8;
-	}
-
-	.ai-workflow-list {
-		display: grid;
-		gap: 0.46rem;
-	}
-
-	.ai-workflow-entry {
-		display: grid;
-		gap: 0.24rem;
-		padding: 0.52rem 0.58rem;
+	.ai-console {
 		border-radius: 12px;
 		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(14, 16, 20, 0.92);
+		overflow: hidden;
+		font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+		font-size: 0.74rem;
+	}
+
+	.ai-console--live {
+		border-color: rgba(26, 115, 232, 0.28);
+		box-shadow: 0 0 0 1px rgba(26, 115, 232, 0.1) inset;
+	}
+
+	/* Header */
+	.ai-console-head {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.38rem 0.72rem;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 		background: rgba(255, 255, 255, 0.03);
 	}
 
-	.ai-workflow-entry-head {
-		display: flex;
+	.console-live-badge {
+		display: inline-flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
-	}
-
-	.ai-workflow-entry-head strong {
-		font-size: 0.76rem;
-		color: #eef2f7;
-	}
-
-	.ai-workflow-entry p {
-		margin: 0;
-		font-size: 0.72rem;
-		line-height: 1.45;
-		color: #b8c0ca;
-	}
-
-	.ai-workflow-progress {
-		border-radius: 999px;
-		padding: 0.12rem 0.4rem;
+		gap: 0.32rem;
 		font-size: 0.62rem;
 		font-weight: 700;
-		background: rgba(26, 115, 232, 0.14);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
 		color: #8ab4f8;
 	}
 
-	.ai-workflow-tags {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.35rem;
-	}
-
-	.ai-workflow-tags span {
+	.console-live-dot {
+		width: 6px;
+		height: 6px;
 		border-radius: 999px;
-		padding: 0.14rem 0.42rem;
+		background: #1a73e8;
+		animation: console-pulse 1.2s ease-in-out infinite;
+	}
+
+	@keyframes console-pulse {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.4; transform: scale(0.75); }
+	}
+
+	.console-done-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.32rem;
 		font-size: 0.62rem;
-		background: rgba(255, 255, 255, 0.08);
-		color: #bdc1c6;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: #56b37f;
 	}
 
-	.ai-workflow-entry.tone-success {
-		border-color: rgba(86, 179, 127, 0.26);
-		background: rgba(86, 179, 127, 0.08);
+	.console-done-icon {
+		font-size: 0.7rem;
 	}
 
-	.ai-workflow-entry.tone-warning {
-		border-color: rgba(245, 158, 11, 0.28);
-		background: rgba(245, 158, 11, 0.08);
+	.console-elapsed {
+		margin-left: auto;
+		font-size: 0.62rem;
+		color: #5f6368;
+		font-family: inherit;
 	}
 
-	.ai-spinner {
-		flex: 0 0 auto;
+	/* Step rows */
+	.console-step {
+		display: flex;
+		align-items: center;
+		gap: 0.52rem;
+		padding: 0.32rem 0.72rem;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+		color: #5f6368;
+		transition: color 0.15s;
+	}
+
+	.console-step:last-child {
+		border-bottom: none;
+	}
+
+	.console-step--done {
+		color: #9aa0a6;
+	}
+
+	.console-step--active {
+		color: #e8eaed;
+		background: rgba(26, 115, 232, 0.04);
+	}
+
+	.console-step--warn {
+		color: #fbbc04;
+	}
+
+	.console-step-icon {
+		flex-shrink: 0;
 		width: 14px;
 		height: 14px;
-		border: 2px solid rgba(255, 255, 255, 0.12);
-		border-top-color: #1a73e8;
-		border-radius: 999px;
-		animation: tora-spin 0.8s linear infinite;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
+
+	.console-step--done .console-step-icon svg {
+		color: #56b37f;
+	}
+	.console-step--warn .console-step-icon svg {
+		color: #fbbc04;
+	}
+	.console-step-icon svg {
+		width: 12px;
+		height: 12px;
+	}
+
+	.step-spinner {
+		width: 11px;
+		height: 11px;
+		border: 1.5px solid rgba(255, 255, 255, 0.12);
+		border-top-color: #8ab4f8;
+		border-radius: 999px;
+		display: block;
+		animation: tora-spin 0.7s linear infinite;
+	}
+
+	.step-dot-idle {
+		width: 4px;
+		height: 4px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.18);
+		display: block;
+	}
+
+	.console-step-label {
+		flex: 1;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		font-size: 0.74rem;
+	}
+
+	.console-step-right {
+		flex-shrink: 0;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.36rem;
+	}
+
+	.console-step-count {
+		font-size: 0.62rem;
+		color: #8ab4f8;
+		background: rgba(26, 115, 232, 0.14);
+		border-radius: 999px;
+		padding: 0.08rem 0.36rem;
+		font-weight: 600;
+	}
+
+	.console-step-time {
+		font-size: 0.62rem;
+		color: #5f6368;
+	}
+
+	.console-step-dots {
+		display: inline-flex;
+		gap: 2px;
+	}
+
+	.console-step-dots span {
+		width: 3px;
+		height: 3px;
+		border-radius: 999px;
+		background: #8ab4f8;
+		animation: console-dot-bounce 1.1s ease-in-out infinite;
+	}
+	.console-step-dots span:nth-child(2) { animation-delay: 0.18s; }
+	.console-step-dots span:nth-child(3) { animation-delay: 0.36s; }
+
+	@keyframes console-dot-bounce {
+		0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+		40% { opacity: 1; transform: translateY(-2px); }
+	}
+
+	/* Streaming response text */
+	.console-response {
+		padding: 0.6rem 0.72rem;
+		border-top: 1px solid rgba(255, 255, 255, 0.06);
+		background: rgba(255, 255, 255, 0.015);
+		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+	}
+
+	.console-response-text {
+		margin: 0;
+		font-size: 0.79rem;
+		color: #c9d1d9;
+		line-height: 1.6;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.console-cursor {
+		display: inline-block;
+		width: 2px;
+		height: 0.9em;
+		background: #8ab4f8;
+		margin-left: 1px;
+		vertical-align: text-bottom;
+		animation: cursor-blink 0.9s step-end infinite;
+	}
+
+	@keyframes cursor-blink {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0; }
+	}
+
+	/* ─────────────────────────────────────────────────────────────────────── */
 
 	.suggestions-panel {
 		display: grid;

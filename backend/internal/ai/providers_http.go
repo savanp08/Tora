@@ -25,14 +25,14 @@ const (
 
 var (
 	defaultVertexModels = []string{
-		defaultVertexModel,          // gemini-3-flash-preview — frontier-class, default
-		"gemini-2.5-flash",          // stable GA fallback
-		"gemini-2.5-flash-lite",     // cheapest stable fallback
+		defaultVertexModel,      // gemini-3-flash-preview — frontier-class, default
+		"gemini-2.5-flash",      // stable GA fallback
+		"gemini-2.5-flash-lite", // cheapest stable fallback
 	}
 	defaultGeminiModels = []string{
-		"gemini-3-flash-preview",    // frontier-class preview
-		"gemini-2.5-pro",            // stable GA heavy fallback
-		"gemini-2.5-flash",          // stable GA standard fallback
+		"gemini-3-flash-preview", // frontier-class preview
+		"gemini-2.5-pro",         // stable GA heavy fallback
+		"gemini-2.5-flash",       // stable GA standard fallback
 	}
 	defaultMistralModels = []string{
 		defaultMistralModel,
@@ -159,20 +159,30 @@ func (p *VertexGeminiProvider) GenerateRollingSummary(
 }
 
 func (p *VertexGeminiProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
-	return p.generateWithModels(ctx, prompt, p.models)
+	response, _, err := p.GenerateChatResponseDetailed(ctx, prompt)
+	return response, err
+}
+
+func (p *VertexGeminiProvider) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
+	return p.generateWithModelsDetailed(ctx, prompt, p.models)
 }
 
 // GenerateChatResponseWithModelHint satisfies ModelHintProvider.
 // It reorders the model cascade to prefer the tier-appropriate model,
 // then falls back to the full configured cascade.
 func (p *VertexGeminiProvider) GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error) {
-	return p.generateWithModels(ctx, prompt, buildTieredModelList(p.models, tier, vertexTierModels))
+	response, _, err := p.GenerateChatResponseWithModelHintDetailed(ctx, prompt, tier)
+	return response, err
 }
 
-func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt string, models []string) (string, error) {
+func (p *VertexGeminiProvider) GenerateChatResponseWithModelHintDetailed(ctx context.Context, prompt, tier string) (string, string, error) {
+	return p.generateWithModelsDetailed(ctx, prompt, buildTieredModelList(p.models, tier, vertexTierModels))
+}
+
+func (p *VertexGeminiProvider) generateWithModelsDetailed(ctx context.Context, prompt string, models []string) (string, string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "", fmt.Errorf("vertex prompt is empty")
+		return "", "", fmt.Errorf("vertex prompt is empty")
 	}
 
 	providerLabel := "google_vertex"
@@ -208,7 +218,7 @@ func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt st
 		statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
 		if err != nil {
 			recordAIRequest(providerLabel, "error")
-			return "", err
+			return "", "", err
 		}
 
 		text, statusMessage := extractGeminiTextFromBody(body)
@@ -220,16 +230,16 @@ func (p *VertexGeminiProvider) generateWithModels(ctx context.Context, prompt st
 				continue
 			}
 			recordAIRequest(providerLabel, "error")
-			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+			return "", "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if strings.TrimSpace(text) == "" {
 			recordAIRequest(providerLabel, "error")
-			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
 		recordAIRequest(providerLabel, "success")
-		return strings.TrimSpace(text), nil
+		return strings.TrimSpace(text), strings.TrimSpace(model), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
+	return "", "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 type GeminiProvider struct {
@@ -264,17 +274,27 @@ func (p *GeminiProvider) GenerateRollingSummary(
 }
 
 func (p *GeminiProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
-	return p.generateWithModels(ctx, prompt, p.models)
+	response, _, err := p.GenerateChatResponseDetailed(ctx, prompt)
+	return response, err
+}
+
+func (p *GeminiProvider) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
+	return p.generateWithModelsDetailed(ctx, prompt, p.models)
 }
 
 func (p *GeminiProvider) GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error) {
-	return p.generateWithModels(ctx, prompt, buildTieredModelList(p.models, tier, geminiTierModels))
+	response, _, err := p.GenerateChatResponseWithModelHintDetailed(ctx, prompt, tier)
+	return response, err
 }
 
-func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, models []string) (string, error) {
+func (p *GeminiProvider) GenerateChatResponseWithModelHintDetailed(ctx context.Context, prompt, tier string) (string, string, error) {
+	return p.generateWithModelsDetailed(ctx, prompt, buildTieredModelList(p.models, tier, geminiTierModels))
+}
+
+func (p *GeminiProvider) generateWithModelsDetailed(ctx context.Context, prompt string, models []string) (string, string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "", fmt.Errorf("gemini prompt is empty")
+		return "", "", fmt.Errorf("gemini prompt is empty")
 	}
 
 	providerLabel := "gemini"
@@ -309,7 +329,7 @@ func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, 
 		statusCode, body, err := postJSON(ctx, p.client, endpoint, map[string]string{}, payload)
 		if err != nil {
 			recordAIRequest(providerLabel, "error")
-			return "", err
+			return "", "", err
 		}
 
 		text, statusMessage := extractGeminiTextFromBody(body)
@@ -322,16 +342,16 @@ func (p *GeminiProvider) generateWithModels(ctx context.Context, prompt string, 
 				continue
 			}
 			recordAIRequest(providerLabel, "error")
-			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+			return "", "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if strings.TrimSpace(text) == "" {
 			recordAIRequest(providerLabel, "error")
-			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
 		recordAIRequest(providerLabel, "success")
-		return strings.TrimSpace(text), nil
+		return strings.TrimSpace(text), strings.TrimSpace(model), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
+	return "", "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 type MistralProvider struct {
@@ -367,9 +387,14 @@ func (p *MistralProvider) GenerateRollingSummary(
 }
 
 func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	response, _, err := p.GenerateChatResponseDetailed(ctx, prompt)
+	return response, err
+}
+
+func (p *MistralProvider) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "", fmt.Errorf("mistral prompt is empty")
+		return "", "", fmt.Errorf("mistral prompt is empty")
 	}
 
 	providerLabel := "mistral"
@@ -393,7 +418,7 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 		}, payload)
 		if err != nil {
 			recordAIRequest(providerLabel, "error")
-			return "", err
+			return "", "", err
 		}
 
 		var parsed struct {
@@ -417,22 +442,22 @@ func (p *MistralProvider) GenerateChatResponse(ctx context.Context, prompt strin
 				continue
 			}
 			recordAIRequest(providerLabel, "error")
-			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+			return "", "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Choices) == 0 {
 			recordAIRequest(providerLabel, "error")
-			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
 			recordAIRequest(providerLabel, "error")
-			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
 		recordAIRequest(providerLabel, "success")
-		return text, nil
+		return text, strings.TrimSpace(model), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
+	return "", "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *MistralProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
@@ -480,9 +505,14 @@ func (p *OpenAIProvider) GenerateRollingSummary(
 }
 
 func (p *OpenAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	response, _, err := p.GenerateChatResponseDetailed(ctx, prompt)
+	return response, err
+}
+
+func (p *OpenAIProvider) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "", fmt.Errorf("openai prompt is empty")
+		return "", "", fmt.Errorf("openai prompt is empty")
 	}
 
 	providerLabel := "openai"
@@ -505,7 +535,7 @@ func (p *OpenAIProvider) GenerateChatResponse(ctx context.Context, prompt string
 			"Authorization": "Bearer " + p.apiKey,
 		}, payload)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 
 		var parsed struct {
@@ -527,19 +557,19 @@ func (p *OpenAIProvider) GenerateChatResponse(ctx context.Context, prompt string
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				continue
 			}
-			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+			return "", "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Choices) == 0 {
-			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
-			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
-		return text, nil
+		return text, strings.TrimSpace(model), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
+	return "", "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *OpenAIProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
@@ -583,9 +613,14 @@ func (p *XAIProvider) GenerateRollingSummary(
 }
 
 func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	response, _, err := p.GenerateChatResponseDetailed(ctx, prompt)
+	return response, err
+}
+
+func (p *XAIProvider) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "", fmt.Errorf("xai prompt is empty")
+		return "", "", fmt.Errorf("xai prompt is empty")
 	}
 
 	providerLabel := "xai"
@@ -608,7 +643,7 @@ func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (
 			"Authorization": "Bearer " + p.apiKey,
 		}, payload)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 
 		var parsed struct {
@@ -630,19 +665,19 @@ func (p *XAIProvider) GenerateChatResponse(ctx context.Context, prompt string) (
 				log.Printf("[ai] %s model=%s temporary failure status=%d msg=%s", providerLabel, model, statusCode, statusMessage)
 				continue
 			}
-			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+			return "", "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Choices) == 0 {
-			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
-			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
-		return text, nil
+		return text, strings.TrimSpace(model), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
+	return "", "", newModelCascadeExhaustedError(providerLabel, p.models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *XAIProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
@@ -691,17 +726,27 @@ func (p *GroqProvider) GenerateRollingSummary(
 }
 
 func (p *GroqProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
-	return p.generateWithModels(ctx, prompt, p.models)
+	response, _, err := p.GenerateChatResponseDetailed(ctx, prompt)
+	return response, err
+}
+
+func (p *GroqProvider) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
+	return p.generateWithModelsDetailed(ctx, prompt, p.models)
 }
 
 func (p *GroqProvider) GenerateChatResponseWithModelHint(ctx context.Context, prompt, tier string) (string, error) {
-	return p.generateWithModels(ctx, prompt, buildTieredModelList(p.models, tier, groqTierModels))
+	response, _, err := p.GenerateChatResponseWithModelHintDetailed(ctx, prompt, tier)
+	return response, err
 }
 
-func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, models []string) (string, error) {
+func (p *GroqProvider) GenerateChatResponseWithModelHintDetailed(ctx context.Context, prompt, tier string) (string, string, error) {
+	return p.generateWithModelsDetailed(ctx, prompt, buildTieredModelList(p.models, tier, groqTierModels))
+}
+
+func (p *GroqProvider) generateWithModelsDetailed(ctx context.Context, prompt string, models []string) (string, string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "", fmt.Errorf("groq prompt is empty")
+		return "", "", fmt.Errorf("groq prompt is empty")
 	}
 
 	providerLabel := "groq"
@@ -725,7 +770,7 @@ func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, mo
 		}, payload)
 		if err != nil {
 			recordAIRequest(providerLabel, "error")
-			return "", err
+			return "", "", err
 		}
 
 		var parsed struct {
@@ -749,22 +794,22 @@ func (p *GroqProvider) generateWithModels(ctx context.Context, prompt string, mo
 				continue
 			}
 			recordAIRequest(providerLabel, "error")
-			return "", toProviderStatusError(providerLabel, statusCode, statusMessage)
+			return "", "", toProviderStatusError(providerLabel, statusCode, statusMessage)
 		}
 		if len(parsed.Choices) == 0 {
 			recordAIRequest(providerLabel, "error")
-			return "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty response", providerLabel, model)
 		}
 
 		text := strings.TrimSpace(parsed.Choices[0].Message.Content)
 		if text == "" {
 			recordAIRequest(providerLabel, "error")
-			return "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
+			return "", "", fmt.Errorf("%s model=%s returned empty text", providerLabel, model)
 		}
 		recordAIRequest(providerLabel, "success")
-		return text, nil
+		return text, strings.TrimSpace(model), nil
 	}
-	return "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
+	return "", "", newModelCascadeExhaustedError(providerLabel, models, lastTemporaryStatus, lastTemporaryMessage)
 }
 
 func (p *GroqProvider) GenerateToolResponse(ctx context.Context, req AgentProviderRequest) (AgentProviderResponse, error) {
@@ -808,9 +853,14 @@ func (p *CohereProvider) GenerateRollingSummary(
 }
 
 func (p *CohereProvider) GenerateChatResponse(ctx context.Context, prompt string) (string, error) {
+	response, _, err := p.GenerateChatResponseDetailed(ctx, prompt)
+	return response, err
+}
+
+func (p *CohereProvider) GenerateChatResponseDetailed(ctx context.Context, prompt string) (string, string, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return "", fmt.Errorf("cohere prompt is empty")
+		return "", "", fmt.Errorf("cohere prompt is empty")
 	}
 
 	payload := map[string]any{
@@ -823,7 +873,7 @@ func (p *CohereProvider) GenerateChatResponse(ctx context.Context, prompt string
 		"Authorization": "Bearer " + p.apiKey,
 	}, payload)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	var parsed struct {
@@ -837,7 +887,7 @@ func (p *CohereProvider) GenerateChatResponse(ctx context.Context, prompt string
 	_ = json.Unmarshal(body, &parsed)
 
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return "", toProviderStatusError("cohere", statusCode, extractMessageFromBody(body))
+		return "", "", toProviderStatusError("cohere", statusCode, extractMessageFromBody(body))
 	}
 
 	text := strings.TrimSpace(parsed.Text)
@@ -845,9 +895,9 @@ func (p *CohereProvider) GenerateChatResponse(ctx context.Context, prompt string
 		text = strings.TrimSpace(parsed.Message.Content[0].Text)
 	}
 	if text == "" {
-		return "", fmt.Errorf("cohere returned empty text")
+		return "", "", fmt.Errorf("cohere returned empty text")
 	}
-	return text, nil
+	return text, strings.TrimSpace(p.model), nil
 }
 
 func generateOpenAICompatibleToolResponse(

@@ -17,8 +17,52 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// sseWriter serialises SSE writes across the main goroutine and heartbeat
+// goroutines so concurrent flushes don't interleave event frames.
+type sseWriter struct {
+	mu      sync.Mutex
+	w       http.ResponseWriter
+	flusher http.Flusher
+}
+
+func newSSEWriter(w http.ResponseWriter, f http.Flusher) *sseWriter {
+	return &sseWriter{w: w, flusher: f}
+}
+
+func (s *sseWriter) write(eventType string, data any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	writeSSEEvent(s.w, s.flusher, eventType, data)
+}
+
+// startSSEHeartbeat launches a goroutine that emits "progress" events every
+// interval until the returned cancel func is called.  labels are cycled in
+// order so the UI can show a rotating status without a new workflow entry.
+func startSSEHeartbeat(ctx context.Context, sw *sseWriter, step string, labels []string, interval time.Duration) context.CancelFunc {
+	hbCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		i := 0
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				sw.write("progress", map[string]any{
+					"step":  step,
+					"label": labels[i%len(labels)],
+				})
+				i++
+			}
+		}
+	}()
+	return cancel
+}
 
 const (
 	aiTimelinePerCallTimeout = 5 * time.Minute
@@ -1289,9 +1333,12 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 		return
 	}
 
-	writeSSEEvent(w, flusher, "status", map[string]any{
+	sw := newSSEWriter(w, flusher)
+
+	// ── Phase 1: Intent classification ──────────────────────────────────────
+	sw.write("status", map[string]any{
 		"step":              "intent",
-		"label":             "Understanding your board request...",
+		"label":             "Analyzing your request...",
 		"timeout_ms":        limits.RequestTimeout.Milliseconds(),
 		"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
 		"strategy":          "single_llm_call",
@@ -1299,9 +1346,18 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 
 	intentSummaryJSON, summaryErr := buildAITimelineIntentSummaryJSON(normalizedCurrent)
 	if summaryErr != nil {
-		writeSSEEvent(w, flusher, "error", map[string]any{"message": "Failed to summarize current_state"})
+		sw.write("error", map[string]any{"message": "Failed to summarize current_state"})
 		return
 	}
+
+	// Heartbeat: keep the UI alive while the LLM runs intent classification.
+	cancelIntentHB := startSSEHeartbeat(promptCtx, sw, "intent", []string{
+		"Analyzing your request...",
+		"Reading board context...",
+		"Classifying intent...",
+		"Checking conversation history...",
+	}, 1200*time.Millisecond)
+
 	intentCtx, cancelIntent := context.WithTimeout(promptCtx, limits.RequestTimeout)
 	intentResult, intentErr := classifyAITimelineEditIntent(
 		intentCtx,
@@ -1312,6 +1368,8 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 		limits,
 	)
 	cancelIntent()
+	cancelIntentHB()
+
 	if intentErr != nil {
 		log.Printf("[ai_timeline/edit_stream] intent classification failed room_id=%q user_id=%q err=%v", roomID, userID, intentErr)
 	} else if intentResult.Intent == aiIntentChat || intentResult.Intent == aiIntentClarify {
@@ -1323,26 +1381,40 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 				assistantReply = "I can explain the current board and answer questions without editing it."
 			}
 		}
-		writeSSEEvent(w, flusher, "chat", map[string]any{
+		// Stream chat reply as text deltas for a typing effect.
+		streamReplyDeltas(sw, assistantReply)
+		sw.write("chat", map[string]any{
 			"intent":          intentResult.Intent,
 			"assistant_reply": assistantReply,
 		})
 		return
 	}
 
+	// ── Phase 2: Plan generation ─────────────────────────────────────────────
 	editSummaryJSON, editSummaryErr := buildAITimelineEditSummaryJSON(normalizedCurrent)
 	if editSummaryErr != nil {
-		writeSSEEvent(w, flusher, "error", map[string]any{"message": "Failed to summarize current_state for edits"})
+		sw.write("error", map[string]any{"message": "Failed to summarize current_state for edits"})
 		return
 	}
 	editPlanTimeout := calculateAITimelineEditTimeout(editTier.RequestTimeout, prompt, editSummaryJSON)
-	writeSSEEvent(w, flusher, "status", map[string]any{
+
+	sw.write("status", map[string]any{
 		"step":              "plan",
 		"label":             "Planning board changes...",
 		"timeout_ms":        editPlanTimeout.Milliseconds(),
 		"prompt_timeout_ms": aiTimelinePromptTimeout.Milliseconds(),
 		"strategy":          "single_llm_call",
 	})
+
+	// Heartbeat during plan generation (typically the longest LLM call).
+	cancelPlanHB := startSSEHeartbeat(promptCtx, sw, "plan", []string{
+		"Planning board changes...",
+		"Structuring operations...",
+		"Generating board diff...",
+		"Reviewing constraints...",
+		"Finalizing plan...",
+	}, 1400*time.Millisecond)
+
 	editLimits := limits
 	editLimits.RequestTimeout = editPlanTimeout
 	editCtx, cancelEdit := context.WithTimeout(promptCtx, editLimits.RequestTimeout)
@@ -1355,9 +1427,11 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 		editLimits,
 	)
 	cancelEdit()
+	cancelPlanHB()
+
 	if editErr != nil {
 		_, payload := buildAITimelineErrorPayload("plan", editErr, editPlanTimeout, aiTimelinePromptTimeout)
-		writeSSEEvent(w, flusher, "error", payload)
+		sw.write("error", payload)
 		return
 	}
 	if editOps.Mode == aiIntentChat || editOps.Mode == aiIntentClarify {
@@ -1369,29 +1443,32 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 				assistantReply = "I can discuss the board without changing it."
 			}
 		}
-		writeSSEEvent(w, flusher, "chat", map[string]any{
+		streamReplyDeltas(sw, assistantReply)
+		sw.write("chat", map[string]any{
 			"intent":          editOps.Mode,
 			"assistant_reply": assistantReply,
 		})
 		return
 	}
 
+	// ── Phase 3: Apply operations ─────────────────────────────────────────────
 	workingState := applyAITimelineEditOperations(normalizedCurrent, aiTimelineEditOperationsResponse{
 		ProjectPatch: editOps.ProjectPatch,
 	})
 	totalOperations := len(editOps.Operations)
-	writeSSEEvent(w, flusher, "plan", map[string]any{
+
+	sw.write("plan", map[string]any{
 		"assistant_reply": editOps.AssistantReply,
 		"project_patch":   editOps.ProjectPatch,
 		"operation_total": totalOperations,
 	})
 
 	if totalOperations == 0 && !hasAITimelineProjectPatch(editOps.ProjectPatch) {
-		writeSSEEvent(w, flusher, "error", map[string]any{"message": "AI returned no valid board changes"})
+		sw.write("error", map[string]any{"message": "AI returned no valid board changes"})
 		return
 	}
 
-	writeSSEEvent(w, flusher, "status", map[string]any{
+	sw.write("status", map[string]any{
 		"step":            "apply",
 		"label":           "Applying board changes...",
 		"applied_count":   0,
@@ -1402,25 +1479,26 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 		workingState = applyAITimelineEditOperations(workingState, aiTimelineEditOperationsResponse{
 			Operations: []aiTimelineEditOperation{operation},
 		})
-		writeSSEEvent(w, flusher, "operation_applied", map[string]any{
+		sw.write("operation_applied", map[string]any{
 			"operation":       operation,
 			"applied_count":   appliedCount,
 			"operation_total": operationTotal,
 		})
-		writeSSEEvent(w, flusher, "status", map[string]any{
+		sw.write("status", map[string]any{
 			"step":            "apply",
 			"label":           "Applying board changes...",
 			"applied_count":   appliedCount,
 			"operation_total": operationTotal,
 		})
 	})
+
 	if persistErr != nil {
 		workingState.IsPartial = true
 		if strings.TrimSpace(workingState.AssistantReply) == "" {
 			workingState.AssistantReply = "I applied part of the board update before the request stopped."
 		}
-		writeSSEEvent(w, flusher, "error", map[string]any{"message": "Failed to apply AI timeline operations"})
-		writeSSEEvent(w, flusher, "done", map[string]any{
+		sw.write("error", map[string]any{"message": "Failed to apply AI timeline operations"})
+		sw.write("done", map[string]any{
 			"intent":          aiIntentModifyProject,
 			"assistant_reply": workingState.AssistantReply,
 			"timeline":        workingState,
@@ -1431,17 +1509,59 @@ func (h *RoomHandler) HandleAIEditTimelineStream(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if strings.TrimSpace(workingState.AssistantReply) == "" {
-		workingState.AssistantReply = strings.TrimSpace(editOps.AssistantReply)
+	// ── Phase 4: Validate + stream response ───────────────────────────────────
+	sw.write("status", map[string]any{
+		"step":            "validate",
+		"label":           "Verifying changes...",
+		"applied_count":   appliedCount,
+		"operation_total": totalOperations,
+	})
+
+	finalReply := strings.TrimSpace(workingState.AssistantReply)
+	if finalReply == "" {
+		finalReply = strings.TrimSpace(editOps.AssistantReply)
 	}
-	writeSSEEvent(w, flusher, "done", map[string]any{
+	workingState.AssistantReply = finalReply
+
+	// Stream the assistant reply as text deltas so the UI can show a typing effect.
+	streamReplyDeltas(sw, finalReply)
+
+	sw.write("done", map[string]any{
 		"intent":          aiIntentModifyProject,
-		"assistant_reply": workingState.AssistantReply,
+		"assistant_reply": finalReply,
 		"timeline":        workingState,
 		"is_partial":      false,
 		"applied_count":   appliedCount,
 		"operation_total": totalOperations,
 	})
+}
+
+// streamReplyDeltas sends the assistant reply as a series of "text_delta" SSE
+// events so the frontend can render a typing effect.  Words are sent in small
+// batches with a short delay to look natural without adding perceptible latency.
+func streamReplyDeltas(sw *sseWriter, reply string) {
+	if reply == "" {
+		return
+	}
+	// Split into words; send batches of ~3 words every 28 ms.
+	// At typical prose density (~5 chars/word) this streams ~540 chars/s —
+	// fast enough to feel responsive but slow enough to read.
+	words := strings.Fields(reply)
+	const batchSize = 3
+	const delayMs = 28
+	for i := 0; i < len(words); i += batchSize {
+		end := i + batchSize
+		if end > len(words) {
+			end = len(words)
+		}
+		chunk := strings.Join(words[i:end], " ")
+		// Re-add trailing space unless it's the last batch.
+		if end < len(words) {
+			chunk += " "
+		}
+		sw.write("text_delta", map[string]any{"delta": chunk})
+		time.Sleep(delayMs * time.Millisecond)
+	}
 }
 
 func resolveAuthAssigneeUUID(ctx context.Context) *gocql.UUID {
@@ -4790,4 +4910,141 @@ func sanitizeAITimelineErrorDetail(err error) string {
 		detail = detail[:597] + "..."
 	}
 	return detail
+}
+
+// ── Fix Actions endpoint ─────────────────────────────────────────────────────
+
+type fixActionEntry struct {
+	Index  int                    `json:"index"`
+	Action map[string]interface{} `json:"action"`
+	Error  string                 `json:"error"`
+}
+
+type fixActionsRequest struct {
+	FailedActions []fixActionEntry `json:"failed_actions"`
+	CurrentState  json.RawMessage  `json:"current_state,omitempty"`
+	UserID        string           `json:"user_id,omitempty"`
+}
+
+type fixActionsResponse struct {
+	FixedActions []map[string]interface{} `json:"fixed_actions"`
+	Explanation  string                   `json:"explanation"`
+}
+
+const fixActionsSystemPrompt = `You are an AI assistant that fixes failed board operation payloads.
+
+You will receive a list of board actions that failed to apply, along with their error messages and the current board state.
+Your job is to analyse why each action failed and return corrected versions of those actions.
+
+Common failure reasons:
+- "Task not found" — the task_title or task_id does not match any task on the board. Correct by finding the closest matching title from the current board state and using the exact title.
+- "Create failed: title already exists" — a task with the same title already exists. Change the title to be unique or convert to an update action.
+- "Update failed" / "Delete failed" with 404 — the task was renamed or deleted. Find the closest match and fix the reference.
+- Missing required fields — add the missing field with a sensible value.
+
+Rules:
+- Return ONLY a JSON object with two keys:
+  - "fixed_actions": array of corrected action objects (same structure as the input actions, with fixes applied)
+  - "explanation": short plain text description of what you changed and why (1-3 sentences)
+- Only include actions that need to be re-applied. Actions that already succeeded should NOT be included in fixed_actions.
+- Preserve all original fields that were correct. Only change what is wrong.
+- If an action cannot be fixed (e.g. the user asked to delete a task that genuinely does not exist), omit it from fixed_actions and explain in the explanation field.
+- Do not add markdown, commentary, or any text outside the JSON object.`
+
+// HandleFixActions diagnoses failed board actions and returns AI-corrected versions.
+func (h *RoomHandler) HandleFixActions(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.scylla == nil || h.scylla.Session == nil {
+		http.Error(w, `{"error":"Task storage unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	roomID := normalizeRoomID(chi.URLParam(r, "roomId"))
+	if roomID == "" {
+		http.Error(w, `{"error":"Invalid room id"}`, http.StatusBadRequest)
+		return
+	}
+
+	userID := normalizeIdentifier(
+		firstNonEmpty(
+			AuthUserIDFromContext(r.Context()),
+			r.Header.Get("X-User-Id"),
+		),
+	)
+	if userID == "" {
+		http.Error(w, `{"error":"User context required"}`, http.StatusUnauthorized)
+		return
+	}
+
+	isMember, memberErr := h.isRoomMember(r.Context(), roomID, userID)
+	if memberErr != nil {
+		http.Error(w, `{"error":"Failed to verify room membership"}`, http.StatusInternalServerError)
+		return
+	}
+	if !isMember {
+		http.Error(w, `{"error":"Join the room to use this feature"}`, http.StatusForbidden)
+		return
+	}
+
+	var req fixActionsRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 512*1024)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"Invalid JSON payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	if len(req.FailedActions) == 0 {
+		http.Error(w, `{"error":"failed_actions is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Build user message describing the failures and board state
+	failedJSON, _ := json.MarshalIndent(req.FailedActions, "", "  ")
+	var boardSummary string
+	if len(req.CurrentState) > 0 && strings.TrimSpace(string(req.CurrentState)) != "null" {
+		stateJSON, _ := json.MarshalIndent(json.RawMessage(req.CurrentState), "", "  ")
+		if len(stateJSON) > 8000 {
+			stateJSON = stateJSON[:8000]
+		}
+		boardSummary = fmt.Sprintf("\n\nCurrent board state:\n%s", string(stateJSON))
+	}
+
+	userMsg := fmt.Sprintf("The following board actions failed:\n%s%s\n\nPlease return corrected versions of these actions.", string(failedJSON), boardSummary)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	fullPrompt := fixActionsSystemPrompt + "\n\n" + userMsg
+	reply, aiErr := ai.DefaultRouter.GenerateChatResponseWithHint(ctx, fullPrompt, ai.AIModelTierLight)
+	if aiErr != nil {
+		log.Printf("[fix-actions] AI call failed: %v", aiErr)
+		http.Error(w, `{"error":"AI unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	// Strip markdown fences if present
+	cleaned := strings.TrimSpace(reply)
+	if idx := strings.Index(cleaned, "```"); idx != -1 {
+		end := strings.LastIndex(cleaned, "```")
+		if end > idx {
+			inner := cleaned[idx+3 : end]
+			if nl := strings.IndexByte(inner, '\n'); nl != -1 {
+				inner = inner[nl+1:]
+			}
+			cleaned = strings.TrimSpace(inner)
+		}
+	}
+
+	var resp fixActionsResponse
+	if parseErr := json.Unmarshal([]byte(cleaned), &resp); parseErr != nil {
+		// Return the raw text so the client can display it
+		log.Printf("[fix-actions] failed to parse AI response as JSON: %v — raw: %s", parseErr, cleaned)
+		resp = fixActionsResponse{
+			FixedActions: nil,
+			Explanation:  cleaned,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }

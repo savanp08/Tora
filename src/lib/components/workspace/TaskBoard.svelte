@@ -8,6 +8,7 @@
 	import { addBoardActivity, type BoardActivityInput } from '$lib/stores/boardActivity';
 	import { fieldSchemaStore, type FieldSchema } from '$lib/stores/fieldSchema';
 	import { projectTypeConfig } from '$lib/stores/projectType';
+	import { taskAdvisoriesByTaskId, type TaskAdvisory } from '$lib/stores/taskAdvisories';
 	import { applyTimelineTaskStatusUpdate, projectTimeline } from '$lib/stores/timeline';
 	import type { ProjectTimeline } from '$lib/types/timeline';
 	import {
@@ -183,6 +184,7 @@
 		name: string;
 		tasks: DisplayTask[];
 		lastUpdatedAt: number;
+		earliestStartDate: number; // min startDate across tasks; 0 if none set
 		searchScore?: number;
 	};
 
@@ -483,13 +485,20 @@
 			if (existing) {
 				existing.tasks.push(task);
 				existing.lastUpdatedAt = Math.max(existing.lastUpdatedAt, task.updatedAt || 0);
+				if (task.startDate && task.startDate > 0) {
+					existing.earliestStartDate =
+						existing.earliestStartDate > 0
+							? Math.min(existing.earliestStartDate, task.startDate)
+							: task.startDate;
+				}
 				continue;
 			}
 			grouped.set(key, {
 				key,
 				name: sprintName,
 				tasks: [task],
-				lastUpdatedAt: task.updatedAt || 0
+				lastUpdatedAt: task.updatedAt || 0,
+				earliestStartDate: (task.startDate && task.startDate > 0) ? task.startDate : 0
 			});
 		}
 		for (const draftSprintName of sprintDraftGroups) {
@@ -502,7 +511,8 @@
 				key,
 				name: trimmedDraftName,
 				tasks: [],
-				lastUpdatedAt: 0
+				lastUpdatedAt: 0,
+				earliestStartDate: 0
 			});
 		}
 
@@ -567,7 +577,8 @@
 				key,
 				name: sprintName,
 				tasks: [],
-				lastUpdatedAt: 0
+				lastUpdatedAt: 0,
+				earliestStartDate: 0
 			});
 		}
 		for (const draftSprintName of sprintDraftGroups) {
@@ -580,7 +591,8 @@
 				key,
 				name: trimmedDraftName,
 				tasks: [],
-				lastUpdatedAt: 0
+				lastUpdatedAt: 0,
+				earliestStartDate: 0
 			});
 		}
 		const orderedGroups = [...grouped.values()].sort((left, right) => {
@@ -976,6 +988,29 @@
 		if (column === 'in_progress') return 'Working on it';
 		if (column === 'done') return 'Done';
 		return 'To Do';
+	}
+
+	function primaryTaskAdvisory(task: DisplayTask): TaskAdvisory | null {
+		if (contextAware || !task?.id) {
+			return null;
+		}
+		return $taskAdvisoriesByTaskId[task.id]?.[0] ?? null;
+	}
+
+	function advisoryToneClass(advisory: TaskAdvisory | null) {
+		if (!advisory) {
+			return '';
+		}
+		if (advisory.severity === 'critical') return 'tone-critical';
+		if (advisory.severity === 'warning') return 'tone-warning';
+		return 'tone-info';
+	}
+
+	function advisoryTooltip(advisory: TaskAdvisory | null) {
+		if (!advisory) {
+			return '';
+		}
+		return `${advisory.headline} ${advisory.suggestion} Risk: ${advisory.risk}`.trim();
 	}
 
 	function resolveColumn(statusValue: string): ColumnKey {
@@ -3777,6 +3812,12 @@
 		});
 	}
 
+	function formatSprintStartDate(ms: number): string {
+		if (!Number.isFinite(ms) || ms <= 0) return '';
+		const d = new Date(ms);
+		return 'starts ' + d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+	}
+
 	function formatBudgetCell(value?: number) {
 		if (!Number.isFinite(value) || (value ?? 0) <= 0) {
 			return '--';
@@ -4871,6 +4912,7 @@
 					{:else}
 						<div class="support-card-grid">
 							{#each supportTicketCards as supportCard (supportCard.task.id)}
+								{@const advisory = primaryTaskAdvisory(supportCard.task)}
 								<article class="support-ticket-card">
 									<div class="support-ticket-top">
 										<span class={`support-priority priority-${supportCard.priority}`}>
@@ -4880,6 +4922,15 @@
 									</div>
 									<h4>{supportCard.task.title}</h4>
 									<p>{supportCard.details}</p>
+									{#if advisory}
+										<div
+											class={`task-advisory-inline support-advisory ${advisoryToneClass(advisory)}`}
+											title={advisoryTooltip(advisory)}
+										>
+											<span class="task-advisory-chip">AI</span>
+											<span class="task-advisory-text">{advisory.headline}</span>
+										</div>
+									{/if}
 									<div class="support-linked-meta">
 										{supportCard.linkedTaskIds.length} linked task{supportCard.linkedTaskIds
 											.length === 1
@@ -4936,6 +4987,7 @@
 								<div class="kanban-empty">No {taskPluralLabel}</div>
 							{:else}
 								{#each column.tasks as task (task.id)}
+									{@const advisory = primaryTaskAdvisory(task)}
 									<article class="kanban-card" role="listitem">
 										<div class="kanban-card-top">
 											<button
@@ -4966,6 +5018,15 @@
 												</span>
 											{/if}
 										</div>
+										{#if advisory}
+											<div
+												class={`task-advisory-inline ${advisoryToneClass(advisory)}`}
+												title={advisoryTooltip(advisory)}
+											>
+												<span class="task-advisory-chip">AI</span>
+												<span class="task-advisory-text">{advisory.headline}</span>
+											</div>
+										{/if}
 
 										<div class="kanban-status-row">
 											<div class="status-wrap">
@@ -5087,7 +5148,7 @@
 							<div class="sgh-left">
 								<h3>{formatSprintDisplayName(sprintGroup.name)}</h3>
 								<p>
-									{sprintGroup.tasks.length} {sprintGroup.tasks.length === 1 ? taskLabel : taskPluralLabel} · {formatCellTime(sprintGroup.lastUpdatedAt)}
+									{sprintGroup.tasks.length} {sprintGroup.tasks.length === 1 ? taskLabel : taskPluralLabel}{sprintGroup.earliestStartDate > 0 ? ' · ' + formatSprintStartDate(sprintGroup.earliestStartDate) : ''}
 								</p>
 							</div>
 							<div class="sgh-actions">
@@ -5254,6 +5315,7 @@
 										</tr>
 									{:else}
 										{#each sprintGroup.tasks as task (task.id)}
+											{@const advisory = primaryTaskAdvisory(task)}
 											<!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
 											<tr
 												class:row-todo={resolveColumn(task.status) === 'todo'}
@@ -5301,17 +5363,28 @@
 														</svg>
 													</button>
 													<div class="task-content">
-														<span class="cell-trigger task-title-trigger">{task.title}</span>
-														<div class="task-relation-badges">
-															{#if task.blockedBy.length > 0}
-																<span class="task-badge task-badge-blocked">
-																	Blocked by {task.blockedBy.length}
-																</span>
-															{/if}
-															{#if taskSubtaskSummary(task)}
-																<span class="task-badge task-badge-subtasks">
-																	{taskSubtaskSummaryLabel(task)}
-																</span>
+														<div class="task-main">
+															<span class="cell-trigger task-title-trigger">{task.title}</span>
+															<div class="task-relation-badges">
+																{#if task.blockedBy.length > 0}
+																	<span class="task-badge task-badge-blocked">
+																		Blocked by {task.blockedBy.length}
+																	</span>
+																{/if}
+																{#if taskSubtaskSummary(task)}
+																	<span class="task-badge task-badge-subtasks">
+																		{taskSubtaskSummaryLabel(task)}
+																	</span>
+																{/if}
+															</div>
+															{#if advisory}
+																<div
+																	class={`task-advisory-inline ${advisoryToneClass(advisory)}`}
+																	title={advisoryTooltip(advisory)}
+																>
+																	<span class="task-advisory-chip">AI</span>
+																	<span class="task-advisory-text">{advisory.headline}</span>
+																</div>
 															{/if}
 														</div>
 														<div class="task-actions">
@@ -7406,6 +7479,10 @@
 		-webkit-box-orient: vertical;
 	}
 
+	.support-advisory {
+		margin-top: -0.05rem;
+	}
+
 	.support-linked-meta {
 		font-size: 0.67rem;
 		color: var(--tb-cell-muted);
@@ -7909,10 +7986,17 @@
 	}
 
 	.task-content {
-		display: flex;
-		align-items: center;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
 		gap: 0.45rem;
 		width: 100%;
+		min-width: 0;
+	}
+
+	.task-main {
+		display: grid;
+		gap: 0.22rem;
 		min-width: 0;
 	}
 
@@ -7981,6 +8065,59 @@
 		background: color-mix(in srgb, var(--tb-grid-head-bg) 10%, transparent);
 		color: var(--tb-cell-muted);
 		border: 1px solid color-mix(in srgb, var(--tb-grid-head-bg) 20%, transparent);
+	}
+
+	.task-advisory-inline {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.32rem;
+		max-width: 100%;
+		padding: 0.22rem 0.42rem;
+		border-radius: 10px;
+		border: 1px solid transparent;
+		background: color-mix(in srgb, var(--tb-panel-bg) 72%, transparent);
+	}
+
+	.task-advisory-inline.tone-critical {
+		background: rgba(239, 68, 68, 0.1);
+		border-color: rgba(239, 68, 68, 0.24);
+		color: #b91c1c;
+	}
+
+	.task-advisory-inline.tone-warning {
+		background: rgba(217, 119, 6, 0.1);
+		border-color: rgba(217, 119, 6, 0.24);
+		color: #b45309;
+	}
+
+	.task-advisory-inline.tone-info {
+		background: rgba(37, 99, 235, 0.08);
+		border-color: rgba(37, 99, 235, 0.22);
+		color: #1d4ed8;
+	}
+
+	.task-advisory-chip {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		height: 1rem;
+		padding: 0 0.34rem;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.72);
+		font-size: 0.57rem;
+		font-weight: 800;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		flex-shrink: 0;
+	}
+
+	.task-advisory-text {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.67rem;
+		font-weight: 700;
 	}
 
 	.owner-trigger {

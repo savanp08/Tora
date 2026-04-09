@@ -12,7 +12,8 @@ export type ChangeRequestAction =
 	| 'import_sheet'
 	| 'edit_field_schema'
 	| 'remove_member'
-	| 'edit_canvas';
+	| 'edit_canvas'
+	| 'task_conflict'; // Duplicate or update candidate detected during AI apply
 
 export type ChangeRequestStatus = 'pending' | 'approved' | 'rejected';
 

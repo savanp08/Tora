@@ -12,6 +12,11 @@ export type TaskSubtask = {
 	position: number;
 };
 
+export type TaskRole = {
+	role: string;
+	responsibilities: string;
+};
+
 export type Task = {
 	id: string;
 	roomId: string;
@@ -30,6 +35,7 @@ export type Task = {
 	assigneeId: string;
 	dueDate?: number;
 	startDate?: number;
+	roles?: TaskRole[];
 	statusActorId?: string;
 	statusActorName?: string;
 	statusChangedAt?: number;
@@ -188,6 +194,47 @@ function normalizeTaskSubtasks(value: unknown): TaskSubtask[] {
 	return next;
 }
 
+function normalizeTaskRoles(value: unknown): TaskRole[] | undefined {
+	let source: unknown[] = [];
+	if (Array.isArray(value)) {
+		source = value;
+	} else if (typeof value === 'string') {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		try {
+			const parsed = JSON.parse(trimmed) as unknown;
+			if (!Array.isArray(parsed)) {
+				return undefined;
+			}
+			source = parsed;
+		} catch {
+			return undefined;
+		}
+	} else {
+		return undefined;
+	}
+
+	const roles: TaskRole[] = [];
+	for (const entry of source) {
+		const sourceRole = toRecord(entry);
+		if (!sourceRole) {
+			continue;
+		}
+		const role = toStringValue(sourceRole.role).trim();
+		const responsibilities = toStringValue(sourceRole.responsibilities).trim();
+		if (!role && !responsibilities) {
+			continue;
+		}
+		roles.push({
+			role,
+			responsibilities
+		});
+	}
+	return roles.length > 0 ? roles : undefined;
+}
+
 function calculateTaskCompletionPercent(subtasks: TaskSubtask[]) {
 	if (subtasks.length === 0) {
 		return undefined;
@@ -285,6 +332,7 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 	const assigneeId = toStringValue(source.assigneeId ?? source.assignee_id).trim();
 	const taskTypeRaw = toStringValue(source.taskType ?? source.task_type).trim().toLowerCase();
 	const taskType = taskTypeRaw === 'support' ? 'support' : 'sprint';
+	const roles = normalizeTaskRoles(source.roles);
 	const statusActorId = toStringValue(source.statusActorId ?? source.status_actor_id).trim();
 	const statusActorName = toStringValue(source.statusActorName ?? source.status_actor_name).trim();
 	const statusChangedAt =
@@ -313,6 +361,7 @@ export function normalizeTaskRecord(raw: unknown, fallbackRoomId = activeTaskRoo
 		assigneeId,
 		dueDate: dueDate && dueDate > 0 ? dueDate : undefined,
 		startDate: startDate && startDate > 0 ? startDate : undefined,
+		roles,
 		statusActorId: statusActorId || undefined,
 		statusActorName: statusActorName || undefined,
 		statusChangedAt: statusChangedAt > 0 ? statusChangedAt : undefined,

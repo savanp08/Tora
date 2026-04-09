@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { createEventDispatcher, tick } from 'svelte';
 	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
+	import AIModelSelector from '$lib/components/ai/AIModelSelector.svelte';
 	import { resolveApiBase } from '$lib/config/apiBase';
 	import {
 		activeProjectTab,
@@ -1349,6 +1350,7 @@
 						disabled={$timelineLoading}
 					></textarea>
 					<div class="tora-toolbar">
+						<AIModelSelector compact={true} />
 						<span class="tora-hint" class:tora-hint-warn={[...aiPrompt].length > 2700}>
 							{#if aiPrompt.trim().length === 0}
 								Include sprint count, budget, owners, and deadline

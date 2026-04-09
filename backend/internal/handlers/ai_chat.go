@@ -85,6 +85,12 @@ type privateAIChatRequest struct {
 	Prompt   string `json:"prompt"`
 	DeviceID string `json:"deviceId"`
 	RoomID   string `json:"roomId"`
+	// ModelID is an optional specific model to route to (e.g. "gemini-3-flash-preview").
+	// When empty, the backend uses its default provider chain.
+	ModelID string `json:"modelId,omitempty"`
+	// Effort maps to a model tier: "fast" → light, "extended" → standard, "max" → heavy.
+	// When empty, "extended" (standard tier) is used.
+	Effort string `json:"effort,omitempty"`
 }
 
 type privateAIChatResponse struct {
@@ -161,7 +167,8 @@ func HandlePrivateAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	aiPrompt := buildPrivateAIPromptWithRoomContext(r.Context(), roomID, prompt)
-	responseText, err := DefaultAIRouter.GenerateChatResponse(r.Context(), aiPrompt)
+	tier := effortToTier(req.Effort)
+	responseText, err := generatePrivateAIChatResponse(r.Context(), aiPrompt, tier)
 	if err != nil {
 		if errors.Is(err, ai.ErrAllAIProvidersExhausted) {
 			println("AI response generation failed: all providers exhausted")
@@ -534,6 +541,25 @@ func parsePrivateAITime(value any) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// effortToTier maps a frontend effort label to a backend model tier constant.
+// Unknown/empty values default to AIModelTierStandard.
+func effortToTier(effort string) string {
+	switch strings.TrimSpace(strings.ToLower(effort)) {
+	case "fast":
+		return ai.AIModelTierLight
+	case "max":
+		return ai.AIModelTierHeavy
+	default:
+		return ai.AIModelTierStandard
+	}
+}
+
+// generatePrivateAIChatResponse dispatches a prompt to the AI router using the
+// given model tier hint when the provider supports it.
+func generatePrivateAIChatResponse(ctx context.Context, prompt, tier string) (string, error) {
+	return DefaultAIRouter.GenerateChatResponseWithHint(ctx, prompt, tier)
 }
 
 func writeAIChatError(w http.ResponseWriter, status int, message string) {

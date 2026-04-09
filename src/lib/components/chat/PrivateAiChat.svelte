@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { createEventDispatcher, onDestroy, tick } from 'svelte';
 	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
+	import AIModelSelector from '$lib/components/ai/AIModelSelector.svelte';
+	import { aiSettings, compactContext } from '$lib/stores/aiSettings';
 	import type { ChatMessage } from '$lib/types/chat';
 
 	const API_BASE_RAW = import.meta.env.VITE_API_BASE as string | undefined;
@@ -26,6 +28,7 @@
 	let messages: ChatMessage[] = [];
 	let draft = '';
 	let isSending = false;
+	let isCompacting = false;
 
 	function autoResize(node: HTMLTextAreaElement, _value?: string) {
 		function resize() {
@@ -101,7 +104,13 @@
 			'X-User-Id': effectiveUserID,
 			'X-Username': currentUsername || ''
 		};
-		const body = JSON.stringify({ prompt, deviceId, roomId });
+		const body = JSON.stringify({
+			prompt,
+			deviceId,
+			roomId,
+			modelId: $aiSettings.modelId,
+			effort: $aiSettings.effort
+		});
 
 		let response = await fetch(`${API_BASE}/api/ai/chat`, {
 			method: 'POST',
@@ -255,6 +264,36 @@
 		void tick().then(() => composerTextarea?.focus());
 	}
 
+	// Compact the current conversation into a dense summary, replacing messages.
+	// universal=true caches the result server-side for reuse across users.
+	async function compactMessages() {
+		if (isCompacting || messages.length < 4) return;
+		isCompacting = true;
+		const turns = messages
+			.filter((m) => !m.pending)
+			.map((m) => ({
+				role: m.senderId === 'Tora-Bot' ? 'assistant' : 'user',
+				content: m.content
+			}));
+		// No roomId means this is a generic/universal context.
+		const isUniversal = !roomId || roomId === PRIVATE_AI_ROOM_ID;
+		const result = await compactContext(turns, roomId, isUniversal);
+		if (result?.summary) {
+			const summaryMsg: ChatMessage = {
+				id: createMessageId('compact'),
+				roomId: roomId || PRIVATE_AI_ROOM_ID,
+				senderId: 'Tora-Bot',
+				senderName: 'Tora AI',
+				content: `[Context compacted${result.cached ? ' (from cache)' : ''}]\n\n${result.summary}`,
+				type: 'text',
+				createdAt: Date.now()
+			};
+			messages = [summaryMsg];
+			void scrollToBottom();
+		}
+		isCompacting = false;
+	}
+
 	function clearPrivateChatContext() {
 		requestAbortController?.abort();
 		requestAbortController = null;
@@ -293,17 +332,24 @@
 					<p>Only visible to you</p>
 				</div>
 				<div class="private-ai-header-actions">
-					<span class="model-chip">
-						<span class="model-dot" aria-hidden="true"></span>
-						ToraAI
-					</span>
+					{#if messages.length >= 4}
+						<button
+							type="button"
+							class="clear-chat-btn"
+							on:click={() => void compactMessages()}
+							disabled={isSending || isCompacting}
+							title="Compact conversation context"
+						>
+							{isCompacting ? '…' : '⊡'}
+						</button>
+					{/if}
 					<button
 						type="button"
 						class="clear-chat-btn"
 						on:click={clearPrivateChatContext}
 						disabled={isSending || messages.length === 0}
 					>
-						Clear chat
+						Clear
 					</button>
 					<button
 						type="button"
@@ -388,7 +434,7 @@
 						disabled={isSending}
 					></textarea>
 					<div class="private-ai-toolbar">
-						<span class="private-ai-hint">Enter to send</span>
+						<AIModelSelector compact={true} />
 						<div class="toolbar-spacer"></div>
 						{#if isSending}
 							<button
@@ -479,26 +525,6 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
-	}
-
-	.model-chip {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.35rem;
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(255, 255, 255, 0.12);
-		border-radius: 8px;
-		padding: 0.22rem 0.48rem;
-		font-size: 0.68rem;
-		font-weight: 600;
-		color: #bdc1c6;
-	}
-
-	.model-dot {
-		width: 10px;
-		height: 10px;
-		border-radius: 999px;
-		background: linear-gradient(135deg, #1a73e8, #34a853);
 	}
 
 	.clear-chat-btn {
@@ -790,11 +816,6 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 0.42rem;
-	}
-
-	.private-ai-hint {
-		font-size: 0.68rem;
-		color: #9aa0a6;
 	}
 
 	.toolbar-spacer {

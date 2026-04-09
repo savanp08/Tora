@@ -2,6 +2,7 @@
 	import { onMount, createEventDispatcher } from 'svelte';
 	import RichTextContent from '$lib/components/chat/RichTextContent.svelte';
 	import { projectTypeConfig } from '$lib/stores/projectType';
+	import { submitChangeRequest } from '$lib/stores/changeRequests';
 
 	type ActionKind = 'task_create' | 'task_update' | 'task_delete';
 
@@ -75,12 +76,15 @@
 	export let currentUserId = '';
 	export let currentUserName = '';
 	export let canResolve = false;
+	export let messageId = '';
 
 	const dispatch = createEventDispatcher<{ applied: { roomId: string } }>();
 
 	let actions: TaskAction[] = [];
 	let state: CardState = 'pending';
 	let errorMsg = '';
+	let fixErrorMsg = '';
+	let isFixing = false;
 	let applyProgress = 0;
 	let appliedCounts = { created: 0, updated: 0, deleted: 0 };
 	let appliedMeta: AppliedMeta | null = null;
@@ -139,8 +143,9 @@
 		blocks: 'Blocks'
 	};
 
-	type ActionResult = { ok: boolean; skipped?: boolean; error?: string };
+	type ActionResult = { ok: boolean; skipped?: boolean; conflict?: boolean; error?: string };
 	let actionResults: ActionResult[] = [];
+	let conflictResults: ConflictInfo[] = [];
 
 	function toRecord(value: unknown): Record<string, unknown> | null {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -517,7 +522,9 @@
 		return h.toString(36);
 	}
 	function persistKey(): string {
-		return `tora_applied_${roomId}_${hashActionsJson(actionsJson)}`;
+		// Prefer stable messageId when available; fall back to content hash
+		const suffix = messageId.trim() || hashActionsJson(actionsJson);
+		return `tora_applied_${roomId}_${suffix}`;
 	}
 
 	function persistResolutionState(value: PersistedResolution) {
@@ -611,6 +618,157 @@
 		}
 	});
 
+	// ── Duplicate / update detection ─────────────────────────────────────────
+
+	function wordTokens(text: string): Set<string> {
+		return new Set(
+			text
+				.toLowerCase()
+				.replace(/[^a-z0-9\s]/g, ' ')
+				.split(/\s+/)
+				.filter((w) => w.length > 2)
+		);
+	}
+
+	function datesWithin7Days(a: string | undefined, b: string | undefined): boolean {
+		if (!a || !b) return false;
+		const diff = Math.abs(Date.parse(a) - Date.parse(b));
+		return diff <= 7 * 24 * 60 * 60 * 1000;
+	}
+
+	function budgetClose(a: number | undefined, b: number | undefined): boolean {
+		if (a == null || b == null) return false;
+		if (a === 0 && b === 0) return true;
+		const max = Math.max(Math.abs(a), Math.abs(b));
+		return max === 0 || Math.abs(a - b) / max <= 0.1;
+	}
+
+	/** Returns 0-100 similarity score between an existing board task and a proposed create action. */
+	function computeTaskSimilarity(existing: TaskLookupRecord, proposed: TaskAction): number {
+		let earned = 0;
+		let possible = 0;
+
+		// Description (weight 3) — Jaccard word overlap
+		const propDesc = (proposed.description ?? '').trim();
+		const exDesc = (existing.description ?? '').trim();
+		if (propDesc || exDesc) {
+			possible += 3;
+			if (propDesc && exDesc) {
+				const setA = wordTokens(propDesc);
+				const setB = wordTokens(exDesc);
+				const intersection = [...setA].filter((w) => setB.has(w)).length;
+				const union = new Set([...setA, ...setB]).size;
+				earned += union > 0 ? (intersection / union) * 3 : 0;
+			}
+		}
+
+		// Budget (weight 2)
+		const propBudget = typeof proposed.budget === 'number' ? proposed.budget : undefined;
+		if (propBudget != null || existing.budget != null) {
+			possible += 2;
+			if (budgetClose(propBudget, existing.budget)) earned += 2;
+		}
+
+		// Start date (weight 1.5)
+		const propStart = proposed.start_date ?? undefined;
+		if (propStart || existing.start_date) {
+			possible += 1.5;
+			if (propStart === existing.start_date || datesWithin7Days(propStart, existing.start_date)) earned += 1.5;
+		}
+
+		// Due date (weight 1.5)
+		const propDue = proposed.due_date ?? undefined;
+		if (propDue || existing.due_date) {
+			possible += 1.5;
+			if (propDue === existing.due_date || datesWithin7Days(propDue, existing.due_date)) earned += 1.5;
+		}
+
+		// Sprint (weight 1)
+		const propSprint = (proposed.sprint ?? '').trim().toLowerCase();
+		const exSprint = (existing.sprint_name ?? '').trim().toLowerCase();
+		if (propSprint || exSprint) {
+			possible += 1;
+			if (propSprint && exSprint && propSprint === exSprint) earned += 1;
+		}
+
+		// Status (weight 0.5)
+		const propStatus = (proposed.status ?? '').trim().toLowerCase();
+		const exStatus = (existing.status ?? '').trim().toLowerCase();
+		if (propStatus || exStatus) {
+			possible += 0.5;
+			if (propStatus && exStatus && propStatus === exStatus) earned += 0.5;
+		}
+
+		if (possible === 0) return 0;
+		return Math.round((earned / possible) * 100);
+	}
+
+	function buildConflictDiff(existing: TaskLookupRecord, proposed: TaskAction): ConflictDiffField[] {
+		const rows: ConflictDiffField[] = [];
+
+		function addRow(field: string, label: string, ex: string | number | undefined, pr: string | number | undefined) {
+			const exStr = ex != null ? String(ex) : '';
+			const prStr = pr != null ? String(pr) : '';
+			if (!exStr && !prStr) return;
+			rows.push({ field, label, existing: exStr || '—', proposed: prStr || '—', changed: exStr !== prStr });
+		}
+
+		addRow('description', 'Description', existing.description, proposed.description);
+		addRow('sprint', 'Sprint', existing.sprint_name, proposed.sprint);
+		addRow('status', 'Status', existing.status, proposed.status);
+		addRow('budget', 'Budget', existing.budget != null ? `$${existing.budget.toLocaleString()}` : undefined, proposed.budget != null ? `$${proposed.budget.toLocaleString()}` : undefined);
+		addRow('start_date', 'Start date', existing.start_date, proposed.start_date);
+		addRow('due_date', 'Due date', existing.due_date, proposed.due_date);
+		addRow('assignee', 'Assignee', existing.assignee_id, undefined);
+		return rows;
+	}
+
+	function detectConflict(
+		actionIndex: number,
+		action: TaskAction,
+		tasks: TaskLookupRecord[]
+	): ConflictInfo | null {
+		const proposedTitle = (action.title ?? '').trim().toLowerCase();
+		if (!proposedTitle) return null;
+
+		// Find exact or fuzzy title match in existing tasks
+		let matchedTask: TaskLookupRecord | null = null;
+		for (const t of tasks) {
+			if ((t.title ?? '').trim().toLowerCase() === proposedTitle) {
+				matchedTask = t;
+				break;
+			}
+		}
+		if (!matchedTask) {
+			// Fuzzy check (same levenshtein we use for resolveTaskId)
+			let bestDist = Infinity;
+			for (const t of tasks) {
+				const candidate = (t.title ?? '').trim().toLowerCase();
+				const dist = levenshtein(proposedTitle, candidate);
+				const threshold = Math.ceil(Math.max(proposedTitle.length, candidate.length) * 0.25);
+				if (dist <= threshold && dist < bestDist) {
+					bestDist = dist;
+					matchedTask = t;
+				}
+			}
+		}
+		if (!matchedTask) return null;
+
+		const similarityPct = computeTaskSimilarity(matchedTask, action);
+		const conflictType: 'duplicate' | 'update' = similarityPct >= 80 ? 'duplicate' : 'update';
+		const diff = buildConflictDiff(matchedTask, action);
+
+		return {
+			actionIndex,
+			conflictType,
+			similarityPct,
+			proposedTitle: action.title ?? proposedTitle,
+			existingTaskId: matchedTask.id,
+			existingTitle: matchedTask.title,
+			diff
+		};
+	}
+
 	async function applyActions() {
 		if (!canResolve) {
 			errorMsg = 'Only room admins can accept or dismiss these changes right now.';
@@ -619,16 +777,74 @@
 		}
 		state = 'applying';
 		errorMsg = '';
+		fixErrorMsg = '';
 		applyProgress = 0;
-		appliedCounts = { created: 0, updated: 0, deleted: 0 };
 		dismissedMeta = null;
-		actionResults = actions.map(() => ({ ok: false }));
+		conflictResults = [];
+		// Preserve already-succeeded results — only reset ones that haven't succeeded yet
+		if (actionResults.length !== actions.length) {
+			actionResults = actions.map(() => ({ ok: false }));
+		} else {
+			actionResults = actionResults.map((r) => (r?.ok ? r : { ok: false }));
+		}
+		// Recount from scratch based on what we're about to apply
+		appliedCounts = {
+			created: actionResults.filter((r, i) => r?.ok && actions[i]?.kind === 'task_create').length,
+			updated: actionResults.filter((r, i) => r?.ok && actions[i]?.kind === 'task_update').length,
+			deleted: actionResults.filter((r, i) => r?.ok && actions[i]?.kind === 'task_delete').length
+		};
 		_cachedTasks = null; // reset per-apply cache
 		const errors: string[] = [];
+		let attempted = 0;
+
+		// Pre-load task list once for conflict detection (only needed if any task_create exists)
+		const hasCreates = actions.some((a) => a.kind === 'task_create');
+		const tasksForConflict = hasCreates ? await fetchRoomTasks(buildRequestHeaders()).catch(() => []) : [];
 
 		for (let i = 0; i < actions.length; i++) {
+			// Skip actions that already succeeded in a previous attempt
+			if (actionResults[i]?.ok) continue;
+			// Skip actions already flagged as conflicts (pending admin review)
+			if (actionResults[i]?.conflict) continue;
 			const action = actions[i];
+			attempted++;
 			applyProgress = i + 1;
+
+			// Conflict detection for task_create — check for title match before applying
+			if (action.kind === 'task_create') {
+				const conflict = detectConflict(i, action, tasksForConflict);
+				if (conflict) {
+					conflictResults = [...conflictResults, conflict];
+					// Submit to admin change request panel
+					submitChangeRequest(
+						roomId,
+						currentUserId,
+						currentUserName || 'AI',
+						'task_conflict',
+						conflict.proposedTitle,
+						{
+							conflictType: conflict.conflictType,
+							similarityPct: conflict.similarityPct,
+							existingTaskId: conflict.existingTaskId,
+							existingTitle: conflict.existingTitle,
+							proposedTitle: conflict.proposedTitle,
+							diff: conflict.diff,
+							proposedTask: {
+								title: action.title,
+								description: action.description,
+								sprint: action.sprint,
+								status: action.status,
+								budget: action.budget,
+								start_date: action.start_date,
+								due_date: action.due_date
+							}
+						}
+					);
+					actionResults[i] = { ok: false, conflict: true };
+					continue;
+				}
+			}
+
 			try {
 				await applyAction(action);
 				if (action.kind === 'task_create') appliedCounts.created++;
@@ -649,22 +865,106 @@
 		}
 
 		applyProgress = 0;
+		const conflictCount = conflictResults.length;
 		if (errors.length === 0) {
-			state = 'applied';
-			// Persist applied state so it survives page reload
-			const meta: AppliedMeta = {
-				appliedBy: resolveActorName(),
-				appliedAt: new Date().toISOString(),
-				counts: { ...appliedCounts }
-			};
-			appliedMeta = meta;
-			dismissedMeta = null;
-			persistResolutionState({ state: 'applied', appliedMeta: meta });
-			dispatch('applied', { roomId });
+			if (conflictCount > 0) {
+				// Some actions need admin review — surface as a soft warning, not a hard error
+				state = 'error';
+				errorMsg =
+					`${conflictCount} action${conflictCount === 1 ? '' : 's'} flagged as potential duplicate${conflictCount === 1 ? '' : 's'} — sent to admin for review.` +
+					(appliedCounts.created + appliedCounts.updated + appliedCounts.deleted > 0
+						? ` Other changes were applied.`
+						: '');
+			} else {
+				state = 'applied';
+				const meta: AppliedMeta = {
+					appliedBy: resolveActorName(),
+					appliedAt: new Date().toISOString(),
+					counts: { ...appliedCounts }
+				};
+				appliedMeta = meta;
+				dismissedMeta = null;
+				persistResolutionState({ state: 'applied', appliedMeta: meta });
+				dispatch('applied', { roomId });
+			}
 		} else {
+			const alreadyDone = actions.length - attempted - conflictCount;
+			const parts: string[] = [
+				errors.slice(0, 2).join(' · ') + (errors.length > 2 ? ` (+${errors.length - 2} more)` : '')
+			];
+			if (conflictCount > 0) parts.push(`${conflictCount} flagged for admin review`);
+			if (alreadyDone > 0) parts.push(`${alreadyDone} already applied`);
 			state = 'error';
-			errorMsg =
-				errors.slice(0, 2).join(' · ') + (errors.length > 2 ? ` (+${errors.length - 2} more)` : '');
+			errorMsg = parts.join(' · ');
+		}
+	}
+
+	async function fixWithTora() {
+		if (!canResolve || isFixing) return;
+		isFixing = true;
+		fixErrorMsg = '';
+		try {
+			const failedEntries = actions
+				.map((action, index) => ({
+					index,
+					action: action as unknown as Record<string, unknown>,
+					error: actionResults[index]?.error ?? ''
+				}))
+				.filter((entry) => entry.error);
+
+			if (failedEntries.length === 0) {
+				isFixing = false;
+				return;
+			}
+
+			const headers = buildRequestHeaders();
+			const res = await fetch(`${apiBase}/api/rooms/${roomId}/ai/fix-actions`, {
+				method: 'POST',
+				headers,
+				credentials: 'include',
+				body: JSON.stringify({ failed_actions: failedEntries })
+			});
+
+			if (!res.ok) {
+				const payload = (await res.json().catch(() => null)) as { error?: string } | null;
+				fixErrorMsg = payload?.error ?? `Fix request failed (${res.status})`;
+				return;
+			}
+
+			const data = (await res.json()) as { fixed_actions?: unknown[]; explanation?: string };
+			const fixed = Array.isArray(data?.fixed_actions) ? (data.fixed_actions as TaskAction[]) : [];
+
+			if (fixed.length === 0) {
+				fixErrorMsg = data?.explanation?.trim() || 'Tora could not determine a fix for these errors.';
+				return;
+			}
+
+			// Replace failed actions in the actions array with their fixed versions
+			// Fixed actions retain their original index position
+			const updatedActions = [...actions];
+			for (const fixedAction of fixed) {
+				const origEntry = failedEntries.find(
+					(e) =>
+						e.index < updatedActions.length &&
+						(e.action['kind'] === fixedAction.kind ||
+							e.action['title'] === fixedAction.title ||
+							e.action['task_title'] === fixedAction.task_title)
+				);
+				if (origEntry !== undefined) {
+					updatedActions[origEntry.index] = fixedAction;
+					// Reset result so this action gets retried
+					actionResults[origEntry.index] = { ok: false };
+				}
+			}
+			actions = updatedActions;
+			// Reset task cache so the new IDs can be resolved
+			_cachedTasks = null;
+			// Auto-retry with the fixed actions
+			await applyActions();
+		} catch (err) {
+			fixErrorMsg = err instanceof Error ? err.message : 'Unexpected error during fix.';
+		} finally {
+			isFixing = false;
 		}
 	}
 
@@ -679,6 +979,31 @@
 		id: string;
 		task_number?: number;
 		title: string;
+		description?: string;
+		sprint_name?: string;
+		status?: string;
+		budget?: number;
+		start_date?: string; // ISO date string
+		due_date?: string;   // ISO date string
+		assignee_id?: string;
+	};
+
+	type ConflictDiffField = {
+		field: string;
+		label: string;
+		existing: string;
+		proposed: string;
+		changed: boolean;
+	};
+
+	type ConflictInfo = {
+		actionIndex: number;
+		conflictType: 'duplicate' | 'update';
+		similarityPct: number;
+		proposedTitle: string;
+		existingTaskId: string;
+		existingTitle: string;
+		diff: ConflictDiffField[];
 	};
 
 	function buildRequestHeaders(): Record<string, string> {
@@ -718,11 +1043,15 @@
 			typeof record.task_number === 'number' && Number.isFinite(record.task_number)
 				? Math.trunc(record.task_number)
 				: undefined;
-		return {
-			id,
-			task_number: taskNumber,
-			title
-		};
+		const description = typeof record.description === 'string' ? record.description.trim() : undefined;
+		const sprint_name = typeof record.sprint_name === 'string' ? record.sprint_name.trim() : undefined;
+		const status = typeof record.status === 'string' ? record.status.trim().toLowerCase() : undefined;
+		const budget = typeof record.budget === 'number' && Number.isFinite(record.budget) ? record.budget : undefined;
+		// start_date / due_date come as ISO strings or null
+		const start_date = typeof record.start_date === 'string' ? record.start_date.slice(0, 10) : undefined;
+		const due_date = typeof record.due_date === 'string' ? record.due_date.slice(0, 10) : undefined;
+		const assignee_id = typeof record.assignee_id === 'string' ? record.assignee_id.trim() : undefined;
+		return { id, task_number: taskNumber, title, description, sprint_name, status, budget, start_date, due_date, assignee_id };
 	}
 
 	let _cachedTasks: TaskLookupRecord[] | null = null;
@@ -747,6 +1076,25 @@
 		return list;
 	}
 
+	function levenshtein(a: string, b: string): number {
+		const m = a.length, n = b.length;
+		if (m === 0) return n;
+		if (n === 0) return m;
+		const prev = Array.from({ length: n + 1 }, (_, i) => i);
+		const curr = new Array(n + 1).fill(0);
+		for (let i = 1; i <= m; i++) {
+			curr[0] = i;
+			for (let j = 1; j <= n; j++) {
+				curr[j] =
+					a[i - 1] === b[j - 1]
+						? prev[j - 1]
+						: 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
+			}
+			prev.splice(0, prev.length, ...curr);
+		}
+		return curr[n];
+	}
+
 	async function resolveTaskId(
 		id: string,
 		taskNumber: number | undefined,
@@ -754,7 +1102,7 @@
 		hdrs: Record<string, string>
 	): Promise<string> {
 		if (isRealTaskId(id)) return id;
-		// Preview ID — resolve via task_number first (reliable), then title (fuzzy fallback)
+		// Preview ID — resolve via task_number first (reliable), then title exact, then fuzzy
 		const tasks = await fetchRoomTasks(hdrs);
 		if (taskNumber && taskNumber > 0) {
 			const byNum = tasks.find((t) => t.task_number === taskNumber);
@@ -762,8 +1110,22 @@
 		}
 		if (title) {
 			const needle = title.trim().toLowerCase();
+			// Exact match
 			const byTitle = tasks.find((t) => t.title?.trim().toLowerCase() === needle);
 			if (byTitle) return byTitle.id;
+			// Fuzzy fallback — accept if edit distance ≤ 30% of the longer string length
+			let bestDist = Infinity;
+			let bestTask: TaskLookupRecord | null = null;
+			for (const t of tasks) {
+				const candidate = (t.title ?? '').trim().toLowerCase();
+				const dist = levenshtein(needle, candidate);
+				const threshold = Math.ceil(Math.max(needle.length, candidate.length) * 0.3);
+				if (dist <= threshold && dist < bestDist) {
+					bestDist = dist;
+					bestTask = t;
+				}
+			}
+			if (bestTask) return bestTask.id;
 		}
 		throw new Error(
 			taskNumber
@@ -930,7 +1292,9 @@
 							</div>
 						{/if}
 
-						{#if actionResults[idx]?.ok && !actionResults[idx]?.error}
+						{#if actionResults[idx]?.conflict}
+							<span class="result-conflict" title="Flagged for admin review">⚑</span>
+						{:else if actionResults[idx]?.ok && !actionResults[idx]?.error}
 							<span class="result-ok">✓</span>
 						{:else if actionResults[idx]?.error}
 							<span class="result-err" title={actionResults[idx].error}>✕</span>
@@ -1023,6 +1387,30 @@
 			{/if}
 		{:else if state === 'error'}
 			<div class="error-msg">{errorMsg}</div>
+			{#if conflictResults.length > 0}
+				<div class="conflict-summary">
+					{#each conflictResults as c (c.actionIndex)}
+						<div class="conflict-row">
+							<span class="conflict-badge conflict-badge-{c.conflictType}">
+								{c.conflictType === 'duplicate' ? 'Duplicate' : 'Update?'}
+							</span>
+							<span class="conflict-title">{c.proposedTitle}</span>
+							<span class="conflict-match">
+								{c.similarityPct}% match with "{c.existingTitle}"
+							</span>
+							{#if c.diff.filter((d) => d.changed).length > 0}
+								<span class="conflict-changes">
+									{c.diff.filter((d) => d.changed).map((d) => d.label).join(', ')} changed
+								</span>
+							{/if}
+						</div>
+					{/each}
+					<p class="conflict-hint">Sent to Change Requests for admin review.</p>
+				</div>
+			{/if}
+			{#if fixErrorMsg}
+				<div class="fix-error-msg">{fixErrorMsg}</div>
+			{/if}
 			{#if !canResolve}
 				<div class="resolution-note">Only room admins can accept or dismiss these changes.</div>
 			{/if}
@@ -1030,6 +1418,11 @@
 				<button class="btn btn-apply" disabled={!canResolve} on:click={() => void applyActions()}
 					>Retry</button
 				>
+				<button
+					class="btn btn-fix"
+					disabled={!canResolve || isFixing}
+					on:click={() => void fixWithTora()}
+				>{isFixing ? 'Fixing…' : 'Fix with Tora'}</button>
 				<button class="btn btn-dismiss" disabled={!canResolve} on:click={reject}>Dismiss</button>
 			</div>
 		{/if}
@@ -1227,6 +1620,14 @@
 							void applyActions();
 							showModal = false;
 						}}>Retry</button
+					>
+					<button
+						class="btn btn-fix"
+						disabled={!canResolve || isFixing}
+						on:click={() => {
+							void fixWithTora();
+							showModal = false;
+						}}>{isFixing ? 'Fixing…' : 'Fix with Tora'}</button
 					>
 				{/if}
 				<button class="btn btn-dismiss" on:click={() => (showModal = false)}>Close</button>
@@ -1524,6 +1925,61 @@
 		color: #dc2626;
 		cursor: help;
 	}
+	.result-conflict {
+		font-size: 0.7em;
+		color: #f59e0b;
+		cursor: help;
+	}
+
+	/* ── Conflict summary ───────────────────────────────────────── */
+	.conflict-summary {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px 10px;
+		border-radius: 8px;
+		background: rgba(245, 158, 11, 0.07);
+		border: 1px solid rgba(245, 158, 11, 0.22);
+	}
+	.conflict-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+		font-size: 0.8em;
+	}
+	.conflict-badge {
+		display: inline-flex;
+		align-items: center;
+		padding: 1px 7px;
+		border-radius: 999px;
+		font-size: 0.75em;
+		font-weight: 700;
+	}
+	.conflict-badge-duplicate {
+		background: rgba(239, 68, 68, 0.15);
+		color: #ef4444;
+	}
+	.conflict-badge-update {
+		background: rgba(245, 158, 11, 0.18);
+		color: #f59e0b;
+	}
+	.conflict-title {
+		font-weight: 600;
+	}
+	.conflict-match {
+		opacity: 0.7;
+		font-size: 0.88em;
+	}
+	.conflict-changes {
+		font-size: 0.82em;
+		color: #f59e0b;
+	}
+	.conflict-hint {
+		font-size: 0.76em;
+		opacity: 0.6;
+		margin: 2px 0 0;
+	}
 
 	/* ── Expand / details row ───────────────────────────────────── */
 	.expand-row {
@@ -1599,6 +2055,20 @@
 		background: rgba(128, 128, 128, 0.15);
 		border: 1px solid rgba(128, 128, 128, 0.25);
 		color: inherit;
+	}
+	.btn-fix {
+		background: rgba(139, 92, 246, 0.15);
+		border: 1px solid rgba(139, 92, 246, 0.35);
+		color: #a78bfa;
+	}
+	.btn-fix:hover:not(:disabled) {
+		background: rgba(139, 92, 246, 0.25);
+	}
+	.fix-error-msg {
+		font-size: 0.78em;
+		color: #f59e0b;
+		padding: 4px 0;
+		opacity: 0.9;
 	}
 
 	/* ── Progress ───────────────────────────────────────────────── */

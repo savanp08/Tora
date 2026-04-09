@@ -192,6 +192,8 @@
 		input?: Record<string, unknown>;
 		result?: unknown;
 		text?: string;
+		model?: string;
+		effort?: string;
 		turn: number;
 		totalTurns: number;
 		error?: string;
@@ -1454,6 +1456,12 @@
 				input: isRecord(resolved.body.input) ? { ...resolved.body.input } : undefined,
 				result: resolved.body.result,
 				text: toStringValue(resolved.body.text).trim(),
+				model: toStringValue(
+					resolved.body.model ?? resolved.body.modelId ?? resolved.body.model_id
+				).trim(),
+				effort: toStringValue(
+					resolved.body.effort ?? resolved.body.effortTier ?? resolved.body.effort_tier
+				).trim(),
 				turn,
 				totalTurns,
 				error: toStringValue(resolved.body.error).trim(),
@@ -7182,6 +7190,12 @@
 						currentUserName={currentUsername}
 						canResolveToraChanges={isActiveRoomAdmin}
 						toraLiveAgentEventsByOrigin={toraLiveAgentEventsByRoom[roomId] ?? {}}
+						activeToraWorkflowHint={activeToraComposerRun
+							? {
+									originMessageId: activeToraComposerRun.originMessageId,
+									workflowKind: 'chat'
+								}
+							: null}
 					/>
 				</div>
 

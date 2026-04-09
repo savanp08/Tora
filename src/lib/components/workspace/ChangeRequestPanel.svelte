@@ -48,8 +48,20 @@
 		edit_cost: 'Edit cost / budget',
 		import_sheet: 'Import spreadsheet',
 		edit_field_schema: 'Edit custom field',
-		remove_member: 'Remove member'
+		remove_member: 'Remove member',
+		task_conflict: 'Duplicate / Update conflict'
 	};
+
+	type ConflictDiffField = { field: string; label: string; existing: string; proposed: string; changed: boolean };
+
+	function getConflictDiff(req: ChangeRequest): ConflictDiffField[] {
+		const diff = req.payload.diff;
+		return Array.isArray(diff) ? (diff as ConflictDiffField[]) : [];
+	}
+
+	function getConflictType(req: ChangeRequest): 'duplicate' | 'update' {
+		return req.payload.conflictType === 'duplicate' ? 'duplicate' : 'update';
+	}
 
 	const STATUS_COLOR: Record<ChangeRequestStatus, string> = {
 		pending: '#f59e0b',
@@ -166,6 +178,16 @@
 			rows.push({ label: 'Method', before: String(p.before ?? '—'), after: String(p.method ?? p.after ?? '—') });
 		} else if (req.action === 'import_sheet') {
 			rows.push({ label: 'File', before: '—', after: String(p.fileName ?? '—') });
+		} else if (req.action === 'task_conflict') {
+			const ct = getConflictType(req);
+			rows.push({ label: 'Conflict type', before: '—', after: ct === 'duplicate' ? 'Likely duplicate' : 'Possible update of existing task' });
+			rows.push({ label: 'Similarity', before: '—', after: `${String(p.similarityPct ?? '?')}%` });
+			rows.push({ label: 'Existing task', before: '—', after: String(p.existingTitle ?? '—') });
+			rows.push({ label: 'Proposed task', before: '—', after: String(p.proposedTitle ?? '—') });
+			const diff = getConflictDiff(req).filter((d) => d.changed);
+			if (diff.length > 0) {
+				rows.push({ label: 'Changed fields', before: '—', after: diff.map((d) => d.label).join(', ') });
+			}
 		} else {
 			for (const [k, v] of Object.entries(p).filter(([k2]) => k2 !== 'note').slice(0, 6)) {
 				rows.push({ label: k, before: '—', after: String(v) });
@@ -305,7 +327,56 @@
 						{#if isPreviewOpen}
 							<div class="crp-preview-panel">
 								<div class="crp-preview-title">Preview · how this change looks if applied</div>
-								{#if req.action === 'add_sprint'}
+								{#if req.action === 'task_conflict'}
+									{@const conflictDiff = getConflictDiff(req)}
+									{@const conflictType = getConflictType(req)}
+									<div class="crp-conflict-preview">
+										<div class="crp-conflict-header">
+											<span class="crp-conflict-badge crp-conflict-badge-{conflictType}">
+												{conflictType === 'duplicate' ? 'Likely Duplicate' : 'Possible Update'}
+											</span>
+											<span class="crp-conflict-sim">{String(req.payload.similarityPct ?? '?')}% match</span>
+										</div>
+										<div class="crp-conflict-titles">
+											<div class="crp-conflict-task-col">
+												<div class="crp-conflict-task-label">Existing task</div>
+												<div class="crp-conflict-task-name">{String(req.payload.existingTitle ?? '—')}</div>
+											</div>
+											<div class="crp-conflict-arrow">→</div>
+											<div class="crp-conflict-task-col">
+												<div class="crp-conflict-task-label">Proposed (AI)</div>
+												<div class="crp-conflict-task-name">{String(req.payload.proposedTitle ?? '—')}</div>
+											</div>
+										</div>
+										{#if conflictDiff.length > 0}
+											<table class="crp-diff-table crp-conflict-diff-table">
+												<thead>
+													<tr>
+														<th>Field</th>
+														<th>Existing</th>
+														<th>Proposed</th>
+													</tr>
+												</thead>
+												<tbody>
+													{#each conflictDiff as d}
+														<tr class:crp-diff-changed={d.changed}>
+															<td class="crp-diff-field">{d.label}</td>
+															<td class="crp-diff-before">{d.existing}</td>
+															<td class="crp-diff-after crp-diff-after-{d.changed ? 'changed' : 'same'}">{d.proposed}</td>
+														</tr>
+													{/each}
+												</tbody>
+											</table>
+										{:else}
+											<div class="crp-preview-empty">No field differences detected.</div>
+										{/if}
+										{#if conflictType === 'duplicate'}
+											<p class="crp-conflict-hint">Approve to skip this creation (keep existing). Reject to create anyway.</p>
+										{:else}
+											<p class="crp-conflict-hint">Approve to apply proposed values as an update. Reject to create as a new task.</p>
+										{/if}
+									</div>
+								{:else if req.action === 'add_sprint'}
 									<div class="crp-sprint-preview">
 										<div class="crp-sprint-preview-name">
 											<svg viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
@@ -527,6 +598,24 @@
 	.crp-diff-field { color: var(--ws-muted,#8888a8); font-weight: 600; min-width: 70px; }
 	.crp-diff-before { color: #f87171; text-decoration: line-through; opacity: .7; }
 	.crp-diff-after { color: #34d399; font-weight: 600; }
+	.crp-diff-after-same { color: var(--ws-muted,#8888a8); font-weight: 400; }
+	.crp-diff-after-changed { color: #34d399; font-weight: 600; }
+	.crp-diff-changed td { background: rgba(52, 211, 153, 0.04); }
+
+	/* ── Task conflict preview ───────────────────────────────── */
+	.crp-conflict-preview { display: flex; flex-direction: column; gap: .55rem; }
+	.crp-conflict-header { display: flex; align-items: center; gap: .5rem; }
+	.crp-conflict-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: .68rem; font-weight: 700; }
+	.crp-conflict-badge-duplicate { background: rgba(239,68,68,.15); color: #ef4444; }
+	.crp-conflict-badge-update { background: rgba(245,158,11,.18); color: #f59e0b; }
+	.crp-conflict-sim { font-size: .7rem; color: var(--ws-muted,#8888a8); }
+	.crp-conflict-titles { display: flex; align-items: flex-start; gap: .5rem; padding: .5rem .6rem; border-radius: 8px; background: rgba(99,102,241,.06); border: 1px solid rgba(99,102,241,.15); }
+	.crp-conflict-task-col { flex: 1; display: flex; flex-direction: column; gap: .2rem; }
+	.crp-conflict-task-label { font-size: .62rem; font-weight: 700; letter-spacing: .05em; color: var(--ws-muted,#8888a8); text-transform: uppercase; }
+	.crp-conflict-task-name { font-size: .76rem; font-weight: 600; color: var(--ws-text,#e2e2f0); }
+	.crp-conflict-arrow { align-self: center; font-size: .85rem; color: var(--ws-muted,#8888a8); flex-shrink: 0; }
+	.crp-conflict-diff-table { margin-top: .1rem; }
+	.crp-conflict-hint { font-size: .66rem; color: var(--ws-muted,#8888a8); margin: .1rem 0 0; font-style: italic; }
 	.crp-sprint-preview { display: flex; flex-direction: column; gap: .4rem; border: 1px solid color-mix(in srgb, #6366f1 30%, transparent); border-radius: 8px; padding: .5rem .6rem; background: color-mix(in srgb, #6366f1 6%, transparent); }
 	.crp-sprint-preview-name { display: flex; align-items: center; gap: .35rem; font-size: .78rem; font-weight: 700; color: var(--ws-text,#e2e2f0); }
 	.crp-sprint-preview-name svg { width: 13px; height: 13px; stroke: #818cf8; fill: none; stroke-width: 2; stroke-linecap: round; }

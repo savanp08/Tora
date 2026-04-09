@@ -74,8 +74,9 @@ func buildToraTaskBoardSystemPrompt(cfg models.ProjectTypeConfig) string {
 	roles := strings.Join(cfg.DefaultRoles, ", ")
 	statuses := strings.Join(cfg.StatusOptions, " -> ")
 
-	return fmt.Sprintf(`You are Tora, an AI assistant embedded in a collaborative %[1]s project.
-You have access to tools to read and modify the %[2]s board in real time.
+	return fmt.Sprintf(`You are Tora, a capable AI assistant embedded in a collaborative %[1]s project.
+You can answer any question — domain knowledge, concepts, code, strategy, general topics — and you also have tools to read and modify the %[2]s board when board changes are actually needed.
+Being helpful conversationally is your primary mode. Board mutations are a secondary capability you use only when the user asks for them.
 
 IDENTITY OF ENTITIES:
 - %[2]s (task_type=sprint): the primary unit of project work.
@@ -125,10 +126,13 @@ ROLES RULES:
 - responsibilities must be specific to that %[4]s.
 
 RESPONSE FORMAT:
-- Explain your plan in 2-3 sentences before starting tool calls.
-- After completing all changes, give a summary using field-appropriate terms.
+- ALWAYS answer the user's question directly and conversationally FIRST — before any tool calls. Even if the query requires board changes, lead with a clear, helpful response to what was asked.
+- You are a full AI assistant. You can explain concepts, answer domain questions, teach, brainstorm, and discuss any topic — not just board mutations. If a user asks about drone aerodynamics, software architecture, physics, or any other topic, answer it fully and knowledgeably. Board mutations are optional, not mandatory.
+- Determine independently whether board changes are needed. If the query is purely informational or conversational, respond without making any tool calls. Only invoke tools when the user is actually asking for board modifications.
+- When board changes ARE needed: explain your plan briefly, execute the tool calls, then provide a short summary of what changed.
 - A write-only run without verify_task_count() is incomplete.
-- If verification returns a staged notice, summarise your staged changes immediately.`,
+- If verification returns a staged notice, summarise your staged changes immediately.
+- Never respond with only board actions and no conversational text. Every response must contain a natural language reply to the user.`,
 		cfg.DisplayName,
 		cfg.TaskTermPlural,
 		cfg.GroupTermPlural,
@@ -1552,10 +1556,10 @@ func newToraBotAgentActionMessage(
 ) models.Message {
 	normalizedOriginID := normalizeMessageID(origin.ID)
 	payload, _ := json.Marshal(map[string]any{
-		"text":        strings.TrimSpace(text),
-		"actionsJson": pendingActionsJSON,
-		"auditTrail":  buildToraAgentAuditTrail(events),
-		"agentic":     true,
+		"text":            strings.TrimSpace(text),
+		"actionsJson":     pendingActionsJSON,
+		"auditTrail":      buildToraAgentAuditTrail(events),
+		"agentic":         true,
 		"originMessageId": normalizedOriginID,
 	})
 	return models.Message{
@@ -2491,11 +2495,11 @@ func newToraBotCanvasActionMessage(
 ) models.Message {
 	normalizedOriginID := normalizeMessageID(origin.ID)
 	payload, _ := json.Marshal(map[string]any{
-		"text":         strings.TrimSpace(text),
-		"changesJson":  changesJSON,
-		"auditTrail":   buildToraAgentAuditTrail(events),
-		"agentic":      true,
-		"pendingApply": true,
+		"text":            strings.TrimSpace(text),
+		"changesJson":     changesJSON,
+		"auditTrail":      buildToraAgentAuditTrail(events),
+		"agentic":         true,
+		"pendingApply":    true,
 		"originMessageId": normalizedOriginID,
 	})
 	return models.Message{
@@ -2764,6 +2768,7 @@ func (h *Hub) runToraTaskBoardAgent(
 	finalText, events, err := engine.Run(ctx, prompt, ai.AgentConfig{
 		MaxTurns:        40,
 		Timeout:         toraRequestTimeoutMutation,
+		Effort:          plan.modelTier,
 		SystemPrompt:    buildToraTaskBoardSystemPrompt(cfg),
 		ContextOptions:  buildOpts,
 		Workspace:       workspace,
@@ -2783,6 +2788,7 @@ func (h *Hub) runToraTaskBoardAgent(
 		retryText, retryEvents, retryErr := engine.Run(ctx, buildToraTaskBoardToolEnforcementPrompt(prompt, finalText, events), ai.AgentConfig{
 			MaxTurns:        20,
 			Timeout:         toraRequestTimeoutMutation,
+			Effort:          plan.modelTier,
 			SystemPrompt:    buildToraTaskBoardSystemPrompt(cfg),
 			ContextOptions:  buildOpts,
 			Workspace:       retryWorkspace,
@@ -2855,6 +2861,12 @@ func buildToraAgentAuditTrail(events []ai.AgentEvent) []map[string]any {
 		}
 		if event.Timestamp > 0 {
 			entry["timestamp"] = event.Timestamp
+		}
+		if strings.TrimSpace(event.Model) != "" {
+			entry["model"] = strings.TrimSpace(event.Model)
+		}
+		if strings.TrimSpace(event.Effort) != "" {
+			entry["effort"] = strings.TrimSpace(event.Effort)
 		}
 		if strings.TrimSpace(event.WorkflowKind) != "" {
 			entry["workflowKind"] = strings.TrimSpace(event.WorkflowKind)
@@ -3133,10 +3145,11 @@ func (h *Hub) runToraChatAgent(
 		return "", nil, err
 	}
 
+	modelTier := toraChatModelTier(intent)
 	engine := engineFactory.New(roomID, ai.AgentAuthContext{
 		UserID:   strings.TrimSpace(userMessage.SenderID),
 		UserName: strings.TrimSpace(userMessage.SenderName),
-	}, toraChatModelTier(intent))
+	}, modelTier)
 	if engine == nil {
 		return "", nil, fmt.Errorf("chat ai engine is unavailable")
 	}
@@ -3145,6 +3158,7 @@ func (h *Hub) runToraChatAgent(
 	finalText, events, err := engine.Run(ctx, prompt, ai.AgentConfig{
 		MaxTurns:        toraChatMaxTurns(intent),
 		Timeout:         toraRequestTimeout,
+		Effort:          modelTier,
 		SystemPrompt:    buildToraChatSystemPrompt(privateRoom, ephemeralRoom),
 		ContextOptions:  buildOpts,
 		Workspace:       workspace,
